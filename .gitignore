@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+.DS_Store
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+downloads/
+*.mp3
+*.mov
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.webp
