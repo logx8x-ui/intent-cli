@@ -449,18 +449,14 @@ final class FocusLock {
         let localY = point.y - bounds.y
 
         let topChromeHeight: CGFloat = 105
-        let sideberyWidth: CGFloat = 470
+        let sideberyToolbarWidth: CGFloat = 470
         let sideberyBottomToolbarHeight: CGFloat = 74
 
         if localY <= topChromeHeight {
             return true
         }
 
-        if localX <= sideberyWidth {
-            return true
-        }
-
-        if localX <= sideberyWidth + 80 && localY >= bounds.height - sideberyBottomToolbarHeight {
+        if localX <= sideberyToolbarWidth && localY >= bounds.height - sideberyBottomToolbarHeight {
             return true
         }
 
