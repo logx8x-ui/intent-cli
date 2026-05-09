@@ -41,6 +41,8 @@ Then start the desktop app:
 intent-app
 ```
 
+You can also open `Intent` from `~/Applications/Intent.app`; after Spotlight indexes it, it should appear in Spotlight search as `Intent`.
+
 Or start the CLI:
 
 ```zsh
@@ -85,6 +87,8 @@ Then they can run:
 ```zsh
 intent-app
 ```
+
+Or open `~/Applications/Intent.app`.
 
 They should also load the Firefox extension from `~/intent/firefox-extension/manifest.json` using `about:debugging#/runtime/this-firefox`.
 
