@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "Intent Browser Guard",
+  "version": "0.1.0",
+  "description": "Enforces active Intent browser rules inside Firefox.",
+  "applications": {
+    "gecko": {
+      "id": "intent-firefox@loganmondi.dev"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "tabs",
+    "webNavigation",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  }
+}

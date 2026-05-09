@@ -1,5 +1,6 @@
 import Foundation
 import IntentCore
+import IntentLock
 
 struct SpecFailure: Error, CustomStringConvertible {
     let description: String
@@ -43,6 +44,54 @@ do {
     try expect(IntentCompleter.complete("em", in: ShallowTask.allCases) == "emails", "em should complete")
     try expect(IntentCompleter.complete("data", in: DeepTask.allCases) == "data science", "data should complete")
     try expect(IntentCompleter.complete("x", in: ShallowTask.allCases) == nil, "x should not complete")
+
+    let intentions = DefaultIntentions.make()
+    try expect(intentions.contains { $0.name == "Instagram replies" }, "defaults should include Instagram replies")
+    try expect(intentions.contains { $0.name == "Emails" }, "defaults should include Emails")
+    try expect(intentions.contains { $0.name == "Data Science" }, "defaults should include Data Science")
+
+    let instagram = intentions.first { $0.name == "Instagram replies" }!
+    try expect(instagram.friction.validate("I want to use instagram right now"), "Instagram phrase should validate")
+    try expect(!instagram.friction.validate("instagram"), "wrong Instagram phrase should fail")
+    try expect(instagram.allowedWebsites.contains { $0.value == "instagram.com/direct" }, "Instagram should allow DMs")
+
+    let dataScience = intentions.first { $0.name == "Data Science" }!
+    try expect(dataScience.allowedApps.contains { $0.bundleIdentifier == "io.remnote" }, "Data Science should allow RemNote")
+    try expect(dataScience.allowedApps.contains { $0.bundleIdentifier == "com.remnote.desktop" }, "Data Science should allow RemNote desktop bundle")
+    try expect(!dataScience.startupActions.contains { action in
+        if case .openApp(let bundleIdentifier) = action {
+            return bundleIdentifier == "io.remnote"
+        }
+        return false
+    }, "Data Science should not auto-open RemNote")
+    let dataScienceSpec = FocusSessionSpec.make(for: dataScience)
+    try expect(dataScienceSpec.allowedBundleIdentifiers.contains("io.remnote"), "Data Science spec should allow RemNote")
+    try expect(dataScienceSpec.spotifyPlaylistURI == "spotify:playlist:0fbyat27nV9HP9WlSphWlS", "Data Science spec should keep the study playlist")
+    try expect(!dataScienceSpec.allowSpotifyForeground, "Data Science should not allow Spotify as a foreground escape")
+
+    let tempDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("intent-core-spec-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let intentionStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("intentions.json"))
+    try intentionStore.save(intentions)
+    let loadedIntentions = try intentionStore.load()
+    try expect(loadedIntentions == intentions, "IntentionStore should round-trip intentions")
+
+    let rulesStore = ActiveBrowserRulesStore(fileURL: tempDirectory.appendingPathComponent("browser-rules.json"))
+    let browserRules = ActiveBrowserRules(
+        active: true,
+        allowedWebsites: ["github.com"],
+        blockTabSwitching: true,
+        blockNavigation: true,
+        blockNewTabs: false
+    )
+    try rulesStore.write(browserRules)
+    let loadedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
+    try expect(loadedRules == browserRules, "Active browser rules should round-trip")
+    try rulesStore.clear()
+    let clearedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
+    try expect(!clearedRules.active, "Clearing browser rules should make them inactive")
+    try? FileManager.default.removeItem(at: tempDirectory)
 
     print("IntentCoreSpec passed")
 } catch {

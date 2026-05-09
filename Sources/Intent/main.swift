@@ -1,5 +1,6 @@
 import Foundation
 import IntentCore
+import IntentLock
 
 var menu = IntentMenu()
 let input = TerminalInput()

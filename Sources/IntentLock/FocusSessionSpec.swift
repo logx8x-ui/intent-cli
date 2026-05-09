@@ -1,24 +1,65 @@
 import Foundation
 import IntentCore
 
-struct FocusSessionSpec {
-    let displayName: String
-    let startupSteps: [StartupStep]
-    let allowedBundleIdentifiers: Set<String>
-    let fallbackBundleIdentifier: String
-    let strictSingleApp: Bool
-    let blockBrowserTabEscape: Bool
-    let blockFirefoxChromeClicks: Bool
-    let spotifyPlaylistURI: String?
-    let allowSpotifyForeground: Bool
+public struct FocusSessionSpec {
+    public let displayName: String
+    public let startupSteps: [StartupStep]
+    public let allowedBundleIdentifiers: Set<String>
+    public let fallbackBundleIdentifier: String
+    public let strictSingleApp: Bool
+    public let blockBrowserTabEscape: Bool
+    public let blockFirefoxChromeClicks: Bool
+    public let spotifyPlaylistURI: String?
+    public let allowSpotifyForeground: Bool
 
-    static func make(for task: IntentWorkTask) -> FocusSessionSpec {
+    public init(
+        displayName: String,
+        startupSteps: [StartupStep],
+        allowedBundleIdentifiers: Set<String>,
+        fallbackBundleIdentifier: String,
+        strictSingleApp: Bool,
+        blockBrowserTabEscape: Bool,
+        blockFirefoxChromeClicks: Bool,
+        spotifyPlaylistURI: String?,
+        allowSpotifyForeground: Bool
+    ) {
+        self.displayName = displayName
+        self.startupSteps = startupSteps
+        self.allowedBundleIdentifiers = allowedBundleIdentifiers
+        self.fallbackBundleIdentifier = fallbackBundleIdentifier
+        self.strictSingleApp = strictSingleApp
+        self.blockBrowserTabEscape = blockBrowserTabEscape
+        self.blockFirefoxChromeClicks = blockFirefoxChromeClicks
+        self.spotifyPlaylistURI = spotifyPlaylistURI
+        self.allowSpotifyForeground = allowSpotifyForeground
+    }
+
+    public static func make(for task: IntentWorkTask) -> FocusSessionSpec {
         switch task {
         case .shallow(let shallowTask):
             return make(for: shallowTask)
         case .deep(let deepTask):
             return make(for: deepTask)
         }
+    }
+
+    public static func make(for intention: Intention) -> FocusSessionSpec {
+        FocusSessionSpec(
+            displayName: intention.name,
+            startupSteps: intention.startupActions.map(StartupStep.init),
+            allowedBundleIdentifiers: Set(intention.allowedApps.map(\.bundleIdentifier)),
+            fallbackBundleIdentifier: intention.allowedApps.first?.bundleIdentifier ?? "org.mozilla.firefox",
+            strictSingleApp: intention.allowedApps.count == 1,
+            blockBrowserTabEscape: intention.restrictions.blockBrowserTabSwitching,
+            blockFirefoxChromeClicks: intention.restrictions.blockBrowserTabSwitching || intention.restrictions.blockNewBrowserTabs,
+            spotifyPlaylistURI: intention.startupActions.compactMap { action in
+                if case .playSpotifyPlaylist(let uri) = action {
+                    return uri
+                }
+                return nil
+            }.first,
+            allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" } && intention.id != "data-science"
+        )
     }
 
     private static func make(for task: ShallowTask) -> FocusSessionSpec {
@@ -100,9 +141,22 @@ struct FocusSessionSpec {
     }
 }
 
-enum StartupStep {
+public enum StartupStep {
     case openBundle(String)
     case openURL(String, bundleIdentifier: String)
     case selectSideberyDataSciencePanel
     case playSpotifyPlaylist(String)
+
+    init(_ action: StartupAction) {
+        switch action {
+        case .openApp(let bundleIdentifier):
+            self = .openBundle(bundleIdentifier)
+        case .openURL(let url, let browserBundleIdentifier):
+            self = .openURL(url, bundleIdentifier: browserBundleIdentifier)
+        case .selectSideberyDataSciencePanel:
+            self = .selectSideberyDataSciencePanel
+        case .playSpotifyPlaylist(let uri):
+            self = .playSpotifyPlaylist(uri)
+        }
+    }
 }

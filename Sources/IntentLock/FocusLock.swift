@@ -2,12 +2,12 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-enum FocusLockError: Error, CustomStringConvertible {
+public enum FocusLockError: Error, CustomStringConvertible {
     case accessibilityPermissionRequired
     case eventTapUnavailable
     case unableToOpen(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .accessibilityPermissionRequired:
             return "Intent needs Accessibility permission. Open System Settings > Privacy & Security > Accessibility, enable your terminal app, then run Intent again."
@@ -19,7 +19,7 @@ enum FocusLockError: Error, CustomStringConvertible {
     }
 }
 
-final class FocusLock {
+public final class FocusLock {
     private struct WindowBounds {
         let x: CGFloat
         let y: CGFloat
@@ -40,11 +40,11 @@ final class FocusLock {
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
 
-    init(spec: FocusSessionSpec) {
+    public init(spec: FocusSessionSpec) {
         self.spec = spec
     }
 
-    func run() throws {
+    public func run() throws {
         returnApplication = NSWorkspace.shared.frontmostApplication
 
         guard requestAccessibilityIfNeeded() else {
