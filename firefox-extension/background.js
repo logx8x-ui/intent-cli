@@ -13,7 +13,8 @@ function inactiveRules() {
     allowedWebsites: [],
     blockTabSwitching: false,
     blockNavigation: false,
-    blockNewTabs: false
+    blockNewTabs: false,
+    allowGoogleSearchTabs: false
   };
 }
 
@@ -36,6 +37,13 @@ function normalizeRule(value) {
 
 function normalizedURLParts(url) {
   try {
+    if (["about:blank", "about:newtab"].includes(url)) {
+      return {
+        host: "about",
+        path: url.replace("about:", "/")
+      };
+    }
+
     const parsed = new URL(url);
     if (!["http:", "https:"].includes(parsed.protocol)) {
       return null;
@@ -49,8 +57,26 @@ function normalizedURLParts(url) {
   }
 }
 
+function isSearchStagingURL(url) {
+  return ["about:blank", "about:newtab"].includes(url);
+}
+
+function isGoogleSearchURL(url) {
+  const parts = normalizedURLParts(url);
+  if (!parts) {
+    return false;
+  }
+
+  const googleHost = parts.host === "google.com" || /^google\.[a-z.]+$/.test(parts.host);
+  return googleHost && (parts.path === "" || parts.path === "/" || parts.path === "/search");
+}
+
 function isAllowedURL(url) {
   if (!rules.active || rules.allowedWebsites.length === 0) {
+    return true;
+  }
+
+  if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) {
     return true;
   }
 
@@ -170,6 +196,10 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 browser.tabs.onCreated.addListener(async (tab) => {
   await refreshRules();
   if (!rules.active || !rules.blockNewTabs) {
+    return;
+  }
+
+  if (rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url))) {
     return;
   }
 

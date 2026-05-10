@@ -53,7 +53,57 @@ public struct AllowedWebsite: Codable, Equatable, Identifiable {
     public var value: String
 
     public init(_ value: String) {
-        self.value = value
+        self.value = Self.normalized(value)
+    }
+
+    public var displayName: String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlString: String
+        if trimmed.contains("://") {
+            urlString = trimmed
+        } else {
+            urlString = "https://\(trimmed)"
+        }
+
+        guard let url = URL(string: urlString),
+              var host = url.host?.lowercased() else {
+            return trimmed
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+                .replacingOccurrences(of: "www.", with: "")
+                .components(separatedBy: "/")
+                .first?
+                .components(separatedBy: ".")
+                .first ?? trimmed
+        }
+
+        if host.hasPrefix("www.") {
+            host.removeFirst(4)
+        }
+
+        return host.components(separatedBy: ".").first ?? host
+    }
+
+    public static func normalized(_ rawValue: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        let urlString = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: urlString),
+              var host = url.host?.lowercased() else {
+            return trimmed
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+                .replacingOccurrences(of: "www.", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+
+        if host.hasPrefix("www.") {
+            host.removeFirst(4)
+        }
+
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return path.isEmpty ? host : "\(host)/\(path)"
     }
 }
 
@@ -80,6 +130,7 @@ public struct RestrictionSet: Codable, Equatable {
     public var blockBrowserNavigation: Bool
     public var blockNewBrowserTabs: Bool
     public var keepFocused: Bool
+    public var allowGoogleSearchTabs: Bool
 
     public init(
         blockAppSwitching: Bool = true,
@@ -87,7 +138,8 @@ public struct RestrictionSet: Codable, Equatable {
         blockBrowserTabSwitching: Bool = true,
         blockBrowserNavigation: Bool = true,
         blockNewBrowserTabs: Bool = true,
-        keepFocused: Bool = true
+        keepFocused: Bool = true,
+        allowGoogleSearchTabs: Bool = false
     ) {
         self.blockAppSwitching = blockAppSwitching
         self.blockNewApps = blockNewApps
@@ -95,6 +147,28 @@ public struct RestrictionSet: Codable, Equatable {
         self.blockBrowserNavigation = blockBrowserNavigation
         self.blockNewBrowserTabs = blockNewBrowserTabs
         self.keepFocused = keepFocused
+        self.allowGoogleSearchTabs = allowGoogleSearchTabs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case blockAppSwitching
+        case blockNewApps
+        case blockBrowserTabSwitching
+        case blockBrowserNavigation
+        case blockNewBrowserTabs
+        case keepFocused
+        case allowGoogleSearchTabs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        blockAppSwitching = try container.decodeIfPresent(Bool.self, forKey: .blockAppSwitching) ?? true
+        blockNewApps = try container.decodeIfPresent(Bool.self, forKey: .blockNewApps) ?? true
+        blockBrowserTabSwitching = try container.decodeIfPresent(Bool.self, forKey: .blockBrowserTabSwitching) ?? true
+        blockBrowserNavigation = try container.decodeIfPresent(Bool.self, forKey: .blockBrowserNavigation) ?? true
+        blockNewBrowserTabs = try container.decodeIfPresent(Bool.self, forKey: .blockNewBrowserTabs) ?? true
+        keepFocused = try container.decodeIfPresent(Bool.self, forKey: .keepFocused) ?? true
+        allowGoogleSearchTabs = try container.decodeIfPresent(Bool.self, forKey: .allowGoogleSearchTabs) ?? false
     }
 }
 

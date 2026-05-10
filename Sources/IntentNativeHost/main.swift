@@ -29,6 +29,7 @@ struct HostResponse: Codable {
     var blockTabSwitching: Bool
     var blockNavigation: Bool
     var blockNewTabs: Bool
+    var allowGoogleSearchTabs: Bool
 }
 
 _ = readMessage()
@@ -43,10 +44,11 @@ if let data = try? Data(contentsOf: fileURL),
         allowedWebsites: rules.allowedWebsites,
         blockTabSwitching: rules.blockTabSwitching,
         blockNavigation: rules.blockNavigation,
-        blockNewTabs: rules.blockNewTabs
+        blockNewTabs: rules.blockNewTabs,
+        allowGoogleSearchTabs: rules.allowGoogleSearchTabs
     )
 } else {
-    response = HostResponse(active: false, allowedWebsites: [], blockTabSwitching: false, blockNavigation: false, blockNewTabs: false)
+    response = HostResponse(active: false, allowedWebsites: [], blockTabSwitching: false, blockNavigation: false, blockNewTabs: false, allowGoogleSearchTabs: false)
 }
 
 try writeMessage(response)

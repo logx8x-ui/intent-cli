@@ -4,16 +4,20 @@ import IntentCore
 struct IntentionDetailView: View {
     @EnvironmentObject private var model: IntentAppModel
     @State private var draft: Intention
-    @State private var allowedAppsText: String
-    @State private var allowedWebsitesText: String
-    @State private var startupActionsText: String
+    @State private var selectedColor: Color
     @State private var frictionText: String
+
+    private let symbols = [
+        "target", "message.fill", "envelope.fill", "function", "book.closed.fill", "terminal.fill",
+        "curlybraces", "play.fill", "person.fill", "archivebox.fill", "clipboard.fill", "shippingbox.fill",
+        "cup.and.saucer.fill", "magnifyingglass", "lock.fill", "graduationcap.fill", "flask.fill", "gamecontroller.fill",
+        "person.crop.circle.badge.checkmark", "briefcase.fill", "dollarsign", "cart.fill", "gift.fill",
+        "airplane", "fork.knife", "apple.logo", "tree.fill", "eyeglasses", "square.grid.3x3.fill"
+    ]
 
     init(intention: Intention) {
         _draft = State(initialValue: intention)
-        _allowedAppsText = State(initialValue: Self.appsText(intention.allowedApps))
-        _allowedWebsitesText = State(initialValue: intention.allowedWebsites.map(\.value).joined(separator: "\n"))
-        _startupActionsText = State(initialValue: Self.startupText(intention.startupActions))
+        _selectedColor = State(initialValue: Color(hex: intention.colorHex))
         _frictionText = State(initialValue: Self.frictionText(intention.friction))
     }
 
@@ -21,32 +25,38 @@ struct IntentionDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                identitySection
+                intentionSection
                 allowedSection
                 startupSection
                 restrictionsSection
                 frictionSection
             }
-            .padding(24)
-            .frame(maxWidth: 860, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: 920, alignment: .leading)
         }
+        .background(AnkiTheme.detailBackground)
         .id(draft.id)
         .onChange(of: model.selectedID) { _ in
             if let selected = model.selectedIntention {
                 reset(with: selected)
             }
         }
+        .onChange(of: selectedColor) { newValue in
+            draft.colorHex = newValue.hexString
+        }
     }
 
     private var header: some View {
         HStack(spacing: 14) {
             Image(systemName: draft.icon)
-                .font(.system(size: 32))
-                .frame(width: 54, height: 54)
-                .background(.regularMaterial)
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(selectedColor)
+                .frame(width: 52, height: 52)
+                .background(AnkiTheme.panelBackground)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(AnkiTheme.stroke, lineWidth: 1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(draft.name)
                     .font(.largeTitle.weight(.semibold))
                 Text("Manual intention builder")
@@ -65,80 +75,104 @@ struct IntentionDetailView: View {
                 model.requestStart(draft)
             }
             .buttonStyle(.borderedProminent)
+            .tint(selectedColor)
         }
     }
 
-    private var identitySection: some View {
-        FormSection("Identity") {
-            TextField("Name", text: $draft.name)
-            TextField("Folder", text: $draft.folder)
-            TextField("SF Symbol", text: $draft.icon)
-            TextField("Color hex", text: $draft.colorHex)
+    private var intentionSection: some View {
+        FormSection("Intention") {
+            LabeledRow("Name") {
+                TextField("Name", text: $draft.name)
+                    .textFieldStyle(.roundedBorder)
+            }
+            LabeledRow("Folder") {
+                TextField("Folder", text: $draft.folder)
+                    .textFieldStyle(.roundedBorder)
+            }
+            LabeledRow("SF Symbol") {
+                Picker("SF Symbol", selection: $draft.icon) {
+                    ForEach(symbols, id: \.self) { symbol in
+                        Label(symbol, systemImage: symbol).tag(symbol)
+                    }
+                }
+                .labelsHidden()
+            }
+            LabeledRow("Color") {
+                ColorPicker("Color", selection: $selectedColor, supportsOpacity: false)
+                    .labelsHidden()
+                    .frame(maxWidth: 120, alignment: .leading)
+            }
         }
     }
 
     private var allowedSection: some View {
-        FormSection("Allowed Targets") {
-            VStack(alignment: .leading) {
-                Text("Allowed apps")
-                    .font(.headline)
-                Text("One per line: App name | bundle.id")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $allowedAppsText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 110)
-            }
-
-            VStack(alignment: .leading) {
-                Text("Allowed websites")
-                    .font(.headline)
-                Text("One domain/path per line, e.g. github.com or instagram.com/direct")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $allowedWebsitesText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 90)
-            }
+        FormSection("Allowed") {
+            AppSelectionEditor(
+                title: "Allowed apps",
+                apps: $draft.allowedApps,
+                catalog: model.installedApps
+            )
+            Divider()
+            WebsiteEditor(websites: $draft.allowedWebsites)
         }
     }
 
     private var startupSection: some View {
-        FormSection("Startup Actions") {
-            Text("One per line: app:bundle.id, url:https://example.com, sidebery:data-science, spotify:playlist-uri")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextEditor(text: $startupActionsText)
-                .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 120)
+        FormSection("Startup") {
+            StartupActionEditor(
+                actions: $draft.startupActions,
+                allowedApps: draft.allowedApps
+            )
         }
     }
 
     private var restrictionsSection: some View {
         FormSection("Restrictions") {
-            Toggle("Block app/window switching outside allowed apps", isOn: $draft.restrictions.blockAppSwitching)
-            Toggle("Block launching non-allowed apps", isOn: $draft.restrictions.blockNewApps)
-            Toggle("Block browser tab switching", isOn: $draft.restrictions.blockBrowserTabSwitching)
-            Toggle("Block browser navigation outside allowed sites", isOn: $draft.restrictions.blockBrowserNavigation)
-            Toggle("Block new browser tabs/windows", isOn: $draft.restrictions.blockNewBrowserTabs)
-            Toggle("Keep the intention focused", isOn: $draft.restrictions.keepFocused)
+            Toggle("Block tab switching to unallowed websites", isOn: Binding(
+                get: { draft.restrictions.blockBrowserTabSwitching && draft.restrictions.blockBrowserNavigation },
+                set: { enabled in
+                    draft.restrictions.blockBrowserTabSwitching = enabled
+                    draft.restrictions.blockBrowserNavigation = enabled
+                    draft.restrictions.blockNewBrowserTabs = enabled
+                }
+            ))
+
+            Toggle("Block window switching to unallowed applications", isOn: Binding(
+                get: { draft.restrictions.blockAppSwitching && draft.restrictions.keepFocused },
+                set: { enabled in
+                    draft.restrictions.blockAppSwitching = enabled
+                    draft.restrictions.blockNewApps = enabled
+                    draft.restrictions.keepFocused = enabled
+                }
+            ))
+
+            Toggle("Allow tab creation for Google searches", isOn: $draft.restrictions.allowGoogleSearchTabs)
         }
     }
 
     private var frictionSection: some View {
         FormSection("Friction") {
-            Picker("Type", selection: Binding(
-                get: { frictionKind },
-                set: { setFrictionKind($0) }
-            )) {
-                Text("None").tag("none")
-                Text("Typed phrase").tag("phrase")
-                Text("Countdown").tag("countdown")
-                Text("Reason prompt").tag("reason")
-                Text("Task checklist").tag("checklist")
-                Text("Time budget").tag("budget")
+            LabeledRow("Type") {
+                Picker("Type", selection: Binding(
+                    get: { frictionKind },
+                    set: { setFrictionKind($0) }
+                )) {
+                    Text("None").tag("none")
+                    Text("Typed phrase").tag("phrase")
+                    Text("Countdown").tag("countdown")
+                    Text("Reason prompt").tag("reason")
+                    Text("Task checklist").tag("checklist")
+                    Text("Time budget").tag("budget")
+                }
+                .labelsHidden()
             }
-            TextField("Friction value", text: $frictionText)
+
+            if frictionKind != "none" {
+                LabeledRow("Value") {
+                    TextField("Friction value", text: $frictionText)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
         }
     }
 
@@ -171,34 +205,15 @@ struct IntentionDetailView: View {
     }
 
     private func saveDraft() {
-        draft.allowedApps = parseApps(allowedAppsText)
-        draft.allowedWebsites = allowedWebsitesText.lines.map(AllowedWebsite.init)
-        draft.startupActions = parseStartupActions(startupActionsText)
+        draft.colorHex = selectedColor.hexString
         setFrictionKind(frictionKind)
         model.updateSelected(draft)
     }
 
     private func reset(with intention: Intention) {
         draft = intention
-        allowedAppsText = Self.appsText(intention.allowedApps)
-        allowedWebsitesText = intention.allowedWebsites.map(\.value).joined(separator: "\n")
-        startupActionsText = Self.startupText(intention.startupActions)
+        selectedColor = Color(hex: intention.colorHex)
         frictionText = Self.frictionText(intention.friction)
-    }
-
-    private static func appsText(_ apps: [AllowedApp]) -> String {
-        apps.map { "\($0.name) | \($0.bundleIdentifier)" }.joined(separator: "\n")
-    }
-
-    private static func startupText(_ actions: [StartupAction]) -> String {
-        actions.map { action in
-            switch action {
-            case .openApp(let bundle): "app:\(bundle)"
-            case .openURL(let url, _): "url:\(url)"
-            case .selectSideberyDataSciencePanel: "sidebery:data-science"
-            case .playSpotifyPlaylist(let uri): "spotify:\(uri)"
-            }
-        }.joined(separator: "\n")
     }
 
     private static func frictionText(_ friction: Friction) -> String {
@@ -209,32 +224,6 @@ struct IntentionDetailView: View {
         case .reasonPrompt(let prompt): prompt
         case .taskChecklist(let tasks): tasks.joined(separator: "\n")
         case .timeBudget(let minutes): "\(minutes)"
-        }
-    }
-
-    private func parseApps(_ text: String) -> [AllowedApp] {
-        text.lines.compactMap { line in
-            let parts = line.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count == 2 else { return nil }
-            return AllowedApp(name: parts[0], bundleIdentifier: parts[1])
-        }
-    }
-
-    private func parseStartupActions(_ text: String) -> [StartupAction] {
-        text.lines.compactMap { line in
-            if line.hasPrefix("app:") {
-                return .openApp(String(line.dropFirst(4)))
-            }
-            if line.hasPrefix("url:") {
-                return .openURL(String(line.dropFirst(4)), browserBundleIdentifier: "org.mozilla.firefox")
-            }
-            if line == "sidebery:data-science" {
-                return .selectSideberyDataSciencePanel
-            }
-            if line.hasPrefix("spotify:") {
-                return .playSpotifyPlaylist(String(line))
-            }
-            return nil
         }
     }
 }
@@ -252,12 +241,32 @@ private struct FormSection<Content: View>: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.title3.weight(.semibold))
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
                 content
             }
-            .padding(16)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .ankiPanel()
+        }
+    }
+}
+
+private struct LabeledRow<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: Content
+
+    init(_ label: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+    }
+
+    var body: some View {
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 10) {
+            GridRow {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 100, alignment: .leading)
+                content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }

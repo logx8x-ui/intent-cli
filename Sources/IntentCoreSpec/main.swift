@@ -54,6 +54,20 @@ do {
     try expect(instagram.friction.validate("I want to use instagram right now"), "Instagram phrase should validate")
     try expect(!instagram.friction.validate("instagram"), "wrong Instagram phrase should fail")
     try expect(instagram.allowedWebsites.contains { $0.value == "instagram.com/direct" }, "Instagram should allow DMs")
+    try expect(AllowedWebsite("https://www.roblox.com/games").displayName == "roblox", "Website display name should simplify URLs")
+
+    let legacyRestrictions = Data("""
+    {
+      "blockAppSwitching": true,
+      "blockNewApps": true,
+      "blockBrowserTabSwitching": true,
+      "blockBrowserNavigation": true,
+      "blockNewBrowserTabs": true,
+      "keepFocused": true
+    }
+    """.utf8)
+    let decodedLegacyRestrictions = try JSONDecoder().decode(RestrictionSet.self, from: legacyRestrictions)
+    try expect(!decodedLegacyRestrictions.allowGoogleSearchTabs, "Legacy restrictions should default Google search tabs off")
 
     let dataScience = intentions.first { $0.name == "Data Science" }!
     try expect(dataScience.allowedApps.contains { $0.bundleIdentifier == "io.remnote" }, "Data Science should allow RemNote")
@@ -83,7 +97,8 @@ do {
         allowedWebsites: ["github.com"],
         blockTabSwitching: true,
         blockNavigation: true,
-        blockNewTabs: false
+        blockNewTabs: false,
+        allowGoogleSearchTabs: true
     )
     try rulesStore.write(browserRules)
     let loadedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
@@ -91,6 +106,7 @@ do {
     try rulesStore.clear()
     let clearedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
     try expect(!clearedRules.active, "Clearing browser rules should make them inactive")
+    try expect(!clearedRules.allowGoogleSearchTabs, "Clearing browser rules should disable Google search tabs")
     try? FileManager.default.removeItem(at: tempDirectory)
 
     print("IntentCoreSpec passed")

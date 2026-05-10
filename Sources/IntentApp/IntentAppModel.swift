@@ -9,6 +9,7 @@ final class IntentAppModel: ObservableObject {
     @Published var activeSessionName: String?
     @Published var pendingFriction: PendingFriction?
     @Published var errorMessage: String?
+    @Published var installedApps: [InstalledApp] = []
 
     private let store = IntentionStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
@@ -19,6 +20,10 @@ final class IntentAppModel: ObservableObject {
     }
 
     func load() {
+        if installedApps.isEmpty {
+            installedApps = AppCatalog.load()
+        }
+
         do {
             intentions = try store.load()
             selectedID = selectedID ?? intentions.first?.id
@@ -100,7 +105,8 @@ final class IntentAppModel: ObservableObject {
             allowedWebsites: intention.allowedWebsites.map(\.value),
             blockTabSwitching: intention.restrictions.blockBrowserTabSwitching,
             blockNavigation: intention.restrictions.blockBrowserNavigation,
-            blockNewTabs: intention.restrictions.blockNewBrowserTabs
+            blockNewTabs: intention.restrictions.blockNewBrowserTabs,
+            allowGoogleSearchTabs: intention.restrictions.allowGoogleSearchTabs
         )
 
         do {

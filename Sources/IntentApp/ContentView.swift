@@ -21,6 +21,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(AnkiTheme.detailBackground)
             }
         }
         .toolbar {

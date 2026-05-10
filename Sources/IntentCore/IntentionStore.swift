@@ -43,19 +43,41 @@ public struct ActiveBrowserRules: Codable, Equatable {
     public var blockTabSwitching: Bool
     public var blockNavigation: Bool
     public var blockNewTabs: Bool
+    public var allowGoogleSearchTabs: Bool
 
     public init(
         active: Bool,
         allowedWebsites: [String],
         blockTabSwitching: Bool,
         blockNavigation: Bool,
-        blockNewTabs: Bool
+        blockNewTabs: Bool,
+        allowGoogleSearchTabs: Bool = false
     ) {
         self.active = active
         self.allowedWebsites = allowedWebsites
         self.blockTabSwitching = blockTabSwitching
         self.blockNavigation = blockNavigation
         self.blockNewTabs = blockNewTabs
+        self.allowGoogleSearchTabs = allowGoogleSearchTabs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case active
+        case allowedWebsites
+        case blockTabSwitching
+        case blockNavigation
+        case blockNewTabs
+        case allowGoogleSearchTabs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
+        allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
+        blockTabSwitching = try container.decodeIfPresent(Bool.self, forKey: .blockTabSwitching) ?? false
+        blockNavigation = try container.decodeIfPresent(Bool.self, forKey: .blockNavigation) ?? false
+        blockNewTabs = try container.decodeIfPresent(Bool.self, forKey: .blockNewTabs) ?? false
+        allowGoogleSearchTabs = try container.decodeIfPresent(Bool.self, forKey: .allowGoogleSearchTabs) ?? false
     }
 }
 
@@ -76,7 +98,7 @@ public final class ActiveBrowserRulesStore {
     }
 
     public func clear() throws {
-        try write(.init(active: false, allowedWebsites: [], blockTabSwitching: false, blockNavigation: false, blockNewTabs: false))
+        try write(.init(active: false, allowedWebsites: [], blockTabSwitching: false, blockNavigation: false, blockNewTabs: false, allowGoogleSearchTabs: false))
     }
 
     public static func defaultFileURL() -> URL {
