@@ -5,10 +5,24 @@ enum AnkiTheme {
     static let accent = Color(red: 0.50, green: 0.26, blue: 0.95)
     static let lightDetailBackground = Color(red: 0.96, green: 0.97, blue: 0.99)
     static let darkDetailBackground = Color(red: 0.07, green: 0.06, blue: 0.10)
+    static let lightSidebarBackground = Color(red: 0.82, green: 0.83, blue: 0.84)
+    static let darkSidebarBackground = Color(red: 0.12, green: 0.13, blue: 0.13)
+
+    static func windowBackground(for appearance: String) -> NSColor {
+        if appearance == "light" {
+            return NSColor(calibratedRed: 0.96, green: 0.97, blue: 0.99, alpha: 1)
+        }
+        return NSColor(calibratedRed: 0.07, green: 0.06, blue: 0.10, alpha: 1)
+    }
 
     static let detailBackground = themedColor(
         light: NSColor(calibratedRed: 0.96, green: 0.97, blue: 0.99, alpha: 1),
         dark: NSColor(calibratedRed: 0.07, green: 0.06, blue: 0.10, alpha: 1)
+    )
+
+    static let sidebarBackground = themedColor(
+        light: NSColor(calibratedRed: 0.82, green: 0.83, blue: 0.84, alpha: 1),
+        dark: NSColor(calibratedRed: 0.12, green: 0.13, blue: 0.13, alpha: 1)
     )
 
     static let panelBackground = themedColor(

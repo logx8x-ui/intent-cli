@@ -25,6 +25,8 @@ struct ContentView: View {
                 .background(AnkiTheme.detailBackground)
             }
         }
+        .background(AnkiTheme.detailBackground)
+        .overlay(WindowBackgroundController(appearance: appearance).frame(width: 0, height: 0))
         .toolbar {
             ToolbarItemGroup {
                 Picker("Appearance", selection: $appearance) {

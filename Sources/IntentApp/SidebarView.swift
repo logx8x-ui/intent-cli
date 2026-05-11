@@ -15,13 +15,22 @@ struct SidebarView: View {
             ForEach(groupedIntentions, id: \.0) { folder, intentions in
                 Section(folder) {
                     ForEach(intentions) { intention in
-                        Label(intention.name, systemImage: intention.icon)
+                        HStack(spacing: 10) {
+                            Image(systemName: intention.icon)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Color(hex: intention.colorHex))
+                                .frame(width: 18)
+                            Text(intention.name)
+                                .lineLimit(1)
+                        }
                             .tag(Optional(intention.id))
                     }
                 }
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(AnkiTheme.sidebarBackground)
         .safeAreaInset(edge: .bottom) {
             if let activeSessionName = model.activeSessionName {
                 VStack(alignment: .leading, spacing: 4) {
@@ -35,6 +44,7 @@ struct SidebarView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding()
+                .background(AnkiTheme.sidebarBackground)
             }
         }
     }
