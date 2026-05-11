@@ -48,14 +48,13 @@ struct AppSelectionEditor: View {
                 VStack(alignment: .leading, spacing: 6) {
                     TextField("Type an app name", text: $query)
                         .textFieldStyle(.roundedBorder)
+                        .onSubmit(addFirstAppMatch)
 
                     if !matches.isEmpty {
                         VStack(spacing: 2) {
                             ForEach(matches) { app in
                                 Button {
-                                    apps.append(AllowedApp(name: app.name, bundleIdentifier: app.bundleIdentifier))
-                                    query = ""
-                                    adding = false
+                                    addApp(app)
                                 } label: {
                                     HStack(spacing: 8) {
                                         Image(nsImage: app.icon)
@@ -80,6 +79,19 @@ struct AppSelectionEditor: View {
                 }
             }
         }
+    }
+
+    private func addApp(_ app: InstalledApp) {
+        apps.append(AllowedApp(name: app.name, bundleIdentifier: app.bundleIdentifier))
+        query = ""
+        adding = false
+    }
+
+    private func addFirstAppMatch() {
+        guard let exactOrFirst = matches.first(where: { $0.name.caseInsensitiveCompare(query) == .orderedSame }) ?? matches.first else {
+            return
+        }
+        addApp(exactOrFirst)
     }
 }
 
@@ -128,7 +140,8 @@ struct WebsiteEditor: View {
 
 struct StartupActionEditor: View {
     @Binding var actions: [StartupAction]
-    let allowedApps: [AllowedApp]
+    @Binding var allowedApps: [AllowedApp]
+    let catalog: [InstalledApp]
 
     @State private var addingApp = false
     @State private var appQuery = ""
@@ -140,12 +153,12 @@ struct StartupActionEditor: View {
         allowedApps.filter { browserBundleIdentifiers.contains($0.bundleIdentifier) }
     }
 
-    private var appMatches: [AllowedApp] {
+    private var appMatches: [InstalledApp] {
         guard !appQuery.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
-        return allowedApps.filter { app in
+        return catalog.filter { app in
             app.name.range(of: appQuery, options: [.caseInsensitive, .anchored]) != nil
                 && !actions.contains(.openApp(app.bundleIdentifier))
-        }
+        }.prefix(8).map { $0 }
     }
 
     var body: some View {
@@ -160,7 +173,6 @@ struct StartupActionEditor: View {
                 } label: {
                     Image(systemName: "plus")
                 }
-                .disabled(allowedApps.isEmpty)
                 .buttonStyle(.plain)
                 .help("Add a startup app")
 
@@ -185,16 +197,18 @@ struct StartupActionEditor: View {
 
             if addingApp {
                 VStack(alignment: .leading, spacing: 6) {
-                    TextField("Type an allowed app name", text: $appQuery)
+                    TextField("Type an app name", text: $appQuery)
                         .textFieldStyle(.roundedBorder)
+                        .onSubmit(addFirstStartupAppMatch)
 
                     ForEach(appMatches) { app in
                         Button {
-                            appendUnique(.openApp(app.bundleIdentifier))
-                            appQuery = ""
-                            addingApp = false
+                            addStartupApp(app)
                         } label: {
-                            HStack {
+                            HStack(spacing: 8) {
+                                Image(nsImage: app.icon)
+                                    .resizable()
+                                    .frame(width: 18, height: 18)
                                 Text(app.name)
                                 Spacer()
                                 Text(app.bundleIdentifier)
@@ -237,6 +251,22 @@ struct StartupActionEditor: View {
     private func appendUnique(_ action: StartupAction) {
         guard !actions.contains(action) else { return }
         actions.append(action)
+    }
+
+    private func addStartupApp(_ app: InstalledApp) {
+        if !allowedApps.contains(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+            allowedApps.append(AllowedApp(name: app.name, bundleIdentifier: app.bundleIdentifier))
+        }
+        appendUnique(.openApp(app.bundleIdentifier))
+        appQuery = ""
+        addingApp = false
+    }
+
+    private func addFirstStartupAppMatch() {
+        guard let exactOrFirst = appMatches.first(where: { $0.name.caseInsensitiveCompare(appQuery) == .orderedSame }) ?? appMatches.first else {
+            return
+        }
+        addStartupApp(exactOrFirst)
     }
 
     private func addStartupWebsite() {

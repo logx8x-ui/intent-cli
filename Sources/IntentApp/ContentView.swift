@@ -3,6 +3,7 @@ import IntentCore
 
 struct ContentView: View {
     @EnvironmentObject private var model: IntentAppModel
+    @AppStorage("intentAppearance") private var appearance = "dark"
 
     var body: some View {
         NavigationSplitView {
@@ -26,6 +27,13 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItemGroup {
+                Picker("Appearance", selection: $appearance) {
+                    Label("Light", systemImage: "sun.max").tag("light")
+                    Label("Dark", systemImage: "moon").tag("dark")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 122)
+
                 Button {
                     model.createIntention()
                 } label: {

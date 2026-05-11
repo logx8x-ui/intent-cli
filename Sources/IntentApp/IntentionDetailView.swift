@@ -121,7 +121,8 @@ struct IntentionDetailView: View {
         FormSection("Startup") {
             StartupActionEditor(
                 actions: $draft.startupActions,
-                allowedApps: draft.allowedApps
+                allowedApps: $draft.allowedApps,
+                catalog: model.installedApps
             )
         }
     }
