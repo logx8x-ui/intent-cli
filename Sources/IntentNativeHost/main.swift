@@ -33,6 +33,7 @@ struct HostResponse: Codable {
 }
 
 _ = readMessage()
+try? BrowserGuardHeartbeatStore().write()
 
 let fileURL = ActiveBrowserRulesStore.defaultFileURL()
 let response: HostResponse

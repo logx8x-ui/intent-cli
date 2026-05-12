@@ -15,6 +15,7 @@ final class IntentAppModel: ObservableObject {
 
     private let store = IntentionStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
+    private let browserGuardHeartbeatStore = BrowserGuardHeartbeatStore()
 
     var selectedIntention: Intention? {
         guard let selectedID else { return intentions.first }
@@ -118,6 +119,12 @@ final class IntentAppModel: ObservableObject {
     }
 
     func start(_ intention: Intention) {
+        if requiresFirefoxGuard(intention),
+           !browserGuardHeartbeatStore.isFresh(maxAge: 5) {
+            errorMessage = "Firefox browser locking is not connected. Load the Intent Browser Guard extension in Firefox, then start this intention again."
+            return
+        }
+
         let spec = FocusSessionSpec.make(for: intention)
         let rules = ActiveBrowserRules(
             active: true,
@@ -132,6 +139,7 @@ final class IntentAppModel: ObservableObject {
             try browserRulesStore.write(rules)
         } catch {
             errorMessage = "Could not write browser rules: \(error)"
+            return
         }
 
         activeSessionName = intention.name
@@ -151,6 +159,16 @@ final class IntentAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func requiresFirefoxGuard(_ intention: Intention) -> Bool {
+        let usesFirefox = intention.allowedApps.contains { $0.bundleIdentifier == "org.mozilla.firefox" }
+        let browserRestrictionsEnabled =
+            intention.restrictions.blockBrowserTabSwitching ||
+            intention.restrictions.blockBrowserNavigation ||
+            intention.restrictions.blockNewBrowserTabs ||
+            intention.restrictions.allowGoogleSearchTabs
+        return usesFirefox && browserRestrictionsEnabled
     }
 }
 

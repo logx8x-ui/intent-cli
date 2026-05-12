@@ -108,3 +108,50 @@ public final class ActiveBrowserRulesStore {
             .appendingPathComponent("browser-rules.json")
     }
 }
+
+public struct BrowserGuardHeartbeat: Codable, Equatable {
+    public var lastSeenAt: Date
+
+    public init(lastSeenAt: Date) {
+        self.lastSeenAt = lastSeenAt
+    }
+}
+
+public final class BrowserGuardHeartbeatStore {
+    public let fileURL: URL
+
+    public init(fileURL: URL = BrowserGuardHeartbeatStore.defaultFileURL()) {
+        self.fileURL = fileURL
+    }
+
+    public func write(date: Date = Date()) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder().encode(BrowserGuardHeartbeat(lastSeenAt: date))
+        try data.write(to: fileURL, options: [.atomic])
+    }
+
+    public func lastSeenAt() -> Date? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let heartbeat = try? JSONDecoder().decode(BrowserGuardHeartbeat.self, from: data) else {
+            return nil
+        }
+        return heartbeat.lastSeenAt
+    }
+
+    public func isFresh(maxAge: TimeInterval, now: Date = Date()) -> Bool {
+        guard let lastSeenAt = lastSeenAt() else {
+            return false
+        }
+        return now.timeIntervalSince(lastSeenAt) <= maxAge
+    }
+
+    public static func defaultFileURL() -> URL {
+        FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".intent", isDirectory: true)
+            .appendingPathComponent("browser-guard-heartbeat.json")
+    }
+}

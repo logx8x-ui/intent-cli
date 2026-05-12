@@ -59,6 +59,7 @@ To enable Firefox tab and URL blocking during browser intentions:
 4. Choose `firefox-extension/manifest.json` from this repo.
 
 For now this is a development extension, so Firefox may require reloading it after Firefox restarts. Packaging it permanently is a later distribution step.
+Intent now refuses to start Firefox-locked intentions when that browser guard is not connected, instead of silently running without tab protection.
 
 The first lock session may need macOS permissions:
 

@@ -3,9 +3,15 @@ const RULE_REFRESH_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
 const BLOCKED_URL = "about:blank";
 
+const {
+  isAllowedURL,
+  isSearchStagingURL
+} = IntentBrowserRules;
+
 let rules = inactiveRules();
 let lastAllowedTabId = null;
 let enforcing = false;
+let rulesFingerprint = fingerprintRules(rules);
 
 function inactiveRules() {
   return {
@@ -18,99 +24,54 @@ function inactiveRules() {
   };
 }
 
+function fingerprintRules(value) {
+  return JSON.stringify(value);
+}
+
 async function refreshRules() {
+  const previousFingerprint = rulesFingerprint;
   try {
     rules = await browser.runtime.sendNativeMessage(HOST_NAME, { type: "getRules" });
   } catch (_) {
     rules = inactiveRules();
   }
+
+  rulesFingerprint = fingerprintRules(rules);
+  if (rulesFingerprint === previousFingerprint) {
+    return;
+  }
+
+  if (rules.active) {
+    await primeAllowedTab();
+  } else {
+    lastAllowedTabId = null;
+  }
 }
 
-function normalizeRule(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/^www\./i, "")
-    .replace(/\/+$/g, "")
-    .toLowerCase();
-}
-
-function normalizedURLParts(url) {
-  try {
-    if (["about:blank", "about:newtab"].includes(url)) {
-      return {
-        host: "about",
-        path: url.replace("about:", "/")
-      };
-    }
-
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      return null;
-    }
-    return {
-      host: parsed.hostname.replace(/^www\./i, "").toLowerCase(),
-      path: parsed.pathname.replace(/\/+$/g, "").toLowerCase()
-    };
-  } catch (_) {
+async function getAllowedTab(tabId) {
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  if (!tab || !tab.url || !isAllowedURL(tab.url, rules)) {
     return null;
   }
+  return tab;
 }
 
-function isSearchStagingURL(url) {
-  return ["about:blank", "about:newtab"].includes(url);
-}
-
-function isGoogleSearchURL(url) {
-  const parts = normalizedURLParts(url);
-  if (!parts) {
-    return false;
-  }
-
-  const googleHost = parts.host === "google.com" || /^google\.[a-z.]+$/.test(parts.host);
-  return googleHost && (parts.path === "" || parts.path === "/" || parts.path === "/search");
-}
-
-function isAllowedURL(url) {
-  if (!rules.active || rules.allowedWebsites.length === 0) {
-    return true;
-  }
-
-  if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) {
-    return true;
-  }
-
-  const parts = normalizedURLParts(url);
-  if (!parts) {
-    return false;
-  }
-
-  return rules.allowedWebsites.some((rawRule) => {
-    const rule = normalizeRule(rawRule);
-    if (!rule) {
-      return false;
-    }
-
-    const slashIndex = rule.indexOf("/");
-    const ruleHost = slashIndex === -1 ? rule : rule.slice(0, slashIndex);
-    const rulePath = slashIndex === -1 ? "" : rule.slice(slashIndex);
-    const hostMatches = parts.host === ruleHost || parts.host.endsWith(`.${ruleHost}`);
-
-    if (!hostMatches) {
-      return false;
-    }
-
-    return rulePath === "" || parts.path === rulePath || parts.path.startsWith(`${rulePath}/`);
-  });
+async function primeAllowedTab() {
+  const tabs = await browser.tabs.query({});
+  const activeAllowed = tabs.find((tab) => tab.active && tab.url && isAllowedURL(tab.url, rules));
+  const firstAllowed = activeAllowed || tabs.find((tab) => tab.url && isAllowedURL(tab.url, rules));
+  lastAllowedTabId = firstAllowed?.id ?? null;
 }
 
 async function rememberIfAllowed(tabId) {
-  try {
-    const tab = await browser.tabs.get(tabId);
-    if (tab && tab.url && isAllowedURL(tab.url)) {
-      lastAllowedTabId = tabId;
-    }
-  } catch (_) {}
+  if (!rules.active) {
+    return;
+  }
+
+  const tab = await getAllowedTab(tabId);
+  if (tab) {
+    lastAllowedTabId = tabId;
+  }
 }
 
 async function returnToAllowedTab() {
@@ -121,12 +82,16 @@ async function returnToAllowedTab() {
   enforcing = true;
   try {
     if (lastAllowedTabId !== null) {
-      await browser.tabs.update(lastAllowedTabId, { active: true });
-      return;
+      const lastAllowed = await getAllowedTab(lastAllowedTabId);
+      if (lastAllowed) {
+        await browser.tabs.update(lastAllowed.id, { active: true });
+        return;
+      }
+      lastAllowedTabId = null;
     }
 
-    const tabs = await browser.tabs.query({ currentWindow: true });
-    const allowed = tabs.find((tab) => tab.url && isAllowedURL(tab.url));
+    const tabs = await browser.tabs.query({});
+    const allowed = tabs.find((tab) => tab.url && isAllowedURL(tab.url, rules));
     if (allowed) {
       lastAllowedTabId = allowed.id;
       await browser.tabs.update(allowed.id, { active: true });
@@ -154,7 +119,6 @@ async function blockTab(tabId) {
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
   await refreshRules();
   if (!rules.active) {
-    await rememberIfAllowed(tabId);
     return;
   }
 
@@ -163,7 +127,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
     return;
   }
 
-  if (isAllowedURL(tab.url)) {
+  if (isAllowedURL(tab.url, rules)) {
     lastAllowedTabId = tabId;
     return;
   }
@@ -183,7 +147,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
-  if (isAllowedURL(tab.url)) {
+  if (isAllowedURL(tab.url, rules)) {
     lastAllowedTabId = tabId;
     return;
   }
@@ -205,10 +169,8 @@ browser.tabs.onCreated.addListener(async (tab) => {
 
   setTimeout(async () => {
     const latest = await browser.tabs.get(tab.id).catch(() => null);
-    if (!latest || !latest.url || isAllowedURL(latest.url)) {
-      if (latest && latest.url) {
-        lastAllowedTabId = latest.id;
-      }
+    if (!latest || !latest.url || isAllowedURL(latest.url, rules)) {
+      await rememberIfAllowed(tab.id);
       return;
     }
 

@@ -10,9 +10,9 @@ public enum FocusLockError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .accessibilityPermissionRequired:
-            return "Intent needs Accessibility permission. Open System Settings > Privacy & Security > Accessibility, enable your terminal app, then run Intent again."
+            return "Intent needs Accessibility permission. Open System Settings > Privacy & Security > Accessibility, enable Intent, then start the intention again."
         case .eventTapUnavailable:
-            return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for your terminal app, then run Intent again."
+            return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for Intent, then start the intention again."
         case .unableToOpen(let name):
             return "Intent could not open \(name)."
         }
@@ -37,6 +37,7 @@ public final class FocusLock {
     private var focusTimer: Timer?
     private var spotifyTimer: Timer?
     private var launchObserver: NSObjectProtocol?
+    private var activationObserver: NSObjectProtocol?
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
 
@@ -56,6 +57,7 @@ public final class FocusLock {
         try runStartupSteps()
         try installEventTap()
         installLaunchObserver()
+        installActivationObserver()
         startFocusTimer()
         startSpotifyTimerIfNeeded()
 
@@ -320,6 +322,23 @@ public final class FocusLock {
         }
     }
 
+    private func installActivationObserver() {
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard
+                let self,
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else {
+                return
+            }
+
+            self.handleActivated(app)
+        }
+    }
+
     private func handleLaunched(_ app: NSRunningApplication) {
         guard let bundleIdentifier = app.bundleIdentifier else { return }
         guard !spec.allowedBundleIdentifiers.contains(bundleIdentifier) else { return }
@@ -328,6 +347,26 @@ public final class FocusLock {
 
         app.terminate()
         refocus()
+    }
+
+    private func handleActivated(_ app: NSRunningApplication) {
+        guard let bundleIdentifier = app.bundleIdentifier else {
+            refocus()
+            return
+        }
+
+        if spec.strictSingleApp {
+            guard bundleIdentifier == spec.fallbackBundleIdentifier else {
+                refocus()
+                return
+            }
+            return
+        }
+
+        guard spec.allowedBundleIdentifiers.contains(bundleIdentifier) else {
+            refocus()
+            return
+        }
     }
 
     private func startFocusTimer() {
@@ -407,6 +446,11 @@ public final class FocusLock {
         if let launchObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(launchObserver)
             self.launchObserver = nil
+        }
+
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+            self.activationObserver = nil
         }
 
         if let eventTap {

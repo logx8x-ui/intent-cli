@@ -16,6 +16,7 @@
   ],
   "background": {
     "scripts": [
+      "rule-helpers.js",
       "background.js"
     ]
   }

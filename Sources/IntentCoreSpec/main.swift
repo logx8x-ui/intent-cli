@@ -68,6 +68,10 @@ do {
     try expect(!instagram.friction.validate("instagram"), "wrong Instagram phrase should fail")
     try expect(instagram.allowedWebsites.contains { $0.value == "instagram.com/direct" }, "Instagram should allow DMs")
     try expect(AllowedWebsite("https://www.roblox.com/games").displayName == "roblox", "Website display name should simplify URLs")
+    let instagramSpec = FocusSessionSpec.make(for: instagram)
+    try expect(instagramSpec.strictSingleApp, "Instagram should stay locked to one app")
+    try expect(instagramSpec.allowedBundleIdentifiers == ["org.mozilla.firefox"], "Instagram should only allow Firefox")
+    try expect(instagramSpec.blockBrowserTabEscape, "Instagram should enable browser escape blocking")
 
     let legacyRestrictions = Data("""
     {
@@ -120,6 +124,12 @@ do {
     let clearedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
     try expect(!clearedRules.active, "Clearing browser rules should make them inactive")
     try expect(!clearedRules.allowGoogleSearchTabs, "Clearing browser rules should disable Google search tabs")
+
+    let heartbeatStore = BrowserGuardHeartbeatStore(fileURL: tempDirectory.appendingPathComponent("browser-guard-heartbeat.json"))
+    try expect(!heartbeatStore.isFresh(maxAge: 5, now: Date(timeIntervalSince1970: 100)), "Missing browser heartbeat should be stale")
+    try heartbeatStore.write(date: Date(timeIntervalSince1970: 98))
+    try expect(heartbeatStore.isFresh(maxAge: 5, now: Date(timeIntervalSince1970: 100)), "Recent browser heartbeat should be fresh")
+    try expect(!heartbeatStore.isFresh(maxAge: 1, now: Date(timeIntervalSince1970: 100)), "Old browser heartbeat should expire")
     try? FileManager.default.removeItem(at: tempDirectory)
 
     print("IntentCoreSpec passed")
