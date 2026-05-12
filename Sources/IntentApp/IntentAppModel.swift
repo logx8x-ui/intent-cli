@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import IntentCore
 import IntentLock
@@ -10,6 +11,7 @@ final class IntentAppModel: ObservableObject {
     @Published var pendingFriction: PendingFriction?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
+    @Published var isRunnerPresented = false
 
     private let store = IntentionStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
@@ -86,6 +88,23 @@ final class IntentAppModel: ObservableObject {
         case .timeBudget(let minutes):
             pendingFriction = PendingFriction(intention: intention, prompt: "Type \(minutes) to confirm this time budget.", expectedValue: "\(minutes)")
         }
+    }
+
+    func requestStart(intentionID: String) {
+        guard let intention = intentions.first(where: { $0.id == intentionID }) else {
+            errorMessage = "Could not find that intention."
+            return
+        }
+        selectedID = intention.id
+        requestStart(intention)
+    }
+
+    func showRunner() {
+        if intentions.isEmpty {
+            load()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        isRunnerPresented = true
     }
 
     func submitFriction(_ input: String) {

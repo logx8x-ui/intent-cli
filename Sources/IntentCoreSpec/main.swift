@@ -50,6 +50,19 @@ do {
     try expect(intentions.contains { $0.name == "Emails" }, "defaults should include Emails")
     try expect(intentions.contains { $0.name == "Data Science" }, "defaults should include Data Science")
 
+    var runnerMenu = IntentionRunnerMenu(intentions: intentions)
+    try expect(runnerMenu.screen == .folders, "runner should start at folders")
+    try expect(runnerMenu.folderOptions.map(\.name) == ["Deep", "Shallow"], "runner folders should use intention folders")
+    try expect(runnerMenu.handle("1") == .showIntentions("Deep"), "runner 1 should open Deep folder")
+    try expect(runnerMenu.screen == .intentions("Deep"), "runner should enter Deep folder")
+    try expect(runnerMenu.intentionOptions.map(\.name) == ["Data Science"], "Deep should show Data Science")
+    try expect(runnerMenu.handle("1") == .start("data-science"), "Deep 1 should start Data Science")
+    try expect(runnerMenu.handle("\u{1B}") == .showFolders, "escape should go back to folders")
+    try expect(runnerMenu.screen == .folders, "escape should set runner folders")
+    _ = runnerMenu.handle("2")
+    try expect(runnerMenu.screen == .intentions("Shallow"), "runner 2 should enter Shallow folder")
+    try expect(runnerMenu.handle("b") == .showFolders, "b should go back to folders")
+
     let instagram = intentions.first { $0.name == "Instagram replies" }!
     try expect(instagram.friction.validate("I want to use instagram right now"), "Instagram phrase should validate")
     try expect(!instagram.friction.validate("instagram"), "wrong Instagram phrase should fail")

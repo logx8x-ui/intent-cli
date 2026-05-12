@@ -2,11 +2,22 @@ import SwiftUI
 
 @main
 struct IntentDesktopApp: App {
-    @StateObject private var model = IntentAppModel()
+    @StateObject private var model: IntentAppModel
     @AppStorage("intentAppearance") private var appearance = "dark"
+    private let hotKeyManager: GlobalHotKeyManager
 
     private var preferredColorScheme: ColorScheme? {
         appearance == "light" ? .light : .dark
+    }
+
+    init() {
+        let appModel = IntentAppModel()
+        _model = StateObject(wrappedValue: appModel)
+        hotKeyManager = GlobalHotKeyManager {
+            Task { @MainActor in
+                appModel.showRunner()
+            }
+        }
     }
 
     var body: some Scene {

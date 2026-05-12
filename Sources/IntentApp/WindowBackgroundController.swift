@@ -20,9 +20,12 @@ struct WindowBackgroundController: NSViewRepresentable {
 
     private func apply(to window: NSWindow?) {
         guard let window else { return }
-        window.titlebarAppearsTransparent = false
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
         window.backgroundColor = AnkiTheme.windowBackground(for: appearance)
         window.toolbarStyle = .unified
+        window.toolbar?.showsBaselineSeparator = false
+        window.isMovableByWindowBackground = true
         window.appearance = NSAppearance(named: appearance == "light" ? .aqua : .darkAqua)
     }
 }

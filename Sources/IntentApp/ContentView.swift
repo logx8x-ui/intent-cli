@@ -27,6 +27,7 @@ struct ContentView: View {
         }
         .background(AnkiTheme.detailBackground)
         .overlay(WindowBackgroundController(appearance: appearance).frame(width: 0, height: 0))
+        .tint(AnkiTheme.accent)
         .toolbar {
             ToolbarItemGroup {
                 Picker("Appearance", selection: $appearance) {
@@ -54,6 +55,10 @@ struct ContentView: View {
         }
         .sheet(item: $model.pendingFriction) { pending in
             FrictionSheet(pending: pending)
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.isRunnerPresented) {
+            IntentRunnerView()
                 .environmentObject(model)
         }
         .alert("Intent", isPresented: Binding(
