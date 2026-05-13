@@ -7,8 +7,12 @@ public struct FocusSessionSpec {
     public let allowedBundleIdentifiers: Set<String>
     public let fallbackBundleIdentifier: String
     public let strictSingleApp: Bool
+    public let blockAppSwitching: Bool
+    public let blockNewApps: Bool
+    public let keepFocused: Bool
     public let blockBrowserTabEscape: Bool
     public let blockFirefoxChromeClicks: Bool
+    public let allowGoogleSearchTabs: Bool
     public let spotifyPlaylistURI: String?
     public let allowSpotifyForeground: Bool
 
@@ -18,8 +22,12 @@ public struct FocusSessionSpec {
         allowedBundleIdentifiers: Set<String>,
         fallbackBundleIdentifier: String,
         strictSingleApp: Bool,
+        blockAppSwitching: Bool,
+        blockNewApps: Bool,
+        keepFocused: Bool,
         blockBrowserTabEscape: Bool,
         blockFirefoxChromeClicks: Bool,
+        allowGoogleSearchTabs: Bool,
         spotifyPlaylistURI: String?,
         allowSpotifyForeground: Bool
     ) {
@@ -28,8 +36,12 @@ public struct FocusSessionSpec {
         self.allowedBundleIdentifiers = allowedBundleIdentifiers
         self.fallbackBundleIdentifier = fallbackBundleIdentifier
         self.strictSingleApp = strictSingleApp
+        self.blockAppSwitching = blockAppSwitching
+        self.blockNewApps = blockNewApps
+        self.keepFocused = keepFocused
         self.blockBrowserTabEscape = blockBrowserTabEscape
         self.blockFirefoxChromeClicks = blockFirefoxChromeClicks
+        self.allowGoogleSearchTabs = allowGoogleSearchTabs
         self.spotifyPlaylistURI = spotifyPlaylistURI
         self.allowSpotifyForeground = allowSpotifyForeground
     }
@@ -49,9 +61,13 @@ public struct FocusSessionSpec {
             startupSteps: intention.startupActions.map(StartupStep.init),
             allowedBundleIdentifiers: Set(intention.allowedApps.map(\.bundleIdentifier)),
             fallbackBundleIdentifier: intention.allowedApps.first?.bundleIdentifier ?? "org.mozilla.firefox",
-            strictSingleApp: intention.allowedApps.count == 1,
+            strictSingleApp: intention.allowedApps.count == 1 && intention.restrictions.blockAppSwitching,
+            blockAppSwitching: intention.restrictions.blockAppSwitching,
+            blockNewApps: intention.restrictions.blockNewApps,
+            keepFocused: intention.restrictions.keepFocused,
             blockBrowserTabEscape: intention.restrictions.blockBrowserTabSwitching,
             blockFirefoxChromeClicks: intention.restrictions.blockBrowserTabSwitching || intention.restrictions.blockNewBrowserTabs,
+            allowGoogleSearchTabs: intention.restrictions.allowGoogleSearchTabs,
             spotifyPlaylistURI: intention.startupActions.compactMap { action in
                 if case .playSpotifyPlaylist(let uri) = action {
                     return uri
@@ -71,8 +87,12 @@ public struct FocusSessionSpec {
                 allowedBundleIdentifiers: [task.bundleIdentifier],
                 fallbackBundleIdentifier: task.bundleIdentifier,
                 strictSingleApp: true,
+                blockAppSwitching: true,
+                blockNewApps: true,
+                keepFocused: true,
                 blockBrowserTabEscape: false,
                 blockFirefoxChromeClicks: false,
+                allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: nil,
                 allowSpotifyForeground: false
             )
@@ -86,8 +106,12 @@ public struct FocusSessionSpec {
                 allowedBundleIdentifiers: [task.bundleIdentifier],
                 fallbackBundleIdentifier: task.bundleIdentifier,
                 strictSingleApp: true,
+                blockAppSwitching: true,
+                blockNewApps: true,
+                keepFocused: true,
                 blockBrowserTabEscape: true,
                 blockFirefoxChromeClicks: true,
+                allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: nil,
                 allowSpotifyForeground: false
             )
@@ -101,8 +125,12 @@ public struct FocusSessionSpec {
                 allowedBundleIdentifiers: [task.bundleIdentifier],
                 fallbackBundleIdentifier: task.bundleIdentifier,
                 strictSingleApp: true,
+                blockAppSwitching: true,
+                blockNewApps: true,
+                keepFocused: true,
                 blockBrowserTabEscape: true,
                 blockFirefoxChromeClicks: true,
+                allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: nil,
                 allowSpotifyForeground: false
             )
@@ -132,8 +160,12 @@ public struct FocusSessionSpec {
                 ],
                 fallbackBundleIdentifier: "com.rstudio.desktop",
                 strictSingleApp: false,
+                blockAppSwitching: true,
+                blockNewApps: true,
+                keepFocused: true,
                 blockBrowserTabEscape: true,
                 blockFirefoxChromeClicks: true,
+                allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: "spotify:playlist:0fbyat27nV9HP9WlSphWlS",
                 allowSpotifyForeground: false
             )

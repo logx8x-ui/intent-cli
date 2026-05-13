@@ -40,6 +40,7 @@ public final class FocusLock {
     private var activationObserver: NSObjectProtocol?
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
+    private var lastOpenRefocusAt: Date = .distantPast
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
@@ -139,13 +140,18 @@ public final class FocusLock {
 
     @discardableResult
     private func activateApp(bundleIdentifier: String) -> Bool {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+        let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleIdentifier
-        }) else {
-            return false
+        })
+
+        if let app {
+            _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            if app.isActive {
+                return true
+            }
         }
 
-        return app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        return openForRefocus(bundleIdentifier: bundleIdentifier)
     }
 
     @discardableResult
@@ -155,6 +161,26 @@ public final class FocusLock {
         }
 
         return app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    }
+
+    @discardableResult
+    private func openForRefocus(bundleIdentifier: String) -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastOpenRefocusAt) >= 0.45 else {
+            return false
+        }
+
+        lastOpenRefocusAt = now
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-b", bundleIdentifier]
+
+        do {
+            try process.run()
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func installEventTap() throws {
@@ -222,12 +248,12 @@ public final class FocusLock {
             return nil
         }
 
-        if command && isBlockedSystemCommand(keyCode) {
+        if command && shouldBlockSystemCommand && isBlockedSystemCommand(keyCode) {
             refocus()
             return nil
         }
 
-        if control && isSpaceSwitchKey(keyCode) {
+        if control && shouldBlockSystemCommand && isSpaceSwitchKey(keyCode) {
             refocus()
             return nil
         }
@@ -253,6 +279,10 @@ public final class FocusLock {
         ].contains(keyCode)
     }
 
+    private var shouldBlockSystemCommand: Bool {
+        spec.blockAppSwitching || spec.blockNewApps || spec.keepFocused
+    }
+
     private func isBlockedBrowserCommand(keyCode: Int64, command: Bool, control: Bool, option: Bool) -> Bool {
         if control && keyCode == KeyCode.tab {
             return true
@@ -260,6 +290,12 @@ public final class FocusLock {
 
         if command && option && [KeyCode.leftArrow, KeyCode.rightArrow].contains(keyCode) {
             return true
+        }
+
+        if spec.allowGoogleSearchTabs,
+           command,
+           [KeyCode.l, KeyCode.t].contains(keyCode) {
+            return false
         }
 
         if command && browserCommandKeys.contains(keyCode) {
@@ -338,6 +374,7 @@ public final class FocusLock {
     }
 
     private func handleLaunched(_ app: NSRunningApplication) {
+        guard spec.blockNewApps else { return }
         guard let bundleIdentifier = app.bundleIdentifier else { return }
         guard !spec.allowedBundleIdentifiers.contains(bundleIdentifier) else { return }
         guard app.activationPolicy == .regular else { return }
@@ -348,6 +385,7 @@ public final class FocusLock {
     }
 
     private func handleActivated(_ app: NSRunningApplication) {
+        guard spec.blockAppSwitching || spec.keepFocused else { return }
         guard let bundleIdentifier = app.bundleIdentifier else {
             refocus()
             return
@@ -387,6 +425,8 @@ public final class FocusLock {
     }
 
     private func enforceFocus() {
+        guard spec.blockAppSwitching || spec.keepFocused else { return }
+
         guard let frontmost = NSWorkspace.shared.frontmostApplication else {
             refocus()
             return
@@ -480,29 +520,11 @@ public final class FocusLock {
             return false
         }
 
-        guard point.x >= bounds.x,
-              point.x <= bounds.maxX,
-              point.y >= bounds.y,
-              point.y <= bounds.maxY else {
-            return false
-        }
-
-        let localX = point.x - bounds.x
-        let localY = point.y - bounds.y
-
-        let topChromeHeight: CGFloat = 105
-        let sideberyToolbarWidth: CGFloat = 470
-        let sideberyBottomToolbarHeight: CGFloat = 74
-
-        if localY <= topChromeHeight {
-            return true
-        }
-
-        if localX <= sideberyToolbarWidth && localY >= bounds.height - sideberyBottomToolbarHeight {
-            return true
-        }
-
-        return false
+        return FirefoxClickProtection.isProtected(
+            point: point,
+            windowBounds: FirefoxWindowBounds(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height),
+            protectTopChrome: !spec.allowGoogleSearchTabs
+        )
     }
 
     private func windowBounds(for bundleIdentifier: String) -> WindowBounds? {

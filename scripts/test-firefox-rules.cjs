@@ -35,6 +35,27 @@ assert.equal(
   "Clicking through from Google should stay blocked"
 );
 
+const strictGithubRules = {
+  active: true,
+  allowedWebsites: ["github.com"],
+  allowGoogleSearchTabs: false
+};
+assert.equal(
+  rules.isAllowedURL("about:newtab", strictGithubRules),
+  false,
+  "New tabs should be blocked when Google-search tabs are not enabled"
+);
+assert.equal(
+  rules.isAllowedURL("https://www.google.com/search?q=github", strictGithubRules),
+  false,
+  "Google search tabs should be blocked when the Google-search exception is off"
+);
+assert.equal(
+  rules.isAllowedURL("https://gist.github.com/", strictGithubRules),
+  true,
+  "Subdomains of allowed domains should stay allowed"
+);
+
 const idleRules = {
   active: false,
   allowedWebsites: ["instagram.com/direct"],

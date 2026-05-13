@@ -112,7 +112,38 @@ do {
     let instagramSpec = FocusSessionSpec.make(for: instagram)
     try expect(instagramSpec.strictSingleApp, "Instagram should stay locked to one app")
     try expect(instagramSpec.allowedBundleIdentifiers == ["org.mozilla.firefox"], "Instagram should only allow Firefox")
+    try expect(instagramSpec.blockAppSwitching, "Instagram should block switching to unallowed apps")
     try expect(instagramSpec.blockBrowserTabEscape, "Instagram should enable browser escape blocking")
+
+    let firefoxBounds = FirefoxWindowBounds(x: 100, y: 200, width: 1200, height: 800)
+    try expect(
+        FirefoxClickProtection.isProtected(point: .init(x: 450, y: 500), windowBounds: firefoxBounds),
+        "Firefox Sidebery tab list clicks should be blocked during browser-locked sessions"
+    )
+    try expect(
+        FirefoxClickProtection.isProtected(point: .init(x: 600, y: 230), windowBounds: firefoxBounds),
+        "Firefox top browser chrome clicks should be blocked during browser-locked sessions"
+    )
+    try expect(
+        !FirefoxClickProtection.isProtected(point: .init(x: 650, y: 500), windowBounds: firefoxBounds),
+        "Firefox page content clicks should stay available during browser-locked sessions"
+    )
+    try expect(
+        !FirefoxClickProtection.isProtected(
+            point: .init(x: 600, y: 230),
+            windowBounds: firefoxBounds,
+            protectTopChrome: false
+        ),
+        "Google-search mode should allow Firefox search chrome clicks"
+    )
+    try expect(
+        FirefoxClickProtection.isProtected(
+            point: .init(x: 450, y: 500),
+            windowBounds: firefoxBounds,
+            protectTopChrome: false
+        ),
+        "Google-search mode should still block Sidebery tab list clicks"
+    )
 
     let legacyRestrictions = Data("""
     {
