@@ -13,6 +13,47 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 }
 
 do {
+    var permissionPromptCount = 0
+    var permissionChecks = [false, false, true]
+    let delayedPermission = AccessibilityAuthorizationGate(
+        isTrusted: {
+            permissionChecks.removeFirst()
+        },
+        requestPrompt: {
+            permissionPromptCount += 1
+        },
+        pause: {}
+    )
+    try expect(delayedPermission.waitForTrust(maxPolls: 3), "Accessibility gate should wait for a later grant")
+    try expect(permissionPromptCount == 1, "Accessibility gate should prompt once while waiting")
+
+    var alreadyTrustedPromptCount = 0
+    let alreadyTrustedPermission = AccessibilityAuthorizationGate(
+        isTrusted: { true },
+        requestPrompt: {
+            alreadyTrustedPromptCount += 1
+        },
+        pause: {}
+    )
+    try expect(alreadyTrustedPermission.waitForTrust(maxPolls: 3), "Accessibility gate should pass immediately when already trusted")
+    try expect(alreadyTrustedPromptCount == 0, "Accessibility gate should not prompt when already trusted")
+
+    var deniedPromptCount = 0
+    let deniedPermission = AccessibilityAuthorizationGate(
+        isTrusted: { false },
+        requestPrompt: {
+            deniedPromptCount += 1
+        },
+        pause: {}
+    )
+    try expect(!deniedPermission.waitForTrust(maxPolls: 2), "Accessibility gate should stop after its polling budget")
+    try expect(deniedPromptCount == 1, "Accessibility gate should not spam repeated prompts")
+
+    let accessibilityPauseStartedAt = Date()
+    AccessibilityAuthorizationGate.pollingPause(duration: 0.05)
+    let accessibilityPauseElapsed = Date().timeIntervalSince(accessibilityPauseStartedAt)
+    try expect(accessibilityPauseElapsed >= 0.04, "Accessibility polling pause should actually wait between trust checks")
+
     try expect(IntentMenu.routeRootInput("s") == .shallow, "s should route to shallow")
     try expect(IntentMenu.routeRootInput("S") == .shallow, "S should route to shallow")
     try expect(IntentMenu.routeRootInput("d") == .deep, "d should route to deep")

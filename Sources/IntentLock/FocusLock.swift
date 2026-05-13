@@ -10,7 +10,7 @@ public enum FocusLockError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .accessibilityPermissionRequired:
-            return "Intent needs Accessibility permission. Open System Settings > Privacy & Security > Accessibility, enable Intent, then start the intention again."
+            return "Intent needs Accessibility permission. Open System Settings > Privacy & Security > Accessibility and enable Intent, then start the intention again."
         case .eventTapUnavailable:
             return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for Intent, then start the intention again."
         case .unableToOpen(let name):
@@ -70,9 +70,7 @@ public final class FocusLock {
     }
 
     private func requestAccessibilityIfNeeded() -> Bool {
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let options = [promptKey: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        AccessibilityAuthorizationGate.system().waitForTrust()
     }
 
     private func runStartupSteps() throws {

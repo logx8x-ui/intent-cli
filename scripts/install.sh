@@ -55,6 +55,13 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+codesign \
+  --force \
+  --sign - \
+  --identifier dev.loganmondi.intent \
+  --requirements '=designated => identifier "dev.loganmondi.intent"' \
+  "$APP_BUNDLE" >/dev/null
 mdimport "$APP_BUNDLE" 2>/dev/null || true
 
 HOST_DIR="${HOME}/Library/Application Support/Mozilla/NativeMessagingHosts"
