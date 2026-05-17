@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="popup.css">
+    <title>Intent Browser Guard</title>
+  </head>
+  <body>
+    <main class="panel">
+      <div class="heading">
+        <div>
+          <h1>Intent</h1>
+          <p id="status">Checking guard...</p>
+        </div>
+        <label class="switch" aria-label="Intent Browser Guard">
+          <input id="enabled" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+      <p class="note">When on, Firefox follows the active Intent restrictions from the Mac app.</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

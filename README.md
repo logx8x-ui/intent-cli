@@ -53,12 +53,28 @@ The installer also installs the Firefox native messaging host that lets the brow
 
 To enable Firefox tab and URL blocking during browser intentions:
 
+1. Install the Intent Browser Guard Firefox extension.
+2. Click the Intent Browser Guard toolbar icon in Firefox.
+3. Keep the switch on.
+
+During development, load it locally:
+
 1. Open Firefox.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click `Load Temporary Add-on...`.
 4. Choose `firefox-extension/manifest.json` from this repo.
 
-For now this is a development extension, so Firefox may require reloading it after Firefox restarts. Packaging it permanently is a later distribution step.
+For public release, build and sign the extension with Mozilla Add-ons:
+
+```zsh
+npm install
+./scripts/build-firefox-extension.sh
+export AMO_JWT_ISSUER='user:...'
+export AMO_JWT_SECRET='...'
+./scripts/sign-firefox-extension.sh
+```
+
+`scripts/sign-firefox-extension.sh` publishes through Mozilla's listed add-on signing flow. The final signing step needs credentials from the Intent Mozilla Add-ons developer account.
 Intent now refuses to start Firefox-locked intentions when that browser guard is not connected, instead of silently running without tab protection.
 
 The first lock session may need macOS permissions:
@@ -91,7 +107,7 @@ intent-app
 
 Or open `~/Applications/Intent.app`.
 
-They should also load the Firefox extension from `~/intent/firefox-extension/manifest.json` using `about:debugging#/runtime/this-firefox`.
+They should also install Intent Browser Guard in Firefox and keep its toolbar switch on. Until the Mozilla public listing is approved, they can load the development extension from `~/intent/firefox-extension/manifest.json` using `about:debugging#/runtime/this-firefox`.
 
 After that, friends can update with:
 

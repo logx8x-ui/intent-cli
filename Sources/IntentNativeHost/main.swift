@@ -23,6 +23,11 @@ func writeMessage<T: Encodable>(_ value: T) throws {
     FileHandle.standardOutput.write(data)
 }
 
+struct HostRequest: Codable {
+    var type: String?
+    var enabled: Bool?
+}
+
 struct HostResponse: Codable {
     var active: Bool
     var allowedWebsites: [String]
@@ -30,13 +35,20 @@ struct HostResponse: Codable {
     var blockNavigation: Bool
     var blockNewTabs: Bool
     var allowGoogleSearchTabs: Bool
+    var guardEnabled: Bool
 }
 
-_ = readMessage()
+let requestData = readMessage()
+let request = requestData.flatMap { try? JSONDecoder().decode(HostRequest.self, from: $0) }
 try? BrowserGuardHeartbeatStore().write()
+
+if request?.type == "setGuardEnabled", let enabled = request?.enabled {
+    try? BrowserGuardStateStore().write(enabled: enabled)
+}
 
 let fileURL = ActiveBrowserRulesStore.defaultFileURL()
 let response: HostResponse
+let guardEnabled = BrowserGuardStateStore().isEnabled()
 
 if let data = try? Data(contentsOf: fileURL),
    let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data) {
@@ -46,10 +58,19 @@ if let data = try? Data(contentsOf: fileURL),
         blockTabSwitching: rules.blockTabSwitching,
         blockNavigation: rules.blockNavigation,
         blockNewTabs: rules.blockNewTabs,
-        allowGoogleSearchTabs: rules.allowGoogleSearchTabs
+        allowGoogleSearchTabs: rules.allowGoogleSearchTabs,
+        guardEnabled: guardEnabled
     )
 } else {
-    response = HostResponse(active: false, allowedWebsites: [], blockTabSwitching: false, blockNavigation: false, blockNewTabs: false, allowGoogleSearchTabs: false)
+    response = HostResponse(
+        active: false,
+        allowedWebsites: [],
+        blockTabSwitching: false,
+        blockNavigation: false,
+        blockNewTabs: false,
+        allowGoogleSearchTabs: false,
+        guardEnabled: guardEnabled
+    )
 }
 
 try writeMessage(response)

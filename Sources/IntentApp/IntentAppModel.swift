@@ -16,6 +16,7 @@ final class IntentAppModel: ObservableObject {
     private let store = IntentionStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private let browserGuardHeartbeatStore = BrowserGuardHeartbeatStore()
+    private let browserGuardStateStore = BrowserGuardStateStore()
 
     var selectedIntention: Intention? {
         guard let selectedID else { return intentions.first }
@@ -122,6 +123,12 @@ final class IntentAppModel: ObservableObject {
         if requiresFirefoxGuard(intention),
            !browserGuardHeartbeatStore.isFresh(maxAge: 5) {
             errorMessage = "Firefox browser locking is not connected. Load the Intent Browser Guard extension in Firefox, then start this intention again."
+            return
+        }
+
+        if requiresFirefoxGuard(intention),
+           !browserGuardStateStore.isEnabled() {
+            errorMessage = "Firefox browser locking is turned off. Open the Intent Browser Guard extension in Firefox and switch it on, then start this intention again."
             return
         }
 

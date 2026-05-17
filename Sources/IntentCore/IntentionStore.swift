@@ -117,6 +117,48 @@ public struct BrowserGuardHeartbeat: Codable, Equatable {
     }
 }
 
+public struct BrowserGuardState: Codable, Equatable {
+    public var enabled: Bool
+    public var updatedAt: Date
+
+    public init(enabled: Bool, updatedAt: Date = Date()) {
+        self.enabled = enabled
+        self.updatedAt = updatedAt
+    }
+}
+
+public final class BrowserGuardStateStore {
+    public let fileURL: URL
+
+    public init(fileURL: URL = BrowserGuardStateStore.defaultFileURL()) {
+        self.fileURL = fileURL
+    }
+
+    public func write(enabled: Bool, date: Date = Date()) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder().encode(BrowserGuardState(enabled: enabled, updatedAt: date))
+        try data.write(to: fileURL, options: [.atomic])
+    }
+
+    public func isEnabled() -> Bool {
+        guard let data = try? Data(contentsOf: fileURL),
+              let state = try? JSONDecoder().decode(BrowserGuardState.self, from: data) else {
+            return true
+        }
+        return state.enabled
+    }
+
+    public static func defaultFileURL() -> URL {
+        FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".intent", isDirectory: true)
+            .appendingPathComponent("browser-guard-state.json")
+    }
+}
+
 public final class BrowserGuardHeartbeatStore {
     public let fileURL: URL
 

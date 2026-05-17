@@ -9,15 +9,20 @@ const backgroundSource = fs.readFileSync(
   "utf8"
 );
 
-function createHarness(activeRules, initialTabs) {
+function createHarness(activeRules, initialTabs, options = {}) {
   const tabs = new Map(initialTabs.map((tab) => [tab.id, { ...tab }]));
   const listeners = {
     onActivated: [],
     onUpdated: [],
-    onCreated: []
+    onCreated: [],
+    onMessage: []
   };
   const updates = [];
   const removals = [];
+  const nativeMessages = [];
+  const storage = {
+    guardEnabled: options.guardEnabled !== false
+  };
 
   function setActiveTab(tabId) {
     for (const tab of tabs.values()) {
@@ -27,7 +32,19 @@ function createHarness(activeRules, initialTabs) {
 
   const browser = {
     runtime: {
-      sendNativeMessage: async () => activeRules
+      onMessage: { addListener: (listener) => listeners.onMessage.push(listener) },
+      sendNativeMessage: async (_hostName, message) => {
+        nativeMessages.push(message);
+        return activeRules;
+      }
+    },
+    storage: {
+      local: {
+        get: async (defaults) => ({ ...defaults, ...storage }),
+        set: async (values) => {
+          Object.assign(storage, values);
+        }
+      }
     },
     tabs: {
       onActivated: { addListener: (listener) => listeners.onActivated.push(listener) },
@@ -71,7 +88,18 @@ function createHarness(activeRules, initialTabs) {
     listeners,
     updates,
     removals,
+    nativeMessages,
+    storage,
+    async message(message) {
+      let response;
+      for (const listener of listeners.onMessage) {
+        response = await listener(message);
+      }
+      await Promise.resolve();
+      return response;
+    },
     async activate(tabId) {
+      setActiveTab(tabId);
       for (const listener of listeners.onActivated) {
         await listener({ tabId });
       }
@@ -142,6 +170,22 @@ async function run() {
   assert.equal(searchHarness.tabs.get(3).url, "https://www.google.com/search?q=github", "Google result pages should remain usable");
   await searchHarness.update(3, { url: "https://github.com/" });
   assert.equal(searchHarness.tabs.get(3).url, "about:blank", "Clicking through from Google to an unallowed site should be blocked");
+
+  const disabledHarness = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
+    { id: 2, active: false, url: "https://www.youtube.com/" }
+  ], { guardEnabled: false });
+  await disabledHarness.activate(2);
+  assert.equal(disabledHarness.tabs.get(2).active, true, "Disabled guard should not change active tabs by itself");
+  const status = await disabledHarness.message({ type: "getGuardStatus" });
+  assert.equal(status.enabled, false, "Popup should report the persisted disabled state");
+  await disabledHarness.message({ type: "setGuardEnabled", enabled: true });
+  assert.equal(disabledHarness.storage.guardEnabled, true, "Popup toggle should persist the enabled state");
+  assert.equal(
+    disabledHarness.nativeMessages.some((message) => message?.type === "setGuardEnabled" && message.enabled === true),
+    true,
+    "Popup toggle should notify the native host"
+  );
 }
 
 run()

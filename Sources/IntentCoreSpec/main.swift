@@ -202,6 +202,13 @@ do {
     try heartbeatStore.write(date: Date(timeIntervalSince1970: 98))
     try expect(heartbeatStore.isFresh(maxAge: 5, now: Date(timeIntervalSince1970: 100)), "Recent browser heartbeat should be fresh")
     try expect(!heartbeatStore.isFresh(maxAge: 1, now: Date(timeIntervalSince1970: 100)), "Old browser heartbeat should expire")
+
+    let guardStateStore = BrowserGuardStateStore(fileURL: tempDirectory.appendingPathComponent("browser-guard-state.json"))
+    try expect(guardStateStore.isEnabled(), "Missing browser guard state should default to enabled")
+    try guardStateStore.write(enabled: false, date: Date(timeIntervalSince1970: 99))
+    try expect(!guardStateStore.isEnabled(), "Browser guard state should persist disabled")
+    try guardStateStore.write(enabled: true, date: Date(timeIntervalSince1970: 100))
+    try expect(guardStateStore.isEnabled(), "Browser guard state should persist enabled")
     try? FileManager.default.removeItem(at: tempDirectory)
 
     print("IntentCoreSpec passed")

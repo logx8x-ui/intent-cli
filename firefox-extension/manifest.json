@@ -3,17 +3,35 @@
   "name": "Intent Browser Guard",
   "version": "0.1.0",
   "description": "Enforces active Intent browser rules inside Firefox.",
-  "applications": {
+  "icons": {
+    "48": "icons/intent-48.svg",
+    "96": "icons/intent-96.svg"
+  },
+  "browser_specific_settings": {
     "gecko": {
-      "id": "intent-firefox@loganmondi.dev"
+      "id": "intent-firefox@loganmondi.dev",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
     }
   },
   "permissions": [
     "nativeMessaging",
+    "storage",
     "tabs",
     "webNavigation",
     "<all_urls>"
   ],
+  "browser_action": {
+    "default_title": "Intent Browser Guard",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icons/intent-48.svg",
+      "96": "icons/intent-96.svg"
+    }
+  },
   "background": {
     "scripts": [
       "rule-helpers.js",

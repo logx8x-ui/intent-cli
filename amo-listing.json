@@ -1,0 +1,17 @@
+{
+  "categories": {
+    "firefox": [
+      "productivity"
+    ]
+  },
+  "summary": {
+    "en-US": "Browser guard for Intent focus sessions."
+  },
+  "description": {
+    "en-US": "Intent Browser Guard connects Firefox to the native Intent macOS app. When the guard is on and an Intent session is active, it enforces the session's allowed websites, blocks switching to unallowed tabs, blocks navigation to unallowed destinations, and optionally allows Google search result pages without allowing click-throughs to blocked websites."
+  },
+  "license": "MIT",
+  "homepage": {
+    "en-US": "https://github.com/logx8x-ui/intent-cli"
+  }
+}

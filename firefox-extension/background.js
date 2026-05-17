@@ -12,6 +12,8 @@ let rules = inactiveRules();
 let lastAllowedTabId = null;
 let enforcing = false;
 let rulesFingerprint = fingerprintRules(rules);
+let guardEnabled = true;
+let initialized = false;
 
 function inactiveRules() {
   return {
@@ -28,10 +30,45 @@ function fingerprintRules(value) {
   return JSON.stringify(value);
 }
 
+async function ensureInitialized() {
+  if (initialized) {
+    return;
+  }
+
+  try {
+    const stored = await browser.storage.local.get({ guardEnabled: true });
+    guardEnabled = stored.guardEnabled !== false;
+  } catch (_) {
+    guardEnabled = true;
+  }
+
+  initialized = true;
+  await notifyNativeGuardState();
+}
+
+async function notifyNativeGuardState() {
+  try {
+    await browser.runtime.sendNativeMessage(HOST_NAME, {
+      type: "setGuardEnabled",
+      enabled: guardEnabled
+    });
+  } catch (_) {}
+}
+
+function effectiveRules(nativeRules) {
+  if (!guardEnabled) {
+    return inactiveRules();
+  }
+
+  return nativeRules || inactiveRules();
+}
+
 async function refreshRules() {
+  await ensureInitialized();
   const previousFingerprint = rulesFingerprint;
   try {
-    rules = await browser.runtime.sendNativeMessage(HOST_NAME, { type: "getRules" });
+    const nativeRules = await browser.runtime.sendNativeMessage(HOST_NAME, { type: "getRules" });
+    rules = effectiveRules(nativeRules);
   } catch (_) {
     rules = inactiveRules();
   }
@@ -116,6 +153,26 @@ async function blockTab(tabId) {
   await returnToAllowedTab();
 }
 
+browser.runtime.onMessage.addListener((message) => {
+  if (message?.type === "getGuardStatus") {
+    return ensureInitialized().then(() => ({ enabled: guardEnabled }));
+  }
+
+  if (message?.type === "setGuardEnabled") {
+    const enabled = message.enabled !== false;
+    return browser.storage.local
+      .set({ guardEnabled: enabled })
+      .then(async () => {
+        guardEnabled = enabled;
+        await notifyNativeGuardState();
+        await refreshRules();
+        return { enabled: guardEnabled };
+      });
+  }
+
+  return false;
+});
+
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
   await refreshRules();
   if (!rules.active) {
@@ -183,5 +240,5 @@ browser.tabs.onCreated.addListener(async (tab) => {
   }, NEW_TAB_GRACE_MS);
 });
 
-refreshRules();
+ensureInitialized().then(refreshRules);
 setInterval(refreshRules, RULE_REFRESH_MS);
