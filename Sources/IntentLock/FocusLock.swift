@@ -269,14 +269,7 @@ public final class FocusLock {
     }
 
     private func isBlockedSystemCommand(_ keyCode: Int64) -> Bool {
-        [
-            KeyCode.tab,
-            KeyCode.space,
-            KeyCode.q,
-            KeyCode.h,
-            KeyCode.m,
-            KeyCode.grave
-        ].contains(keyCode)
+        FocusSystemShortcutPolicy.shouldBlock(keyCode: keyCode)
     }
 
     private var shouldBlockSystemCommand: Bool {
@@ -569,7 +562,7 @@ public final class FocusLock {
     }
 }
 
-private enum KeyCode {
+enum KeyCode {
     static let q: Int64 = 12
     static let w: Int64 = 13
     static let r: Int64 = 15

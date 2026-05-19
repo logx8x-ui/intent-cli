@@ -114,6 +114,8 @@ do {
     try expect(instagramSpec.allowedBundleIdentifiers == ["org.mozilla.firefox"], "Instagram should only allow Firefox")
     try expect(instagramSpec.blockAppSwitching, "Instagram should block switching to unallowed apps")
     try expect(instagramSpec.blockBrowserTabEscape, "Instagram should enable browser escape blocking")
+    try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should stay available so users can switch to allowed apps")
+    try expect(FocusSystemShortcutPolicy.shouldBlock(keyCode: 4), "Cmd+H should stay blocked as an escape shortcut")
 
     let firefoxBounds = FirefoxWindowBounds(x: 100, y: 200, width: 1200, height: 800)
     try expect(
