@@ -151,7 +151,15 @@ final class IntentAppModel: ObservableObject {
 
         activeSessionName = intention.name
         Thread.detachNewThread {
+            let renewalTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+            renewalTimer.schedule(deadline: .now() + 1, repeating: 1)
+            renewalTimer.setEventHandler {
+                try? ActiveBrowserRulesStore().write(rules.refreshed())
+            }
+            renewalTimer.resume()
+
             defer {
+                renewalTimer.cancel()
                 try? ActiveBrowserRulesStore().clear()
                 Task { @MainActor in
                     self.activeSessionName = nil

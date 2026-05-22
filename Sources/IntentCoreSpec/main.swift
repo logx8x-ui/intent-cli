@@ -194,6 +194,18 @@ do {
     try rulesStore.write(browserRules)
     let loadedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
     try expect(loadedRules == browserRules, "Active browser rules should round-trip")
+    try expect(loadedRules.isFresh(), "Freshly written active browser rules should be fresh")
+    let staleLegacyRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data("""
+    {
+      "active": true,
+      "allowedWebsites": ["instagram.com/direct"],
+      "blockTabSwitching": true,
+      "blockNavigation": true,
+      "blockNewTabs": true,
+      "allowGoogleSearchTabs": false
+    }
+    """.utf8))
+    try expect(!staleLegacyRules.isFresh(), "Legacy active browser rules without updatedAt should be stale")
     try rulesStore.clear()
     let clearedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
     try expect(!clearedRules.active, "Clearing browser rules should make them inactive")

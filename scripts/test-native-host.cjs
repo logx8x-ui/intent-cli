@@ -19,6 +19,10 @@ const inactiveRules = {
   allowGoogleSearchTabs: false
 };
 
+function swiftReferenceDateNow() {
+  return Date.now() / 1000 - 978307200;
+}
+
 function readIfExists(filePath) {
   return fs.existsSync(filePath) ? fs.readFileSync(filePath) : null;
 }
@@ -48,7 +52,8 @@ try {
     blockTabSwitching: true,
     blockNavigation: true,
     blockNewTabs: true,
-    allowGoogleSearchTabs: true
+    allowGoogleSearchTabs: true,
+    updatedAt: swiftReferenceDateNow()
   };
   fs.writeFileSync(rulesPath, JSON.stringify(activeRules));
 
@@ -59,6 +64,18 @@ try {
   assert.equal(rulesResponse.active, true, "Native host should return active app rules");
   assert.deepEqual(rulesResponse.allowedWebsites, activeRules.allowedWebsites);
   assert.equal(rulesResponse.guardEnabled, false, "Native host should include guard enabled state");
+
+  const staleRules = {
+    active: true,
+    allowedWebsites: ["instagram.com/direct"],
+    blockTabSwitching: true,
+    blockNavigation: true,
+    blockNewTabs: true,
+    allowGoogleSearchTabs: true
+  };
+  fs.writeFileSync(rulesPath, JSON.stringify(staleRules));
+  const staleResponse = callHost({ type: "getRules" });
+  assert.equal(staleResponse.active, false, "Native host should ignore stale active rules without a fresh Intent session");
 
   const onResponse = callHost({ type: "setGuardEnabled", enabled: true });
   assert.equal(onResponse.guardEnabled, true, "Native host should persist guard on");

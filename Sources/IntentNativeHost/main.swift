@@ -51,7 +51,8 @@ let response: HostResponse
 let guardEnabled = BrowserGuardStateStore().isEnabled()
 
 if let data = try? Data(contentsOf: fileURL),
-   let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data) {
+   let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data),
+   !rules.active || rules.isFresh() {
     response = HostResponse(
         active: rules.active,
         allowedWebsites: rules.allowedWebsites,

@@ -38,12 +38,15 @@ public final class IntentionStore {
 }
 
 public struct ActiveBrowserRules: Codable, Equatable {
+    public static let freshnessWindow: TimeInterval = 5
+
     public var active: Bool
     public var allowedWebsites: [String]
     public var blockTabSwitching: Bool
     public var blockNavigation: Bool
     public var blockNewTabs: Bool
     public var allowGoogleSearchTabs: Bool
+    public var updatedAt: Date
 
     public init(
         active: Bool,
@@ -51,7 +54,8 @@ public struct ActiveBrowserRules: Codable, Equatable {
         blockTabSwitching: Bool,
         blockNavigation: Bool,
         blockNewTabs: Bool,
-        allowGoogleSearchTabs: Bool = false
+        allowGoogleSearchTabs: Bool = false,
+        updatedAt: Date = Date()
     ) {
         self.active = active
         self.allowedWebsites = allowedWebsites
@@ -59,6 +63,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         self.blockNavigation = blockNavigation
         self.blockNewTabs = blockNewTabs
         self.allowGoogleSearchTabs = allowGoogleSearchTabs
+        self.updatedAt = updatedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -68,6 +73,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         case blockNavigation
         case blockNewTabs
         case allowGoogleSearchTabs
+        case updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -78,6 +84,23 @@ public struct ActiveBrowserRules: Codable, Equatable {
         blockNavigation = try container.decodeIfPresent(Bool.self, forKey: .blockNavigation) ?? false
         blockNewTabs = try container.decodeIfPresent(Bool.self, forKey: .blockNewTabs) ?? false
         allowGoogleSearchTabs = try container.decodeIfPresent(Bool.self, forKey: .allowGoogleSearchTabs) ?? false
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? .distantPast
+    }
+
+    public func refreshed(at date: Date = Date()) -> ActiveBrowserRules {
+        .init(
+            active: active,
+            allowedWebsites: allowedWebsites,
+            blockTabSwitching: blockTabSwitching,
+            blockNavigation: blockNavigation,
+            blockNewTabs: blockNewTabs,
+            allowGoogleSearchTabs: allowGoogleSearchTabs,
+            updatedAt: date
+        )
+    }
+
+    public func isFresh(now: Date = Date(), maxAge: TimeInterval = freshnessWindow) -> Bool {
+        now.timeIntervalSince(updatedAt) <= maxAge
     }
 }
 
