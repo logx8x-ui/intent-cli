@@ -1,7 +1,6 @@
 const HOST_NAME = "intent_native_host";
 const RULE_REFRESH_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
-const BLOCKED_URL = "about:blank";
 
 const {
   isAllowedURL,
@@ -140,17 +139,14 @@ async function returnToAllowedTab() {
   }
 }
 
-async function blockTab(tabId) {
-  if (enforcing) {
-    return;
-  }
-
-  enforcing = true;
-  try {
-    await browser.tabs.update(tabId, { url: BLOCKED_URL });
-  } catch (_) {}
-  enforcing = false;
-  await returnToAllowedTab();
+function shouldBlockNavigation(url) {
+  return Boolean(
+    guardEnabled &&
+    rules.active &&
+    rules.blockNavigation &&
+    url &&
+    !isAllowedURL(url, rules)
+  );
 }
 
 browser.runtime.onMessage.addListener((message) => {
@@ -210,7 +206,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 
   if (rules.blockNavigation) {
-    await blockTab(tabId);
+    await returnToAllowedTab();
   }
 });
 
@@ -234,11 +230,39 @@ browser.tabs.onCreated.addListener(async (tab) => {
     try {
       await browser.tabs.remove(latest.id);
     } catch (_) {
-      await blockTab(latest.id);
+      await returnToAllowedTab();
     }
     await returnToAllowedTab();
   }, NEW_TAB_GRACE_MS);
 });
+
+browser.tabs.onRemoved.addListener(async (tabId) => {
+  await refreshRules();
+  if (!rules.active) {
+    return;
+  }
+
+  if (lastAllowedTabId === tabId) {
+    lastAllowedTabId = null;
+  }
+
+  setTimeout(returnToAllowedTab, 0);
+});
+
+browser.webRequest.onBeforeRequest.addListener(
+  async (details) => {
+    await refreshRules();
+
+    if (shouldBlockNavigation(details.url)) {
+      setTimeout(returnToAllowedTab, 0);
+      return { cancel: true };
+    }
+
+    return {};
+  },
+  { urls: ["<all_urls>"], types: ["main_frame"] },
+  ["blocking"]
+);
 
 ensureInitialized().then(refreshRules);
 setInterval(refreshRules, RULE_REFRESH_MS);

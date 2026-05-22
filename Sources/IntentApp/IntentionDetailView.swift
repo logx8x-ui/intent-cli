@@ -25,6 +25,7 @@ struct IntentionDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                statusStrip
                 intentionSection
                 allowedSection
                 startupSection
@@ -32,9 +33,9 @@ struct IntentionDetailView: View {
                 frictionSection
             }
             .padding(28)
-            .frame(maxWidth: 920, alignment: .leading)
+            .frame(maxWidth: 1040, alignment: .leading)
         }
-        .background(AnkiTheme.detailBackground)
+        .background(AnkiTheme.detailBackground.opacity(0.001))
         .id(draft.id)
         .onChange(of: model.selectedID) { _ in
             if let selected = model.selectedIntention {
@@ -47,16 +48,29 @@ struct IntentionDetailView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 22) {
             Image(systemName: draft.icon)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: 34, weight: .semibold))
                 .foregroundStyle(selectedColor)
-                .frame(width: 52, height: 52)
+                .frame(width: 74, height: 74)
                 .background(AnkiTheme.panelBackground)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(AnkiTheme.stroke, lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(AnkiTheme.softStroke, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 18))
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Image(systemName: "bolt.fill")
+                        .font(.caption)
+                    Text("Active Intention")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .textCase(.uppercase)
+                }
+                .foregroundStyle(selectedColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(selectedColor.opacity(0.12))
+                .clipShape(Capsule())
+
                 Text(draft.name)
                     .font(.largeTitle.weight(.semibold))
                 Text("Manual intention builder")
@@ -76,6 +90,15 @@ struct IntentionDetailView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(selectedColor)
+        }
+        .glassPanel(cornerRadius: 24, padding: 24)
+    }
+
+    private var statusStrip: some View {
+        HStack(spacing: 14) {
+            MetricTile(title: "Allowed Apps", value: "\(draft.allowedApps.count)", color: selectedColor)
+            MetricTile(title: "Allowed Sites", value: "\(draft.allowedWebsites.count)", color: AnkiTheme.accent)
+            MetricTile(title: "Startup Chain", value: "\(draft.startupActions.count)", color: .secondary)
         }
     }
 
@@ -241,7 +264,9 @@ private struct FormSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.title3.weight(.semibold))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .textCase(.uppercase)
+                .foregroundStyle(AnkiTheme.mutedText)
             VStack(alignment: .leading, spacing: 12) {
                 content
             }
@@ -263,12 +288,33 @@ private struct LabeledRow<Content: View>: View {
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 10) {
             GridRow {
                 Text(label)
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 100, alignment: .leading)
+                    .frame(width: 130, alignment: .leading)
                 content
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+}
+
+private struct MetricTile: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .textCase(.uppercase)
+                .foregroundStyle(AnkiTheme.mutedText)
+            Text(value)
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassPanel(cornerRadius: 18, padding: 14)
     }
 }
 

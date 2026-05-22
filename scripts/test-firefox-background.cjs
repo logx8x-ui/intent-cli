@@ -15,6 +15,8 @@ function createHarness(activeRules, initialTabs, options = {}) {
     onActivated: [],
     onUpdated: [],
     onCreated: [],
+    onRemoved: [],
+    onBeforeRequest: [],
     onMessage: []
   };
   const updates = [];
@@ -50,6 +52,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
       onActivated: { addListener: (listener) => listeners.onActivated.push(listener) },
       onUpdated: { addListener: (listener) => listeners.onUpdated.push(listener) },
       onCreated: { addListener: (listener) => listeners.onCreated.push(listener) },
+      onRemoved: { addListener: (listener) => listeners.onRemoved.push(listener) },
       get: async (tabId) => tabs.get(tabId) ? { ...tabs.get(tabId) } : Promise.reject(new Error("missing tab")),
       query: async () => Array.from(tabs.values()).map((tab) => ({ ...tab })),
       update: async (tabId, patch) => {
@@ -67,6 +70,14 @@ function createHarness(activeRules, initialTabs, options = {}) {
       remove: async (tabId) => {
         removals.push(tabId);
         tabs.delete(tabId);
+        for (const listener of listeners.onRemoved) {
+          await listener(tabId);
+        }
+      }
+    },
+    webRequest: {
+      onBeforeRequest: {
+        addListener: (listener) => listeners.onBeforeRequest.push(listener)
       }
     }
   };
@@ -108,6 +119,13 @@ function createHarness(activeRules, initialTabs, options = {}) {
     async update(tabId, changeInfo) {
       const tab = tabs.get(tabId);
       if (tab && changeInfo.url) {
+        for (const listener of listeners.onBeforeRequest) {
+          const response = await listener({ tabId, url: changeInfo.url, type: "main_frame" });
+          if (response?.cancel) {
+            await Promise.resolve();
+            return response;
+          }
+        }
         tab.url = changeInfo.url;
       }
       for (const listener of listeners.onUpdated) {
@@ -120,6 +138,11 @@ function createHarness(activeRules, initialTabs, options = {}) {
       for (const listener of listeners.onCreated) {
         await listener({ ...tab });
       }
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+    async remove(tabId) {
+      await browser.tabs.remove(tabId);
       await Promise.resolve();
       await Promise.resolve();
     }
@@ -148,7 +171,7 @@ async function run() {
     { id: 2, active: false, url: "https://www.instagram.com/direct/inbox/" }
   ]);
   await navigationHarness.update(2, { url: "https://www.instagram.com/explore/" });
-  assert.equal(navigationHarness.tabs.get(2).url, "about:blank", "Unallowed navigation should be blanked");
+  assert.equal(navigationHarness.tabs.get(2).url, "https://www.instagram.com/direct/inbox/", "Unallowed navigation should be cancelled before the page changes");
   assert.equal(navigationHarness.tabs.get(1).active, true, "Blocked navigation should return to the allowed tab");
 
   const strictNewTabHarness = createHarness(lockedRules, [
@@ -169,7 +192,11 @@ async function run() {
   await searchHarness.update(3, { url: "https://www.google.com/search?q=github" });
   assert.equal(searchHarness.tabs.get(3).url, "https://www.google.com/search?q=github", "Google result pages should remain usable");
   await searchHarness.update(3, { url: "https://github.com/" });
-  assert.equal(searchHarness.tabs.get(3).url, "about:blank", "Clicking through from Google to an unallowed site should be blocked");
+  assert.equal(searchHarness.tabs.get(3).url, "https://www.google.com/search?q=github", "Clicking through from Google to an unallowed site should be cancelled before the tab leaves search");
+
+  await searchHarness.remove(3);
+  assert.equal(searchHarness.tabs.has(3), false, "Search tabs should remain closable");
+  assert.equal(searchHarness.tabs.get(1).active, true, "Closing a search tab should return to an allowed tab");
 
   const disabledHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },

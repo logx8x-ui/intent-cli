@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Intent Browser Guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Enforces active Intent browser rules inside Firefox.",
   "icons": {
     "48": "icons/intent-48.svg",
@@ -21,6 +21,8 @@
     "nativeMessaging",
     "storage",
     "tabs",
+    "webRequest",
+    "webRequestBlocking",
     "webNavigation",
     "<all_urls>"
   ],
