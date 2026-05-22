@@ -64,7 +64,7 @@ During development, load it locally:
 3. Click `Load Temporary Add-on...`.
 4. Choose `firefox-extension/manifest.json` from this repo.
 
-For public release, build and sign the extension with Mozilla Add-ons:
+For the unlisted beta, build and sign the extension with Mozilla Add-ons:
 
 ```zsh
 npm install
@@ -74,7 +74,7 @@ export AMO_JWT_SECRET='...'
 ./scripts/sign-firefox-extension.sh
 ```
 
-`scripts/sign-firefox-extension.sh` publishes through Mozilla's listed add-on signing flow. The final signing step needs credentials from the Intent Mozilla Add-ons developer account.
+`scripts/sign-firefox-extension.sh` signs through Mozilla's unlisted add-on flow. The signed `.xpi` is written to `dist/firefox/` and can be shared with testers without making the extension public on AMO. The final signing step needs credentials from the Intent Mozilla Add-ons developer account.
 Intent now refuses to start Firefox-locked intentions when that browser guard is not connected, instead of silently running without tab protection.
 
 The first lock session may need macOS permissions:

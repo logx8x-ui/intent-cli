@@ -21,4 +21,4 @@ fi
 
 npm run test:firefox
 npm run extension:lint
-npm run extension:sign:listed
+npm run extension:sign:unlisted

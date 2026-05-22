@@ -24,17 +24,19 @@ To load it locally:
 3. Click `Load Temporary Add-on...`.
 4. Choose `firefox-extension/manifest.json`.
 
-## Build The XPI
+## Build The Unsigned Package
 
 ```zsh
 ./scripts/build-firefox-extension.sh
 ```
 
-The unsigned package is written to `dist/firefox/`.
+The unsigned development package is written to `dist/firefox/`. This is useful for local checks, but normal Firefox installs need Mozilla signing.
 
-## Public Mozilla Add-ons Signing
+## Unlisted Beta Signing
 
 Firefox requires most normal-release extensions to be digitally signed by Mozilla.
+
+Use unlisted signing for beta builds. Unlisted builds are signed by Mozilla, install normally in Firefox, and can be shared with testers, but they are not searchable on the public Firefox Add-ons store.
 
 1. Create or open the Intent Mozilla Add-ons developer account.
 2. Create API credentials at `https://addons.mozilla.org/en-US/developers/addon/api/key/`.
@@ -45,15 +47,35 @@ export AMO_JWT_ISSUER='user:...'
 export AMO_JWT_SECRET='...'
 ```
 
-4. Submit/sign the listed public release:
+4. Sign the unlisted beta:
 
 ```zsh
 ./scripts/sign-firefox-extension.sh
 ```
 
-The script uses `web-ext sign --channel=listed` and `amo-listing.json`.
+The script uses `web-ext sign --channel=unlisted`. The signed `.xpi` is written to `dist/firefox/`.
+
+## Installing The Signed Beta
+
+1. Open Firefox.
+2. Open the signed `.xpi` from `dist/firefox/`.
+3. Accept the Firefox install prompt.
+4. Click the Intent Browser Guard toolbar icon and keep the switch on.
+5. Start an Intent session that uses Firefox.
+
+The Intent desktop app must still be installed because the extension reads active session rules from Intent through native messaging.
+
+## Later Public Release
+
+When Intent is ready for public users, run the listed signing flow:
+
+```zsh
+npm run extension:sign:listed
+```
+
+Listed signing uses `amo-listing.json` and submits the add-on for a public AMO listing.
 
 ## Current Public Links
 
 - Repository: `https://github.com/logx8x-ui/intent-cli`
-- Mozilla Add-ons listing: pending first Mozilla submission/approval
+- Mozilla Add-ons listing: pending future public submission
