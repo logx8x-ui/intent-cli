@@ -109,6 +109,11 @@ function createHarness(activeRules, initialTabs, options = {}) {
       await Promise.resolve();
       return response;
     },
+    async ready() {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
     async activate(tabId) {
       setActiveTab(tabId);
       for (const listener of listeners.onActivated) {
@@ -170,6 +175,8 @@ async function run() {
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://www.instagram.com/direct/inbox/" }
   ]);
+  await navigationHarness.ready();
+  await navigationHarness.activate(1);
   await navigationHarness.update(2, { url: "https://www.instagram.com/explore/" });
   assert.equal(navigationHarness.tabs.get(2).url, "https://www.instagram.com/direct/inbox/", "Unallowed navigation should be cancelled before the page changes");
   assert.equal(navigationHarness.tabs.get(1).active, true, "Blocked navigation should return to the allowed tab");
@@ -187,6 +194,8 @@ async function run() {
   const searchHarness = createHarness(searchRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
   ]);
+  await searchHarness.ready();
+  await searchHarness.activate(1);
   await searchHarness.create({ id: 3, active: true, url: "about:newtab" });
   assert.equal(searchHarness.tabs.has(3), true, "Google-search mode should allow a new search staging tab");
   await searchHarness.update(3, { url: "https://www.google.com/search?q=github" });
@@ -197,6 +206,18 @@ async function run() {
   await searchHarness.remove(3);
   assert.equal(searchHarness.tabs.has(3), false, "Search tabs should remain closable");
   assert.equal(searchHarness.tabs.get(1).active, true, "Closing a search tab should return to an allowed tab");
+
+  const typedUrlHarness = createHarness(searchRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
+  ]);
+  await typedUrlHarness.ready();
+  await typedUrlHarness.activate(1);
+  await typedUrlHarness.create({ id: 4, active: true, url: "about:newtab" });
+  await typedUrlHarness.update(4, { url: "https://youtube.com/" });
+  assert.equal(typedUrlHarness.tabs.get(4).url, "about:newtab", "Typing an unallowed website should be cancelled before the search tab gets stuck");
+  assert.equal(typedUrlHarness.tabs.get(1).active, true, "Blocked typed URL should return to an allowed tab");
+  await typedUrlHarness.remove(4);
+  assert.equal(typedUrlHarness.tabs.has(4), false, "Blocked search staging tabs should remain closable after a typed URL attempt");
 
   const disabledHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },

@@ -149,6 +149,30 @@ function shouldBlockNavigation(url) {
   );
 }
 
+async function recoverBlockedNavigation(tabId) {
+  if (tabId < 0) {
+    await returnToAllowedTab();
+    return;
+  }
+
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  if (!tab) {
+    await returnToAllowedTab();
+    return;
+  }
+
+  if (rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url) || isAllowedURL(tab.url, rules))) {
+    await returnToAllowedTab();
+    return;
+  }
+
+  try {
+    await browser.tabs.remove(tabId);
+  } catch (_) {
+    await returnToAllowedTab();
+  }
+}
+
 browser.runtime.onMessage.addListener((message) => {
   if (message?.type === "getGuardStatus") {
     return ensureInitialized().then(() => ({ enabled: guardEnabled }));
@@ -250,11 +274,11 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 browser.webRequest.onBeforeRequest.addListener(
-  async (details) => {
-    await refreshRules();
-
+  (details) => {
     if (shouldBlockNavigation(details.url)) {
-      setTimeout(returnToAllowedTab, 0);
+      setTimeout(() => {
+        recoverBlockedNavigation(details.tabId);
+      }, 0);
       return { cancel: true };
     }
 
