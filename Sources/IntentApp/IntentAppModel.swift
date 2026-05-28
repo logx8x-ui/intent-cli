@@ -150,6 +150,8 @@ final class IntentAppModel: ObservableObject {
         }
 
         activeSessionName = intention.name
+        minimizeIntentWindows()
+
         Thread.detachNewThread {
             let renewalTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
             renewalTimer.schedule(deadline: .now() + 1, repeating: 1)
@@ -173,6 +175,16 @@ final class IntentAppModel: ObservableObject {
                     self.errorMessage = "Could not start session: \(error)"
                 }
             }
+        }
+    }
+
+    private func minimizeIntentWindows() {
+        isRunnerPresented = false
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            NSApp.windows
+                .filter { $0.isVisible && !$0.isMiniaturized && $0.canBecomeMain }
+                .forEach { $0.miniaturize(nil) }
         }
     }
 

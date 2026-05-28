@@ -19,6 +19,16 @@ public enum FocusLockError: Error, CustomStringConvertible {
     }
 }
 
+public enum FocusForegroundPolicy {
+    public static func shouldDeferRefocus(bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return [
+            "com.apple.dock",
+            "com.apple.WindowManager"
+        ].contains(bundleIdentifier)
+    }
+}
+
 public final class FocusLock {
     private struct WindowBounds {
         let x: CGFloat
@@ -41,6 +51,7 @@ public final class FocusLock {
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
     private var lastOpenRefocusAt: Date = .distantPast
+    private var systemSwitcherGraceUntil: Date = .distantPast
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
@@ -379,6 +390,11 @@ public final class FocusLock {
 
     private func handleActivated(_ app: NSRunningApplication) {
         guard spec.blockAppSwitching || spec.keepFocused else { return }
+
+        if shouldWaitForSystemSwitcher(bundleIdentifier: app.bundleIdentifier) {
+            return
+        }
+
         guard let bundleIdentifier = app.bundleIdentifier else {
             refocus()
             return
@@ -421,7 +437,14 @@ public final class FocusLock {
         guard spec.blockAppSwitching || spec.keepFocused else { return }
 
         guard let frontmost = NSWorkspace.shared.frontmostApplication else {
+            if shouldWaitForSystemSwitcher(bundleIdentifier: nil) {
+                return
+            }
             refocus()
+            return
+        }
+
+        if shouldWaitForSystemSwitcher(bundleIdentifier: frontmost.bundleIdentifier) {
             return
         }
 
@@ -446,6 +469,10 @@ public final class FocusLock {
     }
 
     private func refocus() {
+        if shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+            return
+        }
+
         if spec.strictSingleApp {
             activateFallbackApp()
             return
@@ -457,6 +484,15 @@ public final class FocusLock {
         }
 
         activateFallbackApp()
+    }
+
+    private func shouldWaitForSystemSwitcher(bundleIdentifier: String?) -> Bool {
+        if FocusForegroundPolicy.shouldDeferRefocus(bundleIdentifier: bundleIdentifier) {
+            systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
+            return true
+        }
+
+        return bundleIdentifier == nil && Date() < systemSwitcherGraceUntil
     }
 
     private func isFirefoxFrontmost() -> Bool {
