@@ -142,6 +142,28 @@ do {
     )
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should stay available so users can switch to allowed apps")
     try expect(FocusSystemShortcutPolicy.shouldBlock(keyCode: 4), "Cmd+H should stay blocked as an escape shortcut")
+    try expect(
+        !FocusBrowserShortcutPolicy.shouldBlock(
+            keyCode: 21,
+            command: true,
+            control: false,
+            option: false,
+            shift: true,
+            allowGoogleSearchTabs: false
+        ),
+        "Cmd+Shift+4 screenshot selection should stay available during browser-locked sessions"
+    )
+    try expect(
+        FocusBrowserShortcutPolicy.shouldBlock(
+            keyCode: 21,
+            command: true,
+            control: false,
+            option: false,
+            shift: false,
+            allowGoogleSearchTabs: false
+        ),
+        "Cmd+4 tab switching should stay blocked during browser-locked sessions"
+    )
 
     let firefoxBounds = FirefoxWindowBounds(x: 100, y: 200, width: 1200, height: 800)
     try expect(

@@ -294,7 +294,7 @@ public final class FocusLock {
         }
 
         if spec.blockBrowserTabEscape && isFirefoxFrontmost() {
-            if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option) {
+            if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {
                 refocus()
                 return nil
             }
@@ -311,51 +311,15 @@ public final class FocusLock {
         spec.blockAppSwitching || spec.blockNewApps || spec.keepFocused
     }
 
-    private func isBlockedBrowserCommand(keyCode: Int64, command: Bool, control: Bool, option: Bool) -> Bool {
-        if control && keyCode == KeyCode.tab {
-            return true
-        }
-
-        if command && option && [KeyCode.leftArrow, KeyCode.rightArrow].contains(keyCode) {
-            return true
-        }
-
-        if spec.allowGoogleSearchTabs,
-           command,
-           [KeyCode.l, KeyCode.t].contains(keyCode) {
-            return false
-        }
-
-        if command && browserCommandKeys.contains(keyCode) {
-            return true
-        }
-
-        return false
-    }
-
-    private var browserCommandKeys: Set<Int64> {
-        [
-            KeyCode.zero,
-            KeyCode.one,
-            KeyCode.two,
-            KeyCode.three,
-            KeyCode.four,
-            KeyCode.five,
-            KeyCode.six,
-            KeyCode.seven,
-            KeyCode.eight,
-            KeyCode.nine,
-            KeyCode.leftBracket,
-            KeyCode.rightBracket,
-            KeyCode.leftArrow,
-            KeyCode.rightArrow,
-            KeyCode.l,
-            KeyCode.n,
-            KeyCode.o,
-            KeyCode.r,
-            KeyCode.t,
-            KeyCode.w
-        ]
+    private func isBlockedBrowserCommand(keyCode: Int64, command: Bool, control: Bool, option: Bool, shift: Bool) -> Bool {
+        FocusBrowserShortcutPolicy.shouldBlock(
+            keyCode: keyCode,
+            command: command,
+            control: control,
+            option: option,
+            shift: shift,
+            allowGoogleSearchTabs: spec.allowGoogleSearchTabs
+        )
     }
 
     private func isSpaceSwitchKey(_ keyCode: Int64) -> Bool {
