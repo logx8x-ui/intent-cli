@@ -27,6 +27,25 @@ public enum FocusForegroundPolicy {
             "com.apple.WindowManager"
         ].contains(bundleIdentifier)
     }
+
+    public static func isMissionControlOverlay(
+        ownerName: String?,
+        layer: Int?,
+        bounds: CGRect,
+        displayBounds: CGRect
+    ) -> Bool {
+        guard ownerName == "Dock",
+              let layer,
+              [18, 20].contains(layer),
+              !displayBounds.isNull,
+              displayBounds.width > 0,
+              displayBounds.height > 0 else {
+            return false
+        }
+
+        return bounds.width >= displayBounds.width * 0.9 &&
+            bounds.height >= displayBounds.height * 0.9
+    }
 }
 
 public final class FocusLock {
@@ -233,6 +252,11 @@ public final class FocusLock {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
+            if isMissionControlActive() {
+                systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
+                return Unmanaged.passUnretained(event)
+            }
+
             if spec.blockFirefoxChromeClicks,
                isFirefoxFrontmost(),
                isProtectedFirefoxChromeClick(event.location) {
@@ -531,6 +555,38 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
+    }
+
+    private func isMissionControlActive() -> Bool {
+        let displayBounds = NSScreen.screens
+            .map(\.frame)
+            .reduce(CGRect.null) { partialResult, frame in
+                partialResult.union(frame)
+            }
+
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+
+        return windows.contains { window in
+            guard
+                let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                let x = bounds["X"] as? CGFloat,
+                let y = bounds["Y"] as? CGFloat,
+                let width = bounds["Width"] as? CGFloat,
+                let height = bounds["Height"] as? CGFloat
+            else {
+                return false
+            }
+
+            return FocusForegroundPolicy.isMissionControlOverlay(
+                ownerName: window[kCGWindowOwnerName as String] as? String,
+                layer: window[kCGWindowLayer as String] as? Int,
+                bounds: CGRect(x: x, y: y, width: width, height: height),
+                displayBounds: displayBounds
+            )
+        }
     }
 
     private func selectSideberyDataSciencePanel() {

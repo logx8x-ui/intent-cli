@@ -165,6 +165,7 @@ final class IntentAppModel: ObservableObject {
                 try? ActiveBrowserRulesStore().clear()
                 Task { @MainActor in
                     self.activeSessionName = nil
+                    self.restoreIntentWindows()
                 }
             }
 
@@ -186,6 +187,21 @@ final class IntentAppModel: ObservableObject {
                 .filter { $0.isVisible && !$0.isMiniaturized && $0.canBecomeMain }
                 .forEach { $0.miniaturize(nil) }
         }
+    }
+
+    private func restoreIntentWindows() {
+        isRunnerPresented = false
+
+        NSApp.windows
+            .filter { $0.canBecomeMain }
+            .forEach { window in
+                if window.isMiniaturized {
+                    window.deminiaturize(nil)
+                }
+                window.makeKeyAndOrderFront(nil)
+            }
+
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func requiresFirefoxGuard(_ intention: Intention) -> Bool {

@@ -122,6 +122,24 @@ do {
         !FocusForegroundPolicy.shouldDeferRefocus(bundleIdentifier: "io.remnote"),
         "Regular unallowed apps should not get Mission Control grace"
     )
+    try expect(
+        FocusForegroundPolicy.isMissionControlOverlay(
+            ownerName: "Dock",
+            layer: 20,
+            bounds: .init(x: 0, y: 0, width: 1710, height: 1112),
+            displayBounds: .init(x: 0, y: 0, width: 1710, height: 1112)
+        ),
+        "Mission Control's full-screen Dock overlay should allow click-through"
+    )
+    try expect(
+        !FocusForegroundPolicy.isMissionControlOverlay(
+            ownerName: "Firefox",
+            layer: 0,
+            bounds: .init(x: 0, y: 39, width: 1710, height: 1073),
+            displayBounds: .init(x: 0, y: 0, width: 1710, height: 1112)
+        ),
+        "Normal app windows should not disable click protection"
+    )
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should stay available so users can switch to allowed apps")
     try expect(FocusSystemShortcutPolicy.shouldBlock(keyCode: 4), "Cmd+H should stay blocked as an escape shortcut")
 
