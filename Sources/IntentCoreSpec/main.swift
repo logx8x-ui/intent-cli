@@ -154,7 +154,7 @@ do {
         "Cmd+Shift+4 screenshot selection should stay available during browser-locked sessions"
     )
     try expect(
-        FocusBrowserShortcutPolicy.shouldBlock(
+        !FocusBrowserShortcutPolicy.shouldBlock(
             keyCode: 21,
             command: true,
             control: false,
@@ -162,17 +162,39 @@ do {
             shift: false,
             allowGoogleSearchTabs: false
         ),
-        "Cmd+4 tab switching should stay blocked during browser-locked sessions"
+        "Cmd+4 should reach Firefox so Browser Guard can allow or bounce the destination tab"
+    )
+    try expect(
+        !FocusBrowserShortcutPolicy.shouldBlock(
+            keyCode: 48,
+            command: false,
+            control: true,
+            option: false,
+            shift: false,
+            allowGoogleSearchTabs: false
+        ),
+        "Ctrl+Tab should reach Firefox so Browser Guard can allow or bounce the destination tab"
+    )
+    try expect(
+        !FocusBrowserShortcutPolicy.shouldBlock(
+            keyCode: 13,
+            command: true,
+            control: false,
+            option: false,
+            shift: false,
+            allowGoogleSearchTabs: false
+        ),
+        "Cmd+W should stay available so tabs can always close"
     )
 
     let firefoxBounds = FirefoxWindowBounds(x: 100, y: 200, width: 1200, height: 800)
     try expect(
-        FirefoxClickProtection.isProtected(point: .init(x: 450, y: 500), windowBounds: firefoxBounds),
-        "Firefox Sidebery tab list clicks should be blocked during browser-locked sessions"
+        !FirefoxClickProtection.isProtected(point: .init(x: 450, y: 500), windowBounds: firefoxBounds),
+        "Firefox Sidebery tab list clicks should reach Browser Guard so allowed tabs can be selected"
     )
     try expect(
-        FirefoxClickProtection.isProtected(point: .init(x: 600, y: 230), windowBounds: firefoxBounds),
-        "Firefox top browser chrome clicks should be blocked during browser-locked sessions"
+        !FirefoxClickProtection.isProtected(point: .init(x: 600, y: 230), windowBounds: firefoxBounds),
+        "Firefox top browser chrome clicks should stay available for tab closing and normal controls"
     )
     try expect(
         !FirefoxClickProtection.isProtected(point: .init(x: 650, y: 500), windowBounds: firefoxBounds),
@@ -187,12 +209,12 @@ do {
         "Google-search mode should allow Firefox search chrome clicks"
     )
     try expect(
-        FirefoxClickProtection.isProtected(
+        !FirefoxClickProtection.isProtected(
             point: .init(x: 450, y: 500),
             windowBounds: firefoxBounds,
             protectTopChrome: false
         ),
-        "Google-search mode should still block Sidebery tab list clicks"
+        "Google-search mode should also let Sidebery clicks reach Browser Guard"
     )
 
     let legacyRestrictions = Data("""

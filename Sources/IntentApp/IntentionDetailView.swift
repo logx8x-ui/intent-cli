@@ -45,6 +45,12 @@ struct IntentionDetailView: View {
         .onChange(of: selectedColor) { newValue in
             draft.colorHex = newValue.hexString
         }
+        .onChange(of: draft) { _ in
+            autoSaveDraft()
+        }
+        .onChange(of: frictionText) { _ in
+            setFrictionKind(frictionKind)
+        }
     }
 
     private var header: some View {
@@ -78,11 +84,6 @@ struct IntentionDetailView: View {
             }
 
             Spacer()
-
-            Button("Save") {
-                saveDraft()
-            }
-            .keyboardShortcut("s", modifiers: [.command])
 
             Button("Start") {
                 saveDraft()
@@ -232,6 +233,13 @@ struct IntentionDetailView: View {
         draft.colorHex = selectedColor.hexString
         setFrictionKind(frictionKind)
         model.updateSelected(draft)
+    }
+
+    private func autoSaveDraft() {
+        guard model.activeSessionName == nil else { return }
+        var updatedDraft = draft
+        updatedDraft.colorHex = selectedColor.hexString
+        model.updateSelected(updatedDraft)
     }
 
     private func reset(with intention: Intention) {

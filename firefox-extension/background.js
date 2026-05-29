@@ -13,6 +13,8 @@ let enforcing = false;
 let rulesFingerprint = fingerprintRules(rules);
 let guardEnabled = true;
 let initialized = false;
+let recoveryBlankTabIds = new Set();
+let creatingRecoveryBlankTab = false;
 
 function inactiveRules() {
   return {
@@ -86,16 +88,27 @@ async function refreshRules() {
 
 async function getAllowedTab(tabId) {
   const tab = await browser.tabs.get(tabId).catch(() => null);
-  if (!tab || !tab.url || !isAllowedURL(tab.url, rules)) {
+  if (!tab || !isRuntimeAllowedTab(tab)) {
     return null;
   }
   return tab;
 }
 
+function isRecoveryBlankTab(tab) {
+  return Boolean(tab?.id && recoveryBlankTabIds.has(tab.id) && tab.url === "about:blank");
+}
+
+function isRuntimeAllowedTab(tab) {
+  return Boolean(
+    tab?.url &&
+    (isAllowedURL(tab.url, rules) || isRecoveryBlankTab(tab))
+  );
+}
+
 async function primeAllowedTab() {
   const tabs = await browser.tabs.query({});
-  const activeAllowed = tabs.find((tab) => tab.active && tab.url && isAllowedURL(tab.url, rules));
-  const firstAllowed = activeAllowed || tabs.find((tab) => tab.url && isAllowedURL(tab.url, rules));
+  const activeAllowed = tabs.find((tab) => tab.active && isRuntimeAllowedTab(tab));
+  const firstAllowed = activeAllowed || tabs.find((tab) => isRuntimeAllowedTab(tab));
   lastAllowedTabId = firstAllowed?.id ?? null;
 }
 
@@ -127,15 +140,29 @@ async function returnToAllowedTab() {
     }
 
     const tabs = await browser.tabs.query({});
-    const allowed = tabs.find((tab) => tab.url && isAllowedURL(tab.url, rules));
+    const allowed = tabs.find((tab) => isRuntimeAllowedTab(tab));
     if (allowed) {
       lastAllowedTabId = allowed.id;
       await browser.tabs.update(allowed.id, { active: true });
+      return;
     }
+
+    await openRecoveryBlankTab();
   } catch (_) {
     lastAllowedTabId = null;
   } finally {
     enforcing = false;
+  }
+}
+
+async function openRecoveryBlankTab() {
+  creatingRecoveryBlankTab = true;
+  try {
+    const tab = await browser.tabs.create({ url: "about:blank", active: true });
+    recoveryBlankTabIds.add(tab.id);
+    lastAllowedTabId = tab.id;
+  } finally {
+    creatingRecoveryBlankTab = false;
   }
 }
 
@@ -205,6 +232,12 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   }
 
   if (isAllowedURL(tab.url, rules)) {
+    recoveryBlankTabIds.delete(tabId);
+    lastAllowedTabId = tabId;
+    return;
+  }
+
+  if (isRecoveryBlankTab(tab)) {
     lastAllowedTabId = tabId;
     return;
   }
@@ -225,6 +258,12 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 
   if (isAllowedURL(tab.url, rules)) {
+    recoveryBlankTabIds.delete(tabId);
+    lastAllowedTabId = tabId;
+    return;
+  }
+
+  if (isRecoveryBlankTab(tab)) {
     lastAllowedTabId = tabId;
     return;
   }
@@ -237,6 +276,11 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 browser.tabs.onCreated.addListener(async (tab) => {
   await refreshRules();
   if (!rules.active || !rules.blockNewTabs) {
+    return;
+  }
+
+  if (isRecoveryBlankTab(tab) || (creatingRecoveryBlankTab && tab.url === "about:blank")) {
+    recoveryBlankTabIds.add(tab.id);
     return;
   }
 
@@ -265,6 +309,8 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
   if (!rules.active) {
     return;
   }
+
+  recoveryBlankTabIds.delete(tabId);
 
   if (lastAllowedTabId === tabId) {
     lastAllowedTabId = null;

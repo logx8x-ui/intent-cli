@@ -26,20 +26,6 @@ public enum FirefoxClickProtection {
         windowBounds bounds: FirefoxWindowBounds,
         protectTopChrome: Bool = true
     ) -> Bool {
-        guard point.x >= bounds.x,
-              point.x <= bounds.maxX,
-              point.y >= bounds.y,
-              point.y <= bounds.maxY else {
-            return false
-        }
-
-        let localX = point.x - bounds.x
-        let localY = point.y - bounds.y
-
-        if protectTopChrome && localY <= topChromeHeight {
-            return true
-        }
-
-        return localX <= sideberyTabListWidth
+        false
     }
 }

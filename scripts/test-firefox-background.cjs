@@ -73,6 +73,22 @@ function createHarness(activeRules, initialTabs, options = {}) {
         for (const listener of listeners.onRemoved) {
           await listener(tabId);
         }
+      },
+      create: async (createProperties = {}) => {
+        const id = createProperties.id ?? Math.max(0, ...tabs.keys()) + 1;
+        const tab = {
+          id,
+          active: createProperties.active === true,
+          url: createProperties.url ?? "about:blank"
+        };
+        tabs.set(id, tab);
+        if (tab.active) {
+          setActiveTab(id);
+        }
+        for (const listener of listeners.onCreated) {
+          await listener({ ...tab });
+        }
+        return { ...tab };
       }
     },
     webRequest: {
@@ -171,6 +187,14 @@ async function run() {
   await activationHarness.activate(2);
   assert.equal(activationHarness.tabs.get(1).active, true, "Unallowed tab activation should return to the allowed tab");
 
+  const allowedActivationHarness = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
+    { id: 2, active: false, url: "https://www.instagram.com/direct/t/123/" }
+  ]);
+  await allowedActivationHarness.ready();
+  await allowedActivationHarness.activate(2);
+  assert.equal(allowedActivationHarness.tabs.get(2).active, true, "Allowed tab activation should stay active");
+
   const navigationHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://www.instagram.com/direct/inbox/" }
@@ -206,6 +230,31 @@ async function run() {
   await searchHarness.remove(3);
   assert.equal(searchHarness.tabs.has(3), false, "Search tabs should remain closable");
   assert.equal(searchHarness.tabs.get(1).active, true, "Closing a search tab should return to an allowed tab");
+
+  const closeAllowedHarness = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
+    { id: 2, active: false, url: "https://www.youtube.com/" },
+    { id: 3, active: false, url: "https://www.instagram.com/direct/t/456/" }
+  ]);
+  await closeAllowedHarness.ready();
+  await closeAllowedHarness.activate(1);
+  await closeAllowedHarness.remove(1);
+  assert.equal(closeAllowedHarness.tabs.has(1), false, "Allowed tabs should be closable");
+  assert.equal(closeAllowedHarness.tabs.get(3).active, true, "Closing an allowed tab should land on another allowed tab, not the next unallowed tab");
+
+  const closeOnlyAllowedHarness = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
+    { id: 2, active: false, url: "https://www.youtube.com/" }
+  ]);
+  await closeOnlyAllowedHarness.ready();
+  await closeOnlyAllowedHarness.activate(1);
+  await closeOnlyAllowedHarness.remove(1);
+  assert.equal(closeOnlyAllowedHarness.tabs.has(1), false, "The final allowed tab should still be closable");
+  assert.equal(
+    Array.from(closeOnlyAllowedHarness.tabs.values()).some((tab) => tab.active && tab.url === "about:blank"),
+    true,
+    "Closing the final allowed tab should create a blank recovery tab instead of leaving an unallowed tab active"
+  );
 
   const typedUrlHarness = createHarness(searchRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }

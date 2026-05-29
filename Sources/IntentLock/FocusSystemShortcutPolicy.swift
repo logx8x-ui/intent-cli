@@ -24,7 +24,15 @@ public enum FocusBrowserShortcutPolicy {
         }
 
         if control && keyCode == KeyCode.tab {
-            return true
+            return false
+        }
+
+        if command && keyCode == KeyCode.w {
+            return false
+        }
+
+        if command && numberKeyCodes.contains(keyCode) {
+            return false
         }
 
         if command && option && [KeyCode.leftArrow, KeyCode.rightArrow].contains(keyCode) {
@@ -54,6 +62,20 @@ public enum FocusBrowserShortcutPolicy {
 
     private static var browserCommandKeys: Set<Int64> {
         [
+            KeyCode.leftBracket,
+            KeyCode.rightBracket,
+            KeyCode.leftArrow,
+            KeyCode.rightArrow,
+            KeyCode.l,
+            KeyCode.n,
+            KeyCode.o,
+            KeyCode.r,
+            KeyCode.t
+        ]
+    }
+
+    private static var numberKeyCodes: Set<Int64> {
+        [
             KeyCode.zero,
             KeyCode.one,
             KeyCode.two,
@@ -63,17 +85,7 @@ public enum FocusBrowserShortcutPolicy {
             KeyCode.six,
             KeyCode.seven,
             KeyCode.eight,
-            KeyCode.nine,
-            KeyCode.leftBracket,
-            KeyCode.rightBracket,
-            KeyCode.leftArrow,
-            KeyCode.rightArrow,
-            KeyCode.l,
-            KeyCode.n,
-            KeyCode.o,
-            KeyCode.r,
-            KeyCode.t,
-            KeyCode.w
+            KeyCode.nine
         ]
     }
 }

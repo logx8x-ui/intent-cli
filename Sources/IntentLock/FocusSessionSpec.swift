@@ -66,7 +66,7 @@ public struct FocusSessionSpec {
             blockNewApps: intention.restrictions.blockNewApps,
             keepFocused: intention.restrictions.keepFocused,
             blockBrowserTabEscape: intention.restrictions.blockBrowserTabSwitching,
-            blockFirefoxChromeClicks: intention.restrictions.blockBrowserTabSwitching || intention.restrictions.blockNewBrowserTabs,
+            blockFirefoxChromeClicks: false,
             allowGoogleSearchTabs: intention.restrictions.allowGoogleSearchTabs,
             spotifyPlaylistURI: intention.startupActions.compactMap { action in
                 if case .playSpotifyPlaylist(let uri) = action {
@@ -110,7 +110,7 @@ public struct FocusSessionSpec {
                 blockNewApps: true,
                 keepFocused: true,
                 blockBrowserTabEscape: true,
-                blockFirefoxChromeClicks: true,
+                blockFirefoxChromeClicks: false,
                 allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: nil,
                 allowSpotifyForeground: false
@@ -129,7 +129,7 @@ public struct FocusSessionSpec {
                 blockNewApps: true,
                 keepFocused: true,
                 blockBrowserTabEscape: true,
-                blockFirefoxChromeClicks: true,
+                blockFirefoxChromeClicks: false,
                 allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: nil,
                 allowSpotifyForeground: false
@@ -164,7 +164,7 @@ public struct FocusSessionSpec {
                 blockNewApps: true,
                 keepFocused: true,
                 blockBrowserTabEscape: true,
-                blockFirefoxChromeClicks: true,
+                blockFirefoxChromeClicks: false,
                 allowGoogleSearchTabs: false,
                 spotifyPlaylistURI: "spotify:playlist:0fbyat27nV9HP9WlSphWlS",
                 allowSpotifyForeground: false
