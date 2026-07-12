@@ -56,6 +56,17 @@ assert.equal(
   "Subdomains of allowed domains should stay allowed"
 );
 
+const noWebsiteRules = {
+  active: true,
+  allowedWebsites: [],
+  allowGoogleSearchTabs: false
+};
+assert.equal(
+  rules.isAllowedURL("https://example.com/", noWebsiteRules),
+  false,
+  "An active intention with no website spikes should allow no websites"
+);
+
 const idleRules = {
   active: false,
   allowedWebsites: ["instagram.com/direct"],

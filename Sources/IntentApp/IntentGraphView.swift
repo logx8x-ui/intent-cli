@@ -1,0 +1,821 @@
+import AppKit
+import SwiftUI
+import IntentCore
+
+struct IntentGraphView: View {
+    @EnvironmentObject private var model: IntentAppModel
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("intentAppearance") private var appearance = "dark"
+
+    @State private var editMode = false
+    @State private var selection: GraphSelection?
+    @State private var cameraScale: CGFloat = 1
+    @State private var scaleAtGestureStart: CGFloat = 1
+    @State private var cameraOffset: CGSize = .zero
+    @State private var offsetAtGestureStart: CGSize = .zero
+    @State private var hoverLocation: CGPoint?
+    @State private var connectionDraft: ConnectionDraft?
+    @State private var pendingConnection: PendingConnection?
+    @State private var statusMessage: String?
+
+    private let minimumScale: CGFloat = 0.35
+    private let maximumScale: CGFloat = 2.35
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                GraphTheme.background(colorScheme)
+                    .ignoresSafeArea()
+
+                StarfieldView(scale: cameraScale, offset: cameraOffset)
+                    .allowsHitTesting(false)
+
+                Rectangle()
+                    .fill(Color.clear)
+                    .contentShape(Rectangle())
+                    .gesture(panGesture)
+                    .onTapGesture {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                    }
+
+                connectionLayer(in: proxy.size)
+                    .allowsHitTesting(false)
+
+                welcomeView
+                    .scaleEffect(cameraScale)
+                    .position(screenPoint(for: .zero, in: proxy.size))
+                    .allowsHitTesting(false)
+
+                graphNodes(in: proxy.size)
+
+                if let pendingConnection {
+                    connectionChoice(pendingConnection, in: proxy.size)
+                }
+
+                if editMode, let selection {
+                    editor(for: selection, in: proxy.size)
+                }
+
+                topBar
+                    .frame(maxHeight: .infinity, alignment: .top)
+
+                zoomControls(in: proxy.size)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+
+                if let statusMessage {
+                    Text(statusMessage)
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(GraphTheme.elevatedSurface(colorScheme))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme)))
+                        .padding(.bottom, 20)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+
+                if editMode {
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(GraphTheme.editBlue.opacity(0.72), lineWidth: 2)
+                        .shadow(color: GraphTheme.editBlue.opacity(0.22), radius: 13)
+                        .padding(2)
+                        .allowsHitTesting(false)
+                }
+
+                GraphKeyboardMonitor { key in
+                    handleKeyboard(key, viewportSize: proxy.size)
+                }
+                .frame(width: 0, height: 0)
+            }
+            .coordinateSpace(name: "graphViewport")
+            .clipShape(RoundedRectangle(cornerRadius: 22))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(GraphTheme.stroke(colorScheme), lineWidth: 1)
+            )
+            .simultaneousGesture(zoomGesture)
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location): hoverLocation = location
+                case .ended: break
+                }
+            }
+        }
+        .preferredColorScheme(appearance == "light" ? .light : .dark)
+        .sheet(item: $model.pendingFriction) { pending in
+            FrictionSheet(pending: pending)
+                .environmentObject(model)
+                .interactiveDismissDisabled()
+        }
+        .alert("Intent", isPresented: Binding(
+            get: { model.errorMessage != nil },
+            set: { if !$0 { model.errorMessage = nil } }
+        )) {
+            Button("OK") { model.errorMessage = nil }
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+        .onChange(of: model.activeSessionName) { activeSessionName in
+            if activeSessionName != nil {
+                leaveEditMode()
+            }
+        }
+    }
+
+    private var welcomeView: some View {
+        VStack(spacing: 6) {
+            Text("ONE DESKTOP")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .tracking(1.4)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+            Text("Welcome to Intent")
+                .font(.system(size: 29, weight: .semibold))
+                .foregroundStyle(GraphTheme.text(colorScheme))
+            Text("Choose one thing. Let everything else wait.")
+                .font(.system(size: 12))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+        }
+        .frame(width: 390)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 9) {
+                Image(systemName: "scope")
+                    .font(.system(size: 16, weight: .medium))
+                Text("Intent")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+
+            Spacer()
+
+            if editMode {
+                HStack(spacing: 7) {
+                    Circle().fill(GraphTheme.editBlue).frame(width: 6, height: 6)
+                    Text("EDIT MODE")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(1.1)
+                }
+                .foregroundStyle(GraphTheme.editBlue)
+            } else if let activeSessionName = model.activeSessionName {
+                HStack(spacing: 7) {
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text(activeSessionName)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            } else {
+                Text("Press E to edit")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+
+            Spacer()
+
+            Text("~  hide")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+
+            if let activeSessionName = model.activeSessionName {
+                Button {
+                    model.endActiveSession()
+                } label: {
+                    Label("End \(activeSessionName)", systemImage: "stop.fill")
+                }
+                .buttonStyle(.bordered)
+                .help("End intention (Cmd+Shift+M)")
+            }
+        }
+        .foregroundStyle(GraphTheme.text(colorScheme))
+        .padding(.horizontal, 20)
+        .frame(height: 52)
+        .background(GraphTheme.chrome(colorScheme).opacity(0.96))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(GraphTheme.stroke(colorScheme)).frame(height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func graphNodes(in size: CGSize) -> some View {
+        ForEach(model.intentions) { intention in
+            DraggableGraphNode(
+                position: intention.graphPosition,
+                screenPosition: screenPoint(for: intention.graphPosition, in: size),
+                scale: cameraScale,
+                enabled: editMode && !model.hasActiveSession,
+                onTap: {
+                    if editMode {
+                        selection = .intention(intention.id)
+                        model.selectedID = intention.id
+                    } else {
+                        model.requestStart(intention)
+                    }
+                },
+                onMove: { position, persist in
+                    model.moveIntention(id: intention.id, to: position, persist: persist)
+                }
+            ) {
+                IntentionNodeView(
+                    intention: intention,
+                    installedApps: model.installedApps,
+                    selected: selection == .intention(intention.id),
+                    editMode: editMode,
+                    onConnectionChanged: { location in
+                        connectionDraft = ConnectionDraft(
+                            intentionID: intention.id,
+                            start: screenPoint(for: intention.graphPosition, in: size),
+                            end: location
+                        )
+                    },
+                    onConnectionEnded: { location in
+                        connectionDraft = nil
+                        pendingConnection = PendingConnection(
+                            intentionID: intention.id,
+                            screenPoint: location,
+                            worldPoint: worldPoint(for: location, in: size)
+                        )
+                    }
+                )
+            }
+
+            ForEach(intention.restrictionNodes) { node in
+                DraggableGraphNode(
+                    position: node.position,
+                    screenPosition: screenPoint(for: node.position, in: size),
+                    scale: cameraScale,
+                    enabled: editMode && !model.hasActiveSession,
+                    onTap: {
+                        guard editMode else { return }
+                        selection = .restriction(intentionID: intention.id, nodeID: node.id)
+                        model.selectedID = intention.id
+                    },
+                    onMove: { position, persist in
+                        model.moveRestriction(intentionID: intention.id, nodeID: node.id, to: position, persist: persist)
+                    }
+                ) {
+                    RestrictionNodeView(
+                        node: node,
+                        selected: selection == .restriction(intentionID: intention.id, nodeID: node.id)
+                    )
+                }
+            }
+
+            ForEach(intention.frictionNodes) { node in
+                DraggableGraphNode(
+                    position: node.position,
+                    screenPosition: screenPoint(for: node.position, in: size),
+                    scale: cameraScale,
+                    enabled: editMode && !model.hasActiveSession,
+                    onTap: {
+                        guard editMode else { return }
+                        selection = .friction(intentionID: intention.id, nodeID: node.id)
+                        model.selectedID = intention.id
+                    },
+                    onMove: { position, persist in
+                        model.moveFriction(intentionID: intention.id, nodeID: node.id, to: position, persist: persist)
+                    }
+                ) {
+                    FrictionNodeView(
+                        node: node,
+                        selected: selection == .friction(intentionID: intention.id, nodeID: node.id)
+                    )
+                }
+            }
+        }
+    }
+
+    private func connectionLayer(in size: CGSize) -> some View {
+        Canvas { context, _ in
+            for intention in model.intentions {
+                let start = screenPoint(for: intention.graphPosition, in: size)
+                for restriction in intention.restrictionNodes {
+                    drawConnection(
+                        from: start,
+                        to: screenPoint(for: restriction.position, in: size),
+                        context: &context,
+                        temporary: false
+                    )
+                }
+                for friction in intention.frictionNodes {
+                    drawConnection(
+                        from: start,
+                        to: screenPoint(for: friction.position, in: size),
+                        context: &context,
+                        temporary: false
+                    )
+                }
+            }
+
+            if let connectionDraft {
+                drawConnection(
+                    from: connectionDraft.start,
+                    to: connectionDraft.end,
+                    context: &context,
+                    temporary: true
+                )
+            }
+        }
+    }
+
+    private func drawConnection(
+        from start: CGPoint,
+        to end: CGPoint,
+        context: inout GraphicsContext,
+        temporary: Bool
+    ) {
+        let distance = abs(end.x - start.x)
+        let bend = max(45, distance * 0.38)
+        var path = Path()
+        path.move(to: start)
+        path.addCurve(
+            to: end,
+            control1: CGPoint(x: start.x + (end.x >= start.x ? bend : -bend), y: start.y),
+            control2: CGPoint(x: end.x - (end.x >= start.x ? bend : -bend), y: end.y)
+        )
+        context.stroke(
+            path,
+            with: .color(temporary ? GraphTheme.editBlue : GraphTheme.text(colorScheme).opacity(0.30)),
+            style: StrokeStyle(lineWidth: temporary ? 1.6 : 1.15, dash: temporary ? [5, 5] : [])
+        )
+    }
+
+    @ViewBuilder
+    private func editor(for selection: GraphSelection, in size: CGSize) -> some View {
+        let anchor = editorPosition(for: selection, in: size)
+        switch selection {
+        case .intention(let intentionID):
+            if model.intentions.contains(where: { $0.id == intentionID }) {
+                IntentionEditorMenu(
+                    intention: intentionBinding(id: intentionID),
+                    catalog: model.installedApps,
+                    onDelete: {
+                        model.deleteIntention(id: intentionID)
+                        self.selection = nil
+                    }
+                )
+                .position(anchor)
+            }
+        case .restriction(let intentionID, let nodeID):
+            if let intention = model.intentions.first(where: { $0.id == intentionID }),
+               intention.restrictionNodes.contains(where: { $0.id == nodeID }) {
+                RestrictionEditorMenu(
+                    node: restrictionBinding(intentionID: intentionID, nodeID: nodeID),
+                    intention: intention,
+                    onDelete: {
+                        model.mutateIntention(id: intentionID) {
+                            $0.restrictionNodes.removeAll { $0.id == nodeID }
+                        }
+                        self.selection = nil
+                    }
+                )
+                .position(anchor)
+            }
+        case .friction(let intentionID, let nodeID):
+            if let intention = model.intentions.first(where: { $0.id == intentionID }),
+               intention.frictionNodes.contains(where: { $0.id == nodeID }) {
+                FrictionEditorMenu(
+                    node: frictionBinding(intentionID: intentionID, nodeID: nodeID),
+                    onDelete: {
+                        model.mutateIntention(id: intentionID) {
+                            $0.frictionNodes.removeAll { $0.id == nodeID }
+                        }
+                        self.selection = nil
+                    }
+                )
+                .position(anchor)
+            }
+        }
+    }
+
+    private func connectionChoice(_ pending: PendingConnection, in size: CGSize) -> some View {
+        ConnectionChoiceMenu(
+            addRestriction: {
+                if let id = model.addRestriction(to: pending.intentionID, at: pending.worldPoint) {
+                    selection = .restriction(intentionID: pending.intentionID, nodeID: id)
+                }
+                pendingConnection = nil
+            },
+            addFriction: {
+                if let id = model.addFriction(to: pending.intentionID, at: pending.worldPoint) {
+                    selection = .friction(intentionID: pending.intentionID, nodeID: id)
+                }
+                pendingConnection = nil
+            },
+            cancel: { pendingConnection = nil }
+        )
+        .position(clampedMenuPoint(pending.screenPoint, menuSize: .init(width: 180, height: 150), in: size))
+    }
+
+    private func zoomControls(in size: CGSize) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                setScale(cameraScale / 1.18)
+            } label: {
+                Image(systemName: "minus")
+            }
+            .help("Zoom out")
+
+            Button {
+                fitGraph(in: size)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            }
+            .help("Fit all intentions")
+
+            Text("\(Int(cameraScale * 100))%")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .frame(width: 42)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+
+            Button {
+                setScale(cameraScale * 1.18)
+            } label: {
+                Image(systemName: "plus")
+            }
+            .help("Zoom in")
+        }
+        .buttonStyle(.plain)
+        .padding(10)
+        .background(GraphTheme.chrome(colorScheme).opacity(0.94))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(GraphTheme.stroke(colorScheme)))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(18)
+    }
+
+    private var panGesture: some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named("graphViewport"))
+            .onChanged { value in
+                cameraOffset = CGSize(
+                    width: offsetAtGestureStart.width + value.translation.width,
+                    height: offsetAtGestureStart.height + value.translation.height
+                )
+            }
+            .onEnded { _ in
+                offsetAtGestureStart = cameraOffset
+            }
+    }
+
+    private var zoomGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in
+                cameraScale = clampedScale(scaleAtGestureStart * value)
+            }
+            .onEnded { _ in
+                scaleAtGestureStart = cameraScale
+            }
+    }
+
+    private func handleKeyboard(_ key: GraphKeyboardKey, viewportSize: CGSize) {
+        switch key {
+        case .edit:
+            guard !model.hasActiveSession else {
+                showStatus("Finish the active intention before editing")
+                return
+            }
+            editMode ? leaveEditMode() : enterEditMode()
+        case .escape:
+            if editMode {
+                leaveEditMode()
+            } else {
+                model.hideOverlay()
+            }
+        case .intention:
+            guard editMode else { return }
+            let id = model.createIntention(at: pointerWorldPoint(in: viewportSize))
+            selection = .intention(id)
+        case .restriction:
+            guard editMode else { return }
+            guard let intentionID = selection?.intentionID else {
+                showStatus("Select an intention first")
+                return
+            }
+            if let id = model.addRestriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
+                selection = .restriction(intentionID: intentionID, nodeID: id)
+            }
+        case .friction:
+            guard editMode else { return }
+            guard let intentionID = selection?.intentionID else {
+                showStatus("Select an intention first")
+                return
+            }
+            if let id = model.addFriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
+                selection = .friction(intentionID: intentionID, nodeID: id)
+            }
+        }
+    }
+
+    private func enterEditMode() {
+        editMode = true
+        pendingConnection = nil
+    }
+
+    private func leaveEditMode() {
+        editMode = false
+        selection = nil
+        connectionDraft = nil
+        pendingConnection = nil
+    }
+
+    private func showStatus(_ message: String) {
+        statusMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            if statusMessage == message {
+                statusMessage = nil
+            }
+        }
+    }
+
+    private func screenPoint(for point: GraphPoint, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: size.width / 2 + cameraOffset.width + CGFloat(point.x) * cameraScale,
+            y: size.height / 2 + cameraOffset.height + CGFloat(point.y) * cameraScale
+        )
+    }
+
+    private func worldPoint(for point: CGPoint, in size: CGSize) -> GraphPoint {
+        GraphPoint(
+            x: Double((point.x - size.width / 2 - cameraOffset.width) / cameraScale),
+            y: Double((point.y - size.height / 2 - cameraOffset.height) / cameraScale)
+        )
+    }
+
+    private func pointerWorldPoint(in size: CGSize) -> GraphPoint {
+        worldPoint(for: hoverLocation ?? CGPoint(x: size.width / 2, y: size.height / 2), in: size)
+    }
+
+    private func setScale(_ scale: CGFloat) {
+        cameraScale = clampedScale(scale)
+        scaleAtGestureStart = cameraScale
+    }
+
+    private func clampedScale(_ scale: CGFloat) -> CGFloat {
+        min(maximumScale, max(minimumScale, scale))
+    }
+
+    private func fitGraph(in size: CGSize) {
+        let points = model.intentions.flatMap { intention in
+            [intention.graphPosition]
+                + intention.restrictionNodes.map(\.position)
+                + intention.frictionNodes.map(\.position)
+        }
+        guard !points.isEmpty else {
+            setScale(1)
+            cameraOffset = .zero
+            offsetAtGestureStart = .zero
+            return
+        }
+
+        let minX = points.map(\.x).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0
+        let minY = points.map(\.y).min() ?? 0
+        let maxY = points.map(\.y).max() ?? 0
+        let worldWidth = max(420, maxX - minX + 360)
+        let worldHeight = max(320, maxY - minY + 300)
+        let fitted = min((size.width - 80) / CGFloat(worldWidth), (size.height - 100) / CGFloat(worldHeight))
+        setScale(min(1.25, fitted))
+        let centerX = CGFloat((minX + maxX) / 2)
+        let centerY = CGFloat((minY + maxY) / 2)
+        cameraOffset = CGSize(width: -centerX * cameraScale, height: -centerY * cameraScale + 20)
+        offsetAtGestureStart = cameraOffset
+    }
+
+    private func editorPosition(for selection: GraphSelection, in size: CGSize) -> CGPoint {
+        let point = selectionWorldPoint(selection) ?? .zero
+        let nodePoint = screenPoint(for: point, in: size)
+        let placeRight = nodePoint.x < size.width * 0.62
+        let proposed = CGPoint(
+            x: nodePoint.x + (placeRight ? 250 : -250),
+            y: nodePoint.y
+        )
+        return clampedMenuPoint(proposed, menuSize: .init(width: 350, height: 490), in: size)
+    }
+
+    private func clampedMenuPoint(_ point: CGPoint, menuSize: CGSize, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: min(size.width - menuSize.width / 2 - 18, max(menuSize.width / 2 + 18, point.x)),
+            y: min(size.height - menuSize.height / 2 - 18, max(menuSize.height / 2 + 58, point.y))
+        )
+    }
+
+    private func selectionWorldPoint(_ selection: GraphSelection) -> GraphPoint? {
+        switch selection {
+        case .intention(let id):
+            return model.intentions.first(where: { $0.id == id })?.graphPosition
+        case .restriction(let intentionID, let nodeID):
+            return model.intentions.first(where: { $0.id == intentionID })?
+                .restrictionNodes.first(where: { $0.id == nodeID })?.position
+        case .friction(let intentionID, let nodeID):
+            return model.intentions.first(where: { $0.id == intentionID })?
+                .frictionNodes.first(where: { $0.id == nodeID })?.position
+        }
+    }
+
+    private func intentionBinding(id: String) -> Binding<Intention> {
+        Binding(
+            get: { model.intentions.first(where: { $0.id == id }) ?? DefaultIntentions.make()[0] },
+            set: { model.updateIntention($0) }
+        )
+    }
+
+    private func restrictionBinding(intentionID: String, nodeID: String) -> Binding<RestrictionNode> {
+        Binding(
+            get: {
+                model.intentions.first(where: { $0.id == intentionID })?
+                    .restrictionNodes.first(where: { $0.id == nodeID })
+                    ?? RestrictionNode(kind: .allowBrowserSearches, position: .zero)
+            },
+            set: { updated in
+                model.mutateIntention(id: intentionID) { intention in
+                    guard let index = intention.restrictionNodes.firstIndex(where: { $0.id == nodeID }) else { return }
+                    intention.restrictionNodes[index] = updated
+                }
+            }
+        )
+    }
+
+    private func frictionBinding(intentionID: String, nodeID: String) -> Binding<FrictionNode> {
+        Binding(
+            get: {
+                model.intentions.first(where: { $0.id == intentionID })?
+                    .frictionNodes.first(where: { $0.id == nodeID })
+                    ?? FrictionNode(friction: .typedPhrase(""), position: .zero)
+            },
+            set: { updated in
+                model.mutateIntention(id: intentionID) { intention in
+                    guard let index = intention.frictionNodes.firstIndex(where: { $0.id == nodeID }) else { return }
+                    intention.frictionNodes[index] = updated
+                }
+            }
+        )
+    }
+}
+
+private struct StarfieldView: View {
+    let scale: CGFloat
+    let offset: CGSize
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Canvas { context, size in
+            let spacing = max(25, 54 * scale)
+            let centerX = size.width / 2 + offset.width
+            let centerY = size.height / 2 + offset.height
+            let startX = centerX.truncatingRemainder(dividingBy: spacing) - spacing
+            let startY = centerY.truncatingRemainder(dividingBy: spacing) - spacing
+            let color = GraphTheme.text(colorScheme).opacity(colorScheme == .dark ? 0.16 : 0.11)
+
+            var x = startX
+            while x < size.width + spacing {
+                var y = startY
+                while y < size.height + spacing {
+                    context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: 2, height: 2)), with: .color(color))
+                    y += spacing
+                }
+                x += spacing
+            }
+        }
+    }
+}
+
+private struct DraggableGraphNode<Content: View>: View {
+    let position: GraphPoint
+    let screenPosition: CGPoint
+    let scale: CGFloat
+    let enabled: Bool
+    let onTap: () -> Void
+    let onMove: (GraphPoint, Bool) -> Void
+    @ViewBuilder let content: Content
+
+    @State private var dragOrigin: GraphPoint?
+
+    var body: some View {
+        content
+            .scaleEffect(scale)
+            .position(screenPosition)
+            .onTapGesture(perform: onTap)
+            .gesture(
+                DragGesture(minimumDistance: 4, coordinateSpace: .named("graphViewport"))
+                    .onChanged { value in
+                        guard enabled else { return }
+                        let origin = dragOrigin ?? position
+                        if dragOrigin == nil { dragOrigin = position }
+                        onMove(
+                            GraphPoint(
+                                x: origin.x + Double(value.translation.width / scale),
+                                y: origin.y + Double(value.translation.height / scale)
+                            ),
+                            false
+                        )
+                    }
+                    .onEnded { value in
+                        guard enabled else { return }
+                        let origin = dragOrigin ?? position
+                        onMove(
+                            GraphPoint(
+                                x: origin.x + Double(value.translation.width / scale),
+                                y: origin.y + Double(value.translation.height / scale)
+                            ),
+                            true
+                        )
+                        dragOrigin = nil
+                    }
+            )
+    }
+}
+
+private enum GraphSelection: Equatable {
+    case intention(String)
+    case restriction(intentionID: String, nodeID: String)
+    case friction(intentionID: String, nodeID: String)
+
+    var intentionID: String {
+        switch self {
+        case .intention(let id): id
+        case .restriction(let intentionID, _), .friction(let intentionID, _): intentionID
+        }
+    }
+}
+
+private struct ConnectionDraft {
+    let intentionID: String
+    let start: CGPoint
+    let end: CGPoint
+}
+
+private struct PendingConnection {
+    let intentionID: String
+    let screenPoint: CGPoint
+    let worldPoint: GraphPoint
+}
+
+private enum GraphKeyboardKey {
+    case edit
+    case escape
+    case intention
+    case restriction
+    case friction
+}
+
+private struct GraphKeyboardMonitor: NSViewRepresentable {
+    let handler: (GraphKeyboardKey) -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView()
+        view.handler = handler
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.handler = handler
+    }
+
+    final class MonitorView: NSView {
+        var handler: ((GraphKeyboardKey) -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil, monitor == nil {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self,
+                          self.window?.isKeyWindow == true,
+                          event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                        return event
+                    }
+
+                    if event.keyCode == 53 {
+                        self.handler?(.escape)
+                        return nil
+                    }
+
+                    guard !Self.isEditingText(in: self.window) else { return event }
+
+                    let key: GraphKeyboardKey?
+                    switch event.keyCode {
+                    case 14: key = .edit
+                    case 34: key = .intention
+                    case 15: key = .restriction
+                    case 3: key = .friction
+                    default: key = nil
+                    }
+
+                    guard let key else { return event }
+                    self.handler?(key)
+                    return nil
+                }
+            } else if window == nil, let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+
+        private static func isEditingText(in window: NSWindow?) -> Bool {
+            guard let responder = window?.firstResponder else { return false }
+            return responder is NSTextView || responder is NSTextField
+        }
+    }
+}

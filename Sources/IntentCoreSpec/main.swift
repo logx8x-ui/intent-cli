@@ -12,6 +12,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     }
 }
 
+func legacyIntentionData(_ intention: Intention) throws -> Data {
+    let encoded = try JSONEncoder().encode(intention)
+    var object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+    object.removeValue(forKey: "graphPosition")
+    object.removeValue(forKey: "restrictionNodes")
+    object.removeValue(forKey: "frictionNodes")
+    object.removeValue(forKey: "graphModelVersion")
+    return try JSONSerialization.data(withJSONObject: object)
+}
+
 do {
     var permissionPromptCount = 0
     var permissionChecks = [false, false, true]
@@ -109,6 +119,9 @@ do {
     try expect(!instagram.friction.validate("instagram"), "wrong Instagram phrase should fail")
     try expect(instagram.allowedWebsites.contains { $0.value == "instagram.com/direct" }, "Instagram should allow DMs")
     try expect(AllowedWebsite("https://www.roblox.com/games").displayName == "roblox", "Website display name should simplify URLs")
+    let firefoxWebsite = AllowedWebsite("https://github.com", browserBundleIdentifier: "org.mozilla.firefox")
+    try expect(firefoxWebsite.browserBundleIdentifier == "org.mozilla.firefox", "Allowed websites should remember their browser owner")
+    try expect(firefoxWebsite.resourceID == "website:org.mozilla.firefox:github.com", "Website resource IDs should include the browser")
     let instagramSpec = FocusSessionSpec.make(for: instagram)
     try expect(instagramSpec.strictSingleApp, "Instagram should stay locked to one app")
     try expect(instagramSpec.allowedBundleIdentifiers == ["org.mozilla.firefox"], "Instagram should only allow Firefox")
@@ -140,7 +153,8 @@ do {
         ),
         "Normal app windows should not disable click protection"
     )
-    try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should stay available so users can switch to allowed apps")
+    try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should be handled by Intent's allowed-app switcher")
+    try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 50), "Cmd+grave should keep normal within-app window switching")
     try expect(FocusSystemShortcutPolicy.shouldBlock(keyCode: 4), "Cmd+H should stay blocked as an escape shortcut")
     try expect(
         !FocusBrowserShortcutPolicy.shouldBlock(
@@ -230,6 +244,43 @@ do {
     let decodedLegacyRestrictions = try JSONDecoder().decode(RestrictionSet.self, from: legacyRestrictions)
     try expect(!decodedLegacyRestrictions.allowGoogleSearchTabs, "Legacy restrictions should default Google search tabs off")
 
+    let legacyInstagram = Intention(
+        id: "legacy-instagram",
+        name: "Legacy Instagram",
+        icon: "globe",
+        colorHex: "#FFFFFF",
+        folder: "Shallow",
+        allowedApps: [.init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")],
+        allowedWebsites: [.init("instagram.com/direct")],
+        startupActions: [.openURL("https://instagram.com/direct/inbox/", browserBundleIdentifier: "org.mozilla.firefox")],
+        restrictions: .init()
+    )
+    let migratedInstagram = try JSONDecoder().decode(Intention.self, from: legacyIntentionData(legacyInstagram))
+    try expect(
+        !migratedInstagram.dontStartResourceIDs.contains("website:org.mozilla.firefox:instagram.com/direct"),
+        "A more-specific legacy startup URL should count as starting its allowed website rule"
+    )
+
+    let legacyDataScience = Intention(
+        id: "data-science",
+        name: "Data Science",
+        icon: "function",
+        colorHex: "#FFFFFF",
+        folder: "Deep",
+        allowedApps: [
+            .init(name: "RStudio", bundleIdentifier: "com.rstudio.desktop"),
+            .init(name: "Codex", bundleIdentifier: "com.openai.codex"),
+            .init(name: "RemNote", bundleIdentifier: "io.remnote")
+        ],
+        allowedWebsites: [],
+        startupActions: [],
+        restrictions: .init()
+    )
+    let migratedDataScience = try JSONDecoder().decode(Intention.self, from: legacyIntentionData(legacyDataScience))
+    try expect(!migratedDataScience.dontStartResourceIDs.contains("app:com.rstudio.desktop"), "New automatic startup should open productive legacy apps by default")
+    try expect(migratedDataScience.dontStartResourceIDs.contains("app:com.openai.codex"), "Known legacy Data Science exclusions should preserve Codex as allowed but closed")
+    try expect(migratedDataScience.dontStartResourceIDs.contains("app:io.remnote"), "Known legacy Data Science exclusions should preserve RemNote as allowed but closed")
+
     let dataScience = intentions.first { $0.name == "Data Science" }!
     try expect(dataScience.allowedApps.contains { $0.bundleIdentifier == "io.remnote" }, "Data Science should allow RemNote")
     try expect(dataScience.allowedApps.contains { $0.bundleIdentifier == "com.remnote.desktop" }, "Data Science should allow RemNote desktop bundle")
@@ -242,7 +293,51 @@ do {
     let dataScienceSpec = FocusSessionSpec.make(for: dataScience)
     try expect(dataScienceSpec.allowedBundleIdentifiers.contains("io.remnote"), "Data Science spec should allow RemNote")
     try expect(dataScienceSpec.spotifyPlaylistURI == "spotify:playlist:0fbyat27nV9HP9WlSphWlS", "Data Science spec should keep the study playlist")
-    try expect(!dataScienceSpec.allowSpotifyForeground, "Data Science should not allow Spotify as a foreground escape")
+    try expect(dataScienceSpec.allowSpotifyForeground, "An explicitly allowed Spotify app should be switchable like other allowed apps")
+    let dataScienceStartup = IntentionStartupPlanner.steps(for: dataScience)
+    try expect(dataScienceStartup.contains(.openBundle("com.rstudio.desktop")), "Allowed apps should start automatically")
+    try expect(!dataScienceStartup.contains(.openBundle("com.openai.codex")), "Don't-start-up should keep Codex closed initially")
+    try expect(!dataScienceStartup.contains(.openBundle("io.remnote")), "Don't-start-up should keep RemNote closed initially")
+    try expect(dataScienceStartup.contains(.openURL("https://github.com", bundleIdentifier: "org.mozilla.firefox")), "Allowed websites should start in their assigned browser")
+
+    var frictionOrderIntention = dataScience
+    frictionOrderIntention.frictionNodes = [
+        .init(id: "second", friction: .typedPhrase("second"), position: .init(x: 0, y: 100)),
+        .init(id: "first", friction: .countdown(seconds: 5), position: .init(x: 0, y: -100))
+    ]
+    try expect(frictionOrderIntention.orderedFrictionNodes.map(\.id) == ["first", "second"], "Higher friction nodes should run first")
+
+    var collidedIntentions = [
+        Intention(
+            id: "collision-a",
+            name: "A",
+            icon: "target",
+            colorHex: "#FFFFFF",
+            folder: "",
+            allowedApps: [],
+            allowedWebsites: [],
+            startupActions: [],
+            restrictions: .init(),
+            graphPosition: .init(x: 300, y: 0),
+            graphModelVersion: 2
+        ),
+        Intention(
+            id: "collision-b",
+            name: "B",
+            icon: "target",
+            colorHex: "#FFFFFF",
+            folder: "",
+            allowedApps: [],
+            allowedWebsites: [],
+            startupActions: [],
+            restrictions: .init(),
+            graphPosition: .init(x: 300, y: 0),
+            graphModelVersion: 2
+        )
+    ]
+    GraphLayoutMigration.arrangeLegacyCollisions(&collidedIntentions)
+    try expect(collidedIntentions[0].graphPosition != collidedIntentions[1].graphPosition, "Legacy overlapping intentions should be separated once")
+    try expect(collidedIntentions.allSatisfy { $0.graphModelVersion == 3 }, "Collision migration should be versioned and never rearrange later edits")
 
     let tempDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("intent-core-spec-\(UUID().uuidString)", isDirectory: true)

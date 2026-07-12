@@ -61,6 +61,8 @@ public final class FocusLock {
 
     private let spec: FocusSessionSpec
     private var shouldStop = false
+    private let stopStateLock = NSLock()
+    private let allowedAppSwitcher: AllowedAppSwitcher
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var focusTimer: Timer?
@@ -74,10 +76,18 @@ public final class FocusLock {
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        allowedAppSwitcher = AllowedAppSwitcher(allowedBundleIdentifiers: spec.allowedBundleIdentifiers)
+    }
+
+    public func stop() {
+        stopStateLock.lock()
+        shouldStop = true
+        stopStateLock.unlock()
     }
 
     public func run() throws {
         returnApplication = NSWorkspace.shared.frontmostApplication
+        allowedAppSwitcher.recordActivation(bundleIdentifier: returnApplication?.bundleIdentifier)
 
         guard requestAccessibilityIfNeeded() else {
             throw FocusLockError.accessibilityPermissionRequired
@@ -92,7 +102,7 @@ public final class FocusLock {
         startFocusTimer()
         startSpotifyTimerIfNeeded()
 
-        while !shouldStop {
+        while !isStopped {
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2))
         }
 
@@ -216,6 +226,7 @@ public final class FocusLock {
     private func installEventTap() throws {
         let mask =
             CGEventMask(1 << CGEventType.keyDown.rawValue) |
+            CGEventMask(1 << CGEventType.flagsChanged.rawValue) |
             CGEventMask(1 << CGEventType.leftMouseDown.rawValue) |
             CGEventMask(1 << CGEventType.rightMouseDown.rawValue) |
             CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
@@ -267,6 +278,14 @@ public final class FocusLock {
             return Unmanaged.passUnretained(event)
         }
 
+        if type == .flagsChanged {
+            if allowedAppSwitcher.isVisible,
+               !event.flags.contains(.maskCommand) {
+                allowedAppSwitcher.commit()
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
         guard type == .keyDown else {
             return Unmanaged.passUnretained(event)
         }
@@ -278,8 +297,18 @@ public final class FocusLock {
         let control = flags.contains(.maskControl)
         let option = flags.contains(.maskAlternate)
 
+        if command && keyCode == KeyCode.tab {
+            allowedAppSwitcher.advance(reverse: shift)
+            return nil
+        }
+
+        if keyCode == KeyCode.escape, allowedAppSwitcher.isVisible {
+            allowedAppSwitcher.cancel()
+            return nil
+        }
+
         if command && shift && keyCode == KeyCode.m {
-            shouldStop = true
+            stop()
             return nil
         }
 
@@ -377,6 +406,7 @@ public final class FocusLock {
     }
 
     private func handleActivated(_ app: NSRunningApplication) {
+        allowedAppSwitcher.recordActivation(bundleIdentifier: app.bundleIdentifier)
         guard spec.blockAppSwitching || spec.keepFocused else { return }
 
         if shouldWaitForSystemSwitcher(bundleIdentifier: app.bundleIdentifier) {
@@ -492,6 +522,7 @@ public final class FocusLock {
     }
 
     private func cleanup() {
+        allowedAppSwitcher.cancel()
         focusTimer?.invalidate()
         focusTimer = nil
 
@@ -519,6 +550,12 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
+    }
+
+    private var isStopped: Bool {
+        stopStateLock.lock()
+        defer { stopStateLock.unlock() }
+        return shouldStop
     }
 
     private func isMissionControlActive() -> Bool {
@@ -619,6 +656,7 @@ public final class FocusLock {
 }
 
 enum KeyCode {
+    static let escape: Int64 = 53
     static let q: Int64 = 12
     static let w: Int64 = 13
     static let r: Int64 = 15

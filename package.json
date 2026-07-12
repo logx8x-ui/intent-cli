@@ -1,7 +1,7 @@
 {
   "name": "intent",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Intent macOS focus tool and Firefox Browser Guard extension.",
   "scripts": {
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs",

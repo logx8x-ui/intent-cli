@@ -4,8 +4,7 @@ public enum FocusSystemShortcutPolicy {
             KeyCode.space,
             KeyCode.q,
             KeyCode.h,
-            KeyCode.m,
-            KeyCode.grave
+            KeyCode.m
         ].contains(keyCode)
     }
 }

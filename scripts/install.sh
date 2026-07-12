@@ -6,6 +6,8 @@ BIN_DIR="${HOME}/.local/bin"
 APP_DIR="${HOME}/.intent/bin"
 APPLICATIONS_DIR="${HOME}/Applications"
 APP_BUNDLE="${APPLICATIONS_DIR}/Intent.app"
+LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
+LAUNCH_AGENT_FILE="${LAUNCH_AGENTS_DIR}/dev.loganmondi.intent.plist"
 
 cd "$ROOT"
 swift build -c release --product Intent
@@ -24,7 +26,6 @@ chmod +x "$APP_DIR/IntentNativeHost"
 ln -sf "$APP_DIR/Intent" "$BIN_DIR/Intent"
 ln -sf "$APP_DIR/Intent" "$BIN_DIR/intent"
 ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/IntentApp"
-ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/intent-app"
 
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 cp "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
@@ -45,11 +46,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.2.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>
@@ -63,6 +68,34 @@ codesign \
   --requirements '=designated => identifier "dev.loganmondi.intent"' \
   "$APP_BUNDLE" >/dev/null
 mdimport "$APP_BUNDLE" 2>/dev/null || true
+
+rm -f "$BIN_DIR/intent-app"
+cat > "$BIN_DIR/intent-app" <<LAUNCHER
+#!/usr/bin/env bash
+open "$APP_BUNDLE"
+LAUNCHER
+chmod +x "$BIN_DIR/intent-app"
+
+mkdir -p "$LAUNCH_AGENTS_DIR"
+cat > "$LAUNCH_AGENT_FILE" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.loganmondi.intent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${APP_BUNDLE}/Contents/MacOS/IntentApp</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+pkill -x IntentApp 2>/dev/null || true
+launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
 
 HOST_DIR="${HOME}/Library/Application Support/Mozilla/NativeMessagingHosts"
 HOST_FILE="${HOST_DIR}/intent_native_host.json"
@@ -81,13 +114,14 @@ JSON
 
 echo "Installed Intent, IntentApp, and intent-app to $BIN_DIR"
 echo "Installed Intent.app to $APP_BUNDLE"
+echo "Installed Intent as a login menu-bar app via $LAUNCH_AGENT_FILE"
 echo "Installed Firefox native host manifest to $HOST_FILE"
 
 if [[ -w /opt/homebrew/bin ]]; then
   ln -sf "$APP_DIR/Intent" /opt/homebrew/bin/Intent
   ln -sf "$APP_DIR/Intent" /opt/homebrew/bin/intent
   ln -sf "$APP_DIR/IntentApp" /opt/homebrew/bin/IntentApp
-  ln -sf "$APP_DIR/IntentApp" /opt/homebrew/bin/intent-app
+  ln -sf "$BIN_DIR/intent-app" /opt/homebrew/bin/intent-app
   echo "Also linked Intent, intent, IntentApp, and intent-app to /opt/homebrew/bin"
 elif [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "Make sure $BIN_DIR is on your PATH."

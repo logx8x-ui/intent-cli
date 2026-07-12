@@ -1,42 +1,66 @@
+import AppKit
 import SwiftUI
+
+final class IntentAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+}
 
 @main
 struct IntentDesktopApp: App {
+    @NSApplicationDelegateAdaptor(IntentAppDelegate.self) private var appDelegate
     @StateObject private var model: IntentAppModel
     @AppStorage("intentAppearance") private var appearance = "dark"
+    private let overlayController: OverlayWindowController
     private let hotKeyManager: GlobalHotKeyManager
-
-    private var preferredColorScheme: ColorScheme? {
-        appearance == "light" ? .light : .dark
-    }
 
     init() {
         let appModel = IntentAppModel()
+        let controller = OverlayWindowController(model: appModel)
+        appModel.overlayPresenter = controller
         _model = StateObject(wrappedValue: appModel)
+        overlayController = controller
         hotKeyManager = GlobalHotKeyManager {
             Task { @MainActor in
-                appModel.showRunner()
+                appModel.toggleOverlay()
             }
+        }
+
+        Task { @MainActor in
+            appModel.load()
         }
     }
 
     var body: some Scene {
-        WindowGroup("Intent") {
-            ContentView()
-                .environmentObject(model)
-                .preferredColorScheme(preferredColorScheme)
-                .frame(minWidth: 980, minHeight: 640)
-                .task {
-                    model.load()
-                }
-        }
-        .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New Intention") {
-                    model.createIntention()
-                }
-                .keyboardShortcut("n")
+        MenuBarExtra {
+            Button("Open Intent") {
+                model.showOverlay()
             }
+            .keyboardShortcut("o")
+
+            if let activeSessionName = model.activeSessionName {
+                Divider()
+                Text("Active: \(activeSessionName)")
+                Button("End Intention") {
+                    model.endActiveSession()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+            }
+
+            Divider()
+            Menu("Appearance") {
+                Button("Dark") { appearance = "dark" }
+                Button("Light") { appearance = "light" }
+            }
+            Divider()
+            Button("Quit Intent") {
+                NSApp.terminate(nil)
+            }
+            .keyboardShortcut("q")
+        } label: {
+            Label("Intent", systemImage: model.activeSessionName == nil ? "scope" : "scope.circle.fill")
         }
+        .menuBarExtraStyle(.menu)
     }
 }

@@ -46,12 +46,16 @@
   }
 
   function isAllowedURL(url, rules) {
-    if (!rules.active || rules.allowedWebsites.length === 0) {
+    if (!rules.active) {
       return true;
     }
 
     if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) {
       return true;
+    }
+
+    if (rules.allowedWebsites.length === 0) {
+      return false;
     }
 
     const parts = normalizedURLParts(url);

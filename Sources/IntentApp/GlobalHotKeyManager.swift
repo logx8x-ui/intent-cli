@@ -5,8 +5,16 @@ final class GlobalHotKeyManager {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
     private let handler: () -> Void
+    private let keyCode: UInt32
+    private let modifiers: UInt32
 
-    init(handler: @escaping () -> Void) {
+    init(
+        keyCode: UInt32 = UInt32(kVK_ANSI_Grave),
+        modifiers: UInt32 = UInt32(shiftKey),
+        handler: @escaping () -> Void
+    ) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
         self.handler = handler
         register()
     }
@@ -42,10 +50,10 @@ final class GlobalHotKeyManager {
             &eventHandlerRef
         )
 
-        let hotKeyID = EventHotKeyID(signature: fourCharCode("IntK"), id: 1)
+        let hotKeyID = EventHotKeyID(signature: fourCharCode("IntO"), id: 1)
         RegisterEventHotKey(
-            UInt32(kVK_ANSI_K),
-            UInt32(cmdKey | shiftKey),
+            keyCode,
+            modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,

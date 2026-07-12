@@ -56,25 +56,30 @@ public struct FocusSessionSpec {
     }
 
     public static func make(for intention: Intention) -> FocusSessionSpec {
-        FocusSessionSpec(
+        let startupSteps = IntentionStartupPlanner.steps(for: intention)
+        let fallback = IntentionStartupPlanner.fallbackBundleIdentifier(for: intention)
+        let spotifyPlaylistURI = intention.startupActions.compactMap { action in
+            if case .playSpotifyPlaylist(let uri) = action,
+               !intention.dontStartResourceIDs.contains("app:com.spotify.client") {
+                return uri
+            }
+            return nil
+        }.first
+
+        return FocusSessionSpec(
             displayName: intention.name,
-            startupSteps: intention.startupActions.map(StartupStep.init),
+            startupSteps: startupSteps,
             allowedBundleIdentifiers: Set(intention.allowedApps.map(\.bundleIdentifier)),
-            fallbackBundleIdentifier: intention.allowedApps.first?.bundleIdentifier ?? "org.mozilla.firefox",
-            strictSingleApp: intention.allowedApps.count == 1 && intention.restrictions.blockAppSwitching,
-            blockAppSwitching: intention.restrictions.blockAppSwitching,
-            blockNewApps: intention.restrictions.blockNewApps,
-            keepFocused: intention.restrictions.keepFocused,
-            blockBrowserTabEscape: intention.restrictions.blockBrowserTabSwitching,
+            fallbackBundleIdentifier: fallback,
+            strictSingleApp: intention.allowedApps.count == 1,
+            blockAppSwitching: true,
+            blockNewApps: true,
+            keepFocused: true,
+            blockBrowserTabEscape: intention.allowedApps.contains(where: \.isBrowser),
             blockFirefoxChromeClicks: false,
-            allowGoogleSearchTabs: intention.restrictions.allowGoogleSearchTabs,
-            spotifyPlaylistURI: intention.startupActions.compactMap { action in
-                if case .playSpotifyPlaylist(let uri) = action {
-                    return uri
-                }
-                return nil
-            }.first,
-            allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" } && intention.id != "data-science"
+            allowGoogleSearchTabs: intention.browserSearchesAllowed,
+            spotifyPlaylistURI: spotifyPlaylistURI,
+            allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" }
         )
     }
 
@@ -173,7 +178,47 @@ public struct FocusSessionSpec {
     }
 }
 
-public enum StartupStep {
+public enum IntentionStartupPlanner {
+    public static func steps(for intention: Intention) -> [StartupStep] {
+        let excluded = intention.dontStartResourceIDs
+        var steps: [StartupStep] = intention.allowedApps.compactMap { app in
+            excluded.contains(app.resourceID) ? nil : .openBundle(app.bundleIdentifier)
+        }
+
+        if intention.startupActions.contains(.selectSideberyDataSciencePanel),
+           !excluded.contains("app:org.mozilla.firefox") {
+            steps.append(.selectSideberyDataSciencePanel)
+        }
+
+        steps.append(contentsOf: intention.allowedWebsites.compactMap { website in
+            guard !excluded.contains(website.resourceID),
+                  let browserBundleIdentifier = website.browserBundleIdentifier,
+                  intention.allowedApps.contains(where: { $0.bundleIdentifier == browserBundleIdentifier }) else {
+                return nil
+            }
+            return .openURL(website.startupURL, bundleIdentifier: browserBundleIdentifier)
+        })
+
+        for action in intention.startupActions {
+            guard case .playSpotifyPlaylist(let uri) = action,
+                  !excluded.contains("app:com.spotify.client") else {
+                continue
+            }
+            steps.append(.playSpotifyPlaylist(uri))
+        }
+
+        return steps
+    }
+
+    public static func fallbackBundleIdentifier(for intention: Intention) -> String {
+        let excluded = intention.dontStartResourceIDs
+        return intention.allowedApps.first(where: { !excluded.contains($0.resourceID) })?.bundleIdentifier
+            ?? intention.allowedApps.first?.bundleIdentifier
+            ?? "org.mozilla.firefox"
+    }
+}
+
+public enum StartupStep: Equatable {
     case openBundle(String)
     case openURL(String, bundleIdentifier: String)
     case selectSideberyDataSciencePanel

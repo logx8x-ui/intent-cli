@@ -4,6 +4,13 @@ import IntentCore
 import IntentLock
 
 @MainActor
+protocol IntentOverlayPresenting: AnyObject {
+    func showOverlay(animated: Bool)
+    func hideOverlay(animated: Bool)
+    func toggleOverlay()
+}
+
+@MainActor
 final class IntentAppModel: ObservableObject {
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
@@ -11,17 +18,23 @@ final class IntentAppModel: ObservableObject {
     @Published var pendingFriction: PendingFriction?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
-    @Published var isRunnerPresented = false
+
+    weak var overlayPresenter: IntentOverlayPresenting?
 
     private let store = IntentionStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private let browserGuardHeartbeatStore = BrowserGuardHeartbeatStore()
     private let browserGuardStateStore = BrowserGuardStateStore()
+    private var pendingStartIntention: Intention?
+    private var remainingFrictions: [FrictionNode] = []
+    private var activeLock: FocusLock?
 
     var selectedIntention: Intention? {
         guard let selectedID else { return intentions.first }
         return intentions.first { $0.id == selectedID }
     }
+
+    var hasActiveSession: Bool { activeSessionName != nil }
 
     func load() {
         if installedApps.isEmpty {
@@ -31,6 +44,7 @@ final class IntentAppModel: ObservableObject {
         do {
             intentions = try store.load()
             selectedID = selectedID ?? intentions.first?.id
+            try store.save(intentions)
         } catch {
             errorMessage = "Could not load intentions: \(error)"
             intentions = DefaultIntentions.make()
@@ -39,6 +53,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func save() {
+        guard !hasActiveSession else { return }
         do {
             try store.save(intentions)
         } catch {
@@ -46,50 +61,137 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    func createIntention() {
+    @discardableResult
+    func createIntention(at position: GraphPoint) -> String {
         let intention = Intention(
             name: "New intention",
             icon: "target",
-            colorHex: "#4B5563",
-            folder: "Custom",
+            colorHex: "#F5F5F7",
+            folder: "",
             allowedApps: [],
             allowedWebsites: [],
             startupActions: [],
-            restrictions: .init()
+            restrictions: .init(),
+            graphPosition: position
         )
         intentions.append(intention)
         selectedID = intention.id
         save()
+        return intention.id
     }
 
-    func deleteSelectedIntention() {
-        guard let selectedID else { return }
-        intentions.removeAll { $0.id == selectedID }
-        self.selectedID = intentions.first?.id
+    func deleteIntention(id: String) {
+        guard !hasActiveSession else { return }
+        intentions.removeAll { $0.id == id }
+        if selectedID == id {
+            selectedID = intentions.first?.id
+        }
         save()
     }
 
-    func updateSelected(_ intention: Intention) {
-        guard let index = intentions.firstIndex(where: { $0.id == intention.id }) else { return }
+    func updateIntention(_ intention: Intention) {
+        guard !hasActiveSession,
+              let index = intentions.firstIndex(where: { $0.id == intention.id }) else {
+            return
+        }
         intentions[index] = intention
         save()
     }
 
-    func requestStart(_ intention: Intention) {
-        switch intention.friction {
-        case .none:
-            start(intention)
-        case .typedPhrase(let phrase):
-            pendingFriction = PendingFriction(intention: intention, prompt: "Type exactly:", expectedValue: phrase)
-        case .countdown(let seconds):
-            pendingFriction = PendingFriction(intention: intention, prompt: "Wait \(seconds) seconds, then type start.", expectedValue: "start")
-        case .reasonPrompt(let prompt):
-            pendingFriction = PendingFriction(intention: intention, prompt: prompt, expectedValue: nil)
-        case .taskChecklist(let tasks):
-            pendingFriction = PendingFriction(intention: intention, prompt: tasks.joined(separator: "\n"), expectedValue: "done")
-        case .timeBudget(let minutes):
-            pendingFriction = PendingFriction(intention: intention, prompt: "Type \(minutes) to confirm this time budget.", expectedValue: "\(minutes)")
+    func mutateIntention(id: String, _ mutation: (inout Intention) -> Void) {
+        guard !hasActiveSession,
+              let index = intentions.firstIndex(where: { $0.id == id }) else {
+            return
         }
+        mutation(&intentions[index])
+        save()
+    }
+
+    func moveIntention(id: String, to position: GraphPoint, persist: Bool) {
+        guard !hasActiveSession,
+              let index = intentions.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        intentions[index].graphPosition = position
+        if persist { save() }
+    }
+
+    func moveRestriction(intentionID: String, nodeID: String, to position: GraphPoint, persist: Bool) {
+        guard !hasActiveSession,
+              let intentionIndex = intentions.firstIndex(where: { $0.id == intentionID }),
+              let nodeIndex = intentions[intentionIndex].restrictionNodes.firstIndex(where: { $0.id == nodeID }) else {
+            return
+        }
+        intentions[intentionIndex].restrictionNodes[nodeIndex].position = position
+        if persist { save() }
+    }
+
+    func moveFriction(intentionID: String, nodeID: String, to position: GraphPoint, persist: Bool) {
+        guard !hasActiveSession,
+              let intentionIndex = intentions.firstIndex(where: { $0.id == intentionID }),
+              let nodeIndex = intentions[intentionIndex].frictionNodes.firstIndex(where: { $0.id == nodeID }) else {
+            return
+        }
+        intentions[intentionIndex].frictionNodes[nodeIndex].position = position
+        if persist { save() }
+    }
+
+    @discardableResult
+    func addRestriction(to intentionID: String, at position: GraphPoint) -> String? {
+        guard !hasActiveSession,
+              let index = intentions.firstIndex(where: { $0.id == intentionID }) else {
+            return nil
+        }
+        let node = RestrictionNode(kind: .allowBrowserSearches, position: position)
+        intentions[index].restrictionNodes.append(node)
+        selectedID = intentionID
+        save()
+        return node.id
+    }
+
+    @discardableResult
+    func addFriction(to intentionID: String, at position: GraphPoint) -> String? {
+        guard !hasActiveSession,
+              let index = intentions.firstIndex(where: { $0.id == intentionID }) else {
+            return nil
+        }
+        let node = FrictionNode(
+            friction: .typedPhrase("I want to do this right now"),
+            position: position
+        )
+        intentions[index].frictionNodes.append(node)
+        selectedID = intentionID
+        save()
+        return node.id
+    }
+
+    func requestStart(_ intention: Intention) {
+        guard !hasActiveSession else {
+            errorMessage = "Finish the current intention before starting another one."
+            return
+        }
+        guard !intention.allowedApps.isEmpty else {
+            errorMessage = "Add at least one allowed app before starting this intention."
+            return
+        }
+        let unsupportedBrowsers = intention.allowedApps.filter {
+            $0.isBrowser && $0.bundleIdentifier != "org.mozilla.firefox"
+        }
+        if !unsupportedBrowsers.isEmpty {
+            let names = unsupportedBrowsers.map(\.name).joined(separator: ", ")
+            errorMessage = "Browser locking currently supports Firefox only. Replace \(names) with Firefox before starting this intention."
+            return
+        }
+
+        let frictions = intention.orderedFrictionNodes
+        guard !frictions.isEmpty else {
+            start(intention)
+            return
+        }
+
+        pendingStartIntention = intention
+        remainingFrictions = frictions
+        presentNextFriction()
     }
 
     func requestStart(intentionID: String) {
@@ -101,25 +203,69 @@ final class IntentAppModel: ObservableObject {
         requestStart(intention)
     }
 
-    func showRunner() {
-        if intentions.isEmpty {
-            load()
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        isRunnerPresented = true
-    }
-
     func submitFriction(_ input: String) {
         guard let pendingFriction else { return }
-        if pendingFriction.validate(input) {
-            self.pendingFriction = nil
-            start(pendingFriction.intention)
+        guard pendingFriction.validate(input) else {
+            errorMessage = "That friction check is not complete yet."
+            return
+        }
+        completeCurrentFriction()
+    }
+
+    func completeCurrentFriction() {
+        guard pendingFriction != nil else { return }
+        self.pendingFriction = nil
+        if !remainingFrictions.isEmpty {
+            remainingFrictions.removeFirst()
+        }
+
+        if remainingFrictions.isEmpty {
+            guard let intention = pendingStartIntention else { return }
+            pendingStartIntention = nil
+            start(intention)
         } else {
-            errorMessage = "Friction check did not match."
+            presentNextFriction()
         }
     }
 
-    func start(_ intention: Intention) {
+    func cancelFriction() {
+        pendingFriction = nil
+        pendingStartIntention = nil
+        remainingFrictions = []
+    }
+
+    func endActiveSession() {
+        activeLock?.stop()
+    }
+
+    func showOverlay() {
+        overlayPresenter?.showOverlay(animated: true)
+    }
+
+    func hideOverlay() {
+        overlayPresenter?.hideOverlay(animated: true)
+    }
+
+    func toggleOverlay() {
+        overlayPresenter?.toggleOverlay()
+    }
+
+    private func presentNextFriction() {
+        guard let intention = pendingStartIntention,
+              let node = remainingFrictions.first else {
+            return
+        }
+        let completed = intention.frictionNodes.count - remainingFrictions.count
+        pendingFriction = PendingFriction(
+            intentionID: intention.id,
+            intentionName: intention.name,
+            node: node,
+            step: completed + 1,
+            totalSteps: intention.frictionNodes.count
+        )
+    }
+
+    private func start(_ intention: Intention) {
         if requiresFirefoxGuard(intention),
            !browserGuardHeartbeatStore.isFresh(maxAge: 5) {
             errorMessage = "Firefox browser locking is not connected. Load the Intent Browser Guard extension in Firefox, then start this intention again."
@@ -128,18 +274,21 @@ final class IntentAppModel: ObservableObject {
 
         if requiresFirefoxGuard(intention),
            !browserGuardStateStore.isEnabled() {
-            errorMessage = "Firefox browser locking is turned off. Open the Intent Browser Guard extension in Firefox and switch it on, then start this intention again."
+            errorMessage = "Firefox browser locking is turned off. Open Intent Browser Guard in Firefox and switch it on, then start this intention again."
             return
         }
 
         let spec = FocusSessionSpec.make(for: intention)
+        let firefoxWebsites = intention.websites(for: "org.mozilla.firefox").map(\.value)
         let rules = ActiveBrowserRules(
             active: true,
-            allowedWebsites: intention.allowedWebsites.map(\.value),
-            blockTabSwitching: intention.restrictions.blockBrowserTabSwitching,
-            blockNavigation: intention.restrictions.blockBrowserNavigation,
-            blockNewTabs: intention.restrictions.blockNewBrowserTabs,
-            allowGoogleSearchTabs: intention.restrictions.allowGoogleSearchTabs
+            // A non-matching sentinel keeps already-installed Browser Guard 0.1.3 builds strict
+            // when Firefox is allowed but the intention has no website spikes.
+            allowedWebsites: firefoxWebsites.isEmpty ? ["intent.invalid"] : firefoxWebsites,
+            blockTabSwitching: true,
+            blockNavigation: true,
+            blockNewTabs: !intention.browserSearchesAllowed,
+            allowGoogleSearchTabs: intention.browserSearchesAllowed
         )
 
         do {
@@ -149,8 +298,10 @@ final class IntentAppModel: ObservableObject {
             return
         }
 
+        let lock = FocusLock(spec: spec)
+        activeLock = lock
         activeSessionName = intention.name
-        minimizeIntentWindows()
+        overlayPresenter?.hideOverlay(animated: true)
 
         Thread.detachNewThread {
             let renewalTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
@@ -164,13 +315,14 @@ final class IntentAppModel: ObservableObject {
                 renewalTimer.cancel()
                 try? ActiveBrowserRulesStore().clear()
                 Task { @MainActor in
+                    self.activeLock = nil
                     self.activeSessionName = nil
-                    self.restoreIntentWindows()
+                    self.overlayPresenter?.showOverlay(animated: true)
                 }
             }
 
             do {
-                try FocusLock(spec: spec).run()
+                try lock.run()
             } catch {
                 Task { @MainActor in
                     self.errorMessage = "Could not start session: \(error)"
@@ -179,52 +331,33 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    private func minimizeIntentWindows() {
-        isRunnerPresented = false
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            NSApp.windows
-                .filter { $0.isVisible && !$0.isMiniaturized && $0.canBecomeMain }
-                .forEach { $0.miniaturize(nil) }
-        }
-    }
-
-    private func restoreIntentWindows() {
-        isRunnerPresented = false
-
-        NSApp.windows
-            .filter { $0.canBecomeMain }
-            .forEach { window in
-                if window.isMiniaturized {
-                    window.deminiaturize(nil)
-                }
-                window.makeKeyAndOrderFront(nil)
-            }
-
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
     private func requiresFirefoxGuard(_ intention: Intention) -> Bool {
-        let usesFirefox = intention.allowedApps.contains { $0.bundleIdentifier == "org.mozilla.firefox" }
-        let browserRestrictionsEnabled =
-            intention.restrictions.blockBrowserTabSwitching ||
-            intention.restrictions.blockBrowserNavigation ||
-            intention.restrictions.blockNewBrowserTabs ||
-            intention.restrictions.allowGoogleSearchTabs
-        return usesFirefox && browserRestrictionsEnabled
+        intention.allowedApps.contains { $0.bundleIdentifier == "org.mozilla.firefox" }
     }
 }
 
 struct PendingFriction: Identifiable {
     let id = UUID()
-    let intention: Intention
-    let prompt: String
-    let expectedValue: String?
+    let intentionID: String
+    let intentionName: String
+    let node: FrictionNode
+    let step: Int
+    let totalSteps: Int
+
+    var friction: Friction { node.friction }
 
     func validate(_ input: String) -> Bool {
-        if let expectedValue {
-            return input == expectedValue
+        switch friction {
+        case .none, .countdown:
+            return true
+        case .typedPhrase(let phrase):
+            return input == phrase
+        case .reasonPrompt:
+            return !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .taskChecklist:
+            return input == "done"
+        case .timeBudget(let minutes):
+            return input == "\(minutes)"
         }
-        return !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

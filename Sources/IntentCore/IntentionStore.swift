@@ -15,7 +15,17 @@ public final class IntentionStore {
         }
 
         let data = try Data(contentsOf: fileURL)
-        return try JSONDecoder().decode([Intention].self, from: data)
+        if data.range(of: Data("\"graphPosition\"".utf8)) == nil {
+            let backupURL = fileURL.deletingPathExtension().appendingPathExtension("pre-graph-backup.json")
+            if !FileManager.default.fileExists(atPath: backupURL.path) {
+                try? FileManager.default.copyItem(at: fileURL, to: backupURL)
+            }
+        }
+        var intentions = try JSONDecoder().decode([Intention].self, from: data)
+        if intentions.contains(where: { $0.graphModelVersion < 3 }) {
+            GraphLayoutMigration.arrangeLegacyCollisions(&intentions)
+        }
+        return intentions
     }
 
     public func save(_ intentions: [Intention]) throws {
