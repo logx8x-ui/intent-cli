@@ -57,9 +57,26 @@ final class AllowedAppSwitcher {
         guard let snapshot else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let controller = self.panelController ?? AllowedAppSwitcherPanelController()
+            let controller = self.panelController ?? AllowedAppSwitcherPanelController(
+                onHover: { [weak self] index in
+                    self?.select(index: index)
+                }
+            )
             self.panelController = controller
             controller.show(items: snapshot.0, selectedIndex: snapshot.1)
+        }
+    }
+
+    private func select(index: Int) {
+        let selectedIndex: Int? = stateLock.withLock {
+            guard visible, items.indices.contains(index) else { return nil }
+            self.selectedIndex = index
+            return index
+        }
+
+        guard let selectedIndex else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.panelController?.updateSelection(selectedIndex)
         }
     }
 
@@ -124,8 +141,11 @@ private final class AllowedAppSwitcherPanelController {
 
     private let panel: NSPanel
     private let content = NSStackView()
+    private let onHover: (Int) -> Void
+    private var itemViews: [AllowedAppSwitcherItemView] = []
 
-    init() {
+    init(onHover: @escaping (Int) -> Void) {
+        self.onHover = onHover
         panel = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -136,6 +156,7 @@ private final class AllowedAppSwitcherPanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.acceptsMouseMovedEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
         let container = NSView()
@@ -165,9 +186,12 @@ private final class AllowedAppSwitcherPanelController {
             content.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
+        itemViews = []
 
         for (index, item) in items.enumerated() {
-            content.addArrangedSubview(makeItemView(item, selected: index == selectedIndex))
+            let itemView = makeItemView(item, index: index, selected: index == selectedIndex)
+            itemViews.append(itemView)
+            content.addArrangedSubview(itemView)
         }
 
         let itemWidth: CGFloat = 96
@@ -183,19 +207,19 @@ private final class AllowedAppSwitcherPanelController {
         panel.orderFrontRegardless()
     }
 
+    func updateSelection(_ selectedIndex: Int) {
+        for (index, itemView) in itemViews.enumerated() {
+            itemView.setSelected(index == selectedIndex)
+        }
+    }
+
     func hide() {
         panel.orderOut(nil)
     }
 
-    private func makeItemView(_ item: Item, selected: Bool) -> NSView {
-        let box = NSView()
-        box.wantsLayer = true
-        box.layer?.cornerRadius = 12
-        box.layer?.backgroundColor = selected
-            ? NSColor(calibratedRed: 0.22, green: 0.40, blue: 0.68, alpha: 0.42).cgColor
-            : NSColor.clear.cgColor
-        box.layer?.borderWidth = selected ? 1.5 : 0
-        box.layer?.borderColor = NSColor(calibratedRed: 0.46, green: 0.66, blue: 1, alpha: 0.9).cgColor
+    private func makeItemView(_ item: Item, index: Int, selected: Bool) -> AllowedAppSwitcherItemView {
+        let box = AllowedAppSwitcherItemView(index: index, onHover: onHover)
+        box.setSelected(selected)
 
         let image = NSImageView(image: item.icon)
         image.imageScaling = .scaleProportionallyUpOrDown
@@ -221,6 +245,56 @@ private final class AllowedAppSwitcherPanelController {
             label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -9)
         ])
         return box
+    }
+}
+
+private final class AllowedAppSwitcherItemView: NSView {
+    private let index: Int
+    private let onHover: (Int) -> Void
+    private var trackingAreaReference: NSTrackingArea?
+
+    init(index: Int, onHover: @escaping (Int) -> Void) {
+        self.index = index
+        self.onHover = onHover
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaReference {
+            removeTrackingArea(trackingAreaReference)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        trackingAreaReference = trackingArea
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover(index)
+    }
+
+    func setSelected(_ selected: Bool) {
+        layer?.backgroundColor = selected
+            ? NSColor(calibratedRed: 0.22, green: 0.40, blue: 0.68, alpha: 0.42).cgColor
+            : NSColor.clear.cgColor
+        layer?.borderWidth = selected ? 1.5 : 0
+        layer?.borderColor = NSColor(calibratedRed: 0.46, green: 0.66, blue: 1, alpha: 0.9).cgColor
+
+        subviews.compactMap { $0 as? NSTextField }.forEach {
+            $0.font = .systemFont(ofSize: 11, weight: selected ? .semibold : .regular)
+        }
     }
 }
 

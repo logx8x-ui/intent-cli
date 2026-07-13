@@ -10,7 +10,6 @@ struct IntentGraphView: View {
     @State private var editMode = false
     @State private var selection: GraphSelection?
     @State private var cameraScale: CGFloat = 1
-    @State private var scaleAtGestureStart: CGFloat = 1
     @State private var cameraOffset: CGSize = .zero
     @State private var offsetAtGestureStart: CGSize = .zero
     @State private var hoverLocation: CGPoint?
@@ -74,32 +73,40 @@ struct IntentGraphView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
 
-                if editMode {
-                    RoundedRectangle(cornerRadius: 22)
-                        .stroke(GraphTheme.editBlue.opacity(0.72), lineWidth: 2)
-                        .shadow(color: GraphTheme.editBlue.opacity(0.22), radius: 13)
-                        .padding(2)
-                        .allowsHitTesting(false)
-                }
-
-                GraphKeyboardMonitor { key in
-                    handleKeyboard(key, viewportSize: proxy.size)
-                }
-                .frame(width: 0, height: 0)
+                GraphInputMonitor(
+                    keyboardHandler: { key in
+                        handleKeyboard(key, viewportSize: proxy.size)
+                    },
+                    magnificationHandler: { magnification in
+                        applyTrackpadMagnification(magnification, viewportSize: proxy.size)
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
             }
             .coordinateSpace(name: "graphViewport")
             .clipShape(RoundedRectangle(cornerRadius: 22))
             .overlay(
-                RoundedRectangle(cornerRadius: 22)
-                    .stroke(GraphTheme.stroke(colorScheme), lineWidth: 1)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(GraphTheme.stroke(colorScheme), lineWidth: 1)
+                    if editMode {
+                        RoundedRectangle(cornerRadius: 22)
+                            .stroke(GraphTheme.editBlue.opacity(0.88), lineWidth: 2.5)
+                    }
+                }
             )
-            .simultaneousGesture(zoomGesture)
+            .shadow(
+                color: editMode ? GraphTheme.editBlue.opacity(0.52) : Color.black.opacity(0.34),
+                radius: editMode ? 18 : 12
+            )
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location): hoverLocation = location
                 case .ended: break
                 }
             }
+            .padding(18)
         }
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .sheet(item: $model.pendingFriction) { pending in
@@ -454,16 +461,6 @@ struct IntentGraphView: View {
             }
     }
 
-    private var zoomGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { value in
-                cameraScale = clampedScale(scaleAtGestureStart * value)
-            }
-            .onEnded { _ in
-                scaleAtGestureStart = cameraScale
-            }
-    }
-
     private func handleKeyboard(_ key: GraphKeyboardKey, viewportSize: CGSize) {
         switch key {
         case .edit:
@@ -544,7 +541,25 @@ struct IntentGraphView: View {
 
     private func setScale(_ scale: CGFloat) {
         cameraScale = clampedScale(scale)
-        scaleAtGestureStart = cameraScale
+    }
+
+    private func applyTrackpadMagnification(_ magnification: CGFloat, viewportSize size: CGSize) {
+        guard magnification.isFinite, magnification != 0 else { return }
+
+        let oldScale = cameraScale
+        let newScale = clampedScale(oldScale * exp(magnification * 1.35))
+        guard newScale != oldScale else { return }
+
+        let anchor = hoverLocation ?? CGPoint(x: size.width / 2, y: size.height / 2)
+        let worldX = (anchor.x - size.width / 2 - cameraOffset.width) / oldScale
+        let worldY = (anchor.y - size.height / 2 - cameraOffset.height) / oldScale
+
+        cameraOffset = CGSize(
+            width: anchor.x - size.width / 2 - worldX * newScale,
+            height: anchor.y - size.height / 2 - worldY * newScale
+        )
+        offsetAtGestureStart = cameraOffset
+        cameraScale = newScale
     }
 
     private func clampedScale(_ scale: CGFloat) -> CGFloat {
@@ -756,27 +771,32 @@ private enum GraphKeyboardKey {
     case friction
 }
 
-private struct GraphKeyboardMonitor: NSViewRepresentable {
-    let handler: (GraphKeyboardKey) -> Void
+private struct GraphInputMonitor: NSViewRepresentable {
+    let keyboardHandler: (GraphKeyboardKey) -> Void
+    let magnificationHandler: (CGFloat) -> Void
 
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
-        view.handler = handler
+        view.keyboardHandler = keyboardHandler
+        view.magnificationHandler = magnificationHandler
         return view
     }
 
     func updateNSView(_ nsView: MonitorView, context: Context) {
-        nsView.handler = handler
+        nsView.keyboardHandler = keyboardHandler
+        nsView.magnificationHandler = magnificationHandler
     }
 
     final class MonitorView: NSView {
-        var handler: ((GraphKeyboardKey) -> Void)?
-        private var monitor: Any?
+        var keyboardHandler: ((GraphKeyboardKey) -> Void)?
+        var magnificationHandler: ((CGFloat) -> Void)?
+        private var keyboardMonitor: Any?
+        private var magnificationMonitor: Any?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window != nil, monitor == nil {
-                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if window != nil, keyboardMonitor == nil {
+                keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                     guard let self,
                           self.window?.isKeyWindow == true,
                           event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
@@ -784,7 +804,7 @@ private struct GraphKeyboardMonitor: NSViewRepresentable {
                     }
 
                     if event.keyCode == 53 {
-                        self.handler?(.escape)
+                        self.keyboardHandler?(.escape)
                         return nil
                     }
 
@@ -800,17 +820,33 @@ private struct GraphKeyboardMonitor: NSViewRepresentable {
                     }
 
                     guard let key else { return event }
-                    self.handler?(key)
+                    self.keyboardHandler?(key)
                     return nil
                 }
-            } else if window == nil, let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
+
+                magnificationMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+                    guard let self,
+                          self.window?.isKeyWindow == true,
+                          event.window === self.window else {
+                        return event
+                    }
+                    self.magnificationHandler?(event.magnification)
+                    return nil
+                }
+            } else if window == nil {
+                removeMonitors()
             }
         }
 
         deinit {
-            if let monitor { NSEvent.removeMonitor(monitor) }
+            removeMonitors()
+        }
+
+        private func removeMonitors() {
+            if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
+            if let magnificationMonitor { NSEvent.removeMonitor(magnificationMonitor) }
+            keyboardMonitor = nil
+            magnificationMonitor = nil
         }
 
         private static func isEditingText(in window: NSWindow?) -> Bool {

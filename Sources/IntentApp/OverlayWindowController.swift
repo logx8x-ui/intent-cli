@@ -30,7 +30,9 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             ?? NSScreen.screens.first
         guard let screen else { return }
 
-        targetFrame = screen.visibleFrame.insetBy(dx: 30, dy: 30)
+        // The panel includes a transparent perimeter so edit mode can cast its
+        // blue aura outside the visible overlay while preserving a 30pt gap.
+        targetFrame = screen.visibleFrame.insetBy(dx: 12, dy: 12)
         let startFrame = targetFrame.insetBy(dx: 9, dy: 7)
         panel.setFrame(animated ? startFrame : targetFrame, display: true)
         panel.alphaValue = animated ? 0 : 1
@@ -75,7 +77,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     }
 
     private func makePanel() -> NSPanel {
-        let panel = NSPanel(
+        let panel = IntentOverlayPanel(
             contentRect: .zero,
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
@@ -84,9 +86,10 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.animationBehavior = .none
         panel.contentViewController = NSHostingController(
@@ -95,4 +98,9 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         )
         return panel
     }
+}
+
+private final class IntentOverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
