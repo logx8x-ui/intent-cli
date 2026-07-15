@@ -13,8 +13,6 @@ struct IntentGraphView: View {
     @State private var cameraOffset: CGSize = .zero
     @State private var offsetAtGestureStart: CGSize = .zero
     @State private var hoverLocation: CGPoint?
-    @State private var connectionDraft: ConnectionDraft?
-    @State private var pendingConnection: PendingConnection?
     @State private var statusMessage: String?
 
     private let minimumScale: CGFloat = 0.35
@@ -47,10 +45,6 @@ struct IntentGraphView: View {
 
                 graphNodes(in: proxy.size)
 
-                if let pendingConnection {
-                    connectionChoice(pendingConnection, in: proxy.size)
-                }
-
                 if editMode, let selection {
                     editor(for: selection, in: proxy.size)
                 }
@@ -66,9 +60,10 @@ struct IntentGraphView: View {
                         .font(.system(size: 11, weight: .medium))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(GraphTheme.elevatedSurface(colorScheme))
-                        .clipShape(Capsule())
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .background(GraphTheme.glassTint(colorScheme), in: Capsule())
                         .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme)))
+                        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 8, y: 4)
                         .padding(.bottom, 20)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
@@ -79,6 +74,9 @@ struct IntentGraphView: View {
                     },
                     magnificationHandler: { magnification in
                         applyTrackpadMagnification(magnification, viewportSize: proxy.size)
+                    },
+                    scrollHandler: { delta in
+                        applyTrackpadPan(delta)
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -195,7 +193,8 @@ struct IntentGraphView: View {
         .foregroundStyle(GraphTheme.text(colorScheme))
         .padding(.horizontal, 20)
         .frame(height: 52)
-        .background(GraphTheme.chrome(colorScheme).opacity(0.96))
+        .background(.ultraThinMaterial)
+        .background(GraphTheme.chrome(colorScheme))
         .overlay(alignment: .bottom) {
             Rectangle().fill(GraphTheme.stroke(colorScheme)).frame(height: 1)
         }
@@ -224,23 +223,7 @@ struct IntentGraphView: View {
                 IntentionNodeView(
                     intention: intention,
                     installedApps: model.installedApps,
-                    selected: selection == .intention(intention.id),
-                    editMode: editMode,
-                    onConnectionChanged: { location in
-                        connectionDraft = ConnectionDraft(
-                            intentionID: intention.id,
-                            start: screenPoint(for: intention.graphPosition, in: size),
-                            end: location
-                        )
-                    },
-                    onConnectionEnded: { location in
-                        connectionDraft = nil
-                        pendingConnection = PendingConnection(
-                            intentionID: intention.id,
-                            screenPoint: location,
-                            worldPoint: worldPoint(for: location, in: size)
-                        )
-                    }
+                    selected: selection == .intention(intention.id)
                 )
             }
 
@@ -298,27 +281,16 @@ struct IntentGraphView: View {
                     drawConnection(
                         from: start,
                         to: screenPoint(for: restriction.position, in: size),
-                        context: &context,
-                        temporary: false
+                        context: &context
                     )
                 }
                 for friction in intention.frictionNodes {
                     drawConnection(
                         from: start,
                         to: screenPoint(for: friction.position, in: size),
-                        context: &context,
-                        temporary: false
+                        context: &context
                     )
                 }
-            }
-
-            if let connectionDraft {
-                drawConnection(
-                    from: connectionDraft.start,
-                    to: connectionDraft.end,
-                    context: &context,
-                    temporary: true
-                )
             }
         }
     }
@@ -326,8 +298,7 @@ struct IntentGraphView: View {
     private func drawConnection(
         from start: CGPoint,
         to end: CGPoint,
-        context: inout GraphicsContext,
-        temporary: Bool
+        context: inout GraphicsContext
     ) {
         let distance = abs(end.x - start.x)
         let bend = max(45, distance * 0.38)
@@ -338,11 +309,8 @@ struct IntentGraphView: View {
             control1: CGPoint(x: start.x + (end.x >= start.x ? bend : -bend), y: start.y),
             control2: CGPoint(x: end.x - (end.x >= start.x ? bend : -bend), y: end.y)
         )
-        context.stroke(
-            path,
-            with: .color(temporary ? GraphTheme.editBlue : GraphTheme.text(colorScheme).opacity(0.30)),
-            style: StrokeStyle(lineWidth: temporary ? 1.6 : 1.15, dash: temporary ? [5, 5] : [])
-        )
+        context.stroke(path, with: .color(GraphTheme.connection(colorScheme).opacity(0.30)), lineWidth: 3.4)
+        context.stroke(path, with: .color(GraphTheme.connection(colorScheme)), lineWidth: 1.05)
     }
 
     @ViewBuilder
@@ -393,25 +361,6 @@ struct IntentGraphView: View {
         }
     }
 
-    private func connectionChoice(_ pending: PendingConnection, in size: CGSize) -> some View {
-        ConnectionChoiceMenu(
-            addRestriction: {
-                if let id = model.addRestriction(to: pending.intentionID, at: pending.worldPoint) {
-                    selection = .restriction(intentionID: pending.intentionID, nodeID: id)
-                }
-                pendingConnection = nil
-            },
-            addFriction: {
-                if let id = model.addFriction(to: pending.intentionID, at: pending.worldPoint) {
-                    selection = .friction(intentionID: pending.intentionID, nodeID: id)
-                }
-                pendingConnection = nil
-            },
-            cancel: { pendingConnection = nil }
-        )
-        .position(clampedMenuPoint(pending.screenPoint, menuSize: .init(width: 180, height: 150), in: size))
-    }
-
     private func zoomControls(in size: CGSize) -> some View {
         HStack(spacing: 4) {
             Button {
@@ -442,9 +391,7 @@ struct IntentGraphView: View {
         }
         .buttonStyle(.plain)
         .padding(10)
-        .background(GraphTheme.chrome(colorScheme).opacity(0.94))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(GraphTheme.stroke(colorScheme)))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 12)
         .padding(18)
     }
 
@@ -502,14 +449,11 @@ struct IntentGraphView: View {
 
     private func enterEditMode() {
         editMode = true
-        pendingConnection = nil
     }
 
     private func leaveEditMode() {
         editMode = false
         selection = nil
-        connectionDraft = nil
-        pendingConnection = nil
     }
 
     private func showStatus(_ message: String) {
@@ -560,6 +504,13 @@ struct IntentGraphView: View {
         )
         offsetAtGestureStart = cameraOffset
         cameraScale = newScale
+    }
+
+    private func applyTrackpadPan(_ delta: CGSize) {
+        guard delta.width.isFinite, delta.height.isFinite else { return }
+        cameraOffset.width += delta.width
+        cameraOffset.height += delta.height
+        offsetAtGestureStart = cameraOffset
     }
 
     private func clampedScale(_ scale: CGFloat) -> CGFloat {
@@ -751,18 +702,6 @@ private enum GraphSelection: Equatable {
     }
 }
 
-private struct ConnectionDraft {
-    let intentionID: String
-    let start: CGPoint
-    let end: CGPoint
-}
-
-private struct PendingConnection {
-    let intentionID: String
-    let screenPoint: CGPoint
-    let worldPoint: GraphPoint
-}
-
 private enum GraphKeyboardKey {
     case edit
     case escape
@@ -774,24 +713,29 @@ private enum GraphKeyboardKey {
 private struct GraphInputMonitor: NSViewRepresentable {
     let keyboardHandler: (GraphKeyboardKey) -> Void
     let magnificationHandler: (CGFloat) -> Void
+    let scrollHandler: (CGSize) -> Void
 
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
         view.keyboardHandler = keyboardHandler
         view.magnificationHandler = magnificationHandler
+        view.scrollHandler = scrollHandler
         return view
     }
 
     func updateNSView(_ nsView: MonitorView, context: Context) {
         nsView.keyboardHandler = keyboardHandler
         nsView.magnificationHandler = magnificationHandler
+        nsView.scrollHandler = scrollHandler
     }
 
     final class MonitorView: NSView {
         var keyboardHandler: ((GraphKeyboardKey) -> Void)?
         var magnificationHandler: ((CGFloat) -> Void)?
+        var scrollHandler: ((CGSize) -> Void)?
         private var keyboardMonitor: Any?
         private var magnificationMonitor: Any?
+        private var scrollMonitor: Any?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -833,6 +777,23 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     self.magnificationHandler?(event.magnification)
                     return nil
                 }
+
+                scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                    guard let self,
+                          self.window?.isKeyWindow == true,
+                          event.window === self.window,
+                          event.hasPreciseScrollingDeltas,
+                          !Self.isOverScrollView(event, in: self.window) else {
+                        return event
+                    }
+                    self.scrollHandler?(
+                        CGSize(
+                            width: event.scrollingDeltaX * 1.15,
+                            height: event.scrollingDeltaY * 1.15
+                        )
+                    )
+                    return nil
+                }
             } else if window == nil {
                 removeMonitors()
             }
@@ -845,13 +806,21 @@ private struct GraphInputMonitor: NSViewRepresentable {
         private func removeMonitors() {
             if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
             if let magnificationMonitor { NSEvent.removeMonitor(magnificationMonitor) }
+            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
             keyboardMonitor = nil
             magnificationMonitor = nil
+            scrollMonitor = nil
         }
 
         private static func isEditingText(in window: NSWindow?) -> Bool {
             guard let responder = window?.firstResponder else { return false }
             return responder is NSTextView || responder is NSTextField
+        }
+
+        private static func isOverScrollView(_ event: NSEvent, in window: NSWindow?) -> Bool {
+            guard let view = window?.contentView?.hitTest(event.locationInWindow) else { return false }
+            return sequence(first: view as NSView?, next: { $0?.superview })
+                .contains { $0 is NSScrollView }
         }
     }
 }

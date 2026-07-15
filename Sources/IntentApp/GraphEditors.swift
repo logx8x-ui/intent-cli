@@ -394,35 +394,6 @@ struct FrictionEditorMenu: View {
     }
 }
 
-struct ConnectionChoiceMenu: View {
-    let addRestriction: () -> Void
-    let addFriction: () -> Void
-    let cancel: () -> Void
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("Connect a shape")
-                .font(.system(size: 12, weight: .semibold))
-            Button(action: addRestriction) {
-                Label("Restriction", systemImage: "circle")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Button(action: addFriction) {
-                Label("Friction", systemImage: "triangle")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Button("Cancel", action: cancel)
-                .buttonStyle(.plain)
-                .foregroundStyle(GraphTheme.muted(colorScheme))
-        }
-        .buttonStyle(.plain)
-        .frame(width: 150)
-        .graphMenuPanel(colorScheme: colorScheme)
-    }
-}
-
 private enum FrictionKind: CaseIterable {
     case typedPhrase
     case countdown

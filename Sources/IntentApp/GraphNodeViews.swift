@@ -5,9 +5,6 @@ struct IntentionNodeView: View {
     let intention: Intention
     let installedApps: [InstalledApp]
     let selected: Bool
-    let editMode: Bool
-    let onConnectionChanged: (CGPoint) -> Void
-    let onConnectionEnded: (CGPoint) -> Void
 
     private let squareSize: CGFloat = 148
 
@@ -21,25 +18,16 @@ struct IntentionNodeView: View {
             ZStack {
                 appSlices
                     .frame(width: squareSize, height: squareSize)
-                    .background(GraphTheme.surface(colorScheme))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1.2)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
+                    .frame(maxHeight: .infinity, alignment: .top)
 
                 websiteSpikes
                     .allowsHitTesting(false)
-
-                if editMode {
-                    connectorHandle
-                        .offset(x: squareSize / 2 + 9)
-                }
             }
-            .frame(width: 188, height: 172)
+            .frame(width: 188, height: 194)
         }
         .foregroundStyle(GraphTheme.text(colorScheme))
-        .frame(width: 200, height: 205)
+        .frame(width: 200, height: 226)
         .contentShape(Rectangle())
     }
 
@@ -58,16 +46,10 @@ struct IntentionNodeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ForEach(Array(intention.allowedApps.enumerated()), id: \.element.bundleIdentifier) { index, app in
-                    VStack(spacing: 8) {
-                        appIcon(app, appCount: intention.allowedApps.count)
-                        Text(app.name)
-                            .font(.system(size: intention.allowedApps.count > 3 ? 8 : 9))
-                            .foregroundStyle(GraphTheme.muted(colorScheme))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.55)
-                            .padding(.horizontal, 3)
-                    }
+                    appIcon(app)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(GraphTheme.surface(colorScheme))
+                    .clipped()
                     .overlay(alignment: .leading) {
                         if index > 0 {
                             Rectangle()
@@ -81,17 +63,17 @@ struct IntentionNodeView: View {
     }
 
     @ViewBuilder
-    private func appIcon(_ app: AllowedApp, appCount: Int) -> some View {
-        let size = max(CGFloat(22), min(CGFloat(42), 88 / CGFloat(max(appCount, 1))))
+    private func appIcon(_ app: AllowedApp) -> some View {
         if let installed = installedApps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
             Image(nsImage: installed.icon)
                 .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: size, height: size)
+                .scaledToFill()
         } else {
             Image(systemName: app.isBrowser ? "globe" : "app")
-                .font(.system(size: size * 0.7))
-                .frame(width: size, height: size)
+                .resizable()
+                .scaledToFit()
+                .padding(18)
+                .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.82))
         }
     }
 
@@ -100,40 +82,29 @@ struct IntentionNodeView: View {
             guard !intention.allowedApps.isEmpty else { return }
             let sliceWidth = squareSize / CGFloat(intention.allowedApps.count)
             let squareOriginX = (size.width - squareSize) / 2
-            let squareBottom = size.height / 2 + squareSize / 2
+            let squareBottom = squareSize
 
             for (appIndex, app) in intention.allowedApps.enumerated() where app.isBrowser {
                 let websites = intention.websites(for: app.bundleIdentifier)
                 let centerX = squareOriginX + sliceWidth * (CGFloat(appIndex) + 0.5)
                 for websiteIndex in websites.indices {
                     let spread = CGFloat(websiteIndex) - CGFloat(websites.count - 1) / 2
-                    let x = centerX + spread * 9
+                    let baseX = centerX + spread * 12
+                    let lean = spread * 2.6
+                    let height = 22 + min(abs(spread) * 3, 7)
+                    let halfBase = CGFloat(6)
                     var path = Path()
-                    path.move(to: CGPoint(x: x, y: squareBottom - 1))
-                    path.addLine(to: CGPoint(x: x + spread * 2, y: squareBottom + 15 + abs(spread) * 3))
-                    context.stroke(path, with: .color(GraphTheme.text(colorScheme).opacity(0.72)), lineWidth: 1.2)
-                    context.fill(
-                        Path(ellipseIn: CGRect(x: x + spread * 2 - 2, y: squareBottom + 13 + abs(spread) * 3, width: 4, height: 4)),
-                        with: .color(GraphTheme.text(colorScheme).opacity(0.9))
-                    )
+                    path.move(to: CGPoint(x: baseX - halfBase, y: squareBottom - 1))
+                    path.addLine(to: CGPoint(x: baseX + halfBase, y: squareBottom - 1))
+                    path.addLine(to: CGPoint(x: baseX + lean + 2, y: squareBottom + height))
+                    path.addLine(to: CGPoint(x: baseX + lean - 2, y: squareBottom + height))
+                    path.closeSubpath()
+                    context.fill(path, with: .color(GraphTheme.glassHighlight(colorScheme).opacity(0.42)))
+                    context.stroke(path, with: .color(GraphTheme.text(colorScheme).opacity(0.62)), lineWidth: 0.9)
                 }
             }
         }
-        .frame(width: 188, height: 172)
-    }
-
-    private var connectorHandle: some View {
-        Circle()
-            .fill(GraphTheme.editBlue)
-            .frame(width: 12, height: 12)
-            .overlay(Circle().stroke(.white.opacity(0.85), lineWidth: 1))
-            .shadow(color: GraphTheme.editBlue.opacity(0.5), radius: 5)
-            .help("Drag to add a restriction or friction")
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .named("graphViewport"))
-                    .onChanged { onConnectionChanged($0.location) }
-                    .onEnded { onConnectionEnded($0.location) }
-            )
+        .frame(width: 188, height: 194)
     }
 }
 
@@ -146,11 +117,23 @@ struct RestrictionNodeView: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(GraphTheme.surface(colorScheme))
+                .fill(.ultraThinMaterial)
+                .overlay(Circle().fill(GraphTheme.glassTint(colorScheme)))
+                .overlay(
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [GraphTheme.glassHighlight(colorScheme).opacity(0.30), .clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
                 .overlay(
                     Circle()
                         .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1.2)
                 )
+                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.22) : GraphTheme.glassShadow(colorScheme), radius: 9, y: 5)
             VStack(spacing: 5) {
                 Image(systemName: node.kind == .allowBrowserSearches ? "magnifyingglass" : "nosign")
                     .font(.system(size: 17, weight: .medium))
@@ -174,11 +157,23 @@ struct FrictionNodeView: View {
     var body: some View {
         ZStack {
             TriangleShape()
-                .fill(GraphTheme.surface(colorScheme))
+                .fill(.ultraThinMaterial)
+                .overlay(TriangleShape().fill(GraphTheme.glassTint(colorScheme)))
+                .overlay(
+                    TriangleShape()
+                        .fill(
+                            LinearGradient(
+                                colors: [GraphTheme.glassHighlight(colorScheme).opacity(0.30), .clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
                 .overlay(
                     TriangleShape()
                         .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1.2)
                 )
+                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.22) : GraphTheme.glassShadow(colorScheme), radius: 9, y: 5)
             VStack(spacing: 5) {
                 Image(systemName: frictionIcon)
                     .font(.system(size: 16, weight: .medium))

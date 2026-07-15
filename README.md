@@ -49,9 +49,9 @@ The installer registers Intent to start once at each macOS login, so the global 
 - Press `~` anywhere on the Mac to show or hide the near-full-screen Intent overlay.
 - Click an intention once to run it.
 - Press `E` to enter or leave edit mode. The blue perimeter indicates that shapes can be changed.
-- In edit mode, drag shapes to move them. Drag from an intention's edge to attach a restriction or friction.
-- Press `I` to create an intention at the pointer, `R` to attach a restriction, or `F` to attach a friction.
-- Pinch to zoom, drag empty canvas space to pan, or use the bottom-right zoom and fit controls.
+- In edit mode, drag existing shapes to move them.
+- Creation is keyboard-only: press `I` to create an intention at the pointer, `R` to attach a restriction to the selected intention, or `F` to attach a friction.
+- Pinch to zoom, use two fingers or drag empty space to pan, or use the bottom-right zoom and fit controls.
 - Intention edits autosave. Clicking empty canvas does not close the selected shape's settings menu.
 
 Every allowed app and website starts automatically. Attach a `Don't start up` restriction to keep selected resources closed initially while still allowing them during the intention. Multiple friction triangles run from the highest shape on the canvas to the lowest.

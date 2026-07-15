@@ -5,26 +5,26 @@ import IntentCore
 enum GraphTheme {
     static func background(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.025, green: 0.028, blue: 0.034)
-            : Color(red: 0.965, green: 0.970, blue: 0.978)
+            ? Color(red: 0.014, green: 0.016, blue: 0.020)
+            : Color(red: 0.975, green: 0.978, blue: 0.984)
     }
 
     static func chrome(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.050, green: 0.054, blue: 0.064)
-            : Color.white
+            ? Color.white.opacity(0.035)
+            : Color.white.opacity(0.58)
     }
 
     static func surface(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.080, green: 0.085, blue: 0.100)
-            : Color.white
+            ? Color.white.opacity(0.045)
+            : Color.white.opacity(0.50)
     }
 
     static func elevatedSurface(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.105, green: 0.112, blue: 0.132)
-            : Color(red: 0.985, green: 0.988, blue: 0.994)
+            ? Color.white.opacity(0.075)
+            : Color.white.opacity(0.72)
     }
 
     static func text(_ colorScheme: ColorScheme) -> Color {
@@ -36,7 +36,23 @@ enum GraphTheme {
     }
 
     static func stroke(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? .white.opacity(0.22) : .black.opacity(0.18)
+        colorScheme == .dark ? .white.opacity(0.19) : .black.opacity(0.14)
+    }
+
+    static func glassTint(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .white.opacity(0.030) : .white.opacity(0.40)
+    }
+
+    static func glassHighlight(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .white.opacity(0.20) : .white.opacity(0.78)
+    }
+
+    static func glassShadow(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .black.opacity(0.42) : .black.opacity(0.10)
+    }
+
+    static func connection(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .white.opacity(0.30) : .black.opacity(0.25)
     }
 
     static let editBlue = Color(red: 0.46, green: 0.66, blue: 1.0)
@@ -54,16 +70,46 @@ struct TriangleShape: Shape {
 }
 
 extension View {
+    func adaptiveGlassPanel(
+        colorScheme: ColorScheme,
+        cornerRadius: CGFloat,
+        selected: Bool = false
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return self
+            .background(.ultraThinMaterial, in: shape)
+            .background(GraphTheme.glassTint(colorScheme), in: shape)
+            .overlay {
+                shape
+                    .fill(
+                        LinearGradient(
+                            colors: [GraphTheme.glassHighlight(colorScheme).opacity(0.34), .clear],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                shape
+                    .stroke(
+                        selected ? GraphTheme.editBlue.opacity(0.88) : GraphTheme.stroke(colorScheme),
+                        lineWidth: selected ? 1.8 : 1
+                    )
+                    .allowsHitTesting(false)
+            }
+            .clipShape(shape)
+            .shadow(
+                color: selected ? GraphTheme.editBlue.opacity(0.22) : GraphTheme.glassShadow(colorScheme),
+                radius: selected ? 13 : 9,
+                y: 5
+            )
+    }
+
     func graphMenuPanel(colorScheme: ColorScheme) -> some View {
         self
             .padding(15)
-            .background(GraphTheme.elevatedSurface(colorScheme))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(GraphTheme.stroke(colorScheme), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(color: .black.opacity(colorScheme == .dark ? 0.48 : 0.14), radius: 22, y: 12)
+            .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 16)
     }
 }
 
