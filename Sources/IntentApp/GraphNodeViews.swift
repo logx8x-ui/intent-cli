@@ -72,23 +72,24 @@ struct IntentionNodeView: View {
 
     private func appTile(_ app: AllowedApp, width: CGFloat, height: CGFloat) -> some View {
         let websites = intention.websites(for: app.bundleIdentifier)
-        let iconPadding = max(4, min(width, height) * 0.08)
 
         return ZStack(alignment: .bottomTrailing) {
             Group {
                 if let installed = installedApps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
                     Image(nsImage: installed.icon)
                         .resizable()
-                        .scaledToFit()
+                        .scaledToFill()
+                        .scaleEffect(1.34)
                 } else {
                     Image(systemName: app.isBrowser ? "globe" : "app")
                         .resizable()
                         .scaledToFit()
+                        .padding(max(8, min(width, height) * 0.18))
                         .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.82))
                 }
             }
-            .padding(iconPadding)
             .frame(width: width, height: height)
+            .clipped()
 
             if app.isBrowser, !websites.isEmpty {
                 websiteIndicator(count: websites.count)
@@ -97,7 +98,6 @@ struct IntentionNodeView: View {
             }
         }
         .frame(width: width, height: height)
-        .background(GraphTheme.surface(colorScheme))
         .clipped()
         .help(app.name)
     }

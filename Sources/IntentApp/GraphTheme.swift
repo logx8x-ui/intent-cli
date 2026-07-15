@@ -10,7 +10,7 @@ enum GraphTheme {
     }
 
     static func backdropTintOpacity(_ colorScheme: ColorScheme) -> Double {
-        colorScheme == .dark ? 0.76 : 0.88
+        colorScheme == .dark ? 0.61 : 0.73
     }
 
     static func chrome(_ colorScheme: ColorScheme) -> Color {
