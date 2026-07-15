@@ -15,26 +15,19 @@ struct IntentionNodeView: View {
                 .lineLimit(1)
                 .frame(maxWidth: 190)
 
-            ZStack {
-                appSlices
-                    .frame(width: squareSize, height: squareSize)
-                    .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
-                    .frame(maxHeight: .infinity, alignment: .top)
-
-                websiteSpikes
-                    .allowsHitTesting(false)
-            }
-            .frame(width: 188, height: 194)
+            appGrid
+                .frame(width: squareSize, height: squareSize)
+                .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
         }
         .foregroundStyle(GraphTheme.text(colorScheme))
-        .frame(width: 200, height: 226)
+        .frame(width: 200, height: 190)
         .contentShape(Rectangle())
     }
 
     @Environment(\.colorScheme) private var colorScheme
 
-    private var appSlices: some View {
-        HStack(spacing: 0) {
+    private var appGrid: some View {
+        Group {
             if intention.allowedApps.isEmpty {
                 VStack(spacing: 9) {
                     Image(systemName: "plus")
@@ -45,66 +38,91 @@ struct IntentionNodeView: View {
                 .foregroundStyle(GraphTheme.muted(colorScheme))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ForEach(Array(intention.allowedApps.enumerated()), id: \.element.bundleIdentifier) { index, app in
-                    appIcon(app)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(GraphTheme.surface(colorScheme))
-                    .clipped()
-                    .overlay(alignment: .leading) {
-                        if index > 0 {
-                            Rectangle()
-                                .fill(GraphTheme.stroke(colorScheme))
-                                .frame(width: 1)
+                GeometryReader { proxy in
+                    let layout = appGridLayout(count: intention.allowedApps.count)
+                    let spacing = CGFloat(1)
+                    let cellWidth = (proxy.size.width - CGFloat(layout.columns - 1) * spacing) / CGFloat(layout.columns)
+                    let cellHeight = (proxy.size.height - CGFloat(layout.rows - 1) * spacing) / CGFloat(layout.rows)
+
+                    VStack(spacing: spacing) {
+                        ForEach(0..<layout.rows, id: \.self) { row in
+                            HStack(spacing: spacing) {
+                                ForEach(0..<layout.columns, id: \.self) { column in
+                                    let index = row * layout.columns + column
+                                    if index < intention.allowedApps.count {
+                                        appTile(
+                                            intention.allowedApps[index],
+                                            width: cellWidth,
+                                            height: cellHeight
+                                        )
+                                    } else {
+                                        Color.clear
+                                            .frame(width: cellWidth, height: cellHeight)
+                                    }
+                                }
+                            }
                         }
                     }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .background(GraphTheme.stroke(colorScheme).opacity(0.55))
                 }
             }
         }
     }
 
-    @ViewBuilder
-    private func appIcon(_ app: AllowedApp) -> some View {
-        if let installed = installedApps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-            Image(nsImage: installed.icon)
-                .resizable()
-                .scaledToFill()
-        } else {
-            Image(systemName: app.isBrowser ? "globe" : "app")
-                .resizable()
-                .scaledToFit()
-                .padding(18)
-                .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.82))
-        }
-    }
+    private func appTile(_ app: AllowedApp, width: CGFloat, height: CGFloat) -> some View {
+        let websites = intention.websites(for: app.bundleIdentifier)
+        let iconPadding = max(4, min(width, height) * 0.08)
 
-    private var websiteSpikes: some View {
-        Canvas { context, size in
-            guard !intention.allowedApps.isEmpty else { return }
-            let sliceWidth = squareSize / CGFloat(intention.allowedApps.count)
-            let squareOriginX = (size.width - squareSize) / 2
-            let squareBottom = squareSize
-
-            for (appIndex, app) in intention.allowedApps.enumerated() where app.isBrowser {
-                let websites = intention.websites(for: app.bundleIdentifier)
-                let centerX = squareOriginX + sliceWidth * (CGFloat(appIndex) + 0.5)
-                for websiteIndex in websites.indices {
-                    let spread = CGFloat(websiteIndex) - CGFloat(websites.count - 1) / 2
-                    let baseX = centerX + spread * 12
-                    let lean = spread * 2.6
-                    let height = 22 + min(abs(spread) * 3, 7)
-                    let halfBase = CGFloat(6)
-                    var path = Path()
-                    path.move(to: CGPoint(x: baseX - halfBase, y: squareBottom - 1))
-                    path.addLine(to: CGPoint(x: baseX + halfBase, y: squareBottom - 1))
-                    path.addLine(to: CGPoint(x: baseX + lean + 2, y: squareBottom + height))
-                    path.addLine(to: CGPoint(x: baseX + lean - 2, y: squareBottom + height))
-                    path.closeSubpath()
-                    context.fill(path, with: .color(GraphTheme.glassHighlight(colorScheme).opacity(0.42)))
-                    context.stroke(path, with: .color(GraphTheme.text(colorScheme).opacity(0.62)), lineWidth: 0.9)
+        return ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let installed = installedApps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+                    Image(nsImage: installed.icon)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(systemName: app.isBrowser ? "globe" : "app")
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.82))
                 }
             }
+            .padding(iconPadding)
+            .frame(width: width, height: height)
+
+            if app.isBrowser, !websites.isEmpty {
+                websiteIndicator(count: websites.count)
+                    .padding(max(3, min(width, height) * 0.055))
+                    .help(websites.map(\.displayName).joined(separator: ", "))
+            }
         }
-        .frame(width: 188, height: 194)
+        .frame(width: width, height: height)
+        .background(GraphTheme.surface(colorScheme))
+        .clipped()
+        .help(app.name)
+    }
+
+    private func websiteIndicator(count: Int) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "globe")
+                .font(.system(size: 7.5, weight: .semibold))
+            Text("\(count)")
+                .font(.system(size: 8, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.90))
+        .padding(.horizontal, 5)
+        .frame(height: 17)
+        .background(.ultraThinMaterial, in: Capsule())
+        .background(GraphTheme.glassTint(colorScheme), in: Capsule())
+        .overlay(Capsule().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.45), lineWidth: 0.7))
+        .shadow(color: GraphTheme.glassShadow(colorScheme).opacity(0.65), radius: 4, y: 2)
+        .allowsHitTesting(false)
+    }
+
+    private func appGridLayout(count: Int) -> (columns: Int, rows: Int) {
+        let columns = max(1, Int(ceil(sqrt(Double(max(count, 1))))))
+        let rows = max(1, Int(ceil(Double(max(count, 1)) / Double(columns))))
+        return (columns, rows)
     }
 }
 
