@@ -21,7 +21,11 @@ struct IntentGraphView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
+                AdaptiveBackdropView()
+                    .ignoresSafeArea()
+
                 GraphTheme.background(colorScheme)
+                    .opacity(GraphTheme.backdropTintOpacity(colorScheme))
                     .ignoresSafeArea()
 
                 StarfieldView(scale: cameraScale, offset: cameraOffset)

@@ -9,6 +9,10 @@ enum GraphTheme {
             : Color(red: 0.975, green: 0.978, blue: 0.984)
     }
 
+    static func backdropTintOpacity(_ colorScheme: ColorScheme) -> Double {
+        colorScheme == .dark ? 0.76 : 0.88
+    }
+
     static func chrome(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
             ? Color.white.opacity(0.035)
@@ -56,6 +60,21 @@ enum GraphTheme {
     }
 
     static let editBlue = Color(red: 0.46, green: 0.66, blue: 1.0)
+}
+
+struct AdaptiveBackdropView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.state = .active
+    }
 }
 
 struct TriangleShape: Shape {
