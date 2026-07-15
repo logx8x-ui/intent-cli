@@ -10,7 +10,7 @@ enum GraphTheme {
     }
 
     static func backdropTintOpacity(_ colorScheme: ColorScheme) -> Double {
-        colorScheme == .dark ? 0.61 : 0.73
+        colorScheme == .dark ? 0.46 : 0.58
     }
 
     static func chrome(_ colorScheme: ColorScheme) -> Color {
@@ -83,6 +83,46 @@ struct TriangleShape: Shape {
         path.move(to: CGPoint(x: rect.midX, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
         path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+struct RoundedTriangleShape: Shape {
+    var cornerRadius: CGFloat = 12
+
+    func path(in rect: CGRect) -> Path {
+        let vertices = [
+            CGPoint(x: rect.midX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY)
+        ]
+        let radius = min(cornerRadius, min(rect.width, rect.height) * 0.18)
+
+        func point(from start: CGPoint, toward end: CGPoint) -> CGPoint {
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let length = max(sqrt(dx * dx + dy * dy), 0.001)
+            let ratio = min(radius / length, 0.42)
+            return CGPoint(x: start.x + dx * ratio, y: start.y + dy * ratio)
+        }
+
+        var path = Path()
+        path.move(to: point(from: vertices[0], toward: vertices[1]))
+
+        for index in 1...vertices.count {
+            let vertexIndex = index % vertices.count
+            let previousIndex = (vertexIndex + vertices.count - 1) % vertices.count
+            let nextIndex = (vertexIndex + 1) % vertices.count
+            let vertex = vertices[vertexIndex]
+
+            path.addLine(to: point(from: vertex, toward: vertices[previousIndex]))
+            path.addQuadCurve(
+                to: point(from: vertex, toward: vertices[nextIndex]),
+                control: vertex
+            )
+        }
+
         path.closeSubpath()
         return path
     }

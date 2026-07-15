@@ -6,6 +6,7 @@ struct IntentGraphView: View {
     @EnvironmentObject private var model: IntentAppModel
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("intentAppearance") private var appearance = "dark"
+    @AppStorage("intentWelcomeTitle") private var welcomeTitle = "Welcome to Intent"
 
     @State private var editMode = false
     @State private var selection: GraphSelection?
@@ -14,6 +15,9 @@ struct IntentGraphView: View {
     @State private var offsetAtGestureStart: CGSize = .zero
     @State private var hoverLocation: CGPoint?
     @State private var statusMessage: String?
+    @State private var welcomeTitleDraft = ""
+    @State private var editingWelcomeTitle = false
+    @FocusState private var welcomeTitleFocused: Bool
 
     private let minimumScale: CGFloat = 0.35
     private let maximumScale: CGFloat = 2.35
@@ -45,7 +49,6 @@ struct IntentGraphView: View {
                 welcomeView
                     .scaleEffect(cameraScale)
                     .position(screenPoint(for: .zero, in: proxy.size))
-                    .allowsHitTesting(false)
 
                 graphNodes(in: proxy.size)
 
@@ -137,14 +140,50 @@ struct IntentGraphView: View {
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
                 .tracking(1.4)
                 .foregroundStyle(GraphTheme.muted(colorScheme))
-            Text("Welcome to Intent")
-                .font(.system(size: 29, weight: .semibold))
-                .foregroundStyle(GraphTheme.text(colorScheme))
+            Group {
+                if editingWelcomeTitle {
+                    TextField("Desktop title", text: $welcomeTitleDraft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 29, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .focused($welcomeTitleFocused)
+                        .onSubmit(commitWelcomeTitle)
+                        .onChange(of: welcomeTitleFocused) { focused in
+                            if !focused, editingWelcomeTitle {
+                                commitWelcomeTitle()
+                            }
+                        }
+                } else {
+                    Text(welcomeTitle)
+                        .font(.system(size: 29, weight: .semibold))
+                        .onTapGesture(count: 2, perform: beginEditingWelcomeTitle)
+                        .help("Double-click to rename this desktop")
+                }
+            }
+            .foregroundStyle(GraphTheme.text(colorScheme))
+            .frame(width: 370, height: 38)
             Text("Choose one thing. Let everything else wait.")
                 .font(.system(size: 12))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
         }
         .frame(width: 390)
+    }
+
+    private func beginEditingWelcomeTitle() {
+        welcomeTitleDraft = welcomeTitle
+        editingWelcomeTitle = true
+        DispatchQueue.main.async {
+            welcomeTitleFocused = true
+        }
+    }
+
+    private func commitWelcomeTitle() {
+        let trimmedTitle = welcomeTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTitle.isEmpty {
+            welcomeTitle = trimmedTitle
+        }
+        editingWelcomeTitle = false
+        welcomeTitleFocused = false
     }
 
     private var topBar: some View {

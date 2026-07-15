@@ -136,12 +136,15 @@ struct RestrictionNodeView: View {
         ZStack {
             Circle()
                 .fill(.ultraThinMaterial)
-                .overlay(Circle().fill(GraphTheme.glassTint(colorScheme)))
                 .overlay(
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [GraphTheme.glassHighlight(colorScheme).opacity(0.30), .clear],
+                                colors: [
+                                    GraphTheme.glassHighlight(colorScheme).opacity(0.22),
+                                    GraphTheme.glassTint(colorScheme),
+                                    Color.black.opacity(colorScheme == .dark ? 0.18 : 0.03)
+                                ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -149,19 +152,48 @@ struct RestrictionNodeView: View {
                 )
                 .overlay(
                     Circle()
-                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1.2)
+                        .inset(by: 7)
+                        .stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.14), lineWidth: 1)
                 )
-                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.22) : GraphTheme.glassShadow(colorScheme), radius: 9, y: 5)
-            VStack(spacing: 5) {
-                Image(systemName: node.kind == .allowBrowserSearches ? "magnifyingglass" : "nosign")
-                    .font(.system(size: 17, weight: .medium))
+                .overlay {
+                    Circle()
+                        .trim(from: 0.58, to: 0.89)
+                        .stroke(
+                            GraphTheme.glassHighlight(colorScheme).opacity(0.48),
+                            style: StrokeStyle(lineWidth: 1.4, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-18))
+                        .padding(2)
+                }
+                .overlay(
+                    Circle()
+                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1)
+                )
+                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.25) : GraphTheme.glassShadow(colorScheme), radius: 12, y: 7)
+
+            VStack(spacing: 4) {
+                ZStack {
+                    Circle()
+                        .fill(GraphTheme.elevatedSurface(colorScheme))
+                        .overlay(Circle().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.22), lineWidth: 0.8))
+                    Image(systemName: node.kind == .allowBrowserSearches ? "magnifyingglass" : "poweroff")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .frame(width: 31, height: 31)
+
+                Text("RESTRICTION")
+                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
                 Text(node.kind == .allowBrowserSearches ? "Browser\nsearches" : "Don't\nstart up")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 10, weight: .semibold))
                     .multilineTextAlignment(.center)
+                    .lineSpacing(-1)
             }
             .foregroundStyle(GraphTheme.text(colorScheme))
         }
-        .frame(width: 106, height: 106)
+        .frame(width: 116, height: 116)
         .contentShape(Circle())
     }
 }
@@ -174,37 +206,59 @@ struct FrictionNodeView: View {
 
     var body: some View {
         ZStack {
-            TriangleShape()
+            RoundedTriangleShape(cornerRadius: 13)
                 .fill(.ultraThinMaterial)
-                .overlay(TriangleShape().fill(GraphTheme.glassTint(colorScheme)))
                 .overlay(
-                    TriangleShape()
+                    RoundedTriangleShape(cornerRadius: 13)
                         .fill(
                             LinearGradient(
-                                colors: [GraphTheme.glassHighlight(colorScheme).opacity(0.30), .clear],
+                                colors: [
+                                    GraphTheme.glassHighlight(colorScheme).opacity(0.22),
+                                    GraphTheme.glassTint(colorScheme),
+                                    Color.black.opacity(colorScheme == .dark ? 0.20 : 0.04)
+                                ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                 )
                 .overlay(
-                    TriangleShape()
-                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1.2)
+                    RoundedTriangleShape(cornerRadius: 11)
+                        .stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.13), lineWidth: 1)
+                        .scaleEffect(0.84)
+                        .offset(y: 6)
                 )
-                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.22) : GraphTheme.glassShadow(colorScheme), radius: 9, y: 5)
-            VStack(spacing: 5) {
-                Image(systemName: frictionIcon)
-                    .font(.system(size: 16, weight: .medium))
+                .overlay(
+                    RoundedTriangleShape(cornerRadius: 13)
+                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1)
+                )
+                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.25) : GraphTheme.glassShadow(colorScheme), radius: 12, y: 7)
+
+            VStack(spacing: 3) {
+                ZStack {
+                    Circle()
+                        .fill(GraphTheme.elevatedSurface(colorScheme))
+                        .overlay(Circle().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.22), lineWidth: 0.8))
+                    Image(systemName: frictionIcon)
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .frame(width: 29, height: 29)
+
+                Text("FRICTION")
+                    .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
                 Text(shortLabel)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 9.5, weight: .semibold))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
             }
             .foregroundStyle(GraphTheme.text(colorScheme))
-            .offset(y: 14)
+            .offset(y: 17)
         }
-        .frame(width: 118, height: 104)
-        .contentShape(TriangleShape())
+        .frame(width: 126, height: 112)
+        .contentShape(RoundedTriangleShape(cornerRadius: 13))
     }
 
     private var shortLabel: String {
