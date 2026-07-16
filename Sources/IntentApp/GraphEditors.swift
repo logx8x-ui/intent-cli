@@ -122,8 +122,8 @@ struct IntentionEditorMenu: View {
             ForEach(browsers) { browser in
                 VStack(alignment: .leading, spacing: 7) {
                     fieldLabel("\(browser.name) websites")
-                    if browser.bundleIdentifier != "org.mozilla.firefox" {
-                        Label("Browser locking is currently available in Firefox only.", systemImage: "exclamationmark.triangle")
+                    if !["org.mozilla.firefox", "com.google.Chrome"].contains(browser.bundleIdentifier) {
+                        Label("Browser locking is currently available in Firefox and Chrome.", systemImage: "exclamationmark.triangle")
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }

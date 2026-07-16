@@ -322,7 +322,7 @@ public final class FocusLock {
             return nil
         }
 
-        if spec.blockBrowserTabEscape && isFirefoxFrontmost() {
+        if spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
             if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {
                 refocus()
                 return nil
@@ -511,6 +511,13 @@ public final class FocusLock {
         }
 
         return bundleIdentifier == nil && Date() < systemSwitcherGraceUntil
+    }
+
+    private func isSupportedBrowserFrontmost() -> Bool {
+        guard let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
+            return false
+        }
+        return ["org.mozilla.firefox", "com.google.Chrome"].contains(bundleIdentifier)
     }
 
     private func isFirefoxFrontmost() -> Bool {

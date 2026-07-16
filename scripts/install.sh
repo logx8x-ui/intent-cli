@@ -46,9 +46,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.6</string>
+  <string>0.3.7</string>
   <key>CFBundleVersion</key>
-  <string>10</string>
+  <string>11</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -116,6 +116,22 @@ echo "Installed Intent, IntentApp, and intent-app to $BIN_DIR"
 echo "Installed Intent.app to $APP_BUNDLE"
 echo "Installed Intent as a login menu-bar app via $LAUNCH_AGENT_FILE"
 echo "Installed Firefox native host manifest to $HOST_FILE"
+
+CHROME_HOST_DIR="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"
+CHROME_HOST_FILE="${CHROME_HOST_DIR}/intent_native_host.json"
+mkdir -p "$CHROME_HOST_DIR"
+cat > "$CHROME_HOST_FILE" <<JSON
+{
+  "name": "intent_native_host",
+  "description": "Intent browser rules native host",
+  "path": "${APP_DIR}/IntentNativeHost",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/"
+  ]
+}
+JSON
+echo "Installed Chrome native host manifest to $CHROME_HOST_FILE"
 
 if [[ -w /opt/homebrew/bin ]]; then
   ln -sf "$APP_DIR/Intent" /opt/homebrew/bin/Intent

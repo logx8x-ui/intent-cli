@@ -26,6 +26,7 @@ func writeMessage<T: Encodable>(_ value: T) throws {
 struct HostRequest: Codable {
     var type: String?
     var enabled: Bool?
+    var browserBundleIdentifier: String?
 }
 
 struct HostResponse: Codable {
@@ -38,40 +39,50 @@ struct HostResponse: Codable {
     var guardEnabled: Bool
 }
 
-let requestData = readMessage()
-let request = requestData.flatMap { try? JSONDecoder().decode(HostRequest.self, from: $0) }
-try? BrowserGuardHeartbeatStore().write()
-
-if request?.type == "setGuardEnabled", let enabled = request?.enabled {
-    try? BrowserGuardStateStore().write(enabled: enabled)
-}
-
-let fileURL = ActiveBrowserRulesStore.defaultFileURL()
-let response: HostResponse
-let guardEnabled = BrowserGuardStateStore().isEnabled()
-
-if let data = try? Data(contentsOf: fileURL),
-   let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data),
-   !rules.active || rules.isFresh() {
-    response = HostResponse(
-        active: rules.active,
-        allowedWebsites: rules.allowedWebsites,
-        blockTabSwitching: rules.blockTabSwitching,
-        blockNavigation: rules.blockNavigation,
-        blockNewTabs: rules.blockNewTabs,
-        allowGoogleSearchTabs: rules.allowGoogleSearchTabs,
-        guardEnabled: guardEnabled
+while let requestData = readMessage() {
+    let request = try? JSONDecoder().decode(HostRequest.self, from: requestData)
+    let browserBundleIdentifier = request?.browserBundleIdentifier ?? "org.mozilla.firefox"
+    let heartbeatStore = BrowserGuardHeartbeatStore(
+        fileURL: BrowserGuardHeartbeatStore.fileURL(for: browserBundleIdentifier)
     )
-} else {
-    response = HostResponse(
-        active: false,
-        allowedWebsites: [],
-        blockTabSwitching: false,
-        blockNavigation: false,
-        blockNewTabs: false,
-        allowGoogleSearchTabs: false,
-        guardEnabled: guardEnabled
+    let stateStore = BrowserGuardStateStore(
+        fileURL: BrowserGuardStateStore.fileURL(for: browserBundleIdentifier)
     )
-}
+    try? heartbeatStore.write()
 
-try writeMessage(response)
+    if request?.type == "setGuardEnabled", let enabled = request?.enabled {
+        try? stateStore.write(enabled: enabled)
+    }
+
+    let fileURL = ActiveBrowserRulesStore.defaultFileURL()
+    let response: HostResponse
+    let guardEnabled = stateStore.isEnabled()
+
+    if let data = try? Data(contentsOf: fileURL),
+       let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data),
+       !rules.active || rules.isFresh() {
+        let browserWebsites = rules.allowedWebsitesByBrowser[browserBundleIdentifier]
+            ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
+        response = HostResponse(
+            active: rules.active,
+            allowedWebsites: browserWebsites,
+            blockTabSwitching: rules.blockTabSwitching,
+            blockNavigation: rules.blockNavigation,
+            blockNewTabs: rules.blockNewTabs,
+            allowGoogleSearchTabs: rules.allowGoogleSearchTabs,
+            guardEnabled: guardEnabled
+        )
+    } else {
+        response = HostResponse(
+            active: false,
+            allowedWebsites: [],
+            blockTabSwitching: false,
+            blockNavigation: false,
+            blockNewTabs: false,
+            allowGoogleSearchTabs: false,
+            guardEnabled: guardEnabled
+        )
+    }
+
+    try writeMessage(response)
+}

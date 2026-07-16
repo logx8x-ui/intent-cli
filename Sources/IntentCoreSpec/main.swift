@@ -351,6 +351,10 @@ do {
     let browserRules = ActiveBrowserRules(
         active: true,
         allowedWebsites: ["github.com"],
+        allowedWebsitesByBrowser: [
+            "org.mozilla.firefox": ["github.com"],
+            "com.google.Chrome": ["instagram.com/direct"]
+        ],
         blockTabSwitching: true,
         blockNavigation: true,
         blockNewTabs: false,
@@ -359,6 +363,7 @@ do {
     try rulesStore.write(browserRules)
     let loadedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
     try expect(loadedRules == browserRules, "Active browser rules should round-trip")
+    try expect(loadedRules.allowedWebsitesByBrowser["com.google.Chrome"] == ["instagram.com/direct"], "Chrome websites should remain browser-specific")
     try expect(loadedRules.isFresh(), "Freshly written active browser rules should be fresh")
     let staleLegacyRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data("""
     {

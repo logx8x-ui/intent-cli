@@ -1,12 +1,15 @@
 {
   "name": "intent",
   "private": true,
-  "version": "0.1.4",
-  "description": "Intent macOS focus tool and Firefox Browser Guard extension.",
+  "version": "0.1.5",
+  "description": "Intent macOS focus tool with Firefox and Chrome Browser Guard extensions.",
   "scripts": {
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs",
+    "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
+    "test:extensions": "npm run test:firefox && npm run test:chrome",
     "extension:lint": "addons-linter firefox-extension",
     "extension:build": "web-ext build --source-dir firefox-extension --artifacts-dir dist/firefox --overwrite-dest",
+    "extension:build:chrome": "./scripts/build-chrome-extension.sh",
     "extension:sign:unlisted": "web-ext sign --channel=unlisted --source-dir firefox-extension --artifacts-dir dist/firefox --api-key=$AMO_JWT_ISSUER --api-secret=$AMO_JWT_SECRET",
     "extension:sign:listed": "web-ext sign --channel=listed --source-dir firefox-extension --artifacts-dir dist/firefox --amo-metadata amo-listing.json --api-key=$AMO_JWT_ISSUER --api-secret=$AMO_JWT_SECRET"
   },

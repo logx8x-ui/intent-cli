@@ -18,7 +18,7 @@ Default intentions:
 
 - macOS 13 or newer
 - Xcode Command Line Tools
-- Firefox for browser-based tasks
+- Firefox or Google Chrome for browser-based tasks
 - RStudio, Spotify, RemNote, and Codex for the current Data science deep-work mode
 
 Install Xcode Command Line Tools if needed:
@@ -64,7 +64,7 @@ Or start the CLI:
 Intent
 ```
 
-The installer also installs the Firefox native messaging host that lets the browser extension read the active Intent rules.
+The installer also installs the Firefox and Chrome native messaging hosts that let each Browser Guard read only its own active Intent rules.
 
 To enable Firefox tab and URL blocking during browser intentions:
 
@@ -90,7 +90,23 @@ export AMO_JWT_SECRET='...'
 ```
 
 `scripts/sign-firefox-extension.sh` signs through Mozilla's unlisted add-on flow. The signed `.xpi` is written to `dist/firefox/` and can be shared with testers without making the extension public on AMO. The final signing step needs credentials from the Intent Mozilla Add-ons developer account.
-Intent refuses to start Firefox intentions when Browser Guard is not connected, instead of silently running without tab protection. Firefox is the currently supported browser for enforceable tab and URL restrictions; Intent refuses to start browser intentions using unsupported browsers rather than presenting a false lock.
+Intent refuses to start Firefox or Chrome intentions when that browser's guard is disconnected or switched off, instead of silently running without tab protection. Other browsers remain unsupported for enforceable tab and URL restrictions.
+
+To test Intent Browser Guard in Chrome:
+
+1. Run `./scripts/install.sh` so Chrome can reach the native host.
+2. Open `chrome://extensions`.
+3. Enable Developer mode.
+4. Click `Load unpacked` and choose the repo's `chrome-extension` folder.
+5. Pin Intent Browser Guard and leave its switch on. "Listening" does not block normal browsing; rules activate only while an intention is running.
+
+Build the Chrome Web Store package with:
+
+```zsh
+npm run extension:build:chrome
+```
+
+The upload-ready ZIP is written to `dist/chrome/`. Chrome Web Store submission is a later release step; local unpacked testing uses the same extension code and persistent toggle.
 
 The first lock session may need macOS permissions:
 
@@ -106,7 +122,7 @@ From the cloned repo:
 ./scripts/update.sh
 ```
 
-That pulls the latest GitHub version and reinstalls the CLI, desktop app, and Firefox native host.
+That pulls the latest GitHub version and reinstalls the CLI, desktop app, and both browser native hosts.
 
 ## Friend Install Command
 
@@ -122,7 +138,7 @@ intent-app
 
 For the desktop experience, open `~/Applications/Intent.app`, then use the menu-bar icon or press `~`.
 
-They should also install Intent Browser Guard in Firefox and keep its toolbar switch on. Until the Mozilla public listing is approved, they can load the development extension from `~/intent/firefox-extension/manifest.json` using `about:debugging#/runtime/this-firefox`.
+They should also install Intent Browser Guard in the browser used by their intentions and keep its toolbar switch on. Firefox can use the signed beta or temporary development extension; Chrome can load `~/intent/chrome-extension` as an unpacked extension during beta testing.
 
 After that, friends can update with:
 

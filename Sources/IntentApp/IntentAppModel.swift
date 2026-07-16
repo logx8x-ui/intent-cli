@@ -23,8 +23,6 @@ final class IntentAppModel: ObservableObject {
 
     private let store = IntentionStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
-    private let browserGuardHeartbeatStore = BrowserGuardHeartbeatStore()
-    private let browserGuardStateStore = BrowserGuardStateStore()
     private var pendingStartIntention: Intention?
     private var remainingFrictions: [FrictionNode] = []
     private var activeLock: FocusLock?
@@ -175,11 +173,11 @@ final class IntentAppModel: ObservableObject {
             return
         }
         let unsupportedBrowsers = intention.allowedApps.filter {
-            $0.isBrowser && $0.bundleIdentifier != "org.mozilla.firefox"
+            $0.isBrowser && !Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
         }
         if !unsupportedBrowsers.isEmpty {
             let names = unsupportedBrowsers.map(\.name).joined(separator: ", ")
-            errorMessage = "Browser locking currently supports Firefox only. Replace \(names) with Firefox before starting this intention."
+            errorMessage = "Browser locking currently supports Firefox and Chrome. Replace \(names) with one of those browsers before starting this intention."
             return
         }
 
@@ -266,25 +264,36 @@ final class IntentAppModel: ObservableObject {
     }
 
     private func start(_ intention: Intention) {
-        if requiresFirefoxGuard(intention),
-           !browserGuardHeartbeatStore.isFresh(maxAge: 5) {
-            errorMessage = "Firefox browser locking is not connected. Load the Intent Browser Guard extension in Firefox, then start this intention again."
-            return
-        }
+        for browser in requiredBrowserGuards(for: intention) {
+            let heartbeatStore = BrowserGuardHeartbeatStore(
+                fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser.bundleIdentifier)
+            )
+            if !heartbeatStore.isFresh(maxAge: 5) {
+                errorMessage = "\(browser.name) browser locking is not connected. Load Intent Browser Guard in \(browser.name), then start this intention again."
+                return
+            }
 
-        if requiresFirefoxGuard(intention),
-           !browserGuardStateStore.isEnabled() {
-            errorMessage = "Firefox browser locking is turned off. Open Intent Browser Guard in Firefox and switch it on, then start this intention again."
-            return
+            let stateStore = BrowserGuardStateStore(
+                fileURL: BrowserGuardStateStore.fileURL(for: browser.bundleIdentifier)
+            )
+            if !stateStore.isEnabled() {
+                errorMessage = "Intent Browser Guard is turned off in \(browser.name). Open its toolbar popup and switch it on, then start this intention again."
+                return
+            }
         }
 
         let spec = FocusSessionSpec.make(for: intention)
-        let firefoxWebsites = intention.websites(for: "org.mozilla.firefox").map(\.value)
+        let websitesByBrowser = Dictionary(uniqueKeysWithValues: requiredBrowserGuards(for: intention).map { browser in
+            let websites = intention.websites(for: browser.bundleIdentifier).map(\.value)
+            return (browser.bundleIdentifier, websites.isEmpty ? ["intent.invalid"] : websites)
+        })
+        let firefoxWebsites = websitesByBrowser["org.mozilla.firefox"] ?? []
         let rules = ActiveBrowserRules(
             active: true,
             // A non-matching sentinel keeps already-installed Browser Guard 0.1.3 builds strict
             // when Firefox is allowed but the intention has no website spikes.
-            allowedWebsites: firefoxWebsites.isEmpty ? ["intent.invalid"] : firefoxWebsites,
+            allowedWebsites: firefoxWebsites,
+            allowedWebsitesByBrowser: websitesByBrowser,
             blockTabSwitching: true,
             blockNavigation: true,
             blockNewTabs: !intention.browserSearchesAllowed,
@@ -331,9 +340,16 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    private func requiresFirefoxGuard(_ intention: Intention) -> Bool {
-        intention.allowedApps.contains { $0.bundleIdentifier == "org.mozilla.firefox" }
+    private func requiredBrowserGuards(for intention: Intention) -> [AllowedApp] {
+        intention.allowedApps.filter {
+            Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
+        }
     }
+
+    private static let supportedBrowserBundleIdentifiers: Set<String> = [
+        "org.mozilla.firefox",
+        "com.google.Chrome"
+    ]
 }
 
 struct PendingFriction: Identifiable {

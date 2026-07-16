@@ -11,10 +11,7 @@
   function normalizedURLParts(url) {
     try {
       if (["about:blank", "about:newtab", "chrome://newtab/"].includes(url)) {
-        return {
-          host: "about",
-          path: url.replace("about:", "/")
-        };
+        return { host: "about", path: "/newtab" };
       }
 
       const parsed = new URL(url);
@@ -37,62 +34,30 @@
 
   function isGoogleSearchURL(url) {
     const parts = normalizedURLParts(url);
-    if (!parts) {
-      return false;
-    }
-
+    if (!parts) return false;
     const googleHost = parts.host === "google.com" || /^google\.[a-z.]+$/.test(parts.host);
     return googleHost && (parts.path === "" || parts.path === "/" || parts.path === "/search");
   }
 
   function isAllowedURL(url, rules) {
-    if (!rules.active) {
-      return true;
-    }
-
-    if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) {
-      return true;
-    }
-
-    if (rules.allowedWebsites.length === 0) {
-      return false;
-    }
+    if (!rules.active) return true;
+    if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) return true;
+    if (!rules.allowedWebsites.length) return false;
 
     const parts = normalizedURLParts(url);
-    if (!parts) {
-      return false;
-    }
-
+    if (!parts) return false;
     return rules.allowedWebsites.some((rawRule) => {
       const rule = normalizeRule(rawRule);
-      if (!rule) {
-        return false;
-      }
-
+      if (!rule) return false;
       const slashIndex = rule.indexOf("/");
       const ruleHost = slashIndex === -1 ? rule : rule.slice(0, slashIndex);
       const rulePath = slashIndex === -1 ? "" : rule.slice(slashIndex);
       const hostMatches = parts.host === ruleHost || parts.host.endsWith(`.${ruleHost}`);
-
-      if (!hostMatches) {
-        return false;
-      }
-
-      return rulePath === "" || parts.path === rulePath || parts.path.startsWith(`${rulePath}/`);
+      return hostMatches && (rulePath === "" || parts.path === rulePath || parts.path.startsWith(`${rulePath}/`));
     });
   }
 
-  const api = {
-    normalizeRule,
-    normalizedURLParts,
-    isSearchStagingURL,
-    isGoogleSearchURL,
-    isAllowedURL
-  };
-
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = api;
-  } else {
-    root.IntentBrowserRules = api;
-  }
+  const api = { normalizeRule, normalizedURLParts, isSearchStagingURL, isGoogleSearchURL, isAllowedURL };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else root.IntentBrowserRules = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

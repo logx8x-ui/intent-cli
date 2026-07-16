@@ -52,6 +52,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
 
     public var active: Bool
     public var allowedWebsites: [String]
+    public var allowedWebsitesByBrowser: [String: [String]]
     public var blockTabSwitching: Bool
     public var blockNavigation: Bool
     public var blockNewTabs: Bool
@@ -61,6 +62,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     public init(
         active: Bool,
         allowedWebsites: [String],
+        allowedWebsitesByBrowser: [String: [String]] = [:],
         blockTabSwitching: Bool,
         blockNavigation: Bool,
         blockNewTabs: Bool,
@@ -69,6 +71,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     ) {
         self.active = active
         self.allowedWebsites = allowedWebsites
+        self.allowedWebsitesByBrowser = allowedWebsitesByBrowser
         self.blockTabSwitching = blockTabSwitching
         self.blockNavigation = blockNavigation
         self.blockNewTabs = blockNewTabs
@@ -79,6 +82,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case active
         case allowedWebsites
+        case allowedWebsitesByBrowser
         case blockTabSwitching
         case blockNavigation
         case blockNewTabs
@@ -90,6 +94,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
+        allowedWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .allowedWebsitesByBrowser) ?? [:]
         blockTabSwitching = try container.decodeIfPresent(Bool.self, forKey: .blockTabSwitching) ?? false
         blockNavigation = try container.decodeIfPresent(Bool.self, forKey: .blockNavigation) ?? false
         blockNewTabs = try container.decodeIfPresent(Bool.self, forKey: .blockNewTabs) ?? false
@@ -101,6 +106,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         .init(
             active: active,
             allowedWebsites: allowedWebsites,
+            allowedWebsitesByBrowser: allowedWebsitesByBrowser,
             blockTabSwitching: blockTabSwitching,
             blockNavigation: blockNavigation,
             blockNewTabs: blockNewTabs,
@@ -184,6 +190,16 @@ public final class BrowserGuardStateStore {
         return state.enabled
     }
 
+    public static func fileURL(for browserBundleIdentifier: String) -> URL {
+        guard browserBundleIdentifier != "org.mozilla.firefox" else {
+            return defaultFileURL()
+        }
+        return FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".intent", isDirectory: true)
+            .appendingPathComponent("browser-guard-state-\(safeFileComponent(browserBundleIdentifier)).json")
+    }
+
     public static func defaultFileURL() -> URL {
         FileManager.default
             .homeDirectoryForCurrentUser
@@ -229,4 +245,20 @@ public final class BrowserGuardHeartbeatStore {
             .appendingPathComponent(".intent", isDirectory: true)
             .appendingPathComponent("browser-guard-heartbeat.json")
     }
+
+    public static func fileURL(for browserBundleIdentifier: String) -> URL {
+        guard browserBundleIdentifier != "org.mozilla.firefox" else {
+            return defaultFileURL()
+        }
+        return FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".intent", isDirectory: true)
+            .appendingPathComponent("browser-guard-heartbeat-\(safeFileComponent(browserBundleIdentifier)).json")
+    }
+}
+
+private func safeFileComponent(_ value: String) -> String {
+    value.map { character in
+        character.isLetter || character.isNumber ? character : "-"
+    }.reduce(into: "") { $0.append($1) }
 }

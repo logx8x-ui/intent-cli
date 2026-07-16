@@ -1,4 +1,5 @@
 const HOST_NAME = "intent_native_host";
+const BROWSER_BUNDLE_IDENTIFIER = "org.mozilla.firefox";
 const RULE_REFRESH_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
 
@@ -51,7 +52,8 @@ async function notifyNativeGuardState() {
   try {
     await browser.runtime.sendNativeMessage(HOST_NAME, {
       type: "setGuardEnabled",
-      enabled: guardEnabled
+      enabled: guardEnabled,
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
     });
   } catch (_) {}
 }
@@ -68,7 +70,10 @@ async function refreshRules() {
   await ensureInitialized();
   const previousFingerprint = rulesFingerprint;
   try {
-    const nativeRules = await browser.runtime.sendNativeMessage(HOST_NAME, { type: "getRules" });
+    const nativeRules = await browser.runtime.sendNativeMessage(HOST_NAME, {
+      type: "getRules",
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
+    });
     rules = effectiveRules(nativeRules);
   } catch (_) {
     rules = inactiveRules();
