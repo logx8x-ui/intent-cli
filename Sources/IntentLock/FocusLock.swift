@@ -24,6 +24,7 @@ public enum FocusForegroundPolicy {
         guard let bundleIdentifier else { return false }
         return [
             "com.apple.dock",
+            "com.apple.Spotlight",
             "com.apple.WindowManager"
         ].contains(bundleIdentifier)
     }

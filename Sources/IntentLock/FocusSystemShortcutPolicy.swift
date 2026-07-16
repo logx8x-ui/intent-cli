@@ -1,7 +1,6 @@
 public enum FocusSystemShortcutPolicy {
     public static func shouldBlock(keyCode: Int64) -> Bool {
         [
-            KeyCode.space,
             KeyCode.q,
             KeyCode.h,
             KeyCode.m
@@ -38,9 +37,13 @@ public enum FocusBrowserShortcutPolicy {
             return true
         }
 
+        if command && keyCode == KeyCode.t {
+            return false
+        }
+
         if allowGoogleSearchTabs,
            command,
-           [KeyCode.l, KeyCode.t].contains(keyCode) {
+           keyCode == KeyCode.l {
             return false
         }
 

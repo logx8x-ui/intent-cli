@@ -155,7 +155,12 @@ do {
     )
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should be handled by Intent's allowed-app switcher")
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 50), "Cmd+grave should keep normal within-app window switching")
+    try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 49), "Cmd+Space should keep macOS Spotlight available")
     try expect(FocusSystemShortcutPolicy.shouldBlock(keyCode: 4), "Cmd+H should stay blocked as an escape shortcut")
+    try expect(
+        FocusForegroundPolicy.shouldDeferRefocus(bundleIdentifier: "com.apple.Spotlight"),
+        "Spotlight should remain usable while its system overlay is visible"
+    )
     try expect(
         !FocusBrowserShortcutPolicy.shouldBlock(
             keyCode: 21,
@@ -199,6 +204,17 @@ do {
             allowGoogleSearchTabs: false
         ),
         "Cmd+W should stay available so tabs can always close"
+    )
+    try expect(
+        !FocusBrowserShortcutPolicy.shouldBlock(
+            keyCode: 17,
+            command: true,
+            control: false,
+            option: false,
+            shift: false,
+            allowGoogleSearchTabs: false
+        ),
+        "Cmd+T should always create a browser tab, even when browser searches are disabled"
     )
 
     let firefoxBounds = FirefoxWindowBounds(x: 100, y: 200, width: 1200, height: 800)
