@@ -12,6 +12,8 @@ const instagram = {
 assert.equal(rules.isAllowedURL("https://instagram.com/direct/inbox/", instagram), true);
 assert.equal(rules.isAllowedURL("https://instagram.com/explore/", instagram), false);
 assert.equal(rules.isAllowedURL("chrome://newtab/", instagram), true);
+assert.equal(rules.isAllowedURL("chrome://new-tab-page/", instagram), true);
+assert.equal(rules.isAllowedURL("chrome-search://local-ntp/local-ntp.html", instagram), true);
 assert.equal(rules.isAllowedURL("https://www.google.com/search?q=intent", instagram), true);
 assert.equal(rules.isAllowedURL("https://youtube.com/", instagram), false);
 assert.equal(rules.isAllowedURL("https://anything.example/", { ...instagram, active: false }), true);

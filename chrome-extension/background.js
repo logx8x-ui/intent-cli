@@ -16,11 +16,12 @@ let nativePort = null;
 let reconnectTimer = null;
 let lastAllowedTabId = null;
 let enforcing = false;
-let recoveryBlankTabIds = new Set();
+let freshBlankTabIds = new Set();
 let creatingRecoveryBlankTab = false;
 let rulesFingerprint = fingerprintRules(rules);
 let dnrFingerprint = "";
 const lastAllowedURLByTab = new Map();
+const pendingRuleRequests = new Set();
 
 function inactiveRules() {
   return {
@@ -94,6 +95,25 @@ function requestRules() {
   if (!postNative({ type: "getRules" })) connectNativeHost();
 }
 
+async function refreshRules() {
+  await ensureInitialized();
+  if (!nativePort) connectNativeHost();
+  if (!nativePort) return;
+
+  await new Promise((resolve) => {
+    pendingRuleRequests.add(resolve);
+    if (!postNative({ type: "getRules" })) {
+      pendingRuleRequests.delete(resolve);
+      resolve();
+    }
+  });
+}
+
+function settleRuleRequests() {
+  for (const resolve of pendingRuleRequests) resolve();
+  pendingRuleRequests.clear();
+}
+
 function effectiveRules(nativeRules) {
   if (!guardEnabled || !nativeRules?.active) return inactiveRules();
   return {
@@ -107,6 +127,7 @@ async function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
   const nextFingerprint = fingerprintRules(nextRules);
   rules = nextRules;
+  settleRuleRequests();
   if (nextFingerprint === rulesFingerprint) return;
   rulesFingerprint = nextFingerprint;
 
@@ -115,7 +136,7 @@ async function applyNativeRules(nativeRules) {
   if (rules.active) await primeAllowedTab();
   else {
     lastAllowedTabId = null;
-    recoveryBlankTabIds.clear();
+    freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
   }
 }
@@ -191,12 +212,12 @@ function broadcastRules() {
   }).catch(() => {});
 }
 
-function isRecoveryBlankTab(tab) {
-  return Boolean(tab?.id && recoveryBlankTabIds.has(tab.id) && isSearchStagingURL(tab.url));
+function isFreshBlankTab(tab) {
+  return Boolean(tab?.id && freshBlankTabIds.has(tab.id) && isSearchStagingURL(tab.url));
 }
 
 function isRuntimeAllowedTab(tab) {
-  return Boolean(tab?.url && (isAllowedURL(tab.url, rules) || isRecoveryBlankTab(tab)));
+  return Boolean(tab?.url && (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab)));
 }
 
 async function primeAllowedTab() {
@@ -244,7 +265,7 @@ async function openRecoveryBlankTab() {
   creatingRecoveryBlankTab = true;
   try {
     const tab = await chrome.tabs.create({ url: "chrome://newtab/", active: true });
-    recoveryBlankTabIds.add(tab.id);
+    freshBlankTabIds.add(tab.id);
     lastAllowedTabId = tab.id;
   } finally {
     creatingRecoveryBlankTab = false;
@@ -285,6 +306,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  await refreshRules();
   if (!rules.active) return;
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab?.url) return;
@@ -297,22 +319,46 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  await refreshRules();
   if (!rules.active || (!changeInfo.url && changeInfo.status !== "complete") || !tab.url) return;
+
+  if (
+    freshBlankTabIds.has(tabId) &&
+    !rules.allowGoogleSearchTabs &&
+    changeInfo.url &&
+    !isSearchStagingURL(changeInfo.url)
+  ) {
+    freshBlankTabIds.delete(tabId);
+    await chrome.tabs.remove(tabId).catch(() => {});
+    await returnToAllowedTab();
+    return;
+  }
+
   if (isRuntimeAllowedTab(tab)) {
-    if (isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tabId, tab.url);
+    if (isAllowedURL(tab.url, rules)) {
+      freshBlankTabIds.delete(tabId);
+      lastAllowedURLByTab.set(tabId, tab.url);
+    }
     lastAllowedTabId = tabId;
   } else if (rules.blockNavigation) {
     await recoverBlockedNavigation(tabId);
   }
 });
 
-chrome.tabs.onCreated.addListener((tab) => {
-  if (!rules.active || !rules.blockNewTabs) return;
-  if (isRecoveryBlankTab(tab) || (creatingRecoveryBlankTab && isSearchStagingURL(tab.url))) {
-    recoveryBlankTabIds.add(tab.id);
+chrome.tabs.onCreated.addListener(async (tab) => {
+  await refreshRules();
+  if (!rules.active) return;
+  if (!tab.url || isSearchStagingURL(tab.url)) {
+    freshBlankTabIds.add(tab.id);
+    lastAllowedTabId = tab.id;
     return;
   }
-  if (rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url))) return;
+
+  if (isAllowedURL(tab.url, rules)) {
+    lastAllowedURLByTab.set(tab.id, tab.url);
+    lastAllowedTabId = tab.id;
+    return;
+  }
 
   setTimeout(async () => {
     const latest = await chrome.tabs.get(tab.id).catch(() => null);
@@ -323,15 +369,30 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  recoveryBlankTabIds.delete(tabId);
+  freshBlankTabIds.delete(tabId);
   lastAllowedURLByTab.delete(tabId);
   if (lastAllowedTabId === tabId) lastAllowedTabId = null;
   if (rules.active) setTimeout(returnToAllowedTab, 0);
 });
 
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
-  if (details.frameId !== 0 || details.tabId < 0 || !rules.active || !rules.blockNavigation) return;
-  if (!isAllowedURL(details.url, rules)) setTimeout(() => recoverBlockedNavigation(details.tabId), 0);
+  if (details.frameId !== 0 || details.tabId < 0) return;
+  refreshRules().then(async () => {
+    if (!rules.active || !rules.blockNavigation) return;
+    if (
+      freshBlankTabIds.has(details.tabId) &&
+      !rules.allowGoogleSearchTabs &&
+      !isSearchStagingURL(details.url)
+    ) {
+      freshBlankTabIds.delete(details.tabId);
+      await chrome.tabs.remove(details.tabId).catch(() => {});
+      await returnToAllowedTab();
+      return;
+    }
+    if (!isAllowedURL(details.url, rules)) {
+      await recoverBlockedNavigation(details.tabId);
+    }
+  });
 });
 
 chrome.runtime.onStartup.addListener(ensureInitialized);

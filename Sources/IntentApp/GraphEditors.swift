@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import IntentCore
 
@@ -5,6 +6,9 @@ struct IntentionEditorMenu: View {
     @Binding var intention: Intention
     let catalog: [InstalledApp]
     let onDelete: () -> Void
+    let onAddRestriction: () -> Void
+    let onAddFriction: () -> Void
+    let onSave: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var appQuery = ""
@@ -25,7 +29,7 @@ struct IntentionEditorMenu: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 13) {
-                editorHeader("Intention", symbol: "square")
+                editorHeader("Intention", symbol: "square", onSave: onSave)
 
                 fieldLabel("Name")
                 TextField("Intention name", text: $intention.name)
@@ -74,6 +78,21 @@ struct IntentionEditorMenu: View {
                     Label("Delete intention", systemImage: "trash")
                 }
                 .buttonStyle(.plain)
+
+                Divider()
+                fieldLabel("Add connected shape")
+                HStack(spacing: 12) {
+                    quickAddButton(
+                        title: "Restriction",
+                        symbol: "circle",
+                        action: onAddRestriction
+                    )
+                    quickAddButton(
+                        title: "Friction",
+                        symbol: "triangle",
+                        action: onAddFriction
+                    )
+                }
             }
         }
         .scrollIndicators(.automatic)
@@ -230,18 +249,47 @@ struct IntentionEditorMenu: View {
             return updated
         }
     }
+
+    private func quickAddButton(
+        title: String,
+        symbol: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: symbol)
+                    .font(.system(size: 23, weight: .medium))
+                    .frame(height: 28)
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(GraphTheme.text(colorScheme))
+            .frame(maxWidth: .infinity)
+            .frame(height: 68)
+            .background(GraphTheme.surface(colorScheme))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(GraphTheme.stroke(colorScheme), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .help("Add a connected \(title.lowercased())")
+    }
 }
 
 struct RestrictionEditorMenu: View {
     @Binding var node: RestrictionNode
     let intention: Intention
     let onDelete: () -> Void
+    let onSave: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @State private var lastResourceSelectionIndex: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            editorHeader("Restriction", symbol: "circle")
+            editorHeader("Restriction", symbol: "circle", onSave: onSave)
 
             fieldLabel("Type")
             Picker("Restriction type", selection: $node.kind) {
@@ -277,46 +325,106 @@ struct RestrictionEditorMenu: View {
 
     private var resourceToggles: some View {
         VStack(alignment: .leading, spacing: 7) {
-            ForEach(intention.allowedApps) { app in
-                resourceToggle(id: app.resourceID, title: app.name, subtitle: "Application")
+            if !resources.isEmpty {
+                resourceToggle(
+                    id: nil,
+                    title: allResourcesSelected ? "Deselect all" : "Select all",
+                    subtitle: "All allowed apps and websites",
+                    index: nil
+                )
+                Divider()
             }
-            ForEach(intention.allowedWebsites) { website in
-                resourceToggle(id: website.resourceID, title: website.displayName, subtitle: website.value)
+
+            ForEach(Array(resources.enumerated()), id: \.offset) { index, resource in
+                resourceToggle(
+                    id: resource.id,
+                    title: resource.title,
+                    subtitle: resource.subtitle,
+                    index: index
+                )
             }
         }
     }
 
-    private func resourceToggle(id: String, title: String, subtitle: String) -> some View {
-        Toggle(isOn: Binding(
-            get: { node.excludedResourceIDs.contains(id) },
-            set: { excluded in
-                if excluded {
-                    if !node.excludedResourceIDs.contains(id) {
-                        node.excludedResourceIDs.append(id)
-                    }
-                } else {
-                    node.excludedResourceIDs.removeAll { $0 == id }
-                }
+    private var resources: [RestrictionResource] {
+        intention.allowedApps.map {
+            RestrictionResource(id: $0.resourceID, title: $0.name, subtitle: "Application")
+        } + intention.allowedWebsites.map {
+            RestrictionResource(id: $0.resourceID, title: $0.displayName, subtitle: $0.value)
+        }
+    }
+
+    private var allResourcesSelected: Bool {
+        !resources.isEmpty && resources.allSatisfy { node.excludedResourceIDs.contains($0.id) }
+    }
+
+    private func resourceToggle(
+        id: String?,
+        title: String,
+        subtitle: String,
+        index: Int?
+    ) -> some View {
+        let selected = id.map { node.excludedResourceIDs.contains($0) } ?? allResourcesSelected
+
+        return Button {
+            if let id, let index {
+                toggleResource(id: id, at: index, extendRange: NSEvent.modifierFlags.contains(.shift))
+            } else {
+                toggleAllResources()
             }
-        )) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 12, weight: .medium))
-                Text(subtitle).font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: selected ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(selected ? GraphTheme.editBlue : GraphTheme.muted(colorScheme))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 12, weight: .medium))
+                    Text(subtitle).font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func toggleResource(id: String, at index: Int, extendRange: Bool) {
+        if extendRange, let anchor = lastResourceSelectionIndex {
+            let lower = min(anchor, index)
+            let upper = max(anchor, index)
+            for resource in resources[lower...upper] where !node.excludedResourceIDs.contains(resource.id) {
+                node.excludedResourceIDs.append(resource.id)
+            }
+        } else if node.excludedResourceIDs.contains(id) {
+            node.excludedResourceIDs.removeAll { $0 == id }
+        } else {
+            node.excludedResourceIDs.append(id)
+        }
+        lastResourceSelectionIndex = index
+    }
+
+    private func toggleAllResources() {
+        let resourceIDs = Set(resources.map(\.id))
+        if allResourcesSelected {
+            node.excludedResourceIDs.removeAll { resourceIDs.contains($0) }
+        } else {
+            for id in resourceIDs where !node.excludedResourceIDs.contains(id) {
+                node.excludedResourceIDs.append(id)
             }
         }
-        .toggleStyle(.checkbox)
+        lastResourceSelectionIndex = nil
     }
 }
 
 struct FrictionEditorMenu: View {
     @Binding var node: FrictionNode
     let onDelete: () -> Void
+    let onSave: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            editorHeader("Friction", symbol: "triangle")
+            editorHeader("Friction", symbol: "triangle", onSave: onSave)
             fieldLabel("Type")
             Picker("Friction type", selection: frictionKind) {
                 ForEach(FrictionKind.allCases, id: \.self) { kind in
@@ -432,14 +540,31 @@ private enum FrictionKind: CaseIterable {
     }
 }
 
-private func editorHeader(_ title: String, symbol: String) -> some View {
+private struct RestrictionResource: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+}
+
+private func editorHeader(
+    _ title: String,
+    symbol: String,
+    onSave: @escaping () -> Void
+) -> some View {
     HStack {
         Label(title, systemImage: symbol)
             .font(.system(size: 13, weight: .semibold))
         Spacer()
-        Text("EDIT")
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .foregroundStyle(.secondary)
+        Button(action: onSave) {
+            Text("SAVE (S)")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .background(Color.green.opacity(0.82), in: RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .help("Save and close this editor (S)")
     }
 }
 

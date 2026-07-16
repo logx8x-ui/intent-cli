@@ -10,7 +10,7 @@
 
   function normalizedURLParts(url) {
     try {
-      if (["about:blank", "about:newtab", "chrome://newtab/"].includes(url)) {
+      if (isSearchStagingURL(url)) {
         return { host: "about", path: "/newtab" };
       }
 
@@ -29,7 +29,13 @@
   }
 
   function isSearchStagingURL(url) {
-    return ["about:blank", "about:newtab", "chrome://newtab/"].includes(url);
+    const value = String(url || "").toLowerCase();
+    return (
+      value === "about:blank" ||
+      value === "about:newtab" ||
+      /^chrome:\/\/(?:newtab|new-tab-page)(?:\/|$)/.test(value) ||
+      /^chrome-search:\/\//.test(value)
+    );
   }
 
   function isGoogleSearchURL(url) {

@@ -4,7 +4,8 @@ Intent Browser Guard is the Firefox extension that enforces browser-level Intent
 
 - block switching to tabs whose URL is not allowed
 - block navigation to unallowed URLs
-- block new tabs unless the active intention allows Google search tabs
+- always allow creating a blank tab
+- close a newly created tab when it is submitted without the browser-search restriction
 - allow Google search result pages without allowing click-throughs to blocked websites
 
 The extension has a persistent toolbar switch. When the switch is on, Firefox follows the active rules written by the Intent macOS app. When it is off, Firefox ignores those rules.

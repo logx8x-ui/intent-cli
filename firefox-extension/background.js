@@ -14,7 +14,7 @@ let enforcing = false;
 let rulesFingerprint = fingerprintRules(rules);
 let guardEnabled = true;
 let initialized = false;
-let recoveryBlankTabIds = new Set();
+let freshBlankTabIds = new Set();
 let creatingRecoveryBlankTab = false;
 
 function inactiveRules() {
@@ -88,6 +88,7 @@ async function refreshRules() {
     await primeAllowedTab();
   } else {
     lastAllowedTabId = null;
+    freshBlankTabIds.clear();
   }
 }
 
@@ -99,14 +100,14 @@ async function getAllowedTab(tabId) {
   return tab;
 }
 
-function isRecoveryBlankTab(tab) {
-  return Boolean(tab?.id && recoveryBlankTabIds.has(tab.id) && tab.url === "about:blank");
+function isFreshBlankTab(tab) {
+  return Boolean(tab?.id && freshBlankTabIds.has(tab.id) && isSearchStagingURL(tab.url));
 }
 
 function isRuntimeAllowedTab(tab) {
   return Boolean(
     tab?.url &&
-    (isAllowedURL(tab.url, rules) || isRecoveryBlankTab(tab))
+    (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab))
   );
 }
 
@@ -164,7 +165,7 @@ async function openRecoveryBlankTab() {
   creatingRecoveryBlankTab = true;
   try {
     const tab = await browser.tabs.create({ url: "about:blank", active: true });
-    recoveryBlankTabIds.add(tab.id);
+    freshBlankTabIds.add(tab.id);
     lastAllowedTabId = tab.id;
   } finally {
     creatingRecoveryBlankTab = false;
@@ -193,16 +194,16 @@ async function recoverBlockedNavigation(tabId) {
     return;
   }
 
-  if (rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url) || isAllowedURL(tab.url, rules))) {
+  if (freshBlankTabIds.has(tabId) && !rules.allowGoogleSearchTabs) {
+    freshBlankTabIds.delete(tabId);
+    try {
+      await browser.tabs.remove(tabId);
+    } catch (_) {}
     await returnToAllowedTab();
     return;
   }
 
-  try {
-    await browser.tabs.remove(tabId);
-  } catch (_) {
-    await returnToAllowedTab();
-  }
+  await returnToAllowedTab();
 }
 
 browser.runtime.onMessage.addListener((message) => {
@@ -237,12 +238,12 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   }
 
   if (isAllowedURL(tab.url, rules)) {
-    recoveryBlankTabIds.delete(tabId);
+    freshBlankTabIds.delete(tabId);
     lastAllowedTabId = tabId;
     return;
   }
 
-  if (isRecoveryBlankTab(tab)) {
+  if (isFreshBlankTab(tab)) {
     lastAllowedTabId = tabId;
     return;
   }
@@ -262,13 +263,23 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
+  if (
+    freshBlankTabIds.has(tabId) &&
+    !rules.allowGoogleSearchTabs &&
+    changeInfo.url &&
+    !isSearchStagingURL(changeInfo.url)
+  ) {
+    await recoverBlockedNavigation(tabId);
+    return;
+  }
+
   if (isAllowedURL(tab.url, rules)) {
-    recoveryBlankTabIds.delete(tabId);
+    freshBlankTabIds.delete(tabId);
     lastAllowedTabId = tabId;
     return;
   }
 
-  if (isRecoveryBlankTab(tab)) {
+  if (isFreshBlankTab(tab)) {
     lastAllowedTabId = tabId;
     return;
   }
@@ -280,16 +291,18 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 browser.tabs.onCreated.addListener(async (tab) => {
   await refreshRules();
-  if (!rules.active || !rules.blockNewTabs) {
+  if (!rules.active) {
     return;
   }
 
-  if (isRecoveryBlankTab(tab) || (creatingRecoveryBlankTab && tab.url === "about:blank")) {
-    recoveryBlankTabIds.add(tab.id);
+  if (!tab.url || isSearchStagingURL(tab.url)) {
+    freshBlankTabIds.add(tab.id);
+    lastAllowedTabId = tab.id;
     return;
   }
 
-  if (rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url))) {
+  if (isAllowedURL(tab.url, rules)) {
+    lastAllowedTabId = tab.id;
     return;
   }
 
@@ -315,7 +328,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
     return;
   }
 
-  recoveryBlankTabIds.delete(tabId);
+  freshBlankTabIds.delete(tabId);
 
   if (lastAllowedTabId === tabId) {
     lastAllowedTabId = null;
@@ -326,6 +339,17 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (
+      rules.active &&
+      freshBlankTabIds.has(details.tabId) &&
+      !rules.allowGoogleSearchTabs &&
+      details.url &&
+      !isSearchStagingURL(details.url)
+    ) {
+      setTimeout(() => recoverBlockedNavigation(details.tabId), 0);
+      return { cancel: true };
+    }
+
     if (shouldBlockNavigation(details.url)) {
       setTimeout(() => {
         recoverBlockedNavigation(details.tabId);

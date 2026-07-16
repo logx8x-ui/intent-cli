@@ -26,6 +26,8 @@ final class IntentAppModel: ObservableObject {
     private var pendingStartIntention: Intention?
     private var remainingFrictions: [FrictionNode] = []
     private var activeLock: FocusLock?
+    private var undoStack: [[Intention]] = []
+    private var activeMoveUndoKeys: Set<String> = []
 
     var selectedIntention: Intention? {
         guard let selectedID else { return intentions.first }
@@ -42,6 +44,8 @@ final class IntentAppModel: ObservableObject {
         do {
             intentions = try store.load()
             selectedID = selectedID ?? intentions.first?.id
+            undoStack.removeAll()
+            activeMoveUndoKeys.removeAll()
             try store.save(intentions)
         } catch {
             errorMessage = "Could not load intentions: \(error)"
@@ -61,6 +65,7 @@ final class IntentAppModel: ObservableObject {
 
     @discardableResult
     func createIntention(at position: GraphPoint) -> String {
+        recordUndoSnapshot()
         let intention = Intention(
             name: "New intention",
             icon: "target",
@@ -80,6 +85,8 @@ final class IntentAppModel: ObservableObject {
 
     func deleteIntention(id: String) {
         guard !hasActiveSession else { return }
+        guard intentions.contains(where: { $0.id == id }) else { return }
+        recordUndoSnapshot()
         intentions.removeAll { $0.id == id }
         if selectedID == id {
             selectedID = intentions.first?.id
@@ -92,6 +99,8 @@ final class IntentAppModel: ObservableObject {
               let index = intentions.firstIndex(where: { $0.id == intention.id }) else {
             return
         }
+        guard intentions[index] != intention else { return }
+        recordUndoSnapshot()
         intentions[index] = intention
         save()
     }
@@ -101,7 +110,11 @@ final class IntentAppModel: ObservableObject {
               let index = intentions.firstIndex(where: { $0.id == id }) else {
             return
         }
-        mutation(&intentions[index])
+        var updated = intentions[index]
+        mutation(&updated)
+        guard updated != intentions[index] else { return }
+        recordUndoSnapshot()
+        intentions[index] = updated
         save()
     }
 
@@ -110,8 +123,12 @@ final class IntentAppModel: ObservableObject {
               let index = intentions.firstIndex(where: { $0.id == id }) else {
             return
         }
+        beginMoveUndoIfNeeded(key: "intention:\(id)", persist: persist)
         intentions[index].graphPosition = position
-        if persist { save() }
+        if persist {
+            activeMoveUndoKeys.remove("intention:\(id)")
+            save()
+        }
     }
 
     func moveRestriction(intentionID: String, nodeID: String, to position: GraphPoint, persist: Bool) {
@@ -120,8 +137,13 @@ final class IntentAppModel: ObservableObject {
               let nodeIndex = intentions[intentionIndex].restrictionNodes.firstIndex(where: { $0.id == nodeID }) else {
             return
         }
+        let key = "restriction:\(intentionID):\(nodeID)"
+        beginMoveUndoIfNeeded(key: key, persist: persist)
         intentions[intentionIndex].restrictionNodes[nodeIndex].position = position
-        if persist { save() }
+        if persist {
+            activeMoveUndoKeys.remove(key)
+            save()
+        }
     }
 
     func moveFriction(intentionID: String, nodeID: String, to position: GraphPoint, persist: Bool) {
@@ -130,8 +152,13 @@ final class IntentAppModel: ObservableObject {
               let nodeIndex = intentions[intentionIndex].frictionNodes.firstIndex(where: { $0.id == nodeID }) else {
             return
         }
+        let key = "friction:\(intentionID):\(nodeID)"
+        beginMoveUndoIfNeeded(key: key, persist: persist)
         intentions[intentionIndex].frictionNodes[nodeIndex].position = position
-        if persist { save() }
+        if persist {
+            activeMoveUndoKeys.remove(key)
+            save()
+        }
     }
 
     @discardableResult
@@ -140,6 +167,7 @@ final class IntentAppModel: ObservableObject {
               let index = intentions.firstIndex(where: { $0.id == intentionID }) else {
             return nil
         }
+        recordUndoSnapshot()
         let node = RestrictionNode(kind: .allowBrowserSearches, position: position)
         intentions[index].restrictionNodes.append(node)
         selectedID = intentionID
@@ -153,6 +181,7 @@ final class IntentAppModel: ObservableObject {
               let index = intentions.firstIndex(where: { $0.id == intentionID }) else {
             return nil
         }
+        recordUndoSnapshot()
         let node = FrictionNode(
             friction: .typedPhrase("I want to do this right now"),
             position: position
@@ -161,6 +190,16 @@ final class IntentAppModel: ObservableObject {
         selectedID = intentionID
         save()
         return node.id
+    }
+
+    func undoLastChange() {
+        guard !hasActiveSession, let previous = undoStack.popLast() else { return }
+        intentions = previous
+        activeMoveUndoKeys.removeAll()
+        if let selectedID, !intentions.contains(where: { $0.id == selectedID }) {
+            self.selectedID = intentions.first?.id
+        }
+        save()
     }
 
     func requestStart(_ intention: Intention) {
@@ -296,7 +335,7 @@ final class IntentAppModel: ObservableObject {
             allowedWebsitesByBrowser: websitesByBrowser,
             blockTabSwitching: true,
             blockNavigation: true,
-            blockNewTabs: !intention.browserSearchesAllowed,
+            blockNewTabs: false,
             allowGoogleSearchTabs: intention.browserSearchesAllowed
         )
 
@@ -350,6 +389,26 @@ final class IntentAppModel: ObservableObject {
         "org.mozilla.firefox",
         "com.google.Chrome"
     ]
+
+    private func recordUndoSnapshot() {
+        guard !hasActiveSession else { return }
+        if undoStack.last != intentions {
+            undoStack.append(intentions)
+            if undoStack.count > 100 {
+                undoStack.removeFirst(undoStack.count - 100)
+            }
+        }
+    }
+
+    private func beginMoveUndoIfNeeded(key: String, persist: Bool) {
+        if !activeMoveUndoKeys.contains(key) {
+            recordUndoSnapshot()
+            activeMoveUndoKeys.insert(key)
+        }
+        if persist {
+            activeMoveUndoKeys.remove(key)
+        }
+    }
 }
 
 struct PendingFriction: Identifiable {

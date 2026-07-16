@@ -123,6 +123,19 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       for (const listener of tabCreated.listeners) await listener({ ...tab });
       await settle();
     },
+    async navigate(id, url) {
+      for (const listener of beforeNavigate.listeners) {
+        await listener({ tabId: id, frameId: 0, url });
+      }
+      await settle();
+      if (!tabs.has(id)) return;
+      const tab = tabs.get(id);
+      tab.url = url;
+      for (const listener of tabUpdated.listeners) {
+        await listener(id, { url }, { ...tab });
+      }
+      await settle();
+    },
     async remove(id) {
       await chrome.tabs.remove(id);
       await settle();
@@ -177,8 +190,11 @@ async function run() {
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }
   ]);
   await strictNewTab.settle();
-  await strictNewTab.create({ id: 3, active: true, url: "chrome://newtab/" });
-  assert.equal(strictNewTab.tabs.has(3), false, "Strict sessions should remove new tabs");
+  await strictNewTab.create({ id: 3, active: true, url: "chrome://new-tab-page/" });
+  assert.equal(strictNewTab.tabs.has(3), true, "New tabs should always be creatable");
+  await strictNewTab.navigate(3, "https://instagram.com/direct/inbox/");
+  assert.equal(strictNewTab.tabs.has(3), false, "Submitting from a new tab should close it when browser searches are disabled");
+  assert.equal(strictNewTab.tabs.get(1).active, true, "Closing a submitted new tab should return to an allowed tab");
 
   const searches = createHarness({ ...lockedRules, allowGoogleSearchTabs: true }, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }
@@ -186,7 +202,20 @@ async function run() {
   await searches.settle();
   await searches.create({ id: 3, active: true, url: "chrome://newtab/" });
   assert.equal(searches.tabs.has(3), true, "Search-enabled sessions should keep a Chrome new tab");
+  await searches.navigate(3, "https://www.google.com/search?q=intent");
+  assert.equal(searches.tabs.get(3).url, "https://www.google.com/search?q=intent", "Browser-search mode should allow Google result pages");
   assert.equal(searches.dynamicRules.some((rule) => String(rule.condition.regexFilter).includes("google")), true, "Google search pages need a DNR exception");
+
+  const chromeTest = createHarness({
+    ...lockedRules,
+    allowedWebsites: ["youtube.com"]
+  }, [
+    { id: 1, active: true, url: "https://youtube.com/" },
+    { id: 2, active: false, url: "https://github.com/" }
+  ]);
+  await chromeTest.settle();
+  await chromeTest.activate(2);
+  assert.equal(chromeTest.tabs.get(1).active, true, "A YouTube-only intention must reject an existing GitHub tab");
 
   const disabled = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },

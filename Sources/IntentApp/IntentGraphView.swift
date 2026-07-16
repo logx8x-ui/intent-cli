@@ -41,6 +41,7 @@ struct IntentGraphView: View {
                     .gesture(panGesture)
                     .onTapGesture {
                         NSApp.keyWindow?.makeFirstResponder(nil)
+                        selection = nil
                     }
 
                 connectionLayer(in: proxy.size)
@@ -373,7 +374,20 @@ struct IntentGraphView: View {
                     onDelete: {
                         model.deleteIntention(id: intentionID)
                         self.selection = nil
-                    }
+                    },
+                    onAddRestriction: {
+                        let position = quickAddPosition(for: intentionID, kind: .restriction)
+                        if let nodeID = model.addRestriction(to: intentionID, at: position) {
+                            self.selection = .restriction(intentionID: intentionID, nodeID: nodeID)
+                        }
+                    },
+                    onAddFriction: {
+                        let position = quickAddPosition(for: intentionID, kind: .friction)
+                        if let nodeID = model.addFriction(to: intentionID, at: position) {
+                            self.selection = .friction(intentionID: intentionID, nodeID: nodeID)
+                        }
+                    },
+                    onSave: { self.selection = nil }
                 )
                 .position(anchor)
             }
@@ -388,7 +402,8 @@ struct IntentGraphView: View {
                             $0.restrictionNodes.removeAll { $0.id == nodeID }
                         }
                         self.selection = nil
-                    }
+                    },
+                    onSave: { self.selection = nil }
                 )
                 .position(anchor)
             }
@@ -402,7 +417,8 @@ struct IntentGraphView: View {
                             $0.frictionNodes.removeAll { $0.id == nodeID }
                         }
                         self.selection = nil
-                    }
+                    },
+                    onSave: { self.selection = nil }
                 )
                 .position(anchor)
             }
@@ -492,7 +508,57 @@ struct IntentGraphView: View {
             if let id = model.addFriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
                 selection = .friction(intentionID: intentionID, nodeID: id)
             }
+        case .save:
+            guard editMode else { return }
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            selection = nil
+        case .delete:
+            guard editMode else { return }
+            deleteSelection()
+        case .undo:
+            guard editMode else { return }
+            model.undoLastChange()
+            selection = nil
         }
+    }
+
+    private func deleteSelection() {
+        guard let selection else { return }
+        switch selection {
+        case .intention(let intentionID):
+            model.deleteIntention(id: intentionID)
+        case .restriction(let intentionID, let nodeID):
+            model.mutateIntention(id: intentionID) {
+                $0.restrictionNodes.removeAll { $0.id == nodeID }
+            }
+        case .friction(let intentionID, let nodeID):
+            model.mutateIntention(id: intentionID) {
+                $0.frictionNodes.removeAll { $0.id == nodeID }
+            }
+        }
+        self.selection = nil
+    }
+
+    private func quickAddPosition(for intentionID: String, kind: QuickAddKind) -> GraphPoint {
+        guard let intention = model.intentions.first(where: { $0.id == intentionID }) else {
+            return .zero
+        }
+
+        let existingCount: Int
+        let direction: Double
+        switch kind {
+        case .restriction:
+            existingCount = intention.restrictionNodes.count
+            direction = -1
+        case .friction:
+            existingCount = intention.frictionNodes.count
+            direction = 1
+        }
+
+        return GraphPoint(
+            x: intention.graphPosition.x + direction * 250,
+            y: intention.graphPosition.y + Double(existingCount) * 145 - 45
+        )
     }
 
     private func enterEditMode() {
@@ -759,6 +825,14 @@ private enum GraphKeyboardKey {
     case intention
     case restriction
     case friction
+    case save
+    case delete
+    case undo
+}
+
+private enum QuickAddKind {
+    case restriction
+    case friction
 }
 
 private struct GraphInputMonitor: NSViewRepresentable {
@@ -792,9 +866,23 @@ private struct GraphInputMonitor: NSViewRepresentable {
             super.viewDidMoveToWindow()
             if window != nil, keyboardMonitor == nil {
                 keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    guard let self,
-                          self.window?.isKeyWindow == true,
-                          event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                    guard let self, self.window?.isKeyWindow == true else {
+                        return event
+                    }
+
+                    let editingText = Self.isEditingText(in: self.window)
+                    let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+                    if event.keyCode == 6,
+                       modifiers.contains(.command),
+                       !modifiers.contains(.control),
+                       !modifiers.contains(.option),
+                       !modifiers.contains(.shift),
+                       !editingText {
+                        self.keyboardHandler?(.undo)
+                        return nil
+                    }
+
+                    guard modifiers.intersection([.command, .control, .option]).isEmpty else {
                         return event
                     }
 
@@ -803,7 +891,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
                         return nil
                     }
 
-                    guard !Self.isEditingText(in: self.window) else { return event }
+                    guard !editingText else { return event }
 
                     let key: GraphKeyboardKey?
                     switch event.keyCode {
@@ -811,6 +899,8 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     case 34: key = .intention
                     case 15: key = .restriction
                     case 3: key = .friction
+                    case 1: key = .save
+                    case 7, 51, 117: key = .delete
                     default: key = nil
                     }
 

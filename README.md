@@ -51,8 +51,10 @@ The installer registers Intent to start once at each macOS login, so the global 
 - Press `E` to enter or leave edit mode. The blue perimeter indicates that shapes can be changed.
 - In edit mode, drag existing shapes to move them.
 - Creation is keyboard-only: press `I` to create an intention at the pointer, `R` to attach a restriction to the selected intention, or `F` to attach a friction.
+- An intention editor also has direct circle and triangle buttons for attaching a restriction or friction.
+- Press `S` or click `Save (S)` to close the selected editor, Delete or `X` to remove the selected shape, and `Cmd+Z` to undo the latest canvas change.
 - Pinch to zoom, use two fingers or drag empty space to pan, or use the bottom-right zoom and fit controls.
-- Intention edits autosave. Clicking empty canvas does not close the selected shape's settings menu.
+- Intention edits autosave. Clicking empty canvas saves and closes the selected shape's settings menu.
 
 Every allowed app and website starts automatically. Attach a `Don't start up` restriction to keep selected resources closed initially while still allowing them during the intention. Multiple friction triangles run from the highest shape on the canvas to the lowest.
 
@@ -65,6 +67,7 @@ Intent
 ```
 
 The installer also installs the Firefox and Chrome native messaging hosts that let each Browser Guard read only its own active Intent rules.
+Both guards always permit creating a blank tab. Without the browser-search restriction, submitting from that tab closes it; with the restriction, Google search results work while unallowed websites remain blocked.
 
 To enable Firefox tab and URL blocking during browser intentions:
 

@@ -209,7 +209,11 @@ async function run() {
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
   ]);
   await strictNewTabHarness.create({ id: 3, active: true, url: "about:newtab" });
-  assert.equal(strictNewTabHarness.tabs.has(3), false, "New tabs should be removed when Google-search tabs are disabled");
+  assert.equal(strictNewTabHarness.tabs.has(3), true, "New tabs should always be creatable");
+  await strictNewTabHarness.update(3, { url: "https://www.instagram.com/direct/inbox/" });
+  await strictNewTabHarness.ready();
+  assert.equal(strictNewTabHarness.tabs.has(3), false, "Submitting from a new tab should close it when browser searches are disabled");
+  assert.equal(strictNewTabHarness.tabs.get(1).active, true, "Closing a submitted new tab should return to an allowed tab");
 
   const searchRules = {
     ...lockedRules,
