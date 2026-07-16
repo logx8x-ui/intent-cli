@@ -156,8 +156,12 @@ struct IntentGraphView: View {
                 } else {
                     Text(welcomeTitle)
                         .font(.system(size: 29, weight: .semibold))
-                        .onTapGesture(count: 2, perform: beginEditingWelcomeTitle)
-                        .help("Double-click to rename this desktop")
+                        .onTapGesture(count: 2) {
+                            if editMode {
+                                beginEditingWelcomeTitle()
+                            }
+                        }
+                        .help(editMode ? "Double-click to rename this desktop" : "Press E to edit")
                 }
             }
             .foregroundStyle(GraphTheme.text(colorScheme))
@@ -170,6 +174,7 @@ struct IntentGraphView: View {
     }
 
     private func beginEditingWelcomeTitle() {
+        guard editMode else { return }
         welcomeTitleDraft = welcomeTitle
         editingWelcomeTitle = true
         DispatchQueue.main.async {
@@ -495,6 +500,9 @@ struct IntentGraphView: View {
     }
 
     private func leaveEditMode() {
+        if editingWelcomeTitle {
+            commitWelcomeTitle()
+        }
         editMode = false
         selection = nil
     }
