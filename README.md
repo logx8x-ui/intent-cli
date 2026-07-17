@@ -1,58 +1,45 @@
 # Intent
 
-Intent is a macOS focus app that lets you choose one intention, opens its allowed apps and websites, and keeps everything else out until you finish.
+Intent is a macOS focus app that opens one chosen set of apps and websites, then keeps everything else out until you finish.
 
 ## Download
 
-1. Open [GitHub Releases](https://github.com/logx8x-ui/intent-cli/releases/latest).
-2. Download `Intent-0.4.0.dmg`.
-3. Open the DMG and double-click `Install Intent.pkg`.
-4. If macOS blocks it, Control-click the package, choose **Open**, then confirm.
-5. Look for the Intent scope icon in the menu bar, or press `~`.
+These are the only three downloads most people need:
 
-Intent currently requires macOS 13 or newer. This beta is not yet Apple-notarized, which is why macOS shows the one-time warning in step 4.
+| Download | Use it for |
+| --- | --- |
+| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/download/v0.4.0/Intent-0.4.0.dmg)** | The main app. Requires macOS 13 or newer. |
+| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.4.0/intent_browser_guard-0.1.6.zip)** | Website restrictions in Firefox. |
+| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.4.0/intent-browser-guard-chrome-0.1.2.zip)** | Website restrictions in Chrome. |
 
-## Browser Guard
+Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only enforces rules while an intention is running.
 
-Install the companion for the browser used by your intentions, then leave its toolbar switch on. The guard does nothing when no intention is running.
+### Firefox
 
-- **Firefox:** public Mozilla Add-ons listing is pending review. The temporary developer fallback is included in the DMG until approval.
-- **Chrome:** public Chrome Web Store listing is pending review. The developer fallback ZIP is included in the DMG until approval.
+1. Unzip `Intent-Firefox-Extension.zip`.
+2. Open `about:debugging#/runtime/this-firefox` in Firefox.
+3. Choose **Load Temporary Add-on** and select `manifest.json` from the unzipped folder.
 
-Developer fallback for Chrome:
+Firefox removes temporary add-ons after a restart. A permanent Mozilla Add-ons listing is planned.
 
-1. Unzip `Chrome - developer fallback.zip` from the DMG.
-2. Open `chrome://extensions`.
-3. Enable **Developer mode**, click **Load unpacked**, and choose the unzipped folder.
+### Chrome
 
-Developer fallback for Firefox:
+1. Unzip `Intent-Chrome-Extension.zip`.
+2. Open `chrome://extensions` in Chrome.
+3. Turn on **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
 
-1. Unzip `Firefox - AMO upload source.zip` from the DMG.
-2. Open `about:debugging#/runtime/this-firefox`.
-3. Click **Load Temporary Add-on** and choose `manifest.json` inside the unzipped folder.
+## Use Intent
 
-Firefox removes temporary add-ons when it restarts, so this fallback is only for beta testing while the persistent store version is under review.
+New installs open to a blank canvas with **Welcome to my desktop** and a short guide.
 
-## First Run
-
-New installs start with a blank canvas and **Welcome to my desktop**. A two-page guide explains the basics.
-
-- `~` shows or hides Intent.
 - Click an intention to run it.
-- `E` enters edit mode.
-- `I`, `R`, and `F` add an intention, restriction, or friction.
-- `S` closes the selected editor.
-- `X` or `Delete` removes the selected shape.
-- `Cmd+Z` undoes the last change.
+- Press `~` to show or hide Intent.
+- Swipe with three fingers to move between the intentions desktop and scheduler.
+- Press `E` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
 - Pinch to zoom and use two fingers to pan.
-- `Cmd+Tab` switches between launched allowed apps during a session.
-- `Cmd+Shift+M` ends the session.
+- Press `Cmd+Shift+M` to finish an active intention.
 
-The first session asks for macOS Accessibility permission so Intent can enforce app restrictions. This is a one-time system permission.
-
-## Backgrounds
-
-Open the gear in the bottom-right corner to choose dark/light appearance, select a built-in medieval drawing, upload an image, paste one, or drag and drop one. Intent preserves the same adaptive glass, blur, stars, and transparency over every background.
+The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 
 ## Build From Source
 
@@ -62,14 +49,15 @@ cd intent-cli
 ./scripts/install.sh
 ```
 
-Run all checks and build the release DMG:
+Run the complete checks:
 
 ```zsh
 swift run IntentCoreSpec
 npm install
 npm run test:extensions
 npm run extension:lint
-./scripts/build-release.sh
 ```
+
+Public DMGs must be signed with Apple Developer ID certificates and notarized. `scripts/build-release.sh` supports that process and refuses a public release when the required Apple credentials are missing.
 
 Intent is a personal focus tool, not security software. See [Privacy](PRIVACY.md) for its local-only data behavior.

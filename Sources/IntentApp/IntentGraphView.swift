@@ -22,6 +22,7 @@ struct IntentGraphView: View {
     @State private var showSettings = false
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
+    @State private var currentPage: OverlayPage = .desktop
     @FocusState private var welcomeTitleFocused: Bool
 
     private let minimumScale: CGFloat = 0.35
@@ -46,27 +47,17 @@ struct IntentGraphView: View {
                 StarfieldView(scale: cameraScale, offset: cameraOffset)
                     .allowsHitTesting(false)
 
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
-                    .gesture(panGesture)
-                    .onTapGesture {
-                        NSApp.keyWindow?.makeFirstResponder(nil)
-                        selection = nil
-                    }
+                HStack(spacing: 0) {
+                    desktopPage(in: proxy.size)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
 
-                connectionLayer(in: proxy.size)
-                    .allowsHitTesting(false)
-
-                welcomeView
-                    .scaleEffect(cameraScale)
-                    .position(screenPoint(for: .zero, in: proxy.size))
-
-                graphNodes(in: proxy.size)
-
-                if editMode, let selection {
-                    editor(for: selection, in: proxy.size)
+                    IntentSchedulerView()
+                        .environmentObject(model)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
                 }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+                .offset(x: currentPage == .desktop ? 0 : -proxy.size.width)
+                .animation(.easeInOut(duration: 0.34), value: currentPage)
 
                 topBar
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -96,6 +87,9 @@ struct IntentGraphView: View {
                     },
                     scrollHandler: { delta in
                         applyTrackpadPan(delta)
+                    },
+                    pageSwipeHandler: { delta in
+                        handlePageSwipe(delta)
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -141,6 +135,12 @@ struct IntentGraphView: View {
                     showQuickGuide = true
                 }
             }
+            .onChange(of: currentPage) { page in
+                if page == .scheduler {
+                    leaveEditMode()
+                }
+                showSettings = false
+            }
         }
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .sheet(item: $model.pendingFriction) { pending in
@@ -159,6 +159,32 @@ struct IntentGraphView: View {
         .onChange(of: model.activeSessionName) { activeSessionName in
             if activeSessionName != nil {
                 leaveEditMode()
+            }
+        }
+    }
+
+    private func desktopPage(in size: CGSize) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(panGesture)
+                .onTapGesture {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    selection = nil
+                }
+
+            connectionLayer(in: size)
+                .allowsHitTesting(false)
+
+            welcomeView
+                .scaleEffect(cameraScale)
+                .position(screenPoint(for: .zero, in: size))
+
+            graphNodes(in: size)
+
+            if editMode, let selection {
+                editor(for: selection, in: size)
             }
         }
     }
@@ -231,25 +257,7 @@ struct IntentGraphView: View {
 
             Spacer()
 
-            if editMode {
-                HStack(spacing: 7) {
-                    Circle().fill(GraphTheme.editBlue).frame(width: 6, height: 6)
-                    Text("EDIT MODE")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .tracking(1.1)
-                }
-                .foregroundStyle(GraphTheme.editBlue)
-            } else if let activeSessionName = model.activeSessionName {
-                HStack(spacing: 7) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
-                    Text(activeSessionName)
-                        .font(.system(size: 11, weight: .semibold))
-                }
-            } else {
-                Text("Press E to edit")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-            }
+            pageSwitcher
 
             Spacer()
 
@@ -275,6 +283,57 @@ struct IntentGraphView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(GraphTheme.stroke(colorScheme)).frame(height: 1)
         }
+    }
+
+    private var pageSwitcher: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 3) {
+                pageButton(.desktop, icon: "circle.hexagongrid")
+                pageButton(.scheduler, icon: "calendar")
+            }
+            .padding(3)
+            .background(GraphTheme.surface(colorScheme), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(GraphTheme.stroke(colorScheme)))
+
+            if editMode {
+                HStack(spacing: 7) {
+                    Circle().fill(GraphTheme.editBlue).frame(width: 6, height: 6)
+                    Text("EDIT MODE")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(1.1)
+                }
+                .foregroundStyle(GraphTheme.editBlue)
+            } else if let activeSessionName = model.activeSessionName {
+                HStack(spacing: 7) {
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text(activeSessionName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(maxWidth: 180)
+            } else {
+                Text(currentPage == .desktop ? "Press E to edit" : "Three fingers to move")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+        }
+    }
+
+    private func pageButton(_ page: OverlayPage, icon: String) -> some View {
+        Button {
+            switchPage(to: page)
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 34, height: 26)
+                .background(
+                    currentPage == page ? GraphTheme.elevatedSurface(colorScheme) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(page == .desktop ? "Intentions desktop" : "Scheduler")
     }
 
     @ViewBuilder
@@ -510,7 +569,9 @@ struct IntentGraphView: View {
                 )
             }
 
-            zoomControls(in: size)
+            if currentPage == .desktop {
+                zoomControls(in: size)
+            }
         }
         .padding(18)
     }
@@ -543,6 +604,9 @@ struct IntentGraphView: View {
                 showStatus("Finish the active intention before editing")
                 return
             }
+            if currentPage == .scheduler {
+                switchPage(to: .desktop)
+            }
             editMode ? leaveEditMode() : enterEditMode()
         case .escape:
             if editMode {
@@ -551,11 +615,11 @@ struct IntentGraphView: View {
                 model.hideOverlay()
             }
         case .intention:
-            guard editMode else { return }
+            guard currentPage == .desktop, editMode else { return }
             let id = model.createIntention(at: pointerWorldPoint(in: viewportSize))
             selection = .intention(id)
         case .restriction:
-            guard editMode else { return }
+            guard currentPage == .desktop, editMode else { return }
             guard let intentionID = selection?.intentionID else {
                 showStatus("Select an intention first")
                 return
@@ -564,7 +628,7 @@ struct IntentGraphView: View {
                 selection = .restriction(intentionID: intentionID, nodeID: id)
             }
         case .friction:
-            guard editMode else { return }
+            guard currentPage == .desktop, editMode else { return }
             guard let intentionID = selection?.intentionID else {
                 showStatus("Select an intention first")
                 return
@@ -583,6 +647,25 @@ struct IntentGraphView: View {
             guard editMode else { return }
             model.undoLastChange()
             selection = nil
+        }
+    }
+
+    private func handlePageSwipe(_ delta: CGFloat) {
+        guard !showQuickGuide, abs(delta) > 0.01 else { return }
+        if delta < 0 {
+            switchPage(to: .scheduler)
+        } else {
+            switchPage(to: .desktop)
+        }
+    }
+
+    private func switchPage(to page: OverlayPage) {
+        guard currentPage != page else { return }
+        if page == .scheduler {
+            leaveEditMode()
+        }
+        withAnimation(.easeInOut(duration: 0.34)) {
+            currentPage = page
         }
     }
 
@@ -910,16 +993,23 @@ private enum QuickAddKind {
     case friction
 }
 
+private enum OverlayPage {
+    case desktop
+    case scheduler
+}
+
 private struct GraphInputMonitor: NSViewRepresentable {
     let keyboardHandler: (GraphKeyboardKey) -> Void
     let magnificationHandler: (CGFloat) -> Void
     let scrollHandler: (CGSize) -> Void
+    let pageSwipeHandler: (CGFloat) -> Void
 
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
         view.keyboardHandler = keyboardHandler
         view.magnificationHandler = magnificationHandler
         view.scrollHandler = scrollHandler
+        view.pageSwipeHandler = pageSwipeHandler
         return view
     }
 
@@ -927,15 +1017,20 @@ private struct GraphInputMonitor: NSViewRepresentable {
         nsView.keyboardHandler = keyboardHandler
         nsView.magnificationHandler = magnificationHandler
         nsView.scrollHandler = scrollHandler
+        nsView.pageSwipeHandler = pageSwipeHandler
     }
 
     final class MonitorView: NSView {
         var keyboardHandler: ((GraphKeyboardKey) -> Void)?
         var magnificationHandler: ((CGFloat) -> Void)?
         var scrollHandler: ((CGSize) -> Void)?
+        var pageSwipeHandler: ((CGFloat) -> Void)?
         private var keyboardMonitor: Any?
         private var magnificationMonitor: Any?
         private var scrollMonitor: Any?
+        private var swipeMonitor: Any?
+        private var accumulatedThreeFingerX: CGFloat = 0
+        private var didTriggerThreeFingerSwipe = false
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -998,16 +1093,46 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     guard let self,
                           self.window?.isKeyWindow == true,
                           event.window === self.window,
-                          event.hasPreciseScrollingDeltas,
-                          !Self.isOverScrollView(event, in: self.window) else {
+                          event.hasPreciseScrollingDeltas else {
                         return event
                     }
+
+                    let touchingCount = event.touches(matching: .touching, in: nil).count
+                    if touchingCount >= 3, abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+                        if event.phase == .began {
+                            self.accumulatedThreeFingerX = 0
+                            self.didTriggerThreeFingerSwipe = false
+                        }
+                        self.accumulatedThreeFingerX += event.scrollingDeltaX
+                        if !self.didTriggerThreeFingerSwipe, abs(self.accumulatedThreeFingerX) >= 42 {
+                            self.didTriggerThreeFingerSwipe = true
+                            self.pageSwipeHandler?(self.accumulatedThreeFingerX)
+                        }
+                        if event.phase == .ended || event.phase == .cancelled {
+                            self.accumulatedThreeFingerX = 0
+                            self.didTriggerThreeFingerSwipe = false
+                        }
+                        return nil
+                    }
+
+                    guard !Self.isOverScrollView(event, in: self.window) else { return event }
                     self.scrollHandler?(
                         CGSize(
                             width: event.scrollingDeltaX * 1.15,
                             height: event.scrollingDeltaY * 1.15
                         )
                     )
+                    return nil
+                }
+
+                swipeMonitor = NSEvent.addLocalMonitorForEvents(matching: .swipe) { [weak self] event in
+                    guard let self,
+                          self.window?.isKeyWindow == true,
+                          event.window === self.window,
+                          abs(event.deltaX) > abs(event.deltaY) else {
+                        return event
+                    }
+                    self.pageSwipeHandler?(event.deltaX)
                     return nil
                 }
             } else if window == nil {
@@ -1023,9 +1148,11 @@ private struct GraphInputMonitor: NSViewRepresentable {
             if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
             if let magnificationMonitor { NSEvent.removeMonitor(magnificationMonitor) }
             if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+            if let swipeMonitor { NSEvent.removeMonitor(swipeMonitor) }
             keyboardMonitor = nil
             magnificationMonitor = nil
             scrollMonitor = nil
+            swipeMonitor = nil
         }
 
         private static func isEditingText(in window: NSWindow?) -> Bool {

@@ -18,16 +18,19 @@ final class IntentAppModel: ObservableObject {
     @Published var pendingFriction: PendingFriction?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
+    @Published var schedules: [IntentSchedule] = []
 
     weak var overlayPresenter: IntentOverlayPresenting?
 
     private let store = IntentionStore()
+    private let scheduleStore = IntentScheduleStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private var pendingStartIntention: Intention?
     private var remainingFrictions: [FrictionNode] = []
     private var activeLock: FocusLock?
     private var undoStack: [[Intention]] = []
     private var activeMoveUndoKeys: Set<String> = []
+    private var scheduleTimer: Timer?
 
     var selectedIntention: Intention? {
         guard let selectedID else { return intentions.first }
@@ -52,6 +55,14 @@ final class IntentAppModel: ObservableObject {
             intentions = []
             selectedID = nil
         }
+
+        do {
+            schedules = try scheduleStore.load()
+        } catch {
+            errorMessage = "Could not load schedules: \(error)"
+            schedules = []
+        }
+        startScheduleTimer()
     }
 
     func save() {
@@ -88,6 +99,8 @@ final class IntentAppModel: ObservableObject {
         guard intentions.contains(where: { $0.id == id }) else { return }
         recordUndoSnapshot()
         intentions.removeAll { $0.id == id }
+        schedules.removeAll { $0.intentionID == id }
+        saveSchedules()
         if selectedID == id {
             selectedID = intentions.first?.id
         }
@@ -200,6 +213,32 @@ final class IntentAppModel: ObservableObject {
             self.selectedID = intentions.first?.id
         }
         save()
+    }
+
+    @discardableResult
+    func createSchedule(intentionID: String, scheduledAt: Date = Date()) -> String? {
+        guard intentions.contains(where: { $0.id == intentionID }) else { return nil }
+        let schedule = IntentSchedule(
+            intentionID: intentionID,
+            recurrence: .once,
+            scheduledAt: scheduledAt
+        )
+        schedules.append(schedule)
+        saveSchedules()
+        return schedule.id
+    }
+
+    func updateSchedule(_ schedule: IntentSchedule) {
+        guard let index = schedules.firstIndex(where: { $0.id == schedule.id }) else { return }
+        var normalized = schedule
+        normalized.weekdays = Array(Set(schedule.weekdays)).sorted()
+        schedules[index] = normalized
+        saveSchedules()
+    }
+
+    func deleteSchedule(id: String) {
+        schedules.removeAll { $0.id == id }
+        saveSchedules()
     }
 
     func requestStart(_ intention: Intention) {
@@ -390,6 +429,47 @@ final class IntentAppModel: ObservableObject {
         "com.google.Chrome"
     ]
 
+    private func saveSchedules() {
+        do {
+            try scheduleStore.save(schedules)
+        } catch {
+            errorMessage = "Could not save schedules: \(error)"
+        }
+    }
+
+    private func startScheduleTimer() {
+        guard scheduleTimer == nil else { return }
+        let modelBox = WeakIntentAppModel(self)
+        let timer = Timer(timeInterval: 15, repeats: true) { _ in
+            Task { @MainActor in
+                modelBox.value?.runDueSchedule()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scheduleTimer = timer
+        runDueSchedule()
+    }
+
+    private func runDueSchedule(at now: Date = Date()) {
+        guard !hasActiveSession, pendingFriction == nil else { return }
+        guard let index = schedules.indices.first(where: { index in
+            guard let key = schedules[index].triggerKeyIfDue(at: now) else { return false }
+            return schedules[index].lastTriggeredKey != key
+        }),
+        let key = schedules[index].triggerKeyIfDue(at: now),
+        let intention = intentions.first(where: { $0.id == schedules[index].intentionID }) else {
+            return
+        }
+
+        schedules[index].lastTriggeredKey = key
+        if schedules[index].recurrence == .once {
+            schedules[index].isEnabled = false
+        }
+        saveSchedules()
+        overlayPresenter?.showOverlay(animated: true)
+        requestStart(intention)
+    }
+
     private func recordUndoSnapshot() {
         guard !hasActiveSession else { return }
         if undoStack.last != intentions {
@@ -408,6 +488,14 @@ final class IntentAppModel: ObservableObject {
         if persist {
             activeMoveUndoKeys.remove(key)
         }
+    }
+}
+
+private final class WeakIntentAppModel: @unchecked Sendable {
+    weak var value: IntentAppModel?
+
+    init(_ value: IntentAppModel) {
+        self.value = value
     }
 }
 

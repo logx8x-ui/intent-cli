@@ -10,25 +10,25 @@ enum GraphTheme {
     }
 
     static func backdropTintOpacity(_ colorScheme: ColorScheme) -> Double {
-        colorScheme == .dark ? 0.15 : 0.27
+        colorScheme == .dark ? 0.15 : 0.16
     }
 
     static func chrome(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
             ? Color.white.opacity(0.035)
-            : Color.white.opacity(0.58)
+            : Color.white.opacity(0.34)
     }
 
     static func surface(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
             ? Color.white.opacity(0.045)
-            : Color.white.opacity(0.50)
+            : Color.white.opacity(0.30)
     }
 
     static func elevatedSurface(_ colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
             ? Color.white.opacity(0.075)
-            : Color.white.opacity(0.72)
+            : Color.white.opacity(0.48)
     }
 
     static func text(_ colorScheme: ColorScheme) -> Color {
@@ -44,11 +44,11 @@ enum GraphTheme {
     }
 
     static func glassTint(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? .white.opacity(0.030) : .white.opacity(0.40)
+        colorScheme == .dark ? .white.opacity(0.030) : .white.opacity(0.20)
     }
 
     static func glassHighlight(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? .white.opacity(0.20) : .white.opacity(0.78)
+        colorScheme == .dark ? .white.opacity(0.20) : .white.opacity(0.62)
     }
 
     static func glassShadow(_ colorScheme: ColorScheme) -> Color {

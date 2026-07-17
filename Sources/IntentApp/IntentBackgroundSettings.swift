@@ -44,8 +44,8 @@ struct BackgroundArtworkView: View {
                     .resizable()
                     .scaledToFill()
                     .blur(radius: 1.2)
-                    .opacity(colorScheme == .dark ? 0.36 : 0.25)
-                    .overlay(Color.black.opacity(colorScheme == .dark ? 0.08 : 0.02))
+                    .opacity(colorScheme == .dark ? 0.36 : 0.52)
+                    .overlay(Color.black.opacity(colorScheme == .dark ? 0.08 : 0.035))
             } else {
                 Color.clear
             }

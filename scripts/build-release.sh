@@ -3,8 +3,8 @@ set -euo pipefail
 export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.4.0}"
-BUILD_NUMBER="${2:-13}"
+VERSION="${1:-0.5.0}"
+BUILD_NUMBER="${2:-14}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"
@@ -14,13 +14,34 @@ APP="$PKG_ROOT/Applications/Intent.app"
 SUPPORT_DIR="$PKG_ROOT/Library/Application Support/Intent"
 ARM_BUILD="$WORK/swift-arm64"
 X86_BUILD="$WORK/swift-x86_64"
+APPLICATION_IDENTITY="${INTENT_APPLICATION_IDENTITY:-}"
+INSTALLER_IDENTITY="${INTENT_INSTALLER_IDENTITY:-}"
+NOTARY_PROFILE="${INTENT_NOTARY_PROFILE:-}"
+REQUIRE_NOTARIZATION="${INTENT_REQUIRE_NOTARIZATION:-0}"
+
+if [[ "$REQUIRE_NOTARIZATION" == "1" ]] && {
+  [[ -z "$APPLICATION_IDENTITY" ]] || [[ -z "$INSTALLER_IDENTITY" ]] || [[ -z "$NOTARY_PROFILE" ]]
+}; then
+  cat >&2 <<'MSG'
+Public release refused: Apple signing and notarization are not configured.
+
+Set:
+  INTENT_APPLICATION_IDENTITY='Developer ID Application: ...'
+  INTENT_INSTALLER_IDENTITY='Developer ID Installer: ...'
+  INTENT_NOTARY_PROFILE='intent-notary'
+
+Apple Developer Program membership and installed Developer ID certificates are required.
+MSG
+  exit 4
+fi
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mkdir -p "$SUPPORT_DIR"
 mkdir -p "$PKG_ROOT/Library/LaunchAgents"
 mkdir -p "$PKG_ROOT/Library/Application Support/Mozilla/NativeMessagingHosts"
 mkdir -p "$PKG_ROOT/Library/Google/Chrome/NativeMessagingHosts"
-mkdir -p "$PKG_SCRIPTS" "$DMG_ROOT/Browser Extensions" "$DIST"
+rm -rf "$DIST"
+mkdir -p "$PKG_SCRIPTS" "$DMG_ROOT" "$DIST"
 
 cd "$ROOT"
 for product in Intent IntentApp IntentNativeHost; do
@@ -130,17 +151,25 @@ exit 0
 SCRIPT
 chmod +x "$PKG_SCRIPTS/preinstall" "$PKG_SCRIPTS/postinstall"
 
-codesign \
-  --force \
-  --sign - \
-  --identifier dev.loganmondi.intent \
-  --requirements '=designated => identifier "dev.loganmondi.intent"' \
-  "$APP" >/dev/null
+if [[ -n "$APPLICATION_IDENTITY" ]]; then
+  codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$SUPPORT_DIR/Intent"
+  codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$SUPPORT_DIR/IntentNativeHost"
+  codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$APP/Contents/MacOS/IntentApp"
+  codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+else
+  codesign \
+    --force \
+    --sign - \
+    --identifier dev.loganmondi.intent \
+    --requirements '=designated => identifier "dev.loganmondi.intent"' \
+    "$APP" >/dev/null
+fi
 xattr -cr "$PKG_ROOT"
 dot_clean -m "$PKG_ROOT" >/dev/null 2>&1 || true
 
-PKG="$DIST/Intent-${VERSION}.pkg"
-DMG="$DIST/Intent-${VERSION}.dmg"
+DMG="$DIST/Intent.dmg"
+UNSIGNED_PKG="$WORK/Intent-${VERSION}-unsigned.pkg"
 WORK_PKG="$WORK/Intent-${VERSION}.pkg"
 WORK_DMG="$WORK/Intent-${VERSION}.dmg"
 pkgbuild \
@@ -149,22 +178,16 @@ pkgbuild \
   --identifier dev.loganmondi.intent \
   --version "$VERSION" \
   --install-location / \
-  "$WORK_PKG" >/dev/null
+  "$UNSIGNED_PKG" >/dev/null
+
+if [[ -n "$INSTALLER_IDENTITY" ]]; then
+  productsign --sign "$INSTALLER_IDENTITY" "$UNSIGNED_PKG" "$WORK_PKG" >/dev/null
+  pkgutil --check-signature "$WORK_PKG"
+else
+  mv "$UNSIGNED_PKG" "$WORK_PKG"
+fi
 
 cp "$WORK_PKG" "$DMG_ROOT/Install Intent.pkg"
-cp "$ROOT/dist/chrome/intent-browser-guard-chrome-0.1.2.zip" "$DMG_ROOT/Browser Extensions/Chrome - developer fallback.zip"
-cp "$ROOT/dist/firefox/intent_browser_guard-0.1.6.zip" "$DMG_ROOT/Browser Extensions/Firefox - AMO upload source.zip"
-
-cat > "$DMG_ROOT/README.txt" <<'TEXT'
-INTENT BETA
-
-1. Double-click “Install Intent.pkg”.
-2. If macOS blocks it, Control-click the package, choose Open, then confirm.
-3. Install Intent Browser Guard for your browser using the links in the GitHub README.
-4. Open Intent from the menu-bar scope icon or press ~.
-
-The extension ZIP files are included only as developer fallbacks while the store listings are under review.
-TEXT
 
 hdiutil create \
   -volname "Intent ${VERSION}" \
@@ -173,7 +196,26 @@ hdiutil create \
   -format UDZO \
   "$WORK_DMG" >/dev/null
 
-cp -f "$WORK_PKG" "$PKG"
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  if [[ -z "$APPLICATION_IDENTITY" || -z "$INSTALLER_IDENTITY" ]]; then
+    echo "Notarization requires both INTENT_APPLICATION_IDENTITY and INTENT_INSTALLER_IDENTITY." >&2
+    exit 3
+  fi
+  xcrun notarytool submit "$WORK_DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$WORK_DMG"
+  xcrun stapler validate "$WORK_DMG"
+else
+  echo "Warning: built a local beta DMG without Apple notarization." >&2
+fi
+
 cp -f "$WORK_DMG" "$DMG"
 
-echo "$DMG"
+FIREFOX_VERSION="$(node -p "require('$ROOT/firefox-extension/manifest.json').version")"
+CHROME_VERSION="$(node -p "require('$ROOT/chrome-extension/manifest.json').version")"
+cp -f "$ROOT/dist/firefox/intent_browser_guard-${FIREFOX_VERSION}.zip" "$DIST/Intent-Firefox-Extension.zip"
+cp -f "$ROOT/dist/chrome/intent-browser-guard-chrome-${CHROME_VERSION}.zip" "$DIST/Intent-Chrome-Extension.zip"
+
+printf '%s\n' \
+  "$DMG" \
+  "$DIST/Intent-Firefox-Extension.zip" \
+  "$DIST/Intent-Chrome-Extension.zip"

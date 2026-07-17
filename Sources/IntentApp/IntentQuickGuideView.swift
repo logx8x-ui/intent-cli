@@ -146,9 +146,9 @@ struct IntentQuickGuideView: View {
                 shortcut("Cmd Tab", "Switch between launched allowed apps")
                 shortcut("Cmd Shift M", "Finish the active intention")
                 shortcut("~", "Show or hide Intent")
+                shortcut("Three fingers", "Move between intentions and scheduler")
                 shortcut("Pinch", "Zoom the desktop")
                 shortcut("Two fingers", "Pan across the desktop")
-                shortcut("Esc", "Leave edit mode or hide Intent")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

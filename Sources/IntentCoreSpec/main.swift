@@ -368,6 +368,61 @@ do {
     let loadedIntentions = try intentionStore.load()
     try expect(loadedIntentions == intentions, "IntentionStore should round-trip intentions")
 
+    var scheduleCalendar = Calendar(identifier: .gregorian)
+    scheduleCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let scheduleDate = scheduleCalendar.date(from: DateComponents(
+        year: 2026,
+        month: 7,
+        day: 20,
+        hour: 9,
+        minute: 30
+    ))!
+    let scheduleStore = IntentScheduleStore(fileURL: tempDirectory.appendingPathComponent("schedules.json"))
+    let freshSchedules = try scheduleStore.load()
+    try expect(freshSchedules.isEmpty, "A first install should start with no scheduled intentions")
+
+    let onceSchedule = IntentSchedule(
+        id: "once",
+        intentionID: "data-science",
+        recurrence: .once,
+        scheduledAt: scheduleDate
+    )
+    let dailySchedule = IntentSchedule(
+        id: "daily",
+        intentionID: "emails",
+        recurrence: .daily,
+        scheduledAt: scheduleDate
+    )
+    let weeklySchedule = IntentSchedule(
+        id: "weekly",
+        intentionID: "instagram",
+        recurrence: .weekly,
+        scheduledAt: scheduleDate,
+        weekdays: [ScheduleWeekday.monday.rawValue, ScheduleWeekday.wednesday.rawValue]
+    )
+    try scheduleStore.save([onceSchedule, dailySchedule, weeklySchedule])
+    let loadedSchedules = try scheduleStore.load()
+    try expect(
+        loadedSchedules == [onceSchedule, dailySchedule, weeklySchedule],
+        "IntentScheduleStore should round-trip schedules"
+    )
+    try expect(onceSchedule.occurs(on: scheduleDate, calendar: scheduleCalendar), "A once schedule should occur on its saved date")
+    try expect(onceSchedule.triggerKeyIfDue(at: scheduleDate, calendar: scheduleCalendar) != nil, "A schedule should become due at its saved minute")
+    try expect(
+        onceSchedule.triggerKeyIfDue(at: scheduleDate.addingTimeInterval(60), calendar: scheduleCalendar) == nil,
+        "A once schedule should not trigger at a different minute"
+    )
+    let nextDay = scheduleCalendar.date(byAdding: .day, value: 1, to: scheduleDate)!
+    try expect(dailySchedule.occurs(on: nextDay, calendar: scheduleCalendar), "A daily schedule should occur the next day")
+    let wednesday = scheduleCalendar.date(byAdding: .day, value: 2, to: scheduleDate)!
+    let thursday = scheduleCalendar.date(byAdding: .day, value: 3, to: scheduleDate)!
+    try expect(weeklySchedule.occurs(on: wednesday, calendar: scheduleCalendar), "A weekly schedule should occur on a selected weekday")
+    try expect(!weeklySchedule.occurs(on: thursday, calendar: scheduleCalendar), "A weekly schedule should skip an unselected weekday")
+    try expect(
+        weeklySchedule.nextOccurrence(after: scheduleDate, calendar: scheduleCalendar) == wednesday,
+        "A weekly schedule should find its next selected day"
+    )
+
     let rulesStore = ActiveBrowserRulesStore(fileURL: tempDirectory.appendingPathComponent("browser-rules.json"))
     let browserRules = ActiveBrowserRules(
         active: true,
