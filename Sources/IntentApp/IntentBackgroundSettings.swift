@@ -1,0 +1,356 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+enum IntentBackgroundChoice: String, CaseIterable, Identifiable {
+    case none
+    case knightCauseway
+    case celestialGuardian
+    case abbeyPlanners
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none: "Adaptive glass"
+        case .knightCauseway: "The Causeway"
+        case .celestialGuardian: "The Guardian"
+        case .abbeyPlanners: "The Abbey"
+        case .custom: "Your image"
+        }
+    }
+
+    var assetName: String? {
+        switch self {
+        case .knightCauseway: "knight-causeway"
+        case .celestialGuardian: "celestial-guardian"
+        case .abbeyPlanners: "abbey-planners"
+        case .none, .custom: nil
+        }
+    }
+}
+
+struct BackgroundArtworkView: View {
+    let selection: IntentBackgroundChoice
+    let revision: Int
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Group {
+            if let image = IntentBackgroundStore.image(for: selection) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .blur(radius: 1.2)
+                    .opacity(colorScheme == .dark ? 0.36 : 0.25)
+                    .overlay(Color.black.opacity(colorScheme == .dark ? 0.08 : 0.02))
+            } else {
+                Color.clear
+            }
+        }
+        .id("\(selection.rawValue)-\(revision)")
+        .clipped()
+        .allowsHitTesting(false)
+    }
+}
+
+struct IntentSettingsView: View {
+    @Binding var appearance: String
+    @Binding var backgroundSelection: String
+    let onBackgroundChanged: () -> Void
+    let onShowGuide: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isDropTarget = false
+    @State private var importError: String?
+
+    private let presetColumns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Image(systemName: "gearshape")
+                Text("Settings")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("APPEARANCE")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Picker("Appearance", selection: $appearance) {
+                    Text("Dark").tag("dark")
+                    Text("Light").tag("light")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("BACKGROUND")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                LazyVGrid(columns: presetColumns, spacing: 8) {
+                    ForEach(IntentBackgroundChoice.allCases.filter { $0 != .custom }) { choice in
+                        backgroundButton(choice)
+                    }
+                    if IntentBackgroundStore.customImageExists {
+                        backgroundButton(.custom)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        chooseImage()
+                    } label: {
+                        Label("Choose", systemImage: "photo")
+                    }
+
+                    Button {
+                        pasteImage()
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.doc")
+                    Text("Drop an image here")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                }
+                .foregroundStyle(isDropTarget ? GraphTheme.editBlue : GraphTheme.muted(colorScheme))
+                .padding(.horizontal, 12)
+                .frame(height: 42)
+                .background(GraphTheme.surface(colorScheme))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(
+                            isDropTarget ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                            style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                        )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $isDropTarget) { providers in
+                    importFromDrop(providers)
+                }
+
+                if let importError {
+                    Text(importError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Text("Intent keeps the same glass, blur, stars, and transparency over every background.")
+                    .font(.caption2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+
+            Divider()
+
+            Button(action: onShowGuide) {
+                Label("Show quick guide", systemImage: "questionmark.circle")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(18)
+        .frame(width: 390)
+        .background(GraphTheme.background(colorScheme).opacity(0.94))
+    }
+
+    private func backgroundButton(_ choice: IntentBackgroundChoice) -> some View {
+        let selected = backgroundSelection == choice.rawValue
+        return Button {
+            backgroundSelection = choice.rawValue
+            onBackgroundChanged()
+        } label: {
+            ZStack(alignment: .bottomLeading) {
+                preview(for: choice)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 78)
+                    .clipped()
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.76)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                Text(choice.title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .padding(8)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func preview(for choice: IntentBackgroundChoice) -> some View {
+        if choice == .none {
+            ZStack {
+                GraphTheme.background(colorScheme)
+                Image(systemName: "circle.dotted")
+                    .font(.system(size: 24, weight: .light))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+        } else if let image = IntentBackgroundStore.image(for: choice) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+        } else {
+            GraphTheme.surface(colorScheme)
+        }
+    }
+
+    private func chooseImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importImage(at: url)
+    }
+
+    private func pasteImage() {
+        let pasteboard = NSPasteboard.general
+        if let image = NSImage(pasteboard: pasteboard) {
+            saveCustom(image)
+            return
+        }
+
+        guard let raw = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            importError = "Copy an image, image file, or image URL first."
+            return
+        }
+
+        if let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            Task {
+                do {
+                    let (data, _) = try await URLSession.shared.data(from: url)
+                    await MainActor.run {
+                        guard let image = NSImage(data: data) else {
+                            importError = "That URL did not contain a readable image."
+                            return
+                        }
+                        saveCustom(image)
+                    }
+                } catch {
+                    await MainActor.run { importError = "That image URL could not be loaded." }
+                }
+            }
+            return
+        }
+
+        let url = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
+        importImage(at: url)
+    }
+
+    private func importFromDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                guard let data,
+                      let raw = String(data: data, encoding: .utf8),
+                      let url = URL(string: raw) else { return }
+                DispatchQueue.main.async { importImage(at: url) }
+            }
+            return true
+        }
+
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+            guard let data, let image = NSImage(data: data) else { return }
+            DispatchQueue.main.async { saveCustom(image) }
+        }
+        return true
+    }
+
+    private func importImage(at url: URL) {
+        guard let image = NSImage(contentsOf: url) else {
+            importError = "That file is not a readable image."
+            return
+        }
+        saveCustom(image)
+    }
+
+    private func saveCustom(_ image: NSImage) {
+        do {
+            try IntentBackgroundStore.saveCustomImage(image)
+            backgroundSelection = IntentBackgroundChoice.custom.rawValue
+            importError = nil
+            onBackgroundChanged()
+        } catch {
+            importError = "Intent could not save that image."
+        }
+    }
+}
+
+enum IntentBackgroundStore {
+    static let customImageURL = FileManager.default
+        .homeDirectoryForCurrentUser
+        .appendingPathComponent(".intent", isDirectory: true)
+        .appendingPathComponent("backgrounds", isDirectory: true)
+        .appendingPathComponent("custom-background.png")
+
+    static var customImageExists: Bool {
+        FileManager.default.fileExists(atPath: customImageURL.path)
+    }
+
+    static func image(for choice: IntentBackgroundChoice) -> NSImage? {
+        if choice == .custom {
+            return NSImage(contentsOf: customImageURL)
+        }
+        guard let assetName = choice.assetName,
+              let resourceBundle,
+              let url = resourceBundle.url(forResource: assetName, withExtension: "png", subdirectory: "Backgrounds")
+                ?? resourceBundle.url(forResource: assetName, withExtension: "png") else {
+            return nil
+        }
+        return NSImage(contentsOf: url)
+    }
+
+    private static var resourceBundle: Bundle? {
+        let bundleName = "Intent_IntentApp.bundle"
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+            Bundle.main.bundleURL.appendingPathComponent(bundleName),
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent(bundleName)
+        ].compactMap { $0 }
+        return candidates.lazy.compactMap(Bundle.init(url:)).first
+    }
+
+    static func saveCustomImage(_ image: NSImage) throws {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw IntentBackgroundError.invalidImage
+        }
+        try FileManager.default.createDirectory(
+            at: customImageURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try png.write(to: customImageURL, options: .atomic)
+    }
+}
+
+private enum IntentBackgroundError: Error {
+    case invalidImage
+}

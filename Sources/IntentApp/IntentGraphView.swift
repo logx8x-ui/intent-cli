@@ -6,7 +6,9 @@ struct IntentGraphView: View {
     @EnvironmentObject private var model: IntentAppModel
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("intentAppearance") private var appearance = "dark"
-    @AppStorage("intentWelcomeTitle") private var welcomeTitle = "Welcome to Intent"
+    @AppStorage("intentWelcomeTitle") private var welcomeTitle = "Welcome to my desktop"
+    @AppStorage("intentBackgroundSelection") private var backgroundSelection = IntentBackgroundChoice.none.rawValue
+    @AppStorage("intentDidCompleteOnboarding") private var didCompleteOnboarding = false
 
     @State private var editMode = false
     @State private var selection: GraphSelection?
@@ -17,6 +19,9 @@ struct IntentGraphView: View {
     @State private var statusMessage: String?
     @State private var welcomeTitleDraft = ""
     @State private var editingWelcomeTitle = false
+    @State private var showSettings = false
+    @State private var showQuickGuide = false
+    @State private var backgroundRevision = 0
     @FocusState private var welcomeTitleFocused: Bool
 
     private let minimumScale: CGFloat = 0.35
@@ -27,6 +32,12 @@ struct IntentGraphView: View {
             ZStack {
                 AdaptiveBackdropView()
                     .ignoresSafeArea()
+
+                BackgroundArtworkView(
+                    selection: IntentBackgroundChoice(rawValue: backgroundSelection) ?? .none,
+                    revision: backgroundRevision
+                )
+                .ignoresSafeArea()
 
                 GraphTheme.background(colorScheme)
                     .opacity(GraphTheme.backdropTintOpacity(colorScheme))
@@ -60,7 +71,7 @@ struct IntentGraphView: View {
                 topBar
                     .frame(maxHeight: .infinity, alignment: .top)
 
-                zoomControls(in: proxy.size)
+                bottomControls(in: proxy.size)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
 
                 if let statusMessage {
@@ -89,6 +100,18 @@ struct IntentGraphView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
+
+                if showQuickGuide {
+                    Color.black.opacity(0.34)
+                        .ignoresSafeArea()
+                        .onTapGesture { }
+
+                    IntentQuickGuideView {
+                        didCompleteOnboarding = true
+                        showQuickGuide = false
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                }
             }
             .coordinateSpace(name: "graphViewport")
             .clipShape(RoundedRectangle(cornerRadius: 22))
@@ -113,6 +136,11 @@ struct IntentGraphView: View {
                 }
             }
             .padding(18)
+            .onAppear {
+                if !didCompleteOnboarding {
+                    showQuickGuide = true
+                }
+            }
         }
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .sheet(item: $model.pendingFriction) { pending in
@@ -456,6 +484,34 @@ struct IntentGraphView: View {
         .buttonStyle(.plain)
         .padding(10)
         .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 12)
+    }
+
+    private func bottomControls(in size: CGSize) -> some View {
+        VStack(alignment: .trailing, spacing: 9) {
+            Button {
+                showSettings.toggle()
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 11)
+            .help("Settings")
+            .popover(isPresented: $showSettings, arrowEdge: .trailing) {
+                IntentSettingsView(
+                    appearance: $appearance,
+                    backgroundSelection: $backgroundSelection,
+                    onBackgroundChanged: { backgroundRevision += 1 },
+                    onShowGuide: {
+                        showSettings = false
+                        showQuickGuide = true
+                    }
+                )
+            }
+
+            zoomControls(in: size)
+        }
         .padding(18)
     }
 
@@ -473,6 +529,14 @@ struct IntentGraphView: View {
     }
 
     private func handleKeyboard(_ key: GraphKeyboardKey, viewportSize: CGSize) {
+        if showQuickGuide {
+            if key == .escape {
+                didCompleteOnboarding = true
+                showQuickGuide = false
+            }
+            return
+        }
+
         switch key {
         case .edit:
             guard !model.hasActiveSession else {
@@ -694,7 +758,18 @@ struct IntentGraphView: View {
 
     private func intentionBinding(id: String) -> Binding<Intention> {
         Binding(
-            get: { model.intentions.first(where: { $0.id == id }) ?? DefaultIntentions.make()[0] },
+            get: {
+                model.intentions.first(where: { $0.id == id }) ?? Intention(
+                    name: "New intention",
+                    icon: "target",
+                    colorHex: "#F5F5F7",
+                    folder: "",
+                    allowedApps: [],
+                    allowedWebsites: [],
+                    startupActions: [],
+                    restrictions: .init()
+                )
+            },
             set: { model.updateIntention($0) }
         )
     }

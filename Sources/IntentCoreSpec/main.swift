@@ -358,6 +358,11 @@ do {
     let tempDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("intent-core-spec-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    let freshStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("fresh-intentions.json"))
+    let freshIntentions = try freshStore.load()
+    try expect(freshIntentions.isEmpty, "A first install should start with a blank desktop")
+    try expect(FileManager.default.fileExists(atPath: freshStore.fileURL.path), "A blank first-run store should be persisted")
+
     let intentionStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("intentions.json"))
     try intentionStore.save(intentions)
     let loadedIntentions = try intentionStore.load()

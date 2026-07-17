@@ -4,18 +4,16 @@ Intent is a macOS focus app for running saved intentions: focused sessions that 
 
 ## Downloads
 
-The app is currently distributed from GitHub:
-
-- Repository: `https://github.com/logx8x-ui/intent-cli`
-- Friend install command:
-
-```zsh
-git clone https://github.com/logx8x-ui/intent-cli.git ~/intent && ~/intent/scripts/install.sh
-```
+Download the latest `Intent-0.4.0.dmg` from [GitHub Releases](https://github.com/logx8x-ui/intent-cli/releases/latest), then run `Install Intent.pkg` inside it.
 
 ## Firefox Extension
 
 Intent Browser Guard is the Firefox extension that makes tab and URL restrictions work.
 
 - Release notes and signing plan: `firefox-extension-release.md`
-- Mozilla Add-ons listing: pending first Mozilla submission/approval
+- Mozilla Add-ons listing: pending listed review
+
+## Chrome Extension
+
+- Chrome Web Store listing: pending review
+- The developer fallback ZIP is included in the release DMG until approval.

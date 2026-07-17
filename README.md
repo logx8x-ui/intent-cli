@@ -1,154 +1,75 @@
 # Intent
 
-Intent is a macOS focus tool for running saved intentions: focused sessions that allow only selected apps and browser targets until you exit with `Cmd+Shift+M`.
+Intent is a macOS focus app that lets you choose one intention, opens its allowed apps and websites, and keeps everything else out until you finish.
 
-The repo has two entry points:
+## Download
 
-- `Intent`: the original CLI, kept for quick launching and testing.
-- `intent-app`: the native macOS menu-bar app and spatial intention canvas.
+1. Open [GitHub Releases](https://github.com/logx8x-ui/intent-cli/releases/latest).
+2. Download `Intent-0.4.0.dmg`.
+3. Open the DMG and double-click `Install Intent.pkg`.
+4. If macOS blocks it, Control-click the package, choose **Open**, then confirm.
+5. Look for the Intent scope icon in the menu bar, or press `~`.
 
-Default intentions:
+Intent currently requires macOS 13 or newer. This beta is not yet Apple-notarized, which is why macOS shows the one-time warning in step 4.
 
-- Imessages
-- Instagram replies
-- Emails
-- Data science
+## Browser Guard
 
-## Requirements
+Install the companion for the browser used by your intentions, then leave its toolbar switch on. The guard does nothing when no intention is running.
 
-- macOS 13 or newer
-- Xcode Command Line Tools
-- Firefox or Google Chrome for browser-based tasks
-- RStudio, Spotify, RemNote, and Codex for the current Data science deep-work mode
+- **Firefox:** public Mozilla Add-ons listing is pending review. The temporary developer fallback is included in the DMG until approval.
+- **Chrome:** public Chrome Web Store listing is pending review. The developer fallback ZIP is included in the DMG until approval.
 
-Install Xcode Command Line Tools if needed:
+Developer fallback for Chrome:
+
+1. Unzip `Chrome - developer fallback.zip` from the DMG.
+2. Open `chrome://extensions`.
+3. Enable **Developer mode**, click **Load unpacked**, and choose the unzipped folder.
+
+Developer fallback for Firefox:
+
+1. Unzip `Firefox - AMO upload source.zip` from the DMG.
+2. Open `about:debugging#/runtime/this-firefox`.
+3. Click **Load Temporary Add-on** and choose `manifest.json` inside the unzipped folder.
+
+Firefox removes temporary add-ons when it restarts, so this fallback is only for beta testing while the persistent store version is under review.
+
+## First Run
+
+New installs start with a blank canvas and **Welcome to my desktop**. A two-page guide explains the basics.
+
+- `~` shows or hides Intent.
+- Click an intention to run it.
+- `E` enters edit mode.
+- `I`, `R`, and `F` add an intention, restriction, or friction.
+- `S` closes the selected editor.
+- `X` or `Delete` removes the selected shape.
+- `Cmd+Z` undoes the last change.
+- Pinch to zoom and use two fingers to pan.
+- `Cmd+Tab` switches between launched allowed apps during a session.
+- `Cmd+Shift+M` ends the session.
+
+The first session asks for macOS Accessibility permission so Intent can enforce app restrictions. This is a one-time system permission.
+
+## Backgrounds
+
+Open the gear in the bottom-right corner to choose dark/light appearance, select a built-in medieval drawing, upload an image, paste one, or drag and drop one. Intent preserves the same adaptive glass, blur, stars, and transparency over every background.
+
+## Build From Source
 
 ```zsh
-xcode-select --install
-```
-
-## Install
-
-Clone this repo, then run:
-
-```zsh
+git clone https://github.com/logx8x-ui/intent-cli.git
+cd intent-cli
 ./scripts/install.sh
 ```
 
-Then start the menu-bar app:
+Run all checks and build the release DMG:
 
 ```zsh
-intent-app
-```
-
-You can also open `Intent` from `~/Applications/Intent.app`. Intent runs in the menu bar and intentionally does not keep a Dock icon.
-The installer registers Intent to start once at each macOS login, so the global `~` shortcut is available without opening a normal window first.
-
-## Using the canvas
-
-- Press `~` anywhere on the Mac to show or hide the near-full-screen Intent overlay.
-- Click an intention once to run it.
-- Press `E` to enter or leave edit mode. The blue perimeter indicates that shapes can be changed.
-- In edit mode, drag existing shapes to move them.
-- Creation is keyboard-only: press `I` to create an intention at the pointer, `R` to attach a restriction to the selected intention, or `F` to attach a friction.
-- An intention editor also has direct circle and triangle buttons for attaching a restriction or friction.
-- Press `S` or click `Save (S)` to close the selected editor, Delete or `X` to remove the selected shape, and `Cmd+Z` to undo the latest canvas change.
-- Pinch to zoom, use two fingers or drag empty space to pan, or use the bottom-right zoom and fit controls.
-- Intention edits autosave. Clicking empty canvas saves and closes the selected shape's settings menu.
-
-Every allowed app and website starts automatically. Attach a `Don't start up` restriction to keep selected resources closed initially while still allowing them during the intention. Multiple friction triangles run from the highest shape on the canvas to the lowest.
-
-During an active intention, Intent replaces `Cmd+Tab` with an app-level switcher containing only currently running allowed apps. Cmd+grave continues to switch windows inside the selected app, and `Cmd+Shift+M` ends the intention and restores the Intent overlay.
-
-Or start the CLI:
-
-```zsh
-Intent
-```
-
-The installer also installs the Firefox and Chrome native messaging hosts that let each Browser Guard read only its own active Intent rules.
-Both guards always permit creating a blank tab. Without the browser-search restriction, submitting from that tab closes it; with the restriction, Google search results work while unallowed websites remain blocked.
-
-To enable Firefox tab and URL blocking during browser intentions:
-
-1. Install the Intent Browser Guard Firefox extension.
-2. Click the Intent Browser Guard toolbar icon in Firefox.
-3. Keep the switch on.
-
-During development, load it locally:
-
-1. Open Firefox.
-2. Go to `about:debugging#/runtime/this-firefox`.
-3. Click `Load Temporary Add-on...`.
-4. Choose `firefox-extension/manifest.json` from this repo.
-
-For the unlisted beta, build and sign the extension with Mozilla Add-ons:
-
-```zsh
+swift run IntentCoreSpec
 npm install
-./scripts/build-firefox-extension.sh
-export AMO_JWT_ISSUER='user:...'
-export AMO_JWT_SECRET='...'
-./scripts/sign-firefox-extension.sh
+npm run test:extensions
+npm run extension:lint
+./scripts/build-release.sh
 ```
 
-`scripts/sign-firefox-extension.sh` signs through Mozilla's unlisted add-on flow. The signed `.xpi` is written to `dist/firefox/` and can be shared with testers without making the extension public on AMO. The final signing step needs credentials from the Intent Mozilla Add-ons developer account.
-Intent refuses to start Firefox or Chrome intentions when that browser's guard is disconnected or switched off, instead of silently running without tab protection. Other browsers remain unsupported for enforceable tab and URL restrictions.
-
-To test Intent Browser Guard in Chrome:
-
-1. Run `./scripts/install.sh` so Chrome can reach the native host.
-2. Open `chrome://extensions`.
-3. Enable Developer mode.
-4. Click `Load unpacked` and choose the repo's `chrome-extension` folder.
-5. Pin Intent Browser Guard and leave its switch on. "Listening" does not block normal browsing; rules activate only while an intention is running.
-
-Build the Chrome Web Store package with:
-
-```zsh
-npm run extension:build:chrome
-```
-
-The upload-ready ZIP is written to `dist/chrome/`. Chrome Web Store submission is a later release step; local unpacked testing uses the same extension code and persistent toggle.
-
-The first lock session may need macOS permissions:
-
-- System Settings > Privacy & Security > Accessibility
-- Enable your terminal app for CLI sessions, or `IntentApp` for desktop-app sessions
-- If prompted, also enable Input Monitoring for the app you are using to start sessions
-
-## Update
-
-From the cloned repo:
-
-```zsh
-./scripts/update.sh
-```
-
-That pulls the latest GitHub version and reinstalls the CLI, desktop app, and both browser native hosts.
-
-## Friend Install Command
-
-```zsh
-git clone https://github.com/logx8x-ui/intent-cli.git ~/intent && ~/intent/scripts/install.sh
-```
-
-Then they can start the menu-bar app:
-
-```zsh
-intent-app
-```
-
-For the desktop experience, open `~/Applications/Intent.app`, then use the menu-bar icon or press `~`.
-
-They should also install Intent Browser Guard in the browser used by their intentions and keep its toolbar switch on. Firefox can use the signed beta or temporary development extension; Chrome can load `~/intent/chrome-extension` as an unpacked extension during beta testing.
-
-After that, friends can update with:
-
-```zsh
-~/intent/scripts/update.sh
-```
-
-## Notes
-
-Intent uses macOS Accessibility/event taps to block common app-switching and browser-switching escape paths during a focus session. It is a personal focus tool, not security software.
+Intent is a personal focus tool, not security software. See [Privacy](PRIVACY.md) for its local-only data behavior.

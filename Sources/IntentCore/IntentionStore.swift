@@ -9,9 +9,9 @@ public final class IntentionStore {
 
     public func load() throws -> [Intention] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            let defaults = DefaultIntentions.make()
-            try save(defaults)
-            return defaults
+            let emptyDesktop: [Intention] = []
+            try save(emptyDesktop)
+            return emptyDesktop
         }
 
         let data = try Data(contentsOf: fileURL)

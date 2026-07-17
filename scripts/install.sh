@@ -28,7 +28,10 @@ ln -sf "$APP_DIR/Intent" "$BIN_DIR/intent"
 ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/IntentApp"
 
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
+/usr/bin/ditto "$ROOT/.build/release/Intent_IntentApp.bundle" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle"
+cp "$ROOT/Assets/Intent.icns" "$APP_BUNDLE/Contents/Resources/Intent.icns"
 chmod +x "$APP_BUNDLE/Contents/MacOS/IntentApp"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,10 +48,12 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>Intent</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>Intent</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.8</string>
+  <string>0.4.0</string>
   <key>CFBundleVersion</key>
-  <string>12</string>
+  <string>13</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>

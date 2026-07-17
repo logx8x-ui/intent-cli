@@ -18,6 +18,7 @@ struct IntentDesktopApp: App {
     init() {
         let appModel = IntentAppModel()
         let controller = OverlayWindowController(model: appModel)
+        let shouldShowFirstRunGuide = !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
         appModel.overlayPresenter = controller
         _model = StateObject(wrappedValue: appModel)
         overlayController = controller
@@ -29,6 +30,9 @@ struct IntentDesktopApp: App {
 
         Task { @MainActor in
             appModel.load()
+            if shouldShowFirstRunGuide {
+                controller.showOverlay(animated: false)
+            }
         }
     }
 

@@ -14,3 +14,5 @@ downloads/
 *.jpeg
 *.png
 *.webp
+!Assets/*.png
+!Sources/IntentApp/Resources/Backgrounds/*.png

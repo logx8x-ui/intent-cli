@@ -49,8 +49,8 @@ final class IntentAppModel: ObservableObject {
             try store.save(intentions)
         } catch {
             errorMessage = "Could not load intentions: \(error)"
-            intentions = DefaultIntentions.make()
-            selectedID = intentions.first?.id
+            intentions = []
+            selectedID = nil
         }
     }
 

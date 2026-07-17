@@ -25,7 +25,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "IntentApp",
-            dependencies: ["IntentCore", "IntentLock"]
+            dependencies: ["IntentCore", "IntentLock"],
+            resources: [.process("Resources")]
         ),
         .executableTarget(
             name: "IntentNativeHost",
