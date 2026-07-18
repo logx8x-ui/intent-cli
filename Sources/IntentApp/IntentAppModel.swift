@@ -12,6 +12,8 @@ protocol IntentOverlayPresenting: AnyObject {
 
 @MainActor
 final class IntentAppModel: ObservableObject {
+    private static let requireManualFinishKey = "intentRequireManualFinishBeforeSwitching"
+
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
     @Published var activeSessionName: String?
@@ -19,6 +21,12 @@ final class IntentAppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
     @Published var schedules: [IntentSchedule] = []
+    @Published var sessionSwitchWarning: SessionSwitchWarning?
+    @Published var requireManualFinishBeforeSwitching: Bool {
+        didSet {
+            UserDefaults.standard.set(requireManualFinishBeforeSwitching, forKey: Self.requireManualFinishKey)
+        }
+    }
 
     weak var overlayPresenter: IntentOverlayPresenting?
 
@@ -26,11 +34,19 @@ final class IntentAppModel: ObservableObject {
     private let scheduleStore = IntentScheduleStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private var pendingStartIntention: Intention?
+    private var pendingReplacementIntention: Intention?
     private var remainingFrictions: [FrictionNode] = []
     private var activeLock: FocusLock?
+    private var activeSessionID: String?
     private var undoStack: [[Intention]] = []
     private var activeMoveUndoKeys: Set<String> = []
     private var scheduleTimer: Timer?
+
+    init() {
+        requireManualFinishBeforeSwitching = UserDefaults.standard.object(
+            forKey: Self.requireManualFinishKey
+        ) as? Bool ?? true
+    }
 
     var selectedIntention: Intention? {
         guard let selectedID else { return intentions.first }
@@ -242,10 +258,6 @@ final class IntentAppModel: ObservableObject {
     }
 
     func requestStart(_ intention: Intention) {
-        guard !hasActiveSession else {
-            errorMessage = "Finish the current intention before starting another one."
-            return
-        }
         guard !intention.allowedApps.isEmpty else {
             errorMessage = "Add at least one allowed app before starting this intention."
             return
@@ -258,7 +270,29 @@ final class IntentAppModel: ObservableObject {
             errorMessage = "Browser locking currently supports Firefox and Chrome. Replace \(names) with one of those browsers before starting this intention."
             return
         }
+        selectedID = intention.id
 
+        guard hasActiveSession else {
+            sessionSwitchWarning = nil
+            beginStartFlow(for: intention)
+            return
+        }
+        guard activeSessionID != intention.id else { return }
+
+        if requireManualFinishBeforeSwitching {
+            let activeName = activeSessionName ?? "An intention"
+            sessionSwitchWarning = SessionSwitchWarning(
+                message: "\(activeName) is running. Press Cmd+Shift+M to finish it before starting \(intention.name)."
+            )
+            return
+        }
+
+        sessionSwitchWarning = nil
+        pendingReplacementIntention = intention
+        activeLock?.stop()
+    }
+
+    private func beginStartFlow(for intention: Intention) {
         let frictions = intention.orderedFrictionNodes
         guard !frictions.isEmpty else {
             start(intention)
@@ -311,6 +345,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func endActiveSession() {
+        sessionSwitchWarning = nil
         activeLock?.stop()
     }
 
@@ -387,6 +422,7 @@ final class IntentAppModel: ObservableObject {
 
         let lock = FocusLock(spec: spec)
         activeLock = lock
+        activeSessionID = intention.id
         activeSessionName = intention.name
         overlayPresenter?.hideOverlay(animated: true)
 
@@ -402,9 +438,15 @@ final class IntentAppModel: ObservableObject {
                 renewalTimer.cancel()
                 try? ActiveBrowserRulesStore().clear()
                 Task { @MainActor in
+                    let replacement = self.pendingReplacementIntention
+                    self.pendingReplacementIntention = nil
                     self.activeLock = nil
+                    self.activeSessionID = nil
                     self.activeSessionName = nil
                     self.overlayPresenter?.showOverlay(animated: true)
+                    if let replacement {
+                        self.requestStart(replacement)
+                    }
                 }
             }
 
@@ -489,6 +531,11 @@ final class IntentAppModel: ObservableObject {
             activeMoveUndoKeys.remove(key)
         }
     }
+}
+
+struct SessionSwitchWarning: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
 }
 
 private final class WeakIntentAppModel: @unchecked Sendable {

@@ -23,6 +23,8 @@ struct IntentGraphView: View {
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
     @State private var currentPage: OverlayPage = .desktop
+    @State private var pagePosition: CGFloat = 0
+    @State private var warningShakeCount: CGFloat = 0
     @FocusState private var welcomeTitleFocused: Bool
 
     private let minimumScale: CGFloat = 0.35
@@ -56,8 +58,7 @@ struct IntentGraphView: View {
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
-                .offset(x: currentPage == .desktop ? 0 : -proxy.size.width)
-                .animation(.easeInOut(duration: 0.34), value: currentPage)
+                .offset(x: -pagePosition * proxy.size.width)
 
                 topBar
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -78,6 +79,13 @@ struct IntentGraphView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
 
+                if let warning = model.sessionSwitchWarning {
+                    sessionSwitchWarningBanner(warning)
+                        .padding(.top, 72)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
                 GraphInputMonitor(
                     keyboardHandler: { key in
                         handleKeyboard(key, viewportSize: proxy.size)
@@ -88,8 +96,8 @@ struct IntentGraphView: View {
                     scrollHandler: { delta in
                         applyTrackpadPan(delta)
                     },
-                    pageSwipeHandler: { delta in
-                        handlePageSwipe(delta)
+                    pageSwipeHandler: { event in
+                        handlePageSwipe(event, viewportWidth: proxy.size.width)
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -130,7 +138,9 @@ struct IntentGraphView: View {
                 }
             }
             .padding(18)
+            .modifier(ShakeEffect(shakes: warningShakeCount))
             .onAppear {
+                pagePosition = currentPage.position
                 if !didCompleteOnboarding {
                     showQuickGuide = true
                 }
@@ -140,6 +150,18 @@ struct IntentGraphView: View {
                     leaveEditMode()
                 }
                 showSettings = false
+            }
+            .onChange(of: model.sessionSwitchWarning?.id) { warningID in
+                guard let warningID else { return }
+                withAnimation(.linear(duration: 0.54)) {
+                    warningShakeCount += 1
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) {
+                    guard model.sessionSwitchWarning?.id == warningID else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        model.sessionSwitchWarning = nil
+                    }
+                }
             }
         }
         .preferredColorScheme(appearance == "light" ? .light : .dark)
@@ -561,6 +583,7 @@ struct IntentGraphView: View {
                 IntentSettingsView(
                     appearance: $appearance,
                     backgroundSelection: $backgroundSelection,
+                    requireManualFinishBeforeSwitching: $model.requireManualFinishBeforeSwitching,
                     onBackgroundChanged: { backgroundRevision += 1 },
                     onShowGuide: {
                         showSettings = false
@@ -647,26 +670,69 @@ struct IntentGraphView: View {
             guard editMode else { return }
             model.undoLastChange()
             selection = nil
+        case .pageLeft:
+            switchPage(to: .desktop)
+        case .pageRight:
+            switchPage(to: .scheduler)
         }
     }
 
-    private func handlePageSwipe(_ delta: CGFloat) {
-        guard !showQuickGuide, abs(delta) > 0.01 else { return }
-        if delta < 0 {
-            switchPage(to: .scheduler)
-        } else {
-            switchPage(to: .desktop)
+    private func handlePageSwipe(_ event: PageSwipeEvent, viewportWidth: CGFloat) {
+        guard !showQuickGuide, viewportWidth > 0 else { return }
+        let origin = currentPage.position
+
+        switch event {
+        case .changed(let translationX):
+            pagePosition = min(max(origin - (translationX / viewportWidth), 0), 1)
+        case .ended(let translationX, let velocityX):
+            let crossedDistance = abs(translationX) >= viewportWidth * 0.18
+            let crossedVelocity = abs(velocityX) >= 520
+            let target: OverlayPage
+            if currentPage == .desktop, translationX < 0, crossedDistance || crossedVelocity {
+                target = .scheduler
+            } else if currentPage == .scheduler, translationX > 0, crossedDistance || crossedVelocity {
+                target = .desktop
+            } else {
+                target = currentPage
+            }
+            settlePageSwipe(on: target)
+        case .cancelled:
+            settlePageSwipe(on: currentPage)
+        }
+    }
+
+    private func settlePageSwipe(on page: OverlayPage) {
+        if page == .scheduler {
+            leaveEditMode()
+        }
+        currentPage = page
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.9)) {
+            pagePosition = page.position
         }
     }
 
     private func switchPage(to page: OverlayPage) {
-        guard currentPage != page else { return }
-        if page == .scheduler {
-            leaveEditMode()
+        guard currentPage != page || pagePosition != page.position else { return }
+        settlePageSwipe(on: page)
+    }
+
+    private func sessionSwitchWarningBanner(_ warning: SessionSwitchWarning) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.octagon.fill")
+                .font(.system(size: 15, weight: .semibold))
+            Text(warning.message)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(2)
+            Spacer(minLength: 0)
         }
-        withAnimation(.easeInOut(duration: 0.34)) {
-            currentPage = page
-        }
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 15)
+        .frame(minHeight: 46)
+        .background(Color.red.opacity(0.88), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.2)))
+        .shadow(color: Color.red.opacity(0.28), radius: 14, y: 6)
+        .frame(maxWidth: 640)
+        .padding(.horizontal, 26)
     }
 
     private func deleteSelection() {
@@ -986,6 +1052,8 @@ private enum GraphKeyboardKey {
     case save
     case delete
     case undo
+    case pageLeft
+    case pageRight
 }
 
 private enum QuickAddKind {
@@ -996,13 +1064,41 @@ private enum QuickAddKind {
 private enum OverlayPage {
     case desktop
     case scheduler
+
+    var position: CGFloat {
+        self == .desktop ? 0 : 1
+    }
+}
+
+private enum PageSwipeEvent {
+    case changed(translationX: CGFloat)
+    case ended(translationX: CGFloat, velocityX: CGFloat)
+    case cancelled
+}
+
+private struct ShakeEffect: GeometryEffect {
+    var shakes: CGFloat
+
+    var animatableData: CGFloat {
+        get { shakes }
+        set { shakes = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(
+            CGAffineTransform(
+                translationX: 9 * sin(shakes * .pi * 2 * 3),
+                y: 0
+            )
+        )
+    }
 }
 
 private struct GraphInputMonitor: NSViewRepresentable {
     let keyboardHandler: (GraphKeyboardKey) -> Void
     let magnificationHandler: (CGFloat) -> Void
     let scrollHandler: (CGSize) -> Void
-    let pageSwipeHandler: (CGFloat) -> Void
+    let pageSwipeHandler: (PageSwipeEvent) -> Void
 
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
@@ -1020,21 +1116,24 @@ private struct GraphInputMonitor: NSViewRepresentable {
         nsView.pageSwipeHandler = pageSwipeHandler
     }
 
-    final class MonitorView: NSView {
+    final class MonitorView: NSView, NSGestureRecognizerDelegate {
         var keyboardHandler: ((GraphKeyboardKey) -> Void)?
         var magnificationHandler: ((CGFloat) -> Void)?
         var scrollHandler: ((CGSize) -> Void)?
-        var pageSwipeHandler: ((CGFloat) -> Void)?
+        var pageSwipeHandler: ((PageSwipeEvent) -> Void)?
         private var keyboardMonitor: Any?
         private var magnificationMonitor: Any?
         private var scrollMonitor: Any?
         private var swipeMonitor: Any?
-        private var accumulatedThreeFingerX: CGFloat = 0
-        private var didTriggerThreeFingerSwipe = false
+        private weak var gestureHostView: NSView?
+        private var threeFingerPanRecognizer: ThreeFingerSwipeGestureRecognizer?
+        private var isTrackingThreeFingerPan = false
+        private var lastThreeFingerCompletionTime: TimeInterval = 0
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if window != nil, keyboardMonitor == nil {
+                installThreeFingerPanRecognizer()
                 keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                     guard let self, self.window?.isKeyWindow == true else {
                         return event
@@ -1071,6 +1170,8 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     case 3: key = .friction
                     case 1: key = .save
                     case 7, 51, 117: key = .delete
+                    case 123: key = .pageLeft
+                    case 124: key = .pageRight
                     default: key = nil
                     }
 
@@ -1097,24 +1198,6 @@ private struct GraphInputMonitor: NSViewRepresentable {
                         return event
                     }
 
-                    let touchingCount = event.touches(matching: .touching, in: nil).count
-                    if touchingCount >= 3, abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
-                        if event.phase == .began {
-                            self.accumulatedThreeFingerX = 0
-                            self.didTriggerThreeFingerSwipe = false
-                        }
-                        self.accumulatedThreeFingerX += event.scrollingDeltaX
-                        if !self.didTriggerThreeFingerSwipe, abs(self.accumulatedThreeFingerX) >= 42 {
-                            self.didTriggerThreeFingerSwipe = true
-                            self.pageSwipeHandler?(self.accumulatedThreeFingerX)
-                        }
-                        if event.phase == .ended || event.phase == .cancelled {
-                            self.accumulatedThreeFingerX = 0
-                            self.didTriggerThreeFingerSwipe = false
-                        }
-                        return nil
-                    }
-
                     guard !Self.isOverScrollView(event, in: self.window) else { return event }
                     self.scrollHandler?(
                         CGSize(
@@ -1128,11 +1211,18 @@ private struct GraphInputMonitor: NSViewRepresentable {
                 swipeMonitor = NSEvent.addLocalMonitorForEvents(matching: .swipe) { [weak self] event in
                     guard let self,
                           self.window?.isKeyWindow == true,
-                          event.window === self.window,
+                          !self.isTrackingThreeFingerPan,
+                          event.timestamp - self.lastThreeFingerCompletionTime > 0.25,
+                          self.isPointerInsideOverlay,
                           abs(event.deltaX) > abs(event.deltaY) else {
                         return event
                     }
-                    self.pageSwipeHandler?(event.deltaX)
+                    self.pageSwipeHandler?(
+                        .ended(
+                            translationX: event.deltaX * self.bounds.width,
+                            velocityX: event.deltaX * 1_200
+                        )
+                    )
                     return nil
                 }
             } else if window == nil {
@@ -1153,6 +1243,66 @@ private struct GraphInputMonitor: NSViewRepresentable {
             magnificationMonitor = nil
             scrollMonitor = nil
             swipeMonitor = nil
+            if let threeFingerPanRecognizer {
+                gestureHostView?.removeGestureRecognizer(threeFingerPanRecognizer)
+            }
+            threeFingerPanRecognizer = nil
+            gestureHostView = nil
+            isTrackingThreeFingerPan = false
+        }
+
+        private func installThreeFingerPanRecognizer() {
+            guard threeFingerPanRecognizer == nil,
+                  let hostView = window?.contentView else { return }
+            let recognizer = ThreeFingerSwipeGestureRecognizer(
+                target: self,
+                action: #selector(handleThreeFingerPan(_:))
+            )
+            recognizer.allowedTouchTypes = [.indirect]
+            recognizer.delegate = self
+            hostView.addGestureRecognizer(recognizer)
+            gestureHostView = hostView
+            threeFingerPanRecognizer = recognizer
+        }
+
+        @objc private func handleThreeFingerPan(_ recognizer: ThreeFingerSwipeGestureRecognizer) {
+            switch recognizer.state {
+            case .began, .changed:
+                isTrackingThreeFingerPan = true
+                pageSwipeHandler?(.changed(translationX: recognizer.translationX))
+            case .ended:
+                pageSwipeHandler?(
+                    .ended(
+                        translationX: recognizer.translationX,
+                        velocityX: recognizer.velocityX
+                    )
+                )
+                isTrackingThreeFingerPan = false
+                lastThreeFingerCompletionTime = ProcessInfo.processInfo.systemUptime
+            case .cancelled, .failed:
+                pageSwipeHandler?(.cancelled)
+                isTrackingThreeFingerPan = false
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+            gestureRecognizer === threeFingerPanRecognizer && isPointerInsideOverlay
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: NSGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer
+        ) -> Bool {
+            true
+        }
+
+        private var isPointerInsideOverlay: Bool {
+            guard let window else { return false }
+            let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+            let localPoint = convert(windowPoint, from: nil)
+            return bounds.contains(localPoint)
         }
 
         private static func isEditingText(in window: NSWindow?) -> Bool {
@@ -1165,5 +1315,110 @@ private struct GraphInputMonitor: NSViewRepresentable {
             return sequence(first: view as NSView?, next: { $0?.superview })
                 .contains { $0 is NSScrollView }
         }
+    }
+}
+
+private final class ThreeFingerSwipeGestureRecognizer: NSGestureRecognizer {
+    private(set) var translationX: CGFloat = 0
+    private(set) var velocityX: CGFloat = 0
+
+    private var initialCentroid: CGPoint?
+    private var previousCentroid: CGPoint?
+    private var previousTimestamp: TimeInterval = 0
+
+    override func touchesBegan(with event: NSEvent) {
+        super.touchesBegan(with: event)
+        let touches = activeTouches(in: event)
+        guard touches.count <= 3 else {
+            state = .failed
+            return
+        }
+        guard touches.count == 3, let centroid = centroid(of: touches) else { return }
+        initialCentroid = centroid
+        previousCentroid = centroid
+        previousTimestamp = event.timestamp
+        translationX = 0
+        velocityX = 0
+    }
+
+    override func touchesMoved(with event: NSEvent) {
+        super.touchesMoved(with: event)
+        let touches = activeTouches(in: event)
+        guard touches.count == 3,
+              let origin = initialCentroid,
+              let centroid = centroid(of: touches),
+              let view else {
+            if state == .began || state == .changed {
+                state = .cancelled
+            }
+            return
+        }
+
+        let translation = CGPoint(
+            x: (centroid.x - origin.x) * view.bounds.width,
+            y: (centroid.y - origin.y) * view.bounds.height
+        )
+
+        if let previousCentroid {
+            let elapsed = max(1.0 / 240.0, event.timestamp - previousTimestamp)
+            velocityX = ((centroid.x - previousCentroid.x) * view.bounds.width) / elapsed
+        }
+        previousCentroid = centroid
+        previousTimestamp = event.timestamp
+        translationX = translation.x
+
+        if state == .possible {
+            let distance = hypot(translation.x, translation.y)
+            guard distance >= 6 else { return }
+            guard abs(translation.x) > abs(translation.y) * 1.08 else {
+                state = .failed
+                return
+            }
+            state = .began
+        } else if state == .began || state == .changed {
+            state = .changed
+        }
+    }
+
+    override func touchesEnded(with event: NSEvent) {
+        super.touchesEnded(with: event)
+        if state == .began || state == .changed {
+            state = .ended
+        } else if state == .possible {
+            state = .failed
+        }
+    }
+
+    override func touchesCancelled(with event: NSEvent) {
+        super.touchesCancelled(with: event)
+        if state == .began || state == .changed {
+            state = .cancelled
+        } else {
+            state = .failed
+        }
+    }
+
+    override func reset() {
+        super.reset()
+        translationX = 0
+        velocityX = 0
+        initialCentroid = nil
+        previousCentroid = nil
+        previousTimestamp = 0
+    }
+
+    private func activeTouches(in event: NSEvent) -> [NSTouch] {
+        Array(event.touches(matching: .touching, in: view))
+    }
+
+    private func centroid(of touches: [NSTouch]) -> CGPoint? {
+        guard !touches.isEmpty else { return nil }
+        let total = touches.reduce(CGPoint.zero) { partial, touch in
+            CGPoint(
+                x: partial.x + touch.normalizedPosition.x,
+                y: partial.y + touch.normalizedPosition.y
+            )
+        }
+        return CGPoint(x: total.x / CGFloat(touches.count), y: total.y / CGFloat(touches.count))
     }
 }

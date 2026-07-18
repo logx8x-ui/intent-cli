@@ -59,6 +59,7 @@ struct BackgroundArtworkView: View {
 struct IntentSettingsView: View {
     @Binding var appearance: String
     @Binding var backgroundSelection: String
+    @Binding var requireManualFinishBeforeSwitching: Bool
     let onBackgroundChanged: () -> Void
     let onShowGuide: () -> Void
 
@@ -152,6 +153,22 @@ struct IntentSettingsView: View {
                 }
 
                 Text("Intent keeps the same glass, blur, stars, and transparency over every background.")
+                    .font(.caption2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SESSIONS")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                Toggle("Require finish before switching", isOn: $requireManualFinishBeforeSwitching)
+                    .toggleStyle(.switch)
+
+                Text("When off, clicking another intention ends the current session and starts the new one.")
                     .font(.caption2)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }
