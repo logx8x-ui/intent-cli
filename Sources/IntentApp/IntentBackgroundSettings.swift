@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -62,6 +63,7 @@ struct IntentSettingsView: View {
     @Binding var appearance: String
     @Binding var backgroundSelection: String
     @Binding var requireManualFinishBeforeSwitching: Bool
+    @Binding var overlayShortcut: OverlayShortcut
     let onBackgroundChanged: () -> Void
     let onShowGuide: () -> Void
 
@@ -155,6 +157,21 @@ struct IntentSettingsView: View {
                 }
 
                 Text("Intent keeps the same glass, blur, stars, and transparency over every background.")
+                    .font(.caption2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SHORTCUT")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                OverlayShortcutRecorder(shortcut: $overlayShortcut)
+
+                Text("Opens or hides Intent anywhere on your Mac.")
                     .font(.caption2)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }
@@ -318,6 +335,126 @@ struct IntentSettingsView: View {
             onBackgroundChanged()
         } catch {
             importError = "Intent could not save that image."
+        }
+    }
+}
+
+private struct OverlayShortcutRecorder: View {
+    @Binding var shortcut: OverlayShortcut
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isRecording = false
+    @State private var validationMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                validationMessage = nil
+                isRecording = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isRecording ? "keyboard.badge.ellipsis" : "keyboard")
+                        .foregroundStyle(isRecording ? GraphTheme.editBlue : GraphTheme.muted(colorScheme))
+
+                    Text(isRecording ? "Press a new shortcut" : shortcut.displayName)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+
+                    Spacer()
+
+                    Text(isRecording ? "ESC TO CANCEL" : "CHANGE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 42)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(GraphTheme.surface(colorScheme))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(isRecording ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: isRecording ? 1.5 : 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+
+            ShortcutKeyMonitor(isActive: $isRecording) { event in
+                let candidate = OverlayShortcut(event: event)
+                if let message = IntentRuntime.shared.updateOverlayShortcut(candidate) {
+                    validationMessage = message
+                    NSSound.beep()
+                } else {
+                    shortcut = candidate
+                    validationMessage = nil
+                }
+                isRecording = false
+            }
+            .frame(width: 0, height: 0)
+
+            if let validationMessage {
+                Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onDisappear { isRecording = false }
+    }
+}
+
+private struct ShortcutKeyMonitor: NSViewRepresentable {
+    @Binding var isActive: Bool
+    let onCapture: (NSEvent) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isActive: $isActive, onCapture: onCapture)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isActive = $isActive
+        context.coordinator.onCapture = onCapture
+        context.coordinator.setMonitoring(isActive)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.setMonitoring(false)
+    }
+
+    final class Coordinator {
+        var isActive: Binding<Bool>
+        var onCapture: (NSEvent) -> Void
+        private var monitor: Any?
+
+        init(isActive: Binding<Bool>, onCapture: @escaping (NSEvent) -> Void) {
+            self.isActive = isActive
+            self.onCapture = onCapture
+        }
+
+        func setMonitoring(_ shouldMonitor: Bool) {
+            if shouldMonitor, monitor == nil {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self else { return event }
+                    if event.keyCode == UInt16(kVK_Escape) {
+                        self.isActive.wrappedValue = false
+                    } else {
+                        self.onCapture(event)
+                    }
+                    return nil
+                }
+            } else if !shouldMonitor, let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
     }
 }

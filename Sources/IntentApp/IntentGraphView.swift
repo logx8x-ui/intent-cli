@@ -22,6 +22,7 @@ struct IntentGraphView: View {
     @State private var showSettings = false
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
+    @State private var overlayShortcut = OverlayShortcutStore.load()
     @State private var currentPage: OverlayPage = .desktop
     @State private var pagePosition: CGFloat = 0
     @State private var warningShakeCount: CGFloat = 0
@@ -594,6 +595,7 @@ struct IntentGraphView: View {
                     appearance: $appearance,
                     backgroundSelection: $backgroundSelection,
                     requireManualFinishBeforeSwitching: $model.requireManualFinishBeforeSwitching,
+                    overlayShortcut: $overlayShortcut,
                     onBackgroundChanged: { backgroundRevision += 1 },
                     onShowGuide: {
                         showSettings = false

@@ -94,4 +94,21 @@ final class IntentRuntime {
             overlayController.showOverlay(animated: false)
         }
     }
+
+    func updateOverlayShortcut(_ candidate: OverlayShortcut) -> String? {
+        if let message = OverlayShortcutConflictChecker.validationMessage(for: candidate) {
+            return message
+        }
+        guard let hotKeyManager else {
+            return "Intent's shortcut service is not ready yet."
+        }
+
+        let status = hotKeyManager.update(to: candidate)
+        guard status == noErr else {
+            return "\(candidate.displayName) is already being used by macOS or another app."
+        }
+
+        OverlayShortcutStore.save(candidate)
+        return nil
+    }
 }
