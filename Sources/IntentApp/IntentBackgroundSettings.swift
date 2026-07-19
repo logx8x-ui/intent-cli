@@ -43,6 +43,7 @@ struct BackgroundArtworkView: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .blur(radius: 1.2)
                     .opacity(colorScheme == .dark ? 0.36 : 0.52)
                     .overlay(Color.black.opacity(colorScheme == .dark ? 0.08 : 0.035))
@@ -51,6 +52,7 @@ struct BackgroundArtworkView: View {
             }
         }
         .id("\(selection.rawValue)-\(revision)")
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .allowsHitTesting(false)
     }
@@ -321,6 +323,8 @@ struct IntentSettingsView: View {
 }
 
 enum IntentBackgroundStore {
+    private static let imageCache = NSCache<NSString, NSImage>()
+
     static let customImageURL = FileManager.default
         .homeDirectoryForCurrentUser
         .appendingPathComponent(".intent", isDirectory: true)
@@ -332,8 +336,15 @@ enum IntentBackgroundStore {
     }
 
     static func image(for choice: IntentBackgroundChoice) -> NSImage? {
+        let cacheKey = choice.rawValue as NSString
+        if let cached = imageCache.object(forKey: cacheKey) {
+            return cached
+        }
+
         if choice == .custom {
-            return NSImage(contentsOf: customImageURL)
+            guard let image = NSImage(contentsOf: customImageURL) else { return nil }
+            imageCache.setObject(image, forKey: cacheKey)
+            return image
         }
         guard let assetName = choice.assetName,
               let resourceBundle,
@@ -341,7 +352,9 @@ enum IntentBackgroundStore {
                 ?? resourceBundle.url(forResource: assetName, withExtension: "png") else {
             return nil
         }
-        return NSImage(contentsOf: url)
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        imageCache.setObject(image, forKey: cacheKey)
+        return image
     }
 
     private static var resourceBundle: Bundle? {
@@ -365,6 +378,7 @@ enum IntentBackgroundStore {
             withIntermediateDirectories: true
         )
         try png.write(to: customImageURL, options: .atomic)
+        imageCache.removeObject(forKey: IntentBackgroundChoice.custom.rawValue as NSString)
     }
 }
 

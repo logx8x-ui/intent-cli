@@ -32,6 +32,11 @@ struct IntentGraphView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let viewportSize = CGSize(
+                width: max(1, proxy.size.width - 36),
+                height: max(1, proxy.size.height - 36)
+            )
+
             ZStack {
                 AdaptiveBackdropView()
                     .ignoresSafeArea()
@@ -40,6 +45,8 @@ struct IntentGraphView: View {
                     selection: IntentBackgroundChoice(rawValue: backgroundSelection) ?? .none,
                     revision: backgroundRevision
                 )
+                .frame(width: viewportSize.width, height: viewportSize.height)
+                .clipped()
                 .ignoresSafeArea()
 
                 GraphTheme.background(colorScheme)
@@ -50,21 +57,22 @@ struct IntentGraphView: View {
                     .allowsHitTesting(false)
 
                 HStack(spacing: 0) {
-                    desktopPage(in: proxy.size)
-                        .frame(width: proxy.size.width, height: proxy.size.height)
+                    desktopPage(in: viewportSize)
+                        .frame(width: viewportSize.width, height: viewportSize.height)
 
                     IntentSchedulerView()
                         .environmentObject(model)
-                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .frame(width: viewportSize.width, height: viewportSize.height)
                 }
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
-                .offset(x: -pagePosition * proxy.size.width)
+                .frame(width: viewportSize.width, height: viewportSize.height, alignment: .leading)
+                .offset(x: -pagePosition * viewportSize.width)
 
                 topBar
                     .frame(maxHeight: .infinity, alignment: .top)
 
-                bottomControls(in: proxy.size)
+                bottomControls(in: viewportSize)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .zIndex(50)
 
                 if let statusMessage {
                     Text(statusMessage)
@@ -88,16 +96,16 @@ struct IntentGraphView: View {
 
                 GraphInputMonitor(
                     keyboardHandler: { key in
-                        handleKeyboard(key, viewportSize: proxy.size)
+                        handleKeyboard(key, viewportSize: viewportSize)
                     },
                     magnificationHandler: { magnification in
-                        applyTrackpadMagnification(magnification, viewportSize: proxy.size)
+                        applyTrackpadMagnification(magnification, viewportSize: viewportSize)
                     },
                     scrollHandler: { delta in
                         applyTrackpadPan(delta)
                     },
                     pageSwipeHandler: { event in
-                        handlePageSwipe(event, viewportWidth: proxy.size.width)
+                        handlePageSwipe(event, viewportWidth: viewportSize.width)
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -115,6 +123,7 @@ struct IntentGraphView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
                 }
             }
+            .frame(width: viewportSize.width, height: viewportSize.height)
             .coordinateSpace(name: "graphViewport")
             .clipShape(RoundedRectangle(cornerRadius: 22))
             .overlay(
@@ -570,11 +579,12 @@ struct IntentGraphView: View {
     private func bottomControls(in size: CGSize) -> some View {
         VStack(alignment: .trailing, spacing: 9) {
             Button {
-                showSettings.toggle()
+                showSettings = true
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 14, weight: .medium))
                     .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 11)
@@ -617,6 +627,13 @@ struct IntentGraphView: View {
             if key == .escape {
                 didCompleteOnboarding = true
                 showQuickGuide = false
+            }
+            return
+        }
+
+        if showSettings {
+            if key == .escape {
+                showSettings = false
             }
             return
         }
@@ -1125,10 +1142,16 @@ private struct GraphInputMonitor: NSViewRepresentable {
         private var magnificationMonitor: Any?
         private var scrollMonitor: Any?
         private var swipeMonitor: Any?
+        private var indirectGestureMonitor: Any?
         private weak var gestureHostView: NSView?
         private var threeFingerPanRecognizer: ThreeFingerSwipeGestureRecognizer?
         private var isTrackingThreeFingerPan = false
         private var lastThreeFingerCompletionTime: TimeInterval = 0
+        private var indirectGestureOrigin: CGPoint?
+        private var indirectGesturePrevious: CGPoint?
+        private var indirectGesturePreviousTimestamp: TimeInterval = 0
+        private var indirectGestureTranslationX: CGFloat = 0
+        private var indirectGestureVelocityX: CGFloat = 0
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -1225,6 +1248,19 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     )
                     return nil
                 }
+
+                if #available(macOS 26, *) {
+                    indirectGestureMonitor = NSEvent.addLocalMonitorForEvents(matching: .gesture) { [weak self] event in
+                        guard let self,
+                              self.window?.isKeyWindow == true,
+                              event.window === self.window,
+                              self.isPointerInsideOverlay else {
+                            return event
+                        }
+                        self.handleIndirectGesture(event)
+                        return event
+                    }
+                }
             } else if window == nil {
                 removeMonitors()
             }
@@ -1239,32 +1275,109 @@ private struct GraphInputMonitor: NSViewRepresentable {
             if let magnificationMonitor { NSEvent.removeMonitor(magnificationMonitor) }
             if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
             if let swipeMonitor { NSEvent.removeMonitor(swipeMonitor) }
+            if let indirectGestureMonitor { NSEvent.removeMonitor(indirectGestureMonitor) }
             keyboardMonitor = nil
             magnificationMonitor = nil
             scrollMonitor = nil
             swipeMonitor = nil
+            indirectGestureMonitor = nil
             if let threeFingerPanRecognizer {
                 gestureHostView?.removeGestureRecognizer(threeFingerPanRecognizer)
             }
             threeFingerPanRecognizer = nil
             gestureHostView = nil
             isTrackingThreeFingerPan = false
+            resetIndirectGesture()
         }
 
         private func installThreeFingerPanRecognizer() {
+            if #available(macOS 26, *) { return }
             guard threeFingerPanRecognizer == nil,
                   let hostView = window?.contentView else { return }
             let recognizer = ThreeFingerSwipeGestureRecognizer(
                 target: self,
                 action: #selector(handleThreeFingerPan(_:))
             )
-            if #unavailable(macOS 26) {
-                recognizer.allowedTouchTypes = [.indirect]
-            }
+            recognizer.allowedTouchTypes = [.indirect]
             recognizer.delegate = self
             hostView.addGestureRecognizer(recognizer)
             gestureHostView = hostView
             threeFingerPanRecognizer = recognizer
+        }
+
+        @available(macOS 26, *)
+        private func handleIndirectGesture(_ event: NSEvent) {
+            let touches = Array(event.touches(matching: .touching, in: self))
+            let finishing = event.phase.contains(.ended) || event.phase.contains(.cancelled)
+
+            if touches.count == 3, let centroid = centroid(of: touches) {
+                if indirectGestureOrigin == nil {
+                    indirectGestureOrigin = centroid
+                    indirectGesturePrevious = centroid
+                    indirectGesturePreviousTimestamp = event.timestamp
+                    indirectGestureTranslationX = 0
+                    indirectGestureVelocityX = 0
+                }
+
+                guard let origin = indirectGestureOrigin else { return }
+                let translationX = (centroid.x - origin.x) * bounds.width
+                let translationY = (centroid.y - origin.y) * bounds.height
+
+                if let previous = indirectGesturePrevious {
+                    let elapsed = max(1.0 / 240.0, event.timestamp - indirectGesturePreviousTimestamp)
+                    indirectGestureVelocityX = ((centroid.x - previous.x) * bounds.width) / elapsed
+                }
+                indirectGesturePrevious = centroid
+                indirectGesturePreviousTimestamp = event.timestamp
+                indirectGestureTranslationX = translationX
+
+                if abs(translationX) > 5, abs(translationX) > abs(translationY) * 1.05 {
+                    isTrackingThreeFingerPan = true
+                    pageSwipeHandler?(.changed(translationX: translationX))
+                }
+            }
+
+            if finishing {
+                finishIndirectGesture(cancelled: event.phase.contains(.cancelled))
+            }
+        }
+
+        private func finishIndirectGesture(cancelled: Bool) {
+            guard indirectGestureOrigin != nil else { return }
+            if isTrackingThreeFingerPan {
+                if cancelled {
+                    pageSwipeHandler?(.cancelled)
+                } else {
+                    pageSwipeHandler?(
+                        .ended(
+                            translationX: indirectGestureTranslationX,
+                            velocityX: indirectGestureVelocityX
+                        )
+                    )
+                    lastThreeFingerCompletionTime = ProcessInfo.processInfo.systemUptime
+                }
+            }
+            resetIndirectGesture()
+        }
+
+        private func resetIndirectGesture() {
+            indirectGestureOrigin = nil
+            indirectGesturePrevious = nil
+            indirectGesturePreviousTimestamp = 0
+            indirectGestureTranslationX = 0
+            indirectGestureVelocityX = 0
+            isTrackingThreeFingerPan = false
+        }
+
+        private func centroid(of touches: [NSTouch]) -> CGPoint? {
+            guard !touches.isEmpty else { return nil }
+            let total = touches.reduce(CGPoint.zero) { partial, touch in
+                CGPoint(
+                    x: partial.x + touch.normalizedPosition.x,
+                    y: partial.y + touch.normalizedPosition.y
+                )
+            }
+            return CGPoint(x: total.x / CGFloat(touches.count), y: total.y / CGFloat(touches.count))
         }
 
         @objc private func handleThreeFingerPan(_ recognizer: ThreeFingerSwipeGestureRecognizer) {
