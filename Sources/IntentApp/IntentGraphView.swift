@@ -1258,7 +1258,9 @@ private struct GraphInputMonitor: NSViewRepresentable {
                 target: self,
                 action: #selector(handleThreeFingerPan(_:))
             )
-            recognizer.allowedTouchTypes = [.indirect]
+            if #unavailable(macOS 26) {
+                recognizer.allowedTouchTypes = [.indirect]
+            }
             recognizer.delegate = self
             hostView.addGestureRecognizer(recognizer)
             gestureHostView = hostView

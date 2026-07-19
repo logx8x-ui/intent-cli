@@ -4,6 +4,7 @@ import SwiftUI
 final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        IntentRuntime.shared.start()
     }
 }
 
@@ -12,28 +13,9 @@ struct IntentDesktopApp: App {
     @NSApplicationDelegateAdaptor(IntentAppDelegate.self) private var appDelegate
     @StateObject private var model: IntentAppModel
     @AppStorage("intentAppearance") private var appearance = "dark"
-    private let overlayController: OverlayWindowController
-    private let hotKeyManager: GlobalHotKeyManager
 
     init() {
-        let appModel = IntentAppModel()
-        let controller = OverlayWindowController(model: appModel)
-        let shouldShowFirstRunGuide = !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
-        appModel.overlayPresenter = controller
-        _model = StateObject(wrappedValue: appModel)
-        overlayController = controller
-        hotKeyManager = GlobalHotKeyManager {
-            Task { @MainActor in
-                appModel.toggleOverlay()
-            }
-        }
-
-        Task { @MainActor in
-            appModel.load()
-            if shouldShowFirstRunGuide {
-                controller.showOverlay(animated: false)
-            }
-        }
+        _model = StateObject(wrappedValue: IntentRuntime.shared.model)
     }
 
     var body: some Scene {
@@ -66,5 +48,50 @@ struct IntentDesktopApp: App {
             Label("Intent", systemImage: model.activeSessionName == nil ? "scope" : "scope.circle.fill")
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+@MainActor
+final class IntentRuntime {
+    static let shared = IntentRuntime()
+
+    let model: IntentAppModel
+    private let overlayController: OverlayWindowController
+    private var hotKeyManager: GlobalHotKeyManager?
+    private var showOverlayObserver: NSObjectProtocol?
+    private var hasStarted = false
+
+    init() {
+        let model = IntentAppModel()
+        let controller = OverlayWindowController(model: model)
+        model.overlayPresenter = controller
+
+        self.model = model
+        overlayController = controller
+    }
+
+    func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
+
+        hotKeyManager = GlobalHotKeyManager {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                IntentRuntime.shared.model.toggleOverlay()
+            }
+        }
+        showOverlayObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("dev.loganmondi.intent.showOverlay"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            DispatchQueue.main.async {
+                IntentRuntime.shared.model.showOverlay()
+            }
+        }
+
+        model.load()
+        if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding") {
+            overlayController.showOverlay(animated: false)
+        }
     }
 }
