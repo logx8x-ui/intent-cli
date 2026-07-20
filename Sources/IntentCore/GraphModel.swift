@@ -50,6 +50,8 @@ public enum BrowserApplication {
 public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
     case allowBrowserSearches
     case dontStartUp
+    case coolDown
+    case timer
 
     public var displayName: String {
         switch self {
@@ -57,6 +59,10 @@ public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
             return "Allow tab creation for browser searches"
         case .dontStartUp:
             return "Don't start up"
+        case .coolDown:
+            return "Cool Down"
+        case .timer:
+            return "Timer"
         }
     }
 }
@@ -66,17 +72,20 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
     public var kind: RestrictionKind
     public var position: GraphPoint
     public var excludedResourceIDs: [String]
+    public var durationMinutes: Int?
 
     public init(
         id: String = UUID().uuidString,
         kind: RestrictionKind,
         position: GraphPoint,
-        excludedResourceIDs: [String] = []
+        excludedResourceIDs: [String] = [],
+        durationMinutes: Int? = nil
     ) {
         self.id = id
         self.kind = kind
         self.position = position
         self.excludedResourceIDs = excludedResourceIDs
+        self.durationMinutes = durationMinutes
     }
 }
 
@@ -122,6 +131,22 @@ public extension Intention {
                 .filter { $0.kind == .dontStartUp }
                 .flatMap(\.excludedResourceIDs)
         )
+    }
+
+    var coolDownMinutes: Int? {
+        restrictionNodes
+            .filter { $0.kind == .coolDown }
+            .compactMap(\.durationMinutes)
+            .map { max(1, $0) }
+            .max()
+    }
+
+    var timerMinutes: Int? {
+        restrictionNodes
+            .filter { $0.kind == .timer }
+            .compactMap(\.durationMinutes)
+            .map { max(1, $0) }
+            .min()
     }
 
     var orderedFrictionNodes: [FrictionNode] {

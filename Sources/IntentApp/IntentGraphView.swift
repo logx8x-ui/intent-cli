@@ -293,7 +293,7 @@ struct IntentGraphView: View {
 
             Spacer()
 
-            Text("~  hide")
+            Text("\(overlayShortcut.displayName)  hide")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
 
@@ -342,6 +342,13 @@ struct IntentGraphView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
+                    if let endsAt = model.activeSessionEndsAt {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(sessionTimeRemaining(until: endsAt, now: context.date))
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(GraphTheme.muted(colorScheme))
+                        }
+                    }
                 }
                 .frame(maxWidth: 180)
             } else {
@@ -350,6 +357,11 @@ struct IntentGraphView: View {
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }
         }
+    }
+
+    private func sessionTimeRemaining(until date: Date, now: Date) -> String {
+        let remaining = max(0, Int(date.timeIntervalSince(now).rounded(.up)))
+        return String(format: "%02d:%02d", remaining / 60, remaining % 60)
     }
 
     private func pageButton(_ page: OverlayPage, icon: String) -> some View {

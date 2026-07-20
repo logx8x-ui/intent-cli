@@ -17,6 +17,7 @@ final class IntentAppModel: ObservableObject {
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
     @Published var activeSessionName: String?
+    @Published var activeSessionEndsAt: Date?
     @Published var pendingFriction: PendingFriction?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
@@ -32,6 +33,7 @@ final class IntentAppModel: ObservableObject {
 
     private let store = IntentionStore()
     private let scheduleStore = IntentScheduleStore()
+    private let cooldownStore = IntentionCooldownStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private var pendingStartIntention: Intention?
     private var pendingReplacementIntention: Intention?
@@ -41,6 +43,7 @@ final class IntentAppModel: ObservableObject {
     private var undoStack: [[Intention]] = []
     private var activeMoveUndoKeys: Set<String> = []
     private var scheduleTimer: Timer?
+    private var sessionLimitTask: Task<Void, Never>?
 
     init() {
         requireManualFinishBeforeSwitching = UserDefaults.standard.object(
@@ -116,6 +119,7 @@ final class IntentAppModel: ObservableObject {
         recordUndoSnapshot()
         intentions.removeAll { $0.id == id }
         schedules.removeAll { $0.intentionID == id }
+        try? cooldownStore.clear(intentionID: id)
         saveSchedules()
         if selectedID == id {
             selectedID = intentions.first?.id
@@ -258,6 +262,16 @@ final class IntentAppModel: ObservableObject {
     }
 
     func requestStart(_ intention: Intention) {
+        do {
+            if let nextAllowedDate = try cooldownStore.nextAllowedDate(for: intention.id) {
+                errorMessage = "\(intention.name) is cooling down. Try again in \(Self.durationText(until: nextAllowedDate))."
+                return
+            }
+        } catch {
+            errorMessage = "Could not check \(intention.name)'s cooldown: \(error)"
+            return
+        }
+
         guard !intention.allowedApps.isEmpty else {
             errorMessage = "Add at least one allowed app before starting this intention."
             return
@@ -424,6 +438,7 @@ final class IntentAppModel: ObservableObject {
         activeLock = lock
         activeSessionID = intention.id
         activeSessionName = intention.name
+        scheduleSessionLimit(for: intention)
         overlayPresenter?.hideOverlay(animated: true)
 
         Thread.detachNewThread {
@@ -434,30 +449,81 @@ final class IntentAppModel: ObservableObject {
             }
             renewalTimer.resume()
 
-            defer {
-                renewalTimer.cancel()
-                try? ActiveBrowserRulesStore().clear()
-                Task { @MainActor in
-                    let replacement = self.pendingReplacementIntention
-                    self.pendingReplacementIntention = nil
-                    self.activeLock = nil
-                    self.activeSessionID = nil
-                    self.activeSessionName = nil
-                    self.overlayPresenter?.showOverlay(animated: true)
-                    if let replacement {
-                        self.requestStart(replacement)
-                    }
-                }
-            }
-
+            let failureMessage: String?
             do {
                 try lock.run()
+                failureMessage = nil
             } catch {
-                Task { @MainActor in
-                    self.errorMessage = "Could not start session: \(error)"
+                failureMessage = "Could not start session: \(error)"
+            }
+
+            renewalTimer.cancel()
+            try? ActiveBrowserRulesStore().clear()
+            Task { @MainActor in
+                let replacement = self.pendingReplacementIntention
+                self.pendingReplacementIntention = nil
+                self.sessionLimitTask?.cancel()
+                self.sessionLimitTask = nil
+                self.activeSessionEndsAt = nil
+                if failureMessage == nil {
+                    self.beginCooldown(for: intention)
+                } else {
+                    self.errorMessage = failureMessage
+                }
+                self.activeLock = nil
+                self.activeSessionID = nil
+                self.activeSessionName = nil
+                self.overlayPresenter?.showOverlay(animated: true)
+                if let replacement {
+                    self.requestStart(replacement)
                 }
             }
         }
+    }
+
+    private func scheduleSessionLimit(for intention: Intention) {
+        sessionLimitTask?.cancel()
+        guard let minutes = intention.timerMinutes else {
+            activeSessionEndsAt = nil
+            sessionLimitTask = nil
+            return
+        }
+
+        let duration = TimeInterval(minutes * 60)
+        activeSessionEndsAt = Date().addingTimeInterval(duration)
+        sessionLimitTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  self.activeSessionID == intention.id else {
+                return
+            }
+            self.errorMessage = "\(intention.name)'s \(minutes)-minute timer finished."
+            self.activeLock?.stop()
+        }
+    }
+
+    private func beginCooldown(for intention: Intention) {
+        guard let minutes = intention.coolDownMinutes else { return }
+        do {
+            try cooldownStore.begin(intentionID: intention.id, minutes: minutes)
+        } catch {
+            errorMessage = "Could not save \(intention.name)'s cooldown: \(error)"
+        }
+    }
+
+    private static func durationText(until date: Date, now: Date = Date()) -> String {
+        let remaining = max(1, Int(date.timeIntervalSince(now).rounded(.up)))
+        let hours = remaining / 3_600
+        let minutes = (remaining % 3_600) / 60
+        let seconds = remaining % 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        if minutes > 0 {
+            return "\(minutes)m \(seconds)s"
+        }
+        return "\(seconds)s"
     }
 
     private func requiredBrowserGuards(for intention: Intention) -> [AllowedApp] {

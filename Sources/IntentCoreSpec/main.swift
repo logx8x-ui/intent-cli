@@ -323,6 +323,16 @@ do {
     ]
     try expect(frictionOrderIntention.orderedFrictionNodes.map(\.id) == ["first", "second"], "Higher friction nodes should run first")
 
+    var timedIntention = dataScience
+    timedIntention.restrictionNodes.append(contentsOf: [
+        .init(kind: .coolDown, position: .zero, durationMinutes: 15),
+        .init(kind: .coolDown, position: .zero, durationMinutes: 30),
+        .init(kind: .timer, position: .zero, durationMinutes: 45),
+        .init(kind: .timer, position: .zero, durationMinutes: 25)
+    ])
+    try expect(timedIntention.coolDownMinutes == 30, "The strictest cooldown should win")
+    try expect(timedIntention.timerMinutes == 25, "The shortest session timer should win")
+
     var collidedIntentions = [
         Intention(
             id: "collision-a",
@@ -362,6 +372,34 @@ do {
     let freshIntentions = try freshStore.load()
     try expect(freshIntentions.isEmpty, "A first install should start with a blank desktop")
     try expect(FileManager.default.fileExists(atPath: freshStore.fileURL.path), "A blank first-run store should be persisted")
+
+    let cooldownStore = IntentionCooldownStore(fileURL: tempDirectory.appendingPathComponent("cooldowns.json"))
+    let cooldownStart = Date(timeIntervalSince1970: 1_800_000_000)
+    let cooldownEnd = try cooldownStore.begin(
+        intentionID: "instagram-replies",
+        minutes: 30,
+        now: cooldownStart
+    )
+    try expect(
+        cooldownEnd == cooldownStart.addingTimeInterval(1_800),
+        "Cooldown should begin when a session finishes"
+    )
+    let activeCooldown = try cooldownStore.nextAllowedDate(
+        for: "instagram-replies",
+        now: cooldownStart.addingTimeInterval(1_799)
+    )
+    try expect(
+        activeCooldown == cooldownEnd,
+        "Cooldown should block the intention until it expires"
+    )
+    let expiredCooldown = try cooldownStore.nextAllowedDate(
+        for: "instagram-replies",
+        now: cooldownEnd
+    )
+    try expect(
+        expiredCooldown == nil,
+        "Cooldown should allow the intention at its expiry time"
+    )
 
     let intentionStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("intentions.json"))
     try intentionStore.save(intentions)

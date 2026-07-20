@@ -299,11 +299,12 @@ struct RestrictionEditorMenu: View {
             }
             .labelsHidden()
 
-            if node.kind == .allowBrowserSearches {
+            switch node.kind {
+            case .allowBrowserSearches:
                 Text("Allows new tabs and Google result pages, while links to websites outside this intention stay blocked.")
                     .font(.caption)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
-            } else {
+            case .dontStartUp:
                 fieldLabel("Keep closed when starting")
                 if intention.allowedApps.isEmpty && intention.allowedWebsites.isEmpty {
                     Text("Add apps or websites to the intention first.")
@@ -311,6 +312,18 @@ struct RestrictionEditorMenu: View {
                         .foregroundStyle(GraphTheme.muted(colorScheme))
                 }
                 resourceToggles
+            case .coolDown:
+                durationEditor(
+                    title: "Wait before using again",
+                    detail: "Starts when this intention ends. It cannot run again until the cooldown finishes.",
+                    defaultMinutes: 30
+                )
+            case .timer:
+                durationEditor(
+                    title: "Session limit",
+                    detail: "Automatically ends this intention when the timer reaches zero.",
+                    defaultMinutes: 25
+                )
             }
 
             Divider()
@@ -321,6 +334,39 @@ struct RestrictionEditorMenu: View {
         }
         .frame(width: 300)
         .graphMenuPanel(colorScheme: colorScheme)
+    }
+
+    private func durationEditor(
+        title: String,
+        detail: String,
+        defaultMinutes: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            fieldLabel(title)
+            Stepper(
+                value: Binding(
+                    get: { max(1, node.durationMinutes ?? defaultMinutes) },
+                    set: { node.durationMinutes = max(1, $0) }
+                ),
+                in: 1...1_440
+            ) {
+                HStack {
+                    Text("\(max(1, node.durationMinutes ?? defaultMinutes))")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    Text("minutes")
+                        .font(.system(size: 12))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
+            }
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+        }
+        .onAppear {
+            if node.durationMinutes == nil {
+                node.durationMinutes = defaultMinutes
+            }
+        }
     }
 
     private var resourceToggles: some View {

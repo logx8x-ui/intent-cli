@@ -176,7 +176,7 @@ struct RestrictionNodeView: View {
                     Circle()
                         .fill(GraphTheme.elevatedSurface(colorScheme))
                         .overlay(Circle().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.22), lineWidth: 0.8))
-                    Image(systemName: node.kind == .allowBrowserSearches ? "magnifyingglass" : "poweroff")
+                    Image(systemName: restrictionIcon)
                         .font(.system(size: 15, weight: .semibold))
                 }
                 .frame(width: 31, height: 31)
@@ -186,7 +186,7 @@ struct RestrictionNodeView: View {
                     .tracking(0.9)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
 
-                Text(node.kind == .allowBrowserSearches ? "Browser\nsearches" : "Don't\nstart up")
+                Text(restrictionTitle)
                     .font(.system(size: 10, weight: .semibold))
                     .multilineTextAlignment(.center)
                     .lineSpacing(-1)
@@ -195,6 +195,24 @@ struct RestrictionNodeView: View {
         }
         .frame(width: 116, height: 116)
         .contentShape(Circle())
+    }
+
+    private var restrictionIcon: String {
+        switch node.kind {
+        case .allowBrowserSearches: "magnifyingglass"
+        case .dontStartUp: "poweroff"
+        case .coolDown: "hourglass"
+        case .timer: "timer"
+        }
+    }
+
+    private var restrictionTitle: String {
+        switch node.kind {
+        case .allowBrowserSearches: "Browser\nsearches"
+        case .dontStartUp: "Don't\nstart up"
+        case .coolDown: "Cool\nDown"
+        case .timer: "Timer"
+        }
     }
 }
 

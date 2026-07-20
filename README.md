@@ -33,11 +33,13 @@ Firefox removes temporary add-ons after a restart. A permanent Mozilla Add-ons l
 New installs open to a blank canvas with **Welcome to my desktop** and a short guide.
 
 - Click an intention to run it.
-- Press `~` to show or hide Intent.
+- Press `~` to show or hide Intent, or change that shortcut in Settings.
 - Swipe with three fingers to move between the intentions desktop and scheduler.
 - Press `E` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
 - Pinch to zoom and use two fingers to pan.
 - Press `Cmd+Shift+M` to finish an active intention.
+- Add a **Timer** restriction to end a session automatically.
+- Add a **Cool Down** restriction to prevent restarting an intention for a chosen period after it ends.
 
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 
