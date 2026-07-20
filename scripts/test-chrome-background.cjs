@@ -20,6 +20,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const nativeMessages = [];
   const dynamicUpdates = [];
   const removedTabs = [];
+  const focusedWindows = [];
   let dynamicRules = [];
 
   const runtimeMessage = event();
@@ -91,6 +92,12 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       },
       sendMessage: async () => ({})
     },
+    windows: {
+      update: async (id, patch) => {
+        focusedWindows.push({ id, patch });
+        return { id, ...patch };
+      }
+    },
     webNavigation: { onBeforeNavigate: beforeNavigate }
   };
 
@@ -109,7 +116,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   }
 
   return {
-    tabs, storage, nativeMessages, dynamicUpdates, removedTabs,
+    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows,
     get dynamicRules() { return dynamicRules; },
     settle,
     async activate(id) {
@@ -147,6 +154,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
           if (asyncResponse !== true) resolve(asyncResponse);
         }
       });
+    },
+    async receiveNative(message) {
+      for (const listener of nativeMessage.listeners) await listener(message);
+      await settle();
     }
   };
 }
@@ -177,12 +188,23 @@ async function run() {
   assert.equal(locked.tabs.get(1).active, true, "Unallowed tab activation should return to Instagram");
 
   const allowed = createHarness(lockedRules, [
-    { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },
-    { id: 2, active: false, url: "https://instagram.com/direct/t/123/" }
+    { id: 1, windowId: 7, index: 0, active: true, url: "https://instagram.com/direct/inbox/" },
+    { id: 2, windowId: 7, index: 1, active: false, url: "https://instagram.com/direct/t/123/" }
   ]);
   await allowed.settle();
   await allowed.activate(2);
   assert.equal(allowed.tabs.get(2).active, true, "Allowed tabs should remain selectable");
+  await allowed.receiveNative({
+    ...lockedRules,
+    tabCommand: { tabID: 1, windowID: 7 }
+  });
+  assert.equal(allowed.tabs.get(1).active, true, "A native Ctrl+Tab command should activate an allowed tab");
+  assert.equal(allowed.focusedWindows.at(-1).id, 7, "A native Ctrl+Tab command should focus the tab's browser window");
+  await allowed.receiveNative({
+    ...lockedRules,
+    tabCommand: { tabID: 99, windowID: 8 }
+  });
+  assert.equal(allowed.tabs.get(1).active, true, "A stale or unallowed native tab command should do nothing");
   await allowed.remove(2);
   assert.equal(allowed.tabs.get(1).active, true, "Closing an allowed tab should return to another allowed tab");
 

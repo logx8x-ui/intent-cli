@@ -332,6 +332,28 @@ do {
     ])
     try expect(timedIntention.coolDownMinutes == 30, "The strictest cooldown should win")
     try expect(timedIntention.timerMinutes == 25, "The shortest session timer should win")
+    try expect(timedIntention.showsCooldownRemainingTime, "Cooldown display should default on")
+    try expect(timedIntention.showsSessionTimer, "Timer display should default on")
+    try expect(timedIntention.sessionTimerDisplayPosition == .topTrailing, "Timer should default to top right")
+
+    timedIntention.restrictionNodes = [
+        .init(
+            kind: .coolDown,
+            position: .zero,
+            durationMinutes: 30,
+            showsRemainingTime: false
+        ),
+        .init(
+            kind: .timer,
+            position: .zero,
+            durationMinutes: 25,
+            showsRemainingTime: false,
+            timerDisplayPosition: .bottomLeading
+        )
+    ]
+    try expect(!timedIntention.showsCooldownRemainingTime, "Cooldown badge should be configurable")
+    try expect(!timedIntention.showsSessionTimer, "Session timer should be configurable")
+    try expect(timedIntention.sessionTimerDisplayPosition == .bottomLeading, "Timer position should persist")
 
     var collidedIntentions = [
         Intention(
@@ -400,6 +422,37 @@ do {
         expiredCooldown == nil,
         "Cooldown should allow the intention at its expiry time"
     )
+
+    let tabSnapshotStore = BrowserTabSnapshotStore(
+        fileURL: tempDirectory.appendingPathComponent("browser-tabs.json")
+    )
+    let tabSnapshot = BrowserTabSnapshot(
+        browserBundleIdentifier: "org.mozilla.firefox",
+        tabs: [
+            .init(
+                id: 8,
+                windowID: 2,
+                index: 0,
+                title: "Instagram",
+                url: "https://instagram.com/direct",
+                active: true
+            )
+        ],
+        updatedAt: cooldownStart
+    )
+    try tabSnapshotStore.write(tabSnapshot)
+    try expect(
+        tabSnapshotStore.load(maxAge: 1, now: cooldownStart) == tabSnapshot,
+        "Browser tab snapshots should round-trip"
+    )
+
+    let tabCommandStore = BrowserTabCommandStore(
+        fileURL: tempDirectory.appendingPathComponent("browser-tab-command.json")
+    )
+    let tabCommand = BrowserTabCommand(tabID: 8, windowID: 2, createdAt: cooldownStart)
+    try tabCommandStore.write(tabCommand)
+    try expect(tabCommandStore.take() == tabCommand, "Browser tab activation commands should round-trip")
+    try expect(tabCommandStore.take() == nil, "Browser tab activation commands should be consumed once")
 
     let intentionStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("intentions.json"))
     try intentionStore.save(intentions)

@@ -318,12 +318,29 @@ struct RestrictionEditorMenu: View {
                     detail: "Starts when this intention ends. It cannot run again until the cooldown finishes.",
                     defaultMinutes: 30
                 )
+                remainingTimeToggle("Show cooldown on intention")
             case .timer:
                 durationEditor(
                     title: "Session limit",
                     detail: "Automatically ends this intention when the timer reaches zero.",
                     defaultMinutes: 25
                 )
+                remainingTimeToggle("Show timer while running")
+                if node.showsRemainingTime ?? true {
+                    fieldLabel("Timer position")
+                    Picker(
+                        "Timer position",
+                        selection: Binding(
+                            get: { node.timerDisplayPosition ?? .topTrailing },
+                            set: { node.timerDisplayPosition = $0 }
+                        )
+                    ) {
+                        ForEach(TimerDisplayPosition.allCases, id: \.self) { position in
+                            Text(position.displayName).tag(position)
+                        }
+                    }
+                    .labelsHidden()
+                }
             }
 
             Divider()
@@ -334,6 +351,18 @@ struct RestrictionEditorMenu: View {
         }
         .frame(width: 300)
         .graphMenuPanel(colorScheme: colorScheme)
+    }
+
+    private func remainingTimeToggle(_ title: String) -> some View {
+        Toggle(
+            title,
+            isOn: Binding(
+                get: { node.showsRemainingTime ?? true },
+                set: { node.showsRemainingTime = $0 }
+            )
+        )
+        .toggleStyle(.checkbox)
+        .font(.system(size: 12, weight: .medium))
     }
 
     private func durationEditor(

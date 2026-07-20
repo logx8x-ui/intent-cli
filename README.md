@@ -39,7 +39,7 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 - Pinch to zoom and use two fingers to pan.
 - Press `Cmd+Shift+M` to finish an active intention.
 - Add a **Timer** restriction to end a session automatically.
-- Add a **Cool Down** restriction to prevent restarting an intention for a chosen period after it ends.
+- Add a **Cooldown** restriction to prevent restarting an intention for a chosen period after it ends.
 
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 

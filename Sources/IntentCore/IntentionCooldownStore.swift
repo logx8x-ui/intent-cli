@@ -32,6 +32,15 @@ public final class IntentionCooldownStore {
         try save(records)
     }
 
+    public func activeCooldowns(now: Date = Date()) throws -> [String: Date] {
+        let records = try load()
+        let active = records.filter { $0.value > now }
+        if active.count != records.count {
+            try save(active)
+        }
+        return active
+    }
+
     public static func defaultFileURL() -> URL {
         FileManager.default
             .homeDirectoryForCurrentUser

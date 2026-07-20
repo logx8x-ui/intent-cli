@@ -3,6 +3,7 @@ importScripts("rule-helpers.js");
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
 const RULE_REFRESH_MS = 1000;
+const TAB_SNAPSHOT_MS = 120;
 const RECONNECT_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
@@ -55,7 +56,10 @@ function connectNativeHost() {
   try {
     const port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
-    port.onMessage.addListener((nativeRules) => applyNativeRules(nativeRules));
+    port.onMessage.addListener((message) => {
+      if (message?.tabCommand) activateRequestedTab(message.tabCommand);
+      applyNativeRules(message);
+    });
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) return;
       nativePort = null;
@@ -114,12 +118,45 @@ function settleRuleRequests() {
   pendingRuleRequests.clear();
 }
 
+async function activateRequestedTab(message) {
+  const tab = await chrome.tabs.get(message.tabID).catch(() => null);
+  if (!tab || !isRuntimeAllowedTab(tab)) return;
+  if (tab.windowId != null) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+  await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+}
+
+async function publishTabSnapshot() {
+  await ensureInitialized();
+  if (!nativePort) connectNativeHost();
+  if (!nativePort) return;
+  const tabs = rules.active ? await chrome.tabs.query({}) : [];
+  postNative({
+    type: "tabsSnapshot",
+    tabs: tabs
+      .filter((tab) => isRuntimeAllowedTab(tab))
+      .map((tab) => ({
+        id: tab.id,
+        windowID: tab.windowId,
+        index: tab.index,
+        title: tab.title || tab.url || "New Tab",
+        url: tab.url || "",
+        active: Boolean(tab.active)
+      }))
+  });
+}
+
 function effectiveRules(nativeRules) {
   if (!guardEnabled || !nativeRules?.active) return inactiveRules();
   return {
     ...inactiveRules(),
-    ...nativeRules,
-    allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : []
+    active: true,
+    allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
+    blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
+    blockNavigation: Boolean(nativeRules.blockNavigation),
+    blockNewTabs: Boolean(nativeRules.blockNewTabs),
+    allowGoogleSearchTabs: Boolean(nativeRules.allowGoogleSearchTabs)
   };
 }
 
@@ -139,6 +176,7 @@ async function applyNativeRules(nativeRules) {
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
   }
+  await publishTabSnapshot();
 }
 
 function escapeRegex(value) {
@@ -316,6 +354,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   } else if (rules.blockTabSwitching) {
     await returnToAllowedTab();
   }
+  await publishTabSnapshot();
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -343,6 +382,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   } else if (rules.blockNavigation) {
     await recoverBlockedNavigation(tabId);
   }
+  await publishTabSnapshot();
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
@@ -366,6 +406,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     await chrome.tabs.remove(tab.id).catch(() => {});
     await returnToAllowedTab();
   }, NEW_TAB_GRACE_MS);
+  await publishTabSnapshot();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -373,6 +414,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   lastAllowedURLByTab.delete(tabId);
   if (lastAllowedTabId === tabId) lastAllowedTabId = null;
   if (rules.active) setTimeout(returnToAllowedTab, 0);
+  setTimeout(publishTabSnapshot, 0);
 });
 
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
@@ -402,3 +444,4 @@ ensureInitialized().then(async () => {
   requestRules();
 });
 setInterval(requestRules, RULE_REFRESH_MS);
+setInterval(publishTabSnapshot, TAB_SNAPSHOT_MS);

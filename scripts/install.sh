@@ -14,14 +14,23 @@ swift build -c release --product Intent
 swift build -c release --product IntentApp
 swift build -c release --product IntentNativeHost
 
+atomic_install_executable() {
+  local source="$1"
+  local destination="$2"
+  local temporary="${destination}.new.$$"
+  cp "$source" "$temporary"
+  chmod +x "$temporary"
+  mv -f "$temporary" "$destination"
+}
+
+pkill -x IntentApp 2>/dev/null || true
+
 mkdir -p "$BIN_DIR"
 mkdir -p "$APP_DIR"
-cp "$ROOT/.build/release/Intent" "$APP_DIR/Intent"
-cp "$ROOT/.build/release/IntentApp" "$APP_DIR/IntentApp"
-cp "$ROOT/.build/release/IntentNativeHost" "$APP_DIR/IntentNativeHost"
-chmod +x "$APP_DIR/Intent"
-chmod +x "$APP_DIR/IntentApp"
-chmod +x "$APP_DIR/IntentNativeHost"
+atomic_install_executable "$ROOT/.build/release/Intent" "$APP_DIR/Intent"
+atomic_install_executable "$ROOT/.build/release/IntentApp" "$APP_DIR/IntentApp"
+atomic_install_executable "$ROOT/.build/release/IntentNativeHost" "$APP_DIR/IntentNativeHost"
+pkill -f "^${APP_DIR}/IntentNativeHost" 2>/dev/null || true
 
 ln -sf "$APP_DIR/Intent" "$BIN_DIR/Intent"
 ln -sf "$APP_DIR/Intent" "$BIN_DIR/intent"
@@ -29,7 +38,7 @@ ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/IntentApp"
 
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
-cp "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
+atomic_install_executable "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
 /usr/bin/ditto "$ROOT/.build/release/Intent_IntentApp.bundle" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle"
 cp "$ROOT/Assets/Intent.icns" "$APP_BUNDLE/Contents/Resources/Intent.icns"
 chmod +x "$APP_BUNDLE/Contents/MacOS/IntentApp"
@@ -98,7 +107,6 @@ cat > "$LAUNCH_AGENT_FILE" <<PLIST
 </dict>
 </plist>
 PLIST
-pkill -x IntentApp 2>/dev/null || true
 launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
 

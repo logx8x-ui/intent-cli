@@ -416,7 +416,8 @@ struct IntentGraphView: View {
                 IntentionNodeView(
                     intention: intention,
                     installedApps: model.installedApps,
-                    selected: selection == .intention(intention.id)
+                    selected: selection == .intention(intention.id),
+                    cooldownExpiresAt: model.cooldownExpirations[intention.id]
                 )
             }
 

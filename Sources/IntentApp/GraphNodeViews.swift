@@ -5,6 +5,7 @@ struct IntentionNodeView: View {
     let intention: Intention
     let installedApps: [InstalledApp]
     let selected: Bool
+    let cooldownExpiresAt: Date?
 
     private let squareSize: CGFloat = 148
 
@@ -15,9 +16,16 @@ struct IntentionNodeView: View {
                 .lineLimit(1)
                 .frame(maxWidth: 190)
 
-            appGrid
-                .frame(width: squareSize, height: squareSize)
-                .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
+            ZStack(alignment: .topTrailing) {
+                appGrid
+                    .frame(width: squareSize, height: squareSize)
+                    .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
+
+                if intention.showsCooldownRemainingTime, let cooldownExpiresAt {
+                    CooldownBadge(expiresAt: cooldownExpiresAt)
+                        .offset(x: 9, y: -9)
+                }
+            }
         }
         .foregroundStyle(GraphTheme.text(colorScheme))
         .frame(width: 200, height: 190)
@@ -210,9 +218,44 @@ struct RestrictionNodeView: View {
         switch node.kind {
         case .allowBrowserSearches: "Browser\nsearches"
         case .dontStartUp: "Don't\nstart up"
-        case .coolDown: "Cool\nDown"
+        case .coolDown: "Cooldown"
         case .timer: "Timer"
         }
+    }
+}
+
+private struct CooldownBadge: View {
+    let expiresAt: Date
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            if expiresAt > context.date {
+                Text(remainingText(at: context.date))
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(GraphTheme.text(colorScheme))
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .background(GraphTheme.glassTint(colorScheme), in: Capsule())
+                    .overlay(Capsule().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.55), lineWidth: 0.8))
+                    .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 7, y: 3)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func remainingText(at date: Date) -> String {
+        let minutes = max(1, Int(ceil(expiresAt.timeIntervalSince(date) / 60)))
+        if minutes >= 1_440 {
+            return "\(Int(ceil(Double(minutes) / 1_440)))d"
+        }
+        if minutes >= 60 {
+            return "\(Int(ceil(Double(minutes) / 60)))h"
+        }
+        return "\(minutes)m"
     }
 }
 

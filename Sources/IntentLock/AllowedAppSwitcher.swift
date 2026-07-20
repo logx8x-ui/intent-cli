@@ -60,6 +60,10 @@ final class AllowedAppSwitcher {
             let controller = self.panelController ?? AllowedAppSwitcherPanelController(
                 onHover: { [weak self] index in
                     self?.select(index: index)
+                },
+                onClick: { [weak self] index in
+                    self?.select(index: index)
+                    self?.commit()
                 }
             )
             self.panelController = controller
@@ -84,11 +88,14 @@ final class AllowedAppSwitcher {
         let application: NSRunningApplication? = stateLock.withLock {
             guard visible, items.indices.contains(selectedIndex) else { return nil }
             visible = false
-            return items[selectedIndex].application
+            let application = items[selectedIndex].application
+            items = []
+            return application
         }
 
         DispatchQueue.main.async { [weak self] in
             self?.panelController?.hide()
+            application?.unhide()
             application?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         }
     }
@@ -142,10 +149,12 @@ private final class AllowedAppSwitcherPanelController {
     private let panel: NSPanel
     private let content = NSStackView()
     private let onHover: (Int) -> Void
+    private let onClick: (Int) -> Void
     private var itemViews: [AllowedAppSwitcherItemView] = []
 
-    init(onHover: @escaping (Int) -> Void) {
+    init(onHover: @escaping (Int) -> Void, onClick: @escaping (Int) -> Void) {
         self.onHover = onHover
+        self.onClick = onClick
         panel = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -159,24 +168,27 @@ private final class AllowedAppSwitcherPanelController {
         panel.acceptsMouseMovedEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
-        let container = NSView()
+        let container = NSVisualEffectView()
+        container.material = .hudWindow
+        container.blendingMode = .behindWindow
+        container.state = .active
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.075, alpha: 0.96).cgColor
-        container.layer?.cornerRadius = 18
+        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.055, alpha: 0.58).cgColor
+        container.layer?.cornerRadius = 22
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.18).cgColor
+        container.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.20).cgColor
 
         content.orientation = .horizontal
         content.alignment = .centerY
         content.distribution = .fillEqually
-        content.spacing = 12
+        content.spacing = 14
         content.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(content)
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            content.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
-            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16)
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            content.topAnchor.constraint(equalTo: container.topAnchor, constant: 18),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18)
         ])
         panel.contentView = container
     }
@@ -194,9 +206,9 @@ private final class AllowedAppSwitcherPanelController {
             content.addArrangedSubview(itemView)
         }
 
-        let itemWidth: CGFloat = 96
-        let width = min(CGFloat(items.count) * itemWidth + 32, 720)
-        let size = NSSize(width: max(width, 224), height: 126)
+        let itemWidth: CGFloat = 122
+        let width = min(CGFloat(items.count) * itemWidth + 40, 960)
+        let size = NSSize(width: max(width, 264), height: 158)
         let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? .zero
         let origin = NSPoint(
@@ -218,7 +230,7 @@ private final class AllowedAppSwitcherPanelController {
     }
 
     private func makeItemView(_ item: Item, index: Int, selected: Bool) -> AllowedAppSwitcherItemView {
-        let box = AllowedAppSwitcherItemView(index: index, onHover: onHover)
+        let box = AllowedAppSwitcherItemView(index: index, onHover: onHover, onClick: onClick)
         box.setSelected(selected)
 
         let image = NSImageView(image: item.icon)
@@ -234,15 +246,15 @@ private final class AllowedAppSwitcherPanelController {
         box.addSubview(label)
 
         NSLayoutConstraint.activate([
-            box.widthAnchor.constraint(equalToConstant: 84),
-            box.heightAnchor.constraint(equalToConstant: 94),
-            image.widthAnchor.constraint(equalToConstant: 52),
-            image.heightAnchor.constraint(equalToConstant: 52),
+            box.widthAnchor.constraint(equalToConstant: 108),
+            box.heightAnchor.constraint(equalToConstant: 120),
+            image.widthAnchor.constraint(equalToConstant: 70),
+            image.heightAnchor.constraint(equalToConstant: 70),
             image.centerXAnchor.constraint(equalTo: box.centerXAnchor),
-            image.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
-            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 5),
-            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -5),
-            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -9)
+            image.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -7),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -11)
         ])
         return box
     }
@@ -251,14 +263,16 @@ private final class AllowedAppSwitcherPanelController {
 private final class AllowedAppSwitcherItemView: NSView {
     private let index: Int
     private let onHover: (Int) -> Void
+    private let onClick: (Int) -> Void
     private var trackingAreaReference: NSTrackingArea?
 
-    init(index: Int, onHover: @escaping (Int) -> Void) {
+    init(index: Int, onHover: @escaping (Int) -> Void, onClick: @escaping (Int) -> Void) {
         self.index = index
         self.onHover = onHover
+        self.onClick = onClick
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = 16
     }
 
     @available(*, unavailable)
@@ -285,12 +299,16 @@ private final class AllowedAppSwitcherItemView: NSView {
         onHover(index)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        onClick(index)
+    }
+
     func setSelected(_ selected: Bool) {
         layer?.backgroundColor = selected
-            ? NSColor(calibratedRed: 0.22, green: 0.40, blue: 0.68, alpha: 0.42).cgColor
+            ? NSColor(calibratedWhite: 1, alpha: 0.13).cgColor
             : NSColor.clear.cgColor
-        layer?.borderWidth = selected ? 1.5 : 0
-        layer?.borderColor = NSColor(calibratedRed: 0.46, green: 0.66, blue: 1, alpha: 0.9).cgColor
+        layer?.borderWidth = selected ? 1.2 : 0
+        layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.52).cgColor
 
         subviews.compactMap { $0 as? NSTextField }.forEach {
             $0.font = .systemFont(ofSize: 11, weight: selected ? .semibold : .regular)

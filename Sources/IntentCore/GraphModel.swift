@@ -60,9 +60,27 @@ public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
         case .dontStartUp:
             return "Don't start up"
         case .coolDown:
-            return "Cool Down"
+            return "Cooldown"
         case .timer:
             return "Timer"
+        }
+    }
+}
+
+public enum TimerDisplayPosition: String, Codable, CaseIterable, Equatable {
+    case topLeading
+    case top
+    case topTrailing
+    case bottomLeading
+    case bottomTrailing
+
+    public var displayName: String {
+        switch self {
+        case .topLeading: "Top left"
+        case .top: "Top"
+        case .topTrailing: "Top right"
+        case .bottomLeading: "Bottom left"
+        case .bottomTrailing: "Bottom right"
         }
     }
 }
@@ -73,19 +91,25 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
     public var position: GraphPoint
     public var excludedResourceIDs: [String]
     public var durationMinutes: Int?
+    public var showsRemainingTime: Bool?
+    public var timerDisplayPosition: TimerDisplayPosition?
 
     public init(
         id: String = UUID().uuidString,
         kind: RestrictionKind,
         position: GraphPoint,
         excludedResourceIDs: [String] = [],
-        durationMinutes: Int? = nil
+        durationMinutes: Int? = nil,
+        showsRemainingTime: Bool? = nil,
+        timerDisplayPosition: TimerDisplayPosition? = nil
     ) {
         self.id = id
         self.kind = kind
         self.position = position
         self.excludedResourceIDs = excludedResourceIDs
         self.durationMinutes = durationMinutes
+        self.showsRemainingTime = showsRemainingTime
+        self.timerDisplayPosition = timerDisplayPosition
     }
 }
 
@@ -134,19 +158,35 @@ public extension Intention {
     }
 
     var coolDownMinutes: Int? {
-        restrictionNodes
-            .filter { $0.kind == .coolDown }
-            .compactMap(\.durationMinutes)
-            .map { max(1, $0) }
-            .max()
+        effectiveCooldownRestriction.map { max(1, $0.durationMinutes ?? 30) }
     }
 
     var timerMinutes: Int? {
+        effectiveTimerRestriction.map { max(1, $0.durationMinutes ?? 25) }
+    }
+
+    var effectiveCooldownRestriction: RestrictionNode? {
+        restrictionNodes
+            .filter { $0.kind == .coolDown }
+            .max { max(1, $0.durationMinutes ?? 30) < max(1, $1.durationMinutes ?? 30) }
+    }
+
+    var effectiveTimerRestriction: RestrictionNode? {
         restrictionNodes
             .filter { $0.kind == .timer }
-            .compactMap(\.durationMinutes)
-            .map { max(1, $0) }
-            .min()
+            .min { max(1, $0.durationMinutes ?? 25) < max(1, $1.durationMinutes ?? 25) }
+    }
+
+    var showsCooldownRemainingTime: Bool {
+        effectiveCooldownRestriction?.showsRemainingTime ?? true
+    }
+
+    var showsSessionTimer: Bool {
+        effectiveTimerRestriction?.showsRemainingTime ?? true
+    }
+
+    var sessionTimerDisplayPosition: TimerDisplayPosition {
+        effectiveTimerRestriction?.timerDisplayPosition ?? .topTrailing
     }
 
     var orderedFrictionNodes: [FrictionNode] {

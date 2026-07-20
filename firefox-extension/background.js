@@ -1,6 +1,8 @@
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "org.mozilla.firefox";
 const RULE_REFRESH_MS = 1000;
+const TAB_SNAPSHOT_MS = 120;
+const RECONNECT_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
 
 const {
@@ -16,6 +18,8 @@ let guardEnabled = true;
 let initialized = false;
 let freshBlankTabIds = new Set();
 let creatingRecoveryBlankTab = false;
+let commandPort = null;
+let reconnectTimer = null;
 
 function inactiveRules() {
   return {
@@ -45,10 +49,83 @@ async function ensureInitialized() {
   }
 
   initialized = true;
+  connectCommandPort();
   await notifyNativeGuardState();
 }
 
+function connectCommandPort() {
+  if (commandPort) return;
+  if (typeof browser.runtime.connectNative !== "function") return;
+  try {
+    const port = browser.runtime.connectNative(HOST_NAME);
+    commandPort = port;
+    port.onMessage.addListener(async (message) => {
+      if (message?.tabCommand) await activateRequestedTab(message.tabCommand);
+      await applyNativeRules(message);
+    });
+    port.onDisconnect.addListener(() => {
+      if (commandPort !== port) return;
+      commandPort = null;
+      scheduleCommandReconnect();
+    });
+    postCommandPort({ type: "getRules" });
+  } catch (_) {
+    commandPort = null;
+    scheduleCommandReconnect();
+  }
+}
+
+function scheduleCommandReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectCommandPort();
+  }, RECONNECT_MS);
+}
+
+function postCommandPort(message) {
+  if (!commandPort) return false;
+  try {
+    commandPort.postMessage({ ...message, browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER });
+    return true;
+  } catch (_) {
+    commandPort = null;
+    scheduleCommandReconnect();
+    return false;
+  }
+}
+
+async function activateRequestedTab(message) {
+  const tab = await browser.tabs.get(message.tabID).catch(() => null);
+  if (!tab || !isRuntimeAllowedTab(tab)) return;
+  if (tab.windowId != null) {
+    await browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+  await browser.tabs.update(tab.id, { active: true }).catch(() => {});
+}
+
+async function publishTabSnapshot() {
+  if (!commandPort) connectCommandPort();
+  if (!commandPort) return;
+  const tabs = rules.active ? await browser.tabs.query({}) : [];
+  postCommandPort({
+    type: "tabsSnapshot",
+    tabs: tabs
+      .filter((tab) => isRuntimeAllowedTab(tab))
+      .map((tab) => ({
+        id: tab.id,
+        windowID: tab.windowId,
+        index: tab.index,
+        title: tab.title || tab.url || "New Tab",
+        url: tab.url || "",
+        active: Boolean(tab.active)
+      }))
+  });
+}
+
 async function notifyNativeGuardState() {
+  if (postCommandPort({ type: "setGuardEnabled", enabled: guardEnabled })) return;
+  if (typeof browser.runtime.connectNative === "function") return;
   try {
     await browser.runtime.sendNativeMessage(HOST_NAME, {
       type: "setGuardEnabled",
@@ -59,25 +136,43 @@ async function notifyNativeGuardState() {
 }
 
 function effectiveRules(nativeRules) {
-  if (!guardEnabled) {
+  if (!guardEnabled || !nativeRules?.active) {
     return inactiveRules();
   }
-
-  return nativeRules || inactiveRules();
+  return {
+    ...inactiveRules(),
+    active: true,
+    allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
+    blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
+    blockNavigation: Boolean(nativeRules.blockNavigation),
+    blockNewTabs: Boolean(nativeRules.blockNewTabs),
+    allowGoogleSearchTabs: Boolean(nativeRules.allowGoogleSearchTabs)
+  };
 }
 
 async function refreshRules() {
   await ensureInitialized();
-  const previousFingerprint = rulesFingerprint;
+  if (postCommandPort({ type: "getRules" })) return;
+  if (typeof browser.runtime.connectNative === "function") {
+    connectCommandPort();
+    return;
+  }
+
+  // Lightweight background tests and older Firefox builds use one-shot messaging.
   try {
     const nativeRules = await browser.runtime.sendNativeMessage(HOST_NAME, {
       type: "getRules",
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
     });
-    rules = effectiveRules(nativeRules);
+    await applyNativeRules(nativeRules);
   } catch (_) {
-    rules = inactiveRules();
+    await applyNativeRules(inactiveRules());
   }
+}
+
+async function applyNativeRules(nativeRules) {
+  const previousFingerprint = rulesFingerprint;
+  rules = effectiveRules(nativeRules);
 
   rulesFingerprint = fingerprintRules(rules);
   if (rulesFingerprint === previousFingerprint) {
@@ -90,6 +185,7 @@ async function refreshRules() {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
   }
+  await publishTabSnapshot();
 }
 
 async function getAllowedTab(tabId) {
@@ -251,6 +347,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   if (rules.blockTabSwitching) {
     await returnToAllowedTab();
   }
+  await publishTabSnapshot();
 });
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -287,6 +384,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (rules.blockNavigation) {
     await returnToAllowedTab();
   }
+  await publishTabSnapshot();
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
@@ -320,6 +418,7 @@ browser.tabs.onCreated.addListener(async (tab) => {
     }
     await returnToAllowedTab();
   }, NEW_TAB_GRACE_MS);
+  await publishTabSnapshot();
 });
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
@@ -335,6 +434,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
   }
 
   setTimeout(returnToAllowedTab, 0);
+  await publishTabSnapshot();
 });
 
 browser.webRequest.onBeforeRequest.addListener(
@@ -365,3 +465,4 @@ browser.webRequest.onBeforeRequest.addListener(
 
 ensureInitialized().then(refreshRules);
 setInterval(refreshRules, RULE_REFRESH_MS);
+setInterval(publishTabSnapshot, TAB_SNAPSHOT_MS);

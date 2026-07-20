@@ -8,6 +8,8 @@ protocol IntentOverlayPresenting: AnyObject {
     func showOverlay(animated: Bool)
     func hideOverlay(animated: Bool)
     func toggleOverlay()
+    func showSessionTimer(name: String, endsAt: Date, position: TimerDisplayPosition)
+    func hideSessionTimer()
 }
 
 @MainActor
@@ -18,6 +20,7 @@ final class IntentAppModel: ObservableObject {
     @Published var selectedID: String?
     @Published var activeSessionName: String?
     @Published var activeSessionEndsAt: Date?
+    @Published var cooldownExpirations: [String: Date] = [:]
     @Published var pendingFriction: PendingFriction?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
@@ -81,6 +84,11 @@ final class IntentAppModel: ObservableObject {
             errorMessage = "Could not load schedules: \(error)"
             schedules = []
         }
+        do {
+            cooldownExpirations = try cooldownStore.activeCooldowns()
+        } catch {
+            cooldownExpirations = [:]
+        }
         startScheduleTimer()
     }
 
@@ -120,6 +128,7 @@ final class IntentAppModel: ObservableObject {
         intentions.removeAll { $0.id == id }
         schedules.removeAll { $0.intentionID == id }
         try? cooldownStore.clear(intentionID: id)
+        cooldownExpirations.removeValue(forKey: id)
         saveSchedules()
         if selectedID == id {
             selectedID = intentions.first?.id
@@ -264,9 +273,11 @@ final class IntentAppModel: ObservableObject {
     func requestStart(_ intention: Intention) {
         do {
             if let nextAllowedDate = try cooldownStore.nextAllowedDate(for: intention.id) {
+                cooldownExpirations[intention.id] = nextAllowedDate
                 errorMessage = "\(intention.name) is cooling down. Try again in \(Self.durationText(until: nextAllowedDate))."
                 return
             }
+            cooldownExpirations.removeValue(forKey: intention.id)
         } catch {
             errorMessage = "Could not check \(intention.name)'s cooldown: \(error)"
             return
@@ -465,6 +476,7 @@ final class IntentAppModel: ObservableObject {
                 self.sessionLimitTask?.cancel()
                 self.sessionLimitTask = nil
                 self.activeSessionEndsAt = nil
+                self.overlayPresenter?.hideSessionTimer()
                 if failureMessage == nil {
                     self.beginCooldown(for: intention)
                 } else {
@@ -486,11 +498,21 @@ final class IntentAppModel: ObservableObject {
         guard let minutes = intention.timerMinutes else {
             activeSessionEndsAt = nil
             sessionLimitTask = nil
+            overlayPresenter?.hideSessionTimer()
             return
         }
 
         let duration = TimeInterval(minutes * 60)
         activeSessionEndsAt = Date().addingTimeInterval(duration)
+        if intention.showsSessionTimer, let activeSessionEndsAt {
+            overlayPresenter?.showSessionTimer(
+                name: intention.name,
+                endsAt: activeSessionEndsAt,
+                position: intention.sessionTimerDisplayPosition
+            )
+        } else {
+            overlayPresenter?.hideSessionTimer()
+        }
         sessionLimitTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             guard !Task.isCancelled,
@@ -506,7 +528,8 @@ final class IntentAppModel: ObservableObject {
     private func beginCooldown(for intention: Intention) {
         guard let minutes = intention.coolDownMinutes else { return }
         do {
-            try cooldownStore.begin(intentionID: intention.id, minutes: minutes)
+            let nextAllowedDate = try cooldownStore.begin(intentionID: intention.id, minutes: minutes)
+            cooldownExpirations[intention.id] = nextAllowedDate
         } catch {
             errorMessage = "Could not save \(intention.name)'s cooldown: \(error)"
         }

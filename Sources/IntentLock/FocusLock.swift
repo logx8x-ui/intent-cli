@@ -64,6 +64,7 @@ public final class FocusLock {
     private var shouldStop = false
     private let stopStateLock = NSLock()
     private let allowedAppSwitcher: AllowedAppSwitcher
+    private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var focusTimer: Timer?
@@ -284,6 +285,10 @@ public final class FocusLock {
                !event.flags.contains(.maskCommand) {
                 allowedAppSwitcher.commit()
             }
+            if allowedBrowserTabSwitcher.isVisible,
+               !event.flags.contains(.maskControl) {
+                allowedBrowserTabSwitcher.commit()
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -299,12 +304,27 @@ public final class FocusLock {
         let option = flags.contains(.maskAlternate)
 
         if command && keyCode == KeyCode.tab {
+            allowedBrowserTabSwitcher.cancel()
             allowedAppSwitcher.advance(reverse: shift)
             return nil
         }
 
-        if keyCode == KeyCode.escape, allowedAppSwitcher.isVisible {
+        if control,
+           keyCode == KeyCode.tab,
+           spec.blockBrowserTabEscape,
+           let browserBundleIdentifier = supportedFrontmostBrowserBundleIdentifier() {
             allowedAppSwitcher.cancel()
+            allowedBrowserTabSwitcher.advance(
+                browserBundleIdentifier: browserBundleIdentifier,
+                reverse: shift
+            )
+            return nil
+        }
+
+        if keyCode == KeyCode.escape,
+           allowedAppSwitcher.isVisible || allowedBrowserTabSwitcher.isVisible {
+            allowedAppSwitcher.cancel()
+            allowedBrowserTabSwitcher.cancel()
             return nil
         }
 
@@ -515,10 +535,15 @@ public final class FocusLock {
     }
 
     private func isSupportedBrowserFrontmost() -> Bool {
-        guard let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
-            return false
+        supportedFrontmostBrowserBundleIdentifier() != nil
+    }
+
+    private func supportedFrontmostBrowserBundleIdentifier() -> String? {
+        guard let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+              ["org.mozilla.firefox", "com.google.Chrome"].contains(bundleIdentifier) else {
+            return nil
         }
-        return ["org.mozilla.firefox", "com.google.Chrome"].contains(bundleIdentifier)
+        return bundleIdentifier
     }
 
     private func isFirefoxFrontmost() -> Bool {
@@ -531,6 +556,7 @@ public final class FocusLock {
 
     private func cleanup() {
         allowedAppSwitcher.cancel()
+        allowedBrowserTabSwitcher.cancel()
         focusTimer?.invalidate()
         focusTimer = nil
 

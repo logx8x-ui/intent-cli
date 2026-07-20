@@ -15,18 +15,32 @@ func readMessage() -> Data? {
     return FileHandle.standardInput.readData(ofLength: Int(length))
 }
 
+let outputLock = NSLock()
+
 func writeMessage<T: Encodable>(_ value: T) throws {
     let data = try JSONEncoder().encode(value)
     var length = UInt32(data.count).littleEndian
     let header = Data(bytes: &length, count: 4)
+    outputLock.lock()
+    defer { outputLock.unlock() }
     FileHandle.standardOutput.write(header)
     FileHandle.standardOutput.write(data)
+}
+
+struct HostTab: Codable {
+    var id: Int
+    var windowID: Int
+    var index: Int
+    var title: String
+    var url: String
+    var active: Bool
 }
 
 struct HostRequest: Codable {
     var type: String?
     var enabled: Bool?
     var browserBundleIdentifier: String?
+    var tabs: [HostTab]?
 }
 
 struct HostResponse: Codable {
@@ -37,6 +51,7 @@ struct HostResponse: Codable {
     var blockNewTabs: Bool
     var allowGoogleSearchTabs: Bool
     var guardEnabled: Bool
+    var tabCommand: BrowserTabCommand?
 }
 
 while let requestData = readMessage() {
@@ -54,9 +69,29 @@ while let requestData = readMessage() {
         try? stateStore.write(enabled: enabled)
     }
 
+    if request?.type == "tabsSnapshot", let tabs = request?.tabs {
+        let snapshot = BrowserTabSnapshot(
+            browserBundleIdentifier: browserBundleIdentifier,
+            tabs: tabs.map {
+                BrowserTabItem(
+                    id: $0.id,
+                    windowID: $0.windowID,
+                    index: $0.index,
+                    title: $0.title,
+                    url: $0.url,
+                    active: $0.active
+                )
+            }
+        )
+        try? BrowserTabSnapshotStore(browserBundleIdentifier: browserBundleIdentifier).write(snapshot)
+    }
+
     let fileURL = ActiveBrowserRulesStore.defaultFileURL()
     let response: HostResponse
     let guardEnabled = stateStore.isEnabled()
+    let tabCommand = BrowserTabCommandStore(
+        browserBundleIdentifier: browserBundleIdentifier
+    ).take()
 
     if let data = try? Data(contentsOf: fileURL),
        let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data),
@@ -70,7 +105,8 @@ while let requestData = readMessage() {
             blockNavigation: rules.blockNavigation,
             blockNewTabs: rules.blockNewTabs,
             allowGoogleSearchTabs: rules.allowGoogleSearchTabs,
-            guardEnabled: guardEnabled
+            guardEnabled: guardEnabled,
+            tabCommand: tabCommand
         )
     } else {
         response = HostResponse(
@@ -80,7 +116,8 @@ while let requestData = readMessage() {
             blockNavigation: false,
             blockNewTabs: false,
             allowGoogleSearchTabs: false,
-            guardEnabled: guardEnabled
+            guardEnabled: guardEnabled,
+            tabCommand: tabCommand
         )
     }
 
