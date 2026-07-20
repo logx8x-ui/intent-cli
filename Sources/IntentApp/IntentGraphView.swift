@@ -293,9 +293,22 @@ struct IntentGraphView: View {
 
             Spacer()
 
-            Text("\(overlayShortcut.displayName)  hide")
+            Button {
+                model.hideOverlay()
+            } label: {
+                HStack(spacing: 7) {
+                    Text(overlayShortcut.displayName)
+                        .foregroundStyle(GraphTheme.text(colorScheme))
+                    Text("hide")
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(GraphTheme.muted(colorScheme))
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Hide Intent (\(overlayShortcut.displayName))")
 
             if let activeSessionName = model.activeSessionName {
                 Button {
