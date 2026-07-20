@@ -3,8 +3,8 @@ set -euo pipefail
 export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.5.1}"
-BUILD_NUMBER="${2:-15}"
+VERSION="${1:-0.5.2}"
+BUILD_NUMBER="${2:-16}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"
@@ -45,8 +45,8 @@ mkdir -p "$PKG_SCRIPTS" "$DMG_ROOT" "$DIST"
 
 cd "$ROOT"
 for product in Intent IntentApp IntentNativeHost; do
-  swift build -c release --scratch-path "$ARM_BUILD" --triple arm64-apple-macosx13.0 --product "$product"
-  swift build -c release --scratch-path "$X86_BUILD" --triple x86_64-apple-macosx13.0 --product "$product"
+  swift build --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple arm64-apple-macosx13.0 --product "$product"
+  swift build --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple x86_64-apple-macosx13.0 --product "$product"
 done
 npm run extension:build
 npm run extension:build:chrome
@@ -66,14 +66,7 @@ lipo -create \
 cp -R "$ARM_BUILD/arm64-apple-macosx/release/Intent_IntentApp.bundle" "$APP/Contents/Resources/Intent_IntentApp.bundle"
 chmod +x "$APP/Contents/MacOS/IntentApp" "$SUPPORT_DIR/Intent" "$SUPPORT_DIR/IntentNativeHost"
 
-ICONSET="$WORK/Intent.iconset"
-mkdir -p "$ICONSET"
-for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" "$ROOT/Assets/IntentAppIcon.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  double=$((size * 2))
-  sips -z "$double" "$double" "$ROOT/Assets/IntentAppIcon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Intent.icns"
+cp "$ROOT/Assets/Intent.icns" "$APP/Contents/Resources/Intent.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

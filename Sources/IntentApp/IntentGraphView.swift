@@ -68,7 +68,7 @@ struct IntentGraphView: View {
                 .frame(width: viewportSize.width, height: viewportSize.height, alignment: .leading)
                 .offset(x: -pagePosition * viewportSize.width)
 
-                topBar
+                topBar(in: viewportSize)
                     .frame(maxHeight: .infinity, alignment: .top)
 
                 bottomControls(in: viewportSize)
@@ -278,46 +278,49 @@ struct IntentGraphView: View {
         welcomeTitleFocused = false
     }
 
-    private var topBar: some View {
-        HStack(spacing: 16) {
-            HStack(spacing: 9) {
-                Image(systemName: "scope")
-                    .font(.system(size: 16, weight: .medium))
-                Text("Intent")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-
-            Spacer()
-
-            pageSwitcher
-
-            Spacer()
-
-            Button {
-                model.hideOverlay()
-            } label: {
-                HStack(spacing: 7) {
-                    Text(overlayShortcut.displayName)
-                        .foregroundStyle(GraphTheme.text(colorScheme))
-                    Text("hide")
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
+    private func topBar(in viewportSize: CGSize) -> some View {
+        ZStack {
+            HStack(spacing: 16) {
+                HStack(spacing: 9) {
+                    Image(systemName: "scope")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Intent")
+                        .font(.system(size: 16, weight: .semibold))
                 }
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 10)
-                .frame(height: 30)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Hide Intent (\(overlayShortcut.displayName))")
 
-            if let activeSessionName = model.activeSessionName {
+                Spacer()
+
                 Button {
-                    model.endActiveSession()
+                    model.hideOverlay()
                 } label: {
-                    Label("End \(activeSessionName)", systemImage: "stop.fill")
+                    HStack(spacing: 7) {
+                        Text(overlayShortcut.displayName)
+                            .foregroundStyle(GraphTheme.text(colorScheme))
+                        Text("hide")
+                            .foregroundStyle(GraphTheme.muted(colorScheme))
+                    }
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.bordered)
-                .help("End intention (Cmd+Shift+M)")
+                .buttonStyle(.plain)
+                .help("Hide Intent (\(overlayShortcut.displayName))")
+
+                if let activeSessionName = model.activeSessionName {
+                    Button {
+                        model.endActiveSession()
+                    } label: {
+                        Label("End \(activeSessionName)", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("End intention (Cmd+Shift+M)")
+                }
+            }
+
+            HStack(spacing: 10) {
+                pageSwitcher
+                creationDock(in: viewportSize)
             }
         }
         .foregroundStyle(GraphTheme.text(colorScheme))
@@ -328,6 +331,67 @@ struct IntentGraphView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(GraphTheme.stroke(colorScheme)).frame(height: 1)
         }
+    }
+
+    private func creationDock(in viewportSize: CGSize) -> some View {
+        HStack(spacing: 2) {
+            creationDockButton(
+                title: "Intention",
+                key: "I",
+                symbol: "square.roundedrectangle",
+                action: .intention,
+                viewportSize: viewportSize
+            )
+            creationDockButton(
+                title: "Restriction",
+                key: "R",
+                symbol: "circle",
+                action: .restriction,
+                viewportSize: viewportSize
+            )
+            creationDockButton(
+                title: "Friction",
+                key: "F",
+                symbol: "triangle",
+                action: .friction,
+                viewportSize: viewportSize
+            )
+        }
+        .padding(3)
+        .background(.ultraThinMaterial, in: Capsule())
+        .background(GraphTheme.surface(colorScheme), in: Capsule())
+        .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
+        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 7, y: 3)
+    }
+
+    private func creationDockButton(
+        title: String,
+        key: String,
+        symbol: String,
+        action: GraphKeyboardKey,
+        viewportSize: CGSize
+    ) -> some View {
+        Button {
+            performCreationAction(action, viewportSize: viewportSize)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                Text(key)
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .frame(width: 16, height: 16)
+                    .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.7))
+            }
+            .foregroundStyle(GraphTheme.text(colorScheme))
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Create \(title.lowercased()) (\(key))")
     }
 
     private var pageSwitcher: some View {
@@ -720,6 +784,26 @@ struct IntentGraphView: View {
         case .pageRight:
             switchPage(to: .scheduler)
         }
+    }
+
+    private func performCreationAction(_ key: GraphKeyboardKey, viewportSize: CGSize) {
+        guard !model.hasActiveSession else {
+            showStatus("Finish the active intention before editing")
+            return
+        }
+        if currentPage == .scheduler {
+            switchPage(to: .desktop)
+        }
+        if !editMode {
+            enterEditMode()
+        }
+        if key != .intention,
+           selection?.intentionID == nil,
+           let selectedID = model.selectedID,
+           model.intentions.contains(where: { $0.id == selectedID }) {
+            selection = .intention(selectedID)
+        }
+        handleKeyboard(key, viewportSize: viewportSize)
     }
 
     private func handlePageSwipe(_ event: PageSwipeEvent, viewportWidth: CGFloat) {
@@ -1169,6 +1253,9 @@ private struct GraphInputMonitor: NSViewRepresentable {
         private var keyboardMonitor: Any?
         private var magnificationMonitor: Any?
         private var scrollMonitor: Any?
+        private var inputFrameTimer: Timer?
+        private var pendingMagnification: CGFloat = 0
+        private var pendingPan: CGSize = .zero
         private var swipeMonitor: Any?
         private var indirectGestureMonitor: Any?
         private weak var gestureHostView: NSView?
@@ -1185,6 +1272,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
             super.viewDidMoveToWindow()
             if window != nil, keyboardMonitor == nil {
                 installThreeFingerPanRecognizer()
+                startInputFrameTimer()
                 keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                     guard let self, self.window?.isKeyWindow == true else {
                         return event
@@ -1237,7 +1325,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
                           event.window === self.window else {
                         return event
                     }
-                    self.magnificationHandler?(event.magnification)
+                    self.pendingMagnification += event.magnification
                     return nil
                 }
 
@@ -1245,17 +1333,14 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     guard let self,
                           self.window?.isKeyWindow == true,
                           event.window === self.window,
-                          event.hasPreciseScrollingDeltas else {
+                          event.hasPreciseScrollingDeltas,
+                          !self.isTrackingThreeFingerPan else {
                         return event
                     }
 
                     guard !Self.isOverScrollView(event, in: self.window) else { return event }
-                    self.scrollHandler?(
-                        CGSize(
-                            width: event.scrollingDeltaX * 1.15,
-                            height: event.scrollingDeltaY * 1.15
-                        )
-                    )
+                    self.pendingPan.width += event.scrollingDeltaX * 1.28
+                    self.pendingPan.height += event.scrollingDeltaY * 1.28
                     return nil
                 }
 
@@ -1304,6 +1389,10 @@ private struct GraphInputMonitor: NSViewRepresentable {
             if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
             if let swipeMonitor { NSEvent.removeMonitor(swipeMonitor) }
             if let indirectGestureMonitor { NSEvent.removeMonitor(indirectGestureMonitor) }
+            inputFrameTimer?.invalidate()
+            inputFrameTimer = nil
+            pendingMagnification = 0
+            pendingPan = .zero
             keyboardMonitor = nil
             magnificationMonitor = nil
             scrollMonitor = nil
@@ -1316,6 +1405,26 @@ private struct GraphInputMonitor: NSViewRepresentable {
             gestureHostView = nil
             isTrackingThreeFingerPan = false
             resetIndirectGesture()
+        }
+
+        private func startInputFrameTimer() {
+            guard inputFrameTimer == nil else { return }
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let magnification = self.pendingMagnification
+                let pan = self.pendingPan
+                self.pendingMagnification = 0
+                self.pendingPan = .zero
+
+                if abs(magnification) > 0.000_01 {
+                    self.magnificationHandler?(magnification)
+                }
+                if abs(pan.width) > 0.001 || abs(pan.height) > 0.001 {
+                    self.scrollHandler?(pan)
+                }
+            }
+            inputFrameTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
 
         private func installThreeFingerPanRecognizer() {

@@ -23,14 +23,15 @@ final class AllowedBrowserTabSwitcher {
         return visible
     }
 
-    func advance(browserBundleIdentifier: String, reverse: Bool) {
+    @discardableResult
+    func advance(browserBundleIdentifier: String, reverse: Bool) -> Bool {
         stateLock.lock()
         if !visible || self.browserBundleIdentifier != browserBundleIdentifier {
             items = makeItems(browserBundleIdentifier: browserBundleIdentifier)
             guard items.count > 1 else {
                 visible = false
                 stateLock.unlock()
-                return
+                return false
             }
             self.browserBundleIdentifier = browserBundleIdentifier
             visible = true
@@ -61,6 +62,7 @@ final class AllowedBrowserTabSwitcher {
             self.panelController = controller
             controller.show(items: panelItems, selectedIndex: index)
         }
+        return true
     }
 
     func commit() {
@@ -112,7 +114,7 @@ final class AllowedBrowserTabSwitcher {
     private func makeItems(browserBundleIdentifier: String) -> [Item] {
         guard let snapshot = BrowserTabSnapshotStore(
             browserBundleIdentifier: browserBundleIdentifier
-        ).load(maxAge: 3) else {
+        ).load(maxAge: 10) else {
             return []
         }
 

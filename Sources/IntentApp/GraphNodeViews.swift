@@ -16,14 +16,14 @@ struct IntentionNodeView: View {
                 .lineLimit(1)
                 .frame(maxWidth: 190)
 
-            ZStack(alignment: .topTrailing) {
+            ZStack {
                 appGrid
                     .frame(width: squareSize, height: squareSize)
                     .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
 
                 if intention.showsCooldownRemainingTime, let cooldownExpiresAt {
                     CooldownBadge(expiresAt: cooldownExpiresAt)
-                        .offset(x: 9, y: -9)
+                        .frame(width: squareSize - 10, height: squareSize - 10)
                 }
             }
         }
@@ -232,16 +232,26 @@ private struct CooldownBadge: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             if expiresAt > context.date {
-                Text(remainingText(at: context.date))
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(GraphTheme.text(colorScheme))
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .background(GraphTheme.glassTint(colorScheme), in: Capsule())
-                    .overlay(Capsule().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.55), lineWidth: 0.8))
-                    .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 7, y: 3)
+                VStack(spacing: 5) {
+                    Image(systemName: "hourglass")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(remainingText(at: context.date))
+                        .font(.system(size: 35, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text("COOLDOWN")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .tracking(1.2)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
+                .foregroundStyle(GraphTheme.text(colorScheme))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                .background(GraphTheme.elevatedSurface(colorScheme).opacity(0.88), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 17, style: .continuous)
+                        .stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.68), lineWidth: 1)
+                )
+                .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 10, y: 5)
             }
         }
         .allowsHitTesting(false)

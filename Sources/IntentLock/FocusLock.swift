@@ -313,12 +313,19 @@ public final class FocusLock {
            keyCode == KeyCode.tab,
            spec.blockBrowserTabEscape,
            let browserBundleIdentifier = supportedFrontmostBrowserBundleIdentifier() {
-            allowedAppSwitcher.cancel()
-            allowedBrowserTabSwitcher.advance(
+            let didShowSwitcher = allowedBrowserTabSwitcher.advance(
                 browserBundleIdentifier: browserBundleIdentifier,
                 reverse: shift
             )
-            return nil
+            if didShowSwitcher {
+                allowedAppSwitcher.cancel()
+                return nil
+            }
+
+            // Older, disconnected, or sleeping Browser Guard builds may not
+            // have published a tab snapshot. Preserve native Ctrl+Tab rather
+            // than swallowing the shortcut with no visible result.
+            return Unmanaged.passUnretained(event)
         }
 
         if keyCode == KeyCode.escape,
