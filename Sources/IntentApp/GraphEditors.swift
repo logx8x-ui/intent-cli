@@ -13,6 +13,7 @@ struct IntentionEditorMenu: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var appQuery = ""
     @State private var websiteDrafts: [String: String] = [:]
+    @FocusState private var nameFocused: Bool
 
     private var matches: [InstalledApp] {
         let query = appQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -34,6 +35,7 @@ struct IntentionEditorMenu: View {
                 fieldLabel("Name")
                 TextField("Intention name", text: $intention.name)
                     .textFieldStyle(.roundedBorder)
+                    .focused($nameFocused)
 
                 fieldLabel("Allowed apps")
                 tokenFlow
@@ -99,6 +101,10 @@ struct IntentionEditorMenu: View {
         .frame(width: 320)
         .frame(maxHeight: 470)
         .graphMenuPanel(colorScheme: colorScheme)
+        .onAppear {
+            guard intention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            DispatchQueue.main.async { nameFocused = true }
+        }
     }
 
     private var tokenFlow: some View {

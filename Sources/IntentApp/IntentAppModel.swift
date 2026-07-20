@@ -95,7 +95,10 @@ final class IntentAppModel: ObservableObject {
     func save() {
         guard !hasActiveSession else { return }
         do {
-            try store.save(intentions)
+            let namedIntentions = intentions.filter {
+                !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            try store.save(namedIntentions)
         } catch {
             errorMessage = "Could not save intentions: \(error)"
         }
@@ -105,7 +108,7 @@ final class IntentAppModel: ObservableObject {
     func createIntention(at position: GraphPoint) -> String {
         recordUndoSnapshot()
         let intention = Intention(
-            name: "New intention",
+            name: "",
             icon: "target",
             colorHex: "#F5F5F7",
             folder: "",
@@ -119,6 +122,23 @@ final class IntentAppModel: ObservableObject {
         selectedID = intention.id
         save()
         return intention.id
+    }
+
+    func discardIfUnnamed(id: String) {
+        guard !hasActiveSession,
+              let intention = intentions.first(where: { $0.id == id }),
+              intention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        intentions.removeAll { $0.id == id }
+        schedules.removeAll { $0.intentionID == id }
+        try? cooldownStore.clear(intentionID: id)
+        cooldownExpirations.removeValue(forKey: id)
+        saveSchedules()
+        if selectedID == id {
+            selectedID = intentions.first?.id
+        }
+        save()
     }
 
     func deleteIntention(id: String) {

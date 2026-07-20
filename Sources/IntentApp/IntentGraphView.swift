@@ -68,7 +68,7 @@ struct IntentGraphView: View {
                 .frame(width: viewportSize.width, height: viewportSize.height, alignment: .leading)
                 .offset(x: -pagePosition * viewportSize.width)
 
-                topBar(in: viewportSize)
+                topBar
                     .frame(maxHeight: .infinity, alignment: .top)
 
                 bottomControls(in: viewportSize)
@@ -203,7 +203,7 @@ struct IntentGraphView: View {
                 .gesture(panGesture)
                 .onTapGesture {
                     NSApp.keyWindow?.makeFirstResponder(nil)
-                    selection = nil
+                    finishEditingSelection()
                 }
 
             connectionLayer(in: size)
@@ -215,8 +215,13 @@ struct IntentGraphView: View {
 
             graphNodes(in: size)
 
+            creationDock(in: size)
+                .position(x: size.width / 2, y: size.height / 2 - 86)
+                .zIndex(30)
+
             if editMode, let selection {
                 editor(for: selection, in: size)
+                    .zIndex(40)
             }
         }
     }
@@ -278,7 +283,7 @@ struct IntentGraphView: View {
         welcomeTitleFocused = false
     }
 
-    private func topBar(in viewportSize: CGSize) -> some View {
+    private var topBar: some View {
         ZStack {
             HStack(spacing: 16) {
                 HStack(spacing: 9) {
@@ -318,10 +323,7 @@ struct IntentGraphView: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                pageSwitcher
-                creationDock(in: viewportSize)
-            }
+            pageSwitcher
         }
         .foregroundStyle(GraphTheme.text(colorScheme))
         .padding(.horizontal, 20)
@@ -467,7 +469,7 @@ struct IntentGraphView: View {
                 enabled: editMode && !model.hasActiveSession,
                 onTap: {
                     if editMode {
-                        selection = .intention(intention.id)
+                        select(.intention(intention.id))
                         model.selectedID = intention.id
                     } else {
                         model.requestStart(intention)
@@ -493,7 +495,7 @@ struct IntentGraphView: View {
                     enabled: editMode && !model.hasActiveSession,
                     onTap: {
                         guard editMode else { return }
-                        selection = .restriction(intentionID: intention.id, nodeID: node.id)
+                        select(.restriction(intentionID: intention.id, nodeID: node.id))
                         model.selectedID = intention.id
                     },
                     onMove: { position, persist in
@@ -515,7 +517,7 @@ struct IntentGraphView: View {
                     enabled: editMode && !model.hasActiveSession,
                     onTap: {
                         guard editMode else { return }
-                        selection = .friction(intentionID: intention.id, nodeID: node.id)
+                        select(.friction(intentionID: intention.id, nodeID: node.id))
                         model.selectedID = intention.id
                     },
                     onMove: { position, persist in
@@ -585,18 +587,26 @@ struct IntentGraphView: View {
                         self.selection = nil
                     },
                     onAddRestriction: {
+                        guard intentionHasName(intentionID) else {
+                            showStatus("Name the intention first")
+                            return
+                        }
                         let position = quickAddPosition(for: intentionID, kind: .restriction)
                         if let nodeID = model.addRestriction(to: intentionID, at: position) {
                             self.selection = .restriction(intentionID: intentionID, nodeID: nodeID)
                         }
                     },
                     onAddFriction: {
+                        guard intentionHasName(intentionID) else {
+                            showStatus("Name the intention first")
+                            return
+                        }
                         let position = quickAddPosition(for: intentionID, kind: .friction)
                         if let nodeID = model.addFriction(to: intentionID, at: position) {
                             self.selection = .friction(intentionID: intentionID, nodeID: nodeID)
                         }
                     },
-                    onSave: { self.selection = nil }
+                    onSave: finishEditingSelection
                 )
                 .position(anchor)
             }
@@ -748,12 +758,17 @@ struct IntentGraphView: View {
             }
         case .intention:
             guard currentPage == .desktop, editMode else { return }
+            finishEditingSelection()
             let id = model.createIntention(at: pointerWorldPoint(in: viewportSize))
             selection = .intention(id)
         case .restriction:
             guard currentPage == .desktop, editMode else { return }
             guard let intentionID = selection?.intentionID else {
                 showStatus("Select an intention first")
+                return
+            }
+            guard intentionHasName(intentionID) else {
+                showStatus("Name the intention first")
                 return
             }
             if let id = model.addRestriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
@@ -765,13 +780,17 @@ struct IntentGraphView: View {
                 showStatus("Select an intention first")
                 return
             }
+            guard intentionHasName(intentionID) else {
+                showStatus("Name the intention first")
+                return
+            }
             if let id = model.addFriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
                 selection = .friction(intentionID: intentionID, nodeID: id)
             }
         case .save:
             guard editMode else { return }
             NSApp.keyWindow?.makeFirstResponder(nil)
-            selection = nil
+            finishEditingSelection()
         case .delete:
             guard editMode else { return }
             deleteSelection()
@@ -797,13 +816,44 @@ struct IntentGraphView: View {
         if !editMode {
             enterEditMode()
         }
+        if key == .intention {
+            finishEditingSelection()
+            let placement = worldPoint(
+                for: CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2 + 132),
+                in: viewportSize
+            )
+            let id = model.createIntention(at: placement)
+            selection = .intention(id)
+            return
+        }
         if key != .intention,
            selection?.intentionID == nil,
            let selectedID = model.selectedID,
            model.intentions.contains(where: { $0.id == selectedID }) {
             selection = .intention(selectedID)
         }
-        handleKeyboard(key, viewportSize: viewportSize)
+        guard let intentionID = selection?.intentionID else {
+            showStatus("Select an intention first")
+            return
+        }
+        guard intentionHasName(intentionID) else {
+            showStatus("Name the intention first")
+            return
+        }
+        switch key {
+        case .restriction:
+            let position = quickAddPosition(for: intentionID, kind: .restriction)
+            if let nodeID = model.addRestriction(to: intentionID, at: position) {
+                selection = .restriction(intentionID: intentionID, nodeID: nodeID)
+            }
+        case .friction:
+            let position = quickAddPosition(for: intentionID, kind: .friction)
+            if let nodeID = model.addFriction(to: intentionID, at: position) {
+                selection = .friction(intentionID: intentionID, nodeID: nodeID)
+            }
+        default:
+            handleKeyboard(key, viewportSize: viewportSize)
+        }
     }
 
     private func handlePageSwipe(_ event: PageSwipeEvent, viewportWidth: CGFloat) {
@@ -911,8 +961,30 @@ struct IntentGraphView: View {
         if editingWelcomeTitle {
             commitWelcomeTitle()
         }
+        finishEditingSelection()
         editMode = false
+    }
+
+    private func select(_ newSelection: GraphSelection) {
+        if selection?.intentionID != newSelection.intentionID {
+            discardSelectedIntentionIfUnnamed()
+        }
+        selection = newSelection
+    }
+
+    private func finishEditingSelection() {
+        discardSelectedIntentionIfUnnamed()
         selection = nil
+    }
+
+    private func discardSelectedIntentionIfUnnamed() {
+        guard let intentionID = selection?.intentionID else { return }
+        model.discardIfUnnamed(id: intentionID)
+    }
+
+    private func intentionHasName(_ intentionID: String) -> Bool {
+        guard let intention = model.intentions.first(where: { $0.id == intentionID }) else { return false }
+        return !intention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func showStatus(_ message: String) {
@@ -1038,7 +1110,7 @@ struct IntentGraphView: View {
         Binding(
             get: {
                 model.intentions.first(where: { $0.id == id }) ?? Intention(
-                    name: "New intention",
+                    name: "",
                     icon: "target",
                     colorHex: "#F5F5F7",
                     folder: "",
