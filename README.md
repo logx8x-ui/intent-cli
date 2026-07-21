@@ -11,9 +11,9 @@ These are the only three downloads most people need:
 
 | Download | Use it for |
 | --- | --- |
-| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/download/v0.7.0/Intent-0.7.0.dmg)** | The main app. Requires macOS 13 or newer. |
-| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.7.0/intent_browser_guard-0.1.7.zip)** | Website restrictions in Firefox. |
-| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.7.0/intent-browser-guard-chrome-0.1.3.zip)** | Website restrictions in Chrome. |
+| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/download/v0.8.0/Intent-0.8.0.dmg)** | The main app. Requires macOS 13 or newer. |
+| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.8.0/Intent-Firefox-Extension.zip)** | Website restrictions in Firefox. |
+| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.8.0/Intent-Chrome-Extension.zip)** | Website restrictions in Chrome. |
 
 Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only enforces rules while an intention is running.
 
@@ -37,7 +37,6 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 
 - Click an intention to run it.
 - Press `~` to show or hide Intent, or change that shortcut in Settings.
-- Swipe with three fingers to move between the intentions desktop and scheduler.
 - Press `E` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
 - Pinch to zoom and use two fingers to pan.
 - Press `Cmd+Shift+M` to finish an active intention.
@@ -46,9 +45,9 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 
 ### Build with AI
 
-The AI prompt bar at the bottom asks what intention you want to build, suggests a small set of focused intentions, and lets you check every app and website before anything is added. Manual creation with `I` still works exactly as before.
+The AI prompt bar at the bottom asks what intention you want to build, moves to a dedicated AI draft workspace, and creates one editable intention with the requested apps, websites, restrictions, and friction. Choose **Finalise**, then click the main canvas to place it. Manual creation with `I` still works exactly as before.
 
-No API key is required. Intent sends the description you type plus installed app names and bundle identifiers to its hosted AI service only after you choose **Suggest intentions**. Generated apps and sites are checked locally before import, and nothing starts until you review it.
+No API key is required. Intent sends the description you submit plus installed app names and bundle identifiers to its hosted AI service. Generated apps and sites are checked locally before import, and nothing starts until you review and finalise the draft.
 
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 

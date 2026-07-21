@@ -72,7 +72,7 @@ an API key in the desktop app.
 ## Submission Checklist
 
 - Public repository: <https://github.com/logx8x-ui/intent-cli>
-- Release downloads: <https://github.com/logx8x-ui/intent-cli/releases/tag/v0.7.0>
+- Release downloads: <https://github.com/logx8x-ui/intent-cli/releases/tag/v0.8.0>
 - Demo guide: [`docs/build-week-demo.md`](docs/build-week-demo.md)
 - Paste-ready submission: [`docs/build-week-submission.md`](docs/build-week-submission.md)
 - License: MIT

@@ -111,7 +111,7 @@ optional sync while retaining local-first intention data.
 ## Links
 
 - Repository: https://github.com/logx8x-ui/intent-cli
-- Release: https://github.com/logx8x-ui/intent-cli/releases/tag/v0.7.0
+- Release: https://github.com/logx8x-ui/intent-cli/releases/tag/v0.8.0
 - Demo video: PASTE PUBLIC YOUTUBE URL
 - Codex Session ID: RUN `/feedback` AND PASTE THE ID
 
