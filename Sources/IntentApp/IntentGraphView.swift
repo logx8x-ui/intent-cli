@@ -20,6 +20,7 @@ struct IntentGraphView: View {
     @State private var welcomeTitleDraft = ""
     @State private var editingWelcomeTitle = false
     @State private var showSettings = false
+    @State private var showAIBuilder = false
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
     @State private var overlayShortcut = OverlayShortcutStore.load()
@@ -68,7 +69,7 @@ struct IntentGraphView: View {
                 .frame(width: viewportSize.width, height: viewportSize.height, alignment: .leading)
                 .offset(x: -pagePosition * viewportSize.width)
 
-                topBar
+                topBar(in: viewportSize)
                     .frame(maxHeight: .infinity, alignment: .top)
 
                 bottomControls(in: viewportSize)
@@ -180,6 +181,23 @@ struct IntentGraphView: View {
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
+        .sheet(isPresented: $showAIBuilder) {
+            AIIntentionBuilderView(catalog: model.installedApps) { suggestions in
+                let importedIDs = model.addAIIntentions(suggestions)
+                guard let firstID = importedIDs.first else {
+                    showStatus("Choose at least one installed app")
+                    return
+                }
+
+                currentPage = .desktop
+                pagePosition = OverlayPage.desktop.position
+                editMode = true
+                selection = .intention(firstID)
+                cameraScale = 1
+                cameraOffset = .zero
+                showStatus("Added \(importedIDs.count) intentions")
+            }
+        }
         .alert("Intent", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -214,10 +232,6 @@ struct IntentGraphView: View {
                 .position(screenPoint(for: .zero, in: size))
 
             graphNodes(in: size)
-
-            creationDock(in: size)
-                .position(x: size.width / 2, y: size.height / 2 - 86)
-                .zIndex(30)
 
             if editMode, let selection {
                 editor(for: selection, in: size)
@@ -283,7 +297,7 @@ struct IntentGraphView: View {
         welcomeTitleFocused = false
     }
 
-    private var topBar: some View {
+    private func topBar(in viewportSize: CGSize) -> some View {
         ZStack {
             HStack(spacing: 16) {
                 HStack(spacing: 9) {
@@ -323,7 +337,13 @@ struct IntentGraphView: View {
                 }
             }
 
-            pageSwitcher
+            HStack(spacing: 10) {
+                pageSwitcher
+                if currentPage == .desktop {
+                    creationDock(in: viewportSize)
+                    aiBuilderButton
+                }
+            }
         }
         .foregroundStyle(GraphTheme.text(colorScheme))
         .padding(.horizontal, 20)
@@ -333,6 +353,28 @@ struct IntentGraphView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(GraphTheme.stroke(colorScheme)).frame(height: 1)
         }
+    }
+
+    private var aiBuilderButton: some View {
+        Button {
+            showAIBuilder = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("AI")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+            }
+            .foregroundStyle(GraphTheme.text(colorScheme))
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(.ultraThinMaterial, in: Capsule())
+            .background(GraphTheme.surface(colorScheme), in: Capsule())
+            .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.hasActiveSession)
+        .help("Build editable intentions with AI")
     }
 
     private func creationDock(in viewportSize: CGSize) -> some View {

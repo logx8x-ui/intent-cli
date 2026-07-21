@@ -41,6 +41,12 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 - Add a **Timer** restriction to end a session automatically.
 - Add a **Cooldown** restriction to prevent restarting an intention for a chosen period after it ends.
 
+### Build with AI
+
+The optional **AI** button asks what you use your Mac for, suggests a small set of focused intentions, and lets you check every app and website before anything is added. Manual creation with `I` still works exactly as before.
+
+AI setup uses your own OpenAI API key. Intent stores the key in macOS Keychain and sends OpenAI only the description you type plus the names and bundle identifiers of installed apps; generated apps and sites are checked locally before import.
+
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 
 ## Build From Source

@@ -124,6 +124,60 @@ final class IntentAppModel: ObservableObject {
         return intention.id
     }
 
+    @discardableResult
+    func addAIIntentions(_ suggestions: [AIIntentionSuggestion]) -> [String] {
+        guard !hasActiveSession, !suggestions.isEmpty else { return [] }
+
+        let availableApps = installedApps.map {
+            AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
+        }
+        let validated = AIIntentionPlan(intentions: suggestions)
+            .validated(against: availableApps)
+            .intentions
+            .filter { !$0.appBundleIdentifiers.isEmpty }
+        guard !validated.isEmpty else { return [] }
+
+        let appsByIdentifier = Dictionary(
+            uniqueKeysWithValues: availableApps.map { ($0.bundleIdentifier, $0) }
+        )
+        var occupied = intentions.map(\.graphPosition)
+        var imported: [Intention] = []
+
+        for (index, suggestion) in validated.enumerated() {
+            let position = availableAIPosition(index: index, occupied: occupied)
+            let allowedApps = suggestion.appBundleIdentifiers.compactMap { appsByIdentifier[$0] }
+            let allowedWebsites = suggestion.websites.map {
+                AllowedWebsite($0.value, browserBundleIdentifier: $0.browserBundleIdentifier)
+            }
+            let restrictionNodes: [RestrictionNode] = suggestion.allowBrowserSearches
+                ? [RestrictionNode(
+                    kind: .allowBrowserSearches,
+                    position: .init(x: position.x + 220, y: position.y - 165)
+                )]
+                : []
+
+            imported.append(Intention(
+                name: suggestion.name,
+                icon: "sparkles",
+                colorHex: "#F5F5F7",
+                folder: "",
+                allowedApps: allowedApps,
+                allowedWebsites: allowedWebsites,
+                startupActions: [],
+                restrictions: .init(),
+                graphPosition: position,
+                restrictionNodes: restrictionNodes
+            ))
+            occupied.append(position)
+        }
+
+        recordUndoSnapshot()
+        intentions.append(contentsOf: imported)
+        selectedID = imported.first?.id
+        save()
+        return imported.map(\.id)
+    }
+
     func discardIfUnnamed(id: String) {
         guard !hasActiveSession,
               let intention = intentions.first(where: { $0.id == id }),
@@ -629,6 +683,24 @@ final class IntentAppModel: ObservableObject {
                 undoStack.removeFirst(undoStack.count - 100)
             }
         }
+    }
+
+    private func availableAIPosition(index: Int, occupied: [GraphPoint]) -> GraphPoint {
+        let goldenAngle = 2.399963229728653
+        for attempt in 0..<180 {
+            let step = index + attempt
+            let angle = Double(step) * goldenAngle
+            let radius = 340 + Double(step / 7) * 185
+            let candidate = GraphPoint(x: cos(angle) * radius, y: sin(angle) * radius)
+            let clearOfWelcome = hypot(candidate.x, candidate.y) >= 250
+            let clearOfIntentions = occupied.allSatisfy {
+                hypot(candidate.x - $0.x, candidate.y - $0.y) >= 270
+            }
+            if clearOfWelcome && clearOfIntentions {
+                return candidate
+            }
+        }
+        return .init(x: Double(index) * 290, y: 620)
     }
 
     private func beginMoveUndoIfNeeded(key: String, persist: Bool) {

@@ -23,6 +23,43 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    let installedForAI = [
+        AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox"),
+        AllowedApp(name: "Messages", bundleIdentifier: "com.apple.MobileSMS")
+    ]
+    let rawAIPlan = AIIntentionPlan(intentions: [
+        AIIntentionSuggestion(
+            name: "  Reply to messages  ",
+            purpose: " Clear important replies ",
+            appBundleIdentifiers: ["com.fake.app", "com.apple.MobileSMS", "org.mozilla.firefox"],
+            websites: [
+                .init(value: "https://instagram.com/direct", browserBundleIdentifier: "org.mozilla.firefox"),
+                .init(value: "example.com", browserBundleIdentifier: "com.fake.app")
+            ],
+            allowBrowserSearches: true
+        ),
+        AIIntentionSuggestion(
+            name: "   ",
+            purpose: "Discard me",
+            appBundleIdentifiers: [],
+            websites: [],
+            allowBrowserSearches: false
+        )
+    ])
+    let validatedAIPlan = rawAIPlan.validated(against: installedForAI)
+    try expect(validatedAIPlan.intentions.count == 1, "AI plans should discard unnamed intentions")
+    try expect(
+        validatedAIPlan.intentions[0].appBundleIdentifiers == ["org.mozilla.firefox", "com.apple.MobileSMS"],
+        "AI plans should discard invented apps and sort installed apps"
+    )
+    try expect(
+        validatedAIPlan.intentions[0].websites == [.init(value: "instagram.com/direct", browserBundleIdentifier: "org.mozilla.firefox")],
+        "AI plans should keep websites only for selected installed browsers"
+    )
+    let aiPrompt = AIIntentionPrompt.user(description: "University and messages", installedApps: installedForAI)
+    try expect(aiPrompt.contains("Firefox | org.mozilla.firefox"), "AI prompts should include the installed app catalog")
+    try expect(aiPrompt.contains("University and messages"), "AI prompts should include the person's activities")
+
     var permissionPromptCount = 0
     var permissionChecks = [false, false, true]
     let delayedPermission = AccessibilityAuthorizationGate(
