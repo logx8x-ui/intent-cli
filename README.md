@@ -2,6 +2,9 @@
 
 Intent is a macOS focus app that opens one chosen set of apps and websites, then keeps everything else out until you finish.
 
+Built with Codex during OpenAI Build Week. GPT-5.6 powers the optional intention
+builder while every generated app and website remains editable before import.
+
 ## Download
 
 These are the only three downloads most people need:
@@ -69,3 +72,13 @@ npm run extension:lint
 Public DMGs must be signed with Apple Developer ID certificates and notarized. `scripts/build-release.sh` supports that process and refuses a public release when the required Apple credentials are missing.
 
 Intent is a personal focus tool, not security software. See [Privacy](PRIVACY.md) for its local-only data behavior.
+
+## OpenAI Build Week
+
+Intent began as a personal CLI prototype. During Build Week it became the native
+spatial app in this repository: graph editing, browser guards, scheduler,
+focused switchers, timers and cooldowns, release packaging, and the hosted AI
+builder. The full account of how Codex and GPT-5.6 contributed, including dated
+commit evidence and key design decisions, is in [BUILD_WEEK.md](BUILD_WEEK.md).
+
+The source is available under the [MIT License](LICENSE).
