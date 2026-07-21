@@ -8,15 +8,15 @@ These are the only three downloads most people need:
 
 | Download | Use it for |
 | --- | --- |
-| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/download/v0.4.0/Intent-0.4.0.dmg)** | The main app. Requires macOS 13 or newer. |
-| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.4.0/intent_browser_guard-0.1.6.zip)** | Website restrictions in Firefox. |
-| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.4.0/intent-browser-guard-chrome-0.1.2.zip)** | Website restrictions in Chrome. |
+| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/download/v0.7.0/Intent-0.7.0.dmg)** | The main app. Requires macOS 13 or newer. |
+| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.7.0/intent_browser_guard-0.1.7.zip)** | Website restrictions in Firefox. |
+| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.7.0/intent-browser-guard-chrome-0.1.3.zip)** | Website restrictions in Chrome. |
 
 Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only enforces rules while an intention is running.
 
 ### Firefox
 
-1. Unzip `Intent-Firefox-Extension.zip`.
+1. Unzip the Firefox Browser Guard download.
 2. Open `about:debugging#/runtime/this-firefox` in Firefox.
 3. Choose **Load Temporary Add-on** and select `manifest.json` from the unzipped folder.
 
@@ -24,7 +24,7 @@ Firefox removes temporary add-ons after a restart. A permanent Mozilla Add-ons l
 
 ### Chrome
 
-1. Unzip `Intent-Chrome-Extension.zip`.
+1. Unzip the Chrome Browser Guard download.
 2. Open `chrome://extensions` in Chrome.
 3. Turn on **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
 
