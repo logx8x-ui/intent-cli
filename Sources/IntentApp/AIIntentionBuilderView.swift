@@ -8,8 +8,6 @@ struct AIIntentionBuilderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var activities = ""
-    @State private var apiKeyDraft = ""
-    @State private var hasAPIKey = IntentOpenAIKeyStore.load() != nil
     @State private var isGenerating = false
     @State private var errorMessage: String?
     @State private var drafts: [AIEditableDraft] = []
@@ -17,8 +15,19 @@ struct AIIntentionBuilderView: View {
     @State private var appQuery = ""
     @State private var websiteDraft = ""
     @State private var websiteBrowserIdentifier = ""
+    @State private var didAutoGenerate = false
 
-    private let service = OpenAIIntentionService()
+    private let service = IntentAIService()
+
+    init(
+        catalog: [InstalledApp],
+        initialActivities: String = "",
+        onAdd: @escaping ([AIIntentionSuggestion]) -> Void
+    ) {
+        self.catalog = catalog
+        self.onAdd = onAdd
+        _activities = State(initialValue: initialActivities)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,6 +43,12 @@ struct AIIntentionBuilderView: View {
         .background(GraphTheme.background(colorScheme).opacity(0.97))
         .foregroundStyle(GraphTheme.text(colorScheme))
         .tint(GraphTheme.editBlue)
+        .task {
+            guard !didAutoGenerate,
+                  !activities.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            didAutoGenerate = true
+            generate()
+        }
     }
 
     private var header: some View {
@@ -79,41 +94,6 @@ struct AIIntentionBuilderView: View {
                 .background(GraphTheme.surface(colorScheme), in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(GraphTheme.stroke(colorScheme)))
 
-            if !hasAPIKey {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("OPENAI API KEY")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .tracking(1)
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                    HStack(spacing: 8) {
-                        SecureField("sk-...", text: $apiKeyDraft)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Save to Keychain") {
-                            saveAPIKey()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                    Text("Stored only in your Mac Keychain.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-            } else {
-                HStack {
-                    Label("OpenAI connected", systemImage: "checkmark.circle.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.green)
-                    Spacer()
-                    Button("Forget API key") {
-                        IntentOpenAIKeyStore.delete()
-                        hasAPIKey = IntentOpenAIKeyStore.load() != nil
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-            }
-
             if let errorMessage {
                 Text(errorMessage)
                     .font(.system(size: 11, weight: .medium))
@@ -122,7 +102,7 @@ struct AIIntentionBuilderView: View {
 
             Spacer()
             HStack {
-                Text("Your description and installed app names are sent to OpenAI.")
+                Text("Your description and installed app names are sent securely to Intent AI.")
                     .font(.system(size: 10))
                     .foregroundStyle(GraphTheme.muted(colorScheme))
                 Spacer()
@@ -143,7 +123,6 @@ struct AIIntentionBuilderView: View {
                 .disabled(
                     isGenerating
                     || activities.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || !hasAPIKey
                 )
             }
         }
@@ -385,24 +364,8 @@ struct AIIntentionBuilderView: View {
         return catalog.filter { selected.contains($0.bundleIdentifier) }
     }
 
-    private func saveAPIKey() {
-        do {
-            try IntentOpenAIKeyStore.save(apiKeyDraft)
-            apiKeyDraft = ""
-            hasAPIKey = true
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
     private func generate() {
         let installed = catalog.map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
-        guard let apiKey = IntentOpenAIKeyStore.load() else {
-            errorMessage = OpenAIIntentionError.missingAPIKey.localizedDescription
-            hasAPIKey = false
-            return
-        }
 
         isGenerating = true
         errorMessage = nil
@@ -410,8 +373,7 @@ struct AIIntentionBuilderView: View {
             do {
                 let plan = try await service.generate(
                     description: activities,
-                    installedApps: installed,
-                    apiKey: apiKey
+                    installedApps: installed
                 ).validated(against: installed)
                 await MainActor.run {
                     drafts = plan.intentions.map(AIEditableDraft.init)

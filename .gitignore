@@ -6,6 +6,8 @@
 DerivedData/
 dist/
 node_modules/
+.dev.vars
+.wrangler/
 downloads/
 *.mp3
 *.mov

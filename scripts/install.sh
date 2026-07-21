@@ -60,9 +60,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>Intent</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.6.0</string>
+  <string>0.7.0</string>
   <key>CFBundleVersion</key>
-  <string>18</string>
+  <string>19</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>

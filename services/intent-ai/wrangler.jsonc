@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "intent-ai",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-21",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 0.1,
+      "invocation_logs": true
+    }
+  },
+  "vars": {
+    "OPENROUTER_MODEL": "openai/gpt-5.6-luna"
+  },
+  "ratelimits": [
+    {
+      "name": "INTENT_RATE_LIMITER",
+      "namespace_id": "1701",
+      "simple": {
+        "limit": 3,
+        "period": 60
+      }
+    }
+  ]
+}

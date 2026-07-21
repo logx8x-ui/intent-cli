@@ -43,9 +43,9 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 
 ### Build with AI
 
-The optional **AI** button asks what you use your Mac for, suggests a small set of focused intentions, and lets you check every app and website before anything is added. Manual creation with `I` still works exactly as before.
+The AI prompt bar at the bottom asks what intention you want to build, suggests a small set of focused intentions, and lets you check every app and website before anything is added. Manual creation with `I` still works exactly as before.
 
-AI setup uses your own OpenAI API key. Intent stores the key in macOS Keychain and sends OpenAI only the description you type plus the names and bundle identifiers of installed apps; generated apps and sites are checked locally before import.
+No API key is required. Intent sends the description you type plus installed app names and bundle identifiers to its hosted AI service only after you choose **Suggest intentions**. Generated apps and sites are checked locally before import, and nothing starts until you review it.
 
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 

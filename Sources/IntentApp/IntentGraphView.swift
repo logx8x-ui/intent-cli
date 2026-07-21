@@ -21,6 +21,8 @@ struct IntentGraphView: View {
     @State private var editingWelcomeTitle = false
     @State private var showSettings = false
     @State private var showAIBuilder = false
+    @State private var aiPrompt = ""
+    @State private var aiPromptSeed = ""
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
     @State private var overlayShortcut = OverlayShortcutStore.load()
@@ -28,6 +30,7 @@ struct IntentGraphView: View {
     @State private var pagePosition: CGFloat = 0
     @State private var warningShakeCount: CGFloat = 0
     @FocusState private var welcomeTitleFocused: Bool
+    @FocusState private var aiPromptFocused: Bool
 
     private let minimumScale: CGFloat = 0.35
     private let maximumScale: CGFloat = 2.35
@@ -76,6 +79,10 @@ struct IntentGraphView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                     .zIndex(50)
 
+                aiPromptBar
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .zIndex(51)
+
                 if let statusMessage {
                     Text(statusMessage)
                         .font(.system(size: 11, weight: .medium))
@@ -85,7 +92,7 @@ struct IntentGraphView: View {
                         .background(GraphTheme.glassTint(colorScheme), in: Capsule())
                         .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme)))
                         .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 8, y: 4)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 82)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
 
@@ -181,8 +188,13 @@ struct IntentGraphView: View {
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
-        .sheet(isPresented: $showAIBuilder) {
-            AIIntentionBuilderView(catalog: model.installedApps) { suggestions in
+        .sheet(isPresented: $showAIBuilder, onDismiss: {
+            aiPromptSeed = ""
+        }) {
+            AIIntentionBuilderView(
+                catalog: model.installedApps,
+                initialActivities: aiPromptSeed
+            ) { suggestions in
                 let importedIDs = model.addAIIntentions(suggestions)
                 guard let firstID = importedIDs.first else {
                     showStatus("Choose at least one installed app")
@@ -341,7 +353,6 @@ struct IntentGraphView: View {
                 pageSwitcher
                 if currentPage == .desktop {
                     creationDock(in: viewportSize)
-                    aiBuilderButton
                 }
             }
         }
@@ -353,28 +364,6 @@ struct IntentGraphView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(GraphTheme.stroke(colorScheme)).frame(height: 1)
         }
-    }
-
-    private var aiBuilderButton: some View {
-        Button {
-            showAIBuilder = true
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 10, weight: .semibold))
-                Text("AI")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-            }
-            .foregroundStyle(GraphTheme.text(colorScheme))
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(.ultraThinMaterial, in: Capsule())
-            .background(GraphTheme.surface(colorScheme), in: Capsule())
-            .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
-        }
-        .buttonStyle(.plain)
-        .disabled(model.hasActiveSession)
-        .help("Build editable intentions with AI")
     }
 
     private func creationDock(in viewportSize: CGSize) -> some View {
@@ -751,6 +740,58 @@ struct IntentGraphView: View {
             }
         }
         .padding(18)
+    }
+
+    private var aiPromptBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+
+            TextField("What intention would you like to build today?", text: $aiPrompt)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .focused($aiPromptFocused)
+                .onSubmit(submitAIPrompt)
+
+            Button(action: submitAIPrompt) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? GraphTheme.muted(colorScheme).opacity(0.35)
+                            : GraphTheme.text(colorScheme),
+                        in: Circle()
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .help("Build with Intent AI")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .frame(maxWidth: 560)
+        .frame(height: 48)
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
+        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 16, y: 8)
+        .padding(.horizontal, 96)
+        .padding(.bottom, 18)
+        .disabled(showQuickGuide)
+    }
+
+    private func submitAIPrompt() {
+        let prompt = aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        guard !model.hasActiveSession else {
+            showStatus("Finish the active intention before building with AI")
+            return
+        }
+        aiPromptSeed = prompt
+        aiPrompt = ""
+        aiPromptFocused = false
+        showAIBuilder = true
     }
 
     private var panGesture: some Gesture {
