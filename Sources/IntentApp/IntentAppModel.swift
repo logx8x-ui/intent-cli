@@ -149,12 +149,35 @@ final class IntentAppModel: ObservableObject {
             let allowedWebsites = suggestion.websites.map {
                 AllowedWebsite($0.value, browserBundleIdentifier: $0.browserBundleIdentifier)
             }
-            let restrictionNodes: [RestrictionNode] = suggestion.allowBrowserSearches
-                ? [RestrictionNode(
-                    kind: .allowBrowserSearches,
-                    position: .init(x: position.x + 220, y: position.y - 165)
-                )]
-                : []
+            let restrictionNodes = suggestion.restrictions.enumerated().map { offset, restriction in
+                RestrictionNode(
+                    kind: restriction.kind,
+                    position: Self.aiConnectedNodePosition(
+                        center: position,
+                        index: offset,
+                        total: suggestion.restrictions.count,
+                        above: true
+                    ),
+                    excludedResourceIDs: restriction.resourceIDs,
+                    durationMinutes: restriction.kind == .timer || restriction.kind == .coolDown
+                        ? max(1, restriction.durationMinutes)
+                        : nil,
+                    showsRemainingTime: restriction.kind == .timer || restriction.kind == .coolDown
+                        ? true
+                        : nil
+                )
+            }
+            let frictionNodes = suggestion.frictions.enumerated().map { offset, friction in
+                FrictionNode(
+                    friction: friction.friction(intentionName: suggestion.name),
+                    position: Self.aiConnectedNodePosition(
+                        center: position,
+                        index: offset,
+                        total: suggestion.frictions.count,
+                        above: false
+                    )
+                )
+            }
 
             imported.append(Intention(
                 name: suggestion.name,
@@ -166,7 +189,8 @@ final class IntentAppModel: ObservableObject {
                 startupActions: [],
                 restrictions: .init(),
                 graphPosition: position,
-                restrictionNodes: restrictionNodes
+                restrictionNodes: restrictionNodes,
+                frictionNodes: frictionNodes
             ))
             occupied.append(position)
         }
@@ -176,6 +200,65 @@ final class IntentAppModel: ObservableObject {
         selectedID = imported.first?.id
         save()
         return imported.map(\.id)
+    }
+
+    @discardableResult
+    func addDraftIntention(_ draft: Intention, at position: GraphPoint) -> String? {
+        guard !hasActiveSession,
+              !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !draft.allowedApps.isEmpty else {
+            return nil
+        }
+
+        let deltaX = position.x - draft.graphPosition.x
+        let deltaY = position.y - draft.graphPosition.y
+        var imported = draft
+        imported.id = UUID().uuidString
+        imported.graphPosition = position
+        imported.restrictionNodes = draft.restrictionNodes.map { node in
+            var moved = node
+            moved.id = UUID().uuidString
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+        imported.frictionNodes = draft.frictionNodes.map { node in
+            var moved = node
+            moved.id = UUID().uuidString
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+
+        recordUndoSnapshot()
+        intentions.append(imported)
+        selectedID = imported.id
+        save()
+        return imported.id
+    }
+
+    func moveIntentionGroup(id: String, to position: GraphPoint, persist: Bool) {
+        guard !hasActiveSession,
+              let index = intentions.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let previous = intentions[index].graphPosition
+        let deltaX = position.x - previous.x
+        let deltaY = position.y - previous.y
+        beginMoveUndoIfNeeded(key: "intention-group:\(id)", persist: persist)
+        intentions[index].graphPosition = position
+        intentions[index].restrictionNodes = intentions[index].restrictionNodes.map { node in
+            var moved = node
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+        intentions[index].frictionNodes = intentions[index].frictionNodes.map { node in
+            var moved = node
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+        if persist {
+            activeMoveUndoKeys.remove("intention-group:\(id)")
+            save()
+        }
     }
 
     func discardIfUnnamed(id: String) {
@@ -701,6 +784,21 @@ final class IntentAppModel: ObservableObject {
             }
         }
         return .init(x: Double(index) * 290, y: 620)
+    }
+
+    private static func aiConnectedNodePosition(
+        center: GraphPoint,
+        index: Int,
+        total: Int,
+        above: Bool
+    ) -> GraphPoint {
+        let count = max(total, 1)
+        let spacing = 150.0
+        let centeredOffset = (Double(index) - Double(count - 1) / 2) * spacing
+        return .init(
+            x: center.x + centeredOffset,
+            y: center.y + (above ? -230 : 240)
+        )
     }
 
     private func beginMoveUndoIfNeeded(key: String, persist: Bool) {

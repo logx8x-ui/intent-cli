@@ -20,14 +20,14 @@ struct IntentGraphView: View {
     @State private var welcomeTitleDraft = ""
     @State private var editingWelcomeTitle = false
     @State private var showSettings = false
-    @State private var showAIBuilder = false
     @State private var aiPrompt = ""
-    @State private var aiPromptSeed = ""
+    @State private var aiWorkspaceRequest: AIWorkspaceRequest?
+    @State private var pendingPlacementID: String?
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
     @State private var overlayShortcut = OverlayShortcutStore.load()
     @State private var currentPage: OverlayPage = .desktop
-    @State private var pagePosition: CGFloat = 0
+    @State private var pagePosition: CGFloat = OverlayPage.desktop.position
     @State private var warningShakeCount: CGFloat = 0
     @FocusState private var welcomeTitleFocused: Bool
     @FocusState private var aiPromptFocused: Bool
@@ -62,6 +62,15 @@ struct IntentGraphView: View {
                     .allowsHitTesting(false)
 
                 HStack(spacing: 0) {
+                    AIIntentionWorkspaceView(
+                        catalog: model.installedApps,
+                        request: aiWorkspaceRequest,
+                        onFinalise: { draft in
+                            finaliseAIDraft(draft, viewportSize: viewportSize)
+                        }
+                    )
+                    .frame(width: viewportSize.width, height: viewportSize.height)
+
                     desktopPage(in: viewportSize)
                         .frame(width: viewportSize.width, height: viewportSize.height)
 
@@ -79,9 +88,11 @@ struct IntentGraphView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                     .zIndex(50)
 
-                aiPromptBar
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .zIndex(51)
+                if currentPage == .desktop {
+                    aiPromptBar
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .zIndex(51)
+                }
 
                 if let statusMessage {
                     Text(statusMessage)
@@ -151,7 +162,15 @@ struct IntentGraphView: View {
             )
             .onContinuousHover { phase in
                 switch phase {
-                case .active(let location): hoverLocation = location
+                case .active(let location):
+                    hoverLocation = location
+                    if currentPage == .desktop, let pendingPlacementID {
+                        model.moveIntentionGroup(
+                            id: pendingPlacementID,
+                            to: worldPoint(for: location, in: viewportSize),
+                            persist: false
+                        )
+                    }
                 case .ended: break
                 }
             }
@@ -164,7 +183,7 @@ struct IntentGraphView: View {
                 }
             }
             .onChange(of: currentPage) { page in
-                if page == .scheduler {
+                if page != .desktop {
                     leaveEditMode()
                 }
                 showSettings = false
@@ -188,28 +207,6 @@ struct IntentGraphView: View {
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
-        .sheet(isPresented: $showAIBuilder, onDismiss: {
-            aiPromptSeed = ""
-        }) {
-            AIIntentionBuilderView(
-                catalog: model.installedApps,
-                initialActivities: aiPromptSeed
-            ) { suggestions in
-                let importedIDs = model.addAIIntentions(suggestions)
-                guard let firstID = importedIDs.first else {
-                    showStatus("Choose at least one installed app")
-                    return
-                }
-
-                currentPage = .desktop
-                pagePosition = OverlayPage.desktop.position
-                editMode = true
-                selection = .intention(firstID)
-                cameraScale = 1
-                cameraOffset = .zero
-                showStatus("Added \(importedIDs.count) intentions")
-            }
-        }
         .alert("Intent", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -232,6 +229,7 @@ struct IntentGraphView: View {
                 .contentShape(Rectangle())
                 .gesture(panGesture)
                 .onTapGesture {
+                    if commitPendingPlacement() { return }
                     NSApp.keyWindow?.makeFirstResponder(nil)
                     finishEditingSelection()
                 }
@@ -430,6 +428,7 @@ struct IntentGraphView: View {
     private var pageSwitcher: some View {
         HStack(spacing: 10) {
             HStack(spacing: 3) {
+                pageButton(.ai, icon: "sparkles")
                 pageButton(.desktop, icon: "circle.hexagongrid")
                 pageButton(.scheduler, icon: "calendar")
             }
@@ -487,7 +486,7 @@ struct IntentGraphView: View {
                 )
         }
         .buttonStyle(.plain)
-        .help(page == .desktop ? "Intentions desktop" : "Scheduler")
+        .help(page.helpText)
     }
 
     @ViewBuilder
@@ -499,6 +498,10 @@ struct IntentGraphView: View {
                 scale: cameraScale,
                 enabled: editMode && !model.hasActiveSession,
                 onTap: {
+                    if pendingPlacementID == intention.id {
+                        _ = commitPendingPlacement()
+                        return
+                    }
                     if editMode {
                         select(.intention(intention.id))
                         model.selectedID = intention.id
@@ -788,10 +791,44 @@ struct IntentGraphView: View {
             showStatus("Finish the active intention before building with AI")
             return
         }
-        aiPromptSeed = prompt
         aiPrompt = ""
         aiPromptFocused = false
-        showAIBuilder = true
+        aiWorkspaceRequest = AIWorkspaceRequest(prompt: prompt)
+        switchPage(to: .ai)
+    }
+
+    private func finaliseAIDraft(_ draft: Intention, viewportSize: CGSize) {
+        guard !model.hasActiveSession else {
+            showStatus("Finish the active intention before adding this draft")
+            return
+        }
+        let placement = pointerWorldPoint(in: viewportSize)
+        guard let id = model.addDraftIntention(draft, at: placement) else {
+            showStatus("Name the intention and choose at least one app")
+            return
+        }
+
+        pendingPlacementID = id
+        selection = nil
+        model.selectedID = nil
+        editMode = true
+        switchPage(to: .desktop)
+        showStatus("Move the draft, then click to place it")
+    }
+
+    @discardableResult
+    private func commitPendingPlacement() -> Bool {
+        guard let id = pendingPlacementID,
+              let intention = model.intentions.first(where: { $0.id == id }) else {
+            return false
+        }
+        model.moveIntentionGroup(id: id, to: intention.graphPosition, persist: true)
+        pendingPlacementID = nil
+        selection = nil
+        model.selectedID = nil
+        editMode = false
+        showStatus("Intention added")
+        return true
     }
 
     private var panGesture: some Gesture {
@@ -829,7 +866,7 @@ struct IntentGraphView: View {
                 showStatus("Finish the active intention before editing")
                 return
             }
-            if currentPage == .scheduler {
+            if currentPage != .desktop {
                 switchPage(to: .desktop)
             }
             editMode ? leaveEditMode() : enterEditMode()
@@ -882,9 +919,9 @@ struct IntentGraphView: View {
             model.undoLastChange()
             selection = nil
         case .pageLeft:
-            switchPage(to: .desktop)
+            switchPage(to: currentPage.previous)
         case .pageRight:
-            switchPage(to: .scheduler)
+            switchPage(to: currentPage.next)
         }
     }
 
@@ -893,7 +930,7 @@ struct IntentGraphView: View {
             showStatus("Finish the active intention before editing")
             return
         }
-        if currentPage == .scheduler {
+        if currentPage != .desktop {
             switchPage(to: .desktop)
         }
         if !editMode {
@@ -945,17 +982,14 @@ struct IntentGraphView: View {
 
         switch event {
         case .changed(let translationX):
-            pagePosition = min(max(origin - (translationX / viewportWidth), 0), 1)
+            pagePosition = min(max(origin - (translationX / viewportWidth), OverlayPage.minimumPosition), OverlayPage.maximumPosition)
         case .ended(let translationX, let velocityX):
             let crossedDistance = abs(translationX) >= viewportWidth * 0.18
             let crossedVelocity = abs(velocityX) >= 520
-            let target: OverlayPage
-            if currentPage == .desktop, translationX < 0, crossedDistance || crossedVelocity {
-                target = .scheduler
-            } else if currentPage == .scheduler, translationX > 0, crossedDistance || crossedVelocity {
-                target = .desktop
+            let target = if crossedDistance || crossedVelocity {
+                translationX < 0 ? currentPage.next : currentPage.previous
             } else {
-                target = currentPage
+                currentPage
             }
             settlePageSwipe(on: target)
         case .cancelled:
@@ -964,7 +998,7 @@ struct IntentGraphView: View {
     }
 
     private func settlePageSwipe(on page: OverlayPage) {
-        if page == .scheduler {
+        if page != .desktop {
             leaveEditMode()
         }
         currentPage = page
@@ -1345,13 +1379,45 @@ private enum QuickAddKind {
     case friction
 }
 
-private enum OverlayPage {
+private enum OverlayPage: CaseIterable {
+    case ai
     case desktop
     case scheduler
 
     var position: CGFloat {
-        self == .desktop ? 0 : 1
+        switch self {
+        case .ai: 0
+        case .desktop: 1
+        case .scheduler: 2
+        }
     }
+
+    var previous: OverlayPage {
+        switch self {
+        case .ai: .ai
+        case .desktop: .ai
+        case .scheduler: .desktop
+        }
+    }
+
+    var next: OverlayPage {
+        switch self {
+        case .ai: .desktop
+        case .desktop: .scheduler
+        case .scheduler: .scheduler
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .ai: "Draft with Intent AI"
+        case .desktop: "Intentions desktop"
+        case .scheduler: "Scheduler"
+        }
+    }
+
+    static let minimumPosition = OverlayPage.ai.position
+    static let maximumPosition = OverlayPage.scheduler.position
 }
 
 private enum PageSwipeEvent {

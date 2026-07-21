@@ -7,8 +7,8 @@ export const intentionSchema = {
   properties: {
     intentions: {
       type: "array",
-      minItems: 2,
-      maxItems: 8,
+      minItems: 1,
+      maxItems: 1,
       items: {
         type: "object",
         properties: {
@@ -31,6 +31,42 @@ export const intentionSchema = {
             },
           },
           allowBrowserSearches: { type: "boolean" },
+          restrictions: {
+            type: "array",
+            maxItems: 4,
+            items: {
+              type: "object",
+              properties: {
+                kind: {
+                  type: "string",
+                  enum: ["allowBrowserSearches", "dontStartUp", "coolDown", "timer"],
+                },
+                durationMinutes: { type: "integer" },
+                resourceIDs: { type: "array", items: { type: "string" } },
+              },
+              required: ["kind", "durationMinutes", "resourceIDs"],
+              additionalProperties: false,
+            },
+          },
+          frictions: {
+            type: "array",
+            maxItems: 3,
+            items: {
+              type: "object",
+              properties: {
+                kind: {
+                  type: "string",
+                  enum: ["typedPhrase", "countdown", "reasonPrompt", "taskChecklist", "timeBudget"],
+                },
+                text: { type: "string" },
+                seconds: { type: "integer" },
+                minutes: { type: "integer" },
+                tasks: { type: "array", items: { type: "string" } },
+              },
+              required: ["kind", "text", "seconds", "minutes", "tasks"],
+              additionalProperties: false,
+            },
+          },
         },
         required: [
           "name",
@@ -38,6 +74,8 @@ export const intentionSchema = {
           "appBundleIdentifiers",
           "websites",
           "allowBrowserSearches",
+          "restrictions",
+          "frictions",
         ],
         additionalProperties: false,
       },
@@ -50,9 +88,13 @@ export const intentionSchema = {
 const systemPrompt = `
 You design focused computer sessions for Intent, an app that lets a person use only the resources needed for one task at a time.
 
-Turn the person's real computer activities into 2 to 8 specific, reusable intentions. An intention is one concrete outcome such as Reply to messages, Write an assignment, or Review pull requests. Do not create vague categories such as Work or Productivity.
+Turn the person's request into exactly one specific, reusable intention. An intention is one concrete outcome such as Reply to messages, Write an assignment, or Review pull requests. Do not create a vague category such as Work or Productivity.
 
-Choose only applications from the installed-app catalog supplied by the user. Copy bundle identifiers exactly. Include only apps genuinely needed for the outcome. Suggest narrow website hosts or paths only when a selected installed app is a browser, and assign each website to that browser's exact bundle identifier. Do not invent applications or bundle identifiers. Keep names short and distinct. Allow browser searches only when discovery or research is genuinely part of the task.
+Choose only applications from the installed-app catalog supplied by the user. Copy bundle identifiers exactly. Include only apps genuinely needed for the outcome. Suggest narrow website hosts or paths only when a selected installed app is a browser, and assign each website to that browser's exact bundle identifier. Do not invent applications or bundle identifiers. Keep the name short.
+
+Translate explicit requests into connected restrictions. A timer limits the session and a cooldown delays reuse after it ends. Only add allowBrowserSearches when the person explicitly asks to search, browse, Google, look something up, or do research. Never infer browser-search permission merely because a browser or website is needed. Use durationMinutes for timer and coolDown, and use 0 for restrictions without a duration. Use resourceIDs only for dontStartUp and otherwise return an empty array. Keep allowBrowserSearches consistent with the matching restriction.
+
+Translate explicit friction requests into frictions. For distracting games, YouTube, Instagram, or similarly addictive resources, suggest one light editable friction such as a countdown, reason prompt, time budget, or typed commitment phrase unless the person says not to. For unused friction fields, return an empty string, 0, or an empty array.
 `.trim();
 
 export default {
@@ -116,10 +158,77 @@ export async function handlePlanRequest(request, env) {
     const content = payload?.choices?.[0]?.message?.content;
     const plan = typeof content === "string" ? JSON.parse(content) : content;
     if (!isPlan(plan)) throw new Error("Invalid plan");
-    return json(plan);
+    return json(applyExplicitRequestRules(plan, body.description, body.installedApps));
   } catch {
     return json({ error: "Intent AI returned an unreadable plan. Please try again." }, 502);
   }
+}
+
+export function applyExplicitRequestRules(plan, description, installedApps = []) {
+  const explicitlyRequestsSearch = /\b(search|searches|searching|google|browse|browsing|research|look\s+up)\b/i
+    .test(description);
+  const requestsGmail = /\bgmail\b/i.test(description);
+  const requestsAppleMail = /\b(apple\s+mail|mail\s+app)\b/i.test(description);
+  const requestsDistractingResource = /\b(instagram|youtube|tiktok|reddit|roblox|game|gaming|social\s+media)\b/i
+    .test(description);
+  const rejectsFriction = /\b(no|without)\s+friction\b/i.test(description);
+  const availableIDs = new Set(installedApps.map((app) => app.bundleIdentifier));
+  const browserPriority = [
+    "com.google.Chrome",
+    "org.mozilla.firefox",
+    "com.apple.Safari",
+    "com.brave.Browser",
+    "com.microsoft.edgemac",
+    "company.thebrowser.Browser",
+  ];
+
+  return {
+    ...plan,
+    intentions: plan.intentions.map((intention) => {
+      let appBundleIdentifiers = [...intention.appBundleIdentifiers];
+      let websites = [...intention.websites];
+
+      if (requestsGmail) {
+        const selectedBrowser = browserPriority.find((id) => appBundleIdentifiers.includes(id));
+        const availableBrowser = browserPriority.find((id) => availableIDs.has(id));
+        const browserBundleIdentifier = selectedBrowser || availableBrowser;
+        if (browserBundleIdentifier) {
+          if (!requestsAppleMail) {
+            appBundleIdentifiers = appBundleIdentifiers.filter((id) => id !== "com.apple.mail");
+          }
+          if (!appBundleIdentifiers.includes(browserBundleIdentifier)) {
+            appBundleIdentifiers.push(browserBundleIdentifier);
+          }
+          websites = websites.filter((website) => website.value !== "mail.google.com");
+          websites.push({ value: "mail.google.com", browserBundleIdentifier });
+        }
+      }
+
+      let frictions = [...intention.frictions];
+      if (requestsDistractingResource && !rejectsFriction && frictions.length === 0) {
+        frictions = [{
+          kind: "reasonPrompt",
+          text: "What are you here to do?",
+          seconds: 0,
+          minutes: 0,
+          tasks: [],
+        }];
+      }
+
+      return {
+        ...intention,
+        appBundleIdentifiers,
+        websites,
+        allowBrowserSearches: explicitlyRequestsSearch ? intention.allowBrowserSearches : false,
+        restrictions: explicitlyRequestsSearch
+          ? intention.restrictions
+          : intention.restrictions.filter((restriction) =>
+              restriction.kind !== "allowBrowserSearches"
+            ),
+        frictions,
+      };
+    }),
+  };
 }
 
 export function validateRequest(body) {
@@ -183,11 +292,12 @@ export function openRouterRequest(body, model = "openai/gpt-5.6-luna") {
 
 function isPlan(plan) {
   return plan && Array.isArray(plan.intentions) &&
-    plan.intentions.length >= 2 && plan.intentions.length <= 8 &&
+    plan.intentions.length === 1 &&
     plan.intentions.every((item) =>
       item && typeof item.name === "string" && typeof item.purpose === "string" &&
       Array.isArray(item.appBundleIdentifiers) && Array.isArray(item.websites) &&
-      typeof item.allowBrowserSearches === "boolean"
+      typeof item.allowBrowserSearches === "boolean" &&
+      Array.isArray(item.restrictions) && Array.isArray(item.frictions)
     );
 }
 

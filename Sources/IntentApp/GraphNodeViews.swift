@@ -180,14 +180,25 @@ struct RestrictionNodeView: View {
                 .shadow(color: selected ? GraphTheme.editBlue.opacity(0.25) : GraphTheme.glassShadow(colorScheme), radius: 12, y: 7)
 
             VStack(spacing: 4) {
-                ZStack {
-                    Circle()
-                        .fill(GraphTheme.elevatedSurface(colorScheme))
-                        .overlay(Circle().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.22), lineWidth: 0.8))
-                    Image(systemName: restrictionIcon)
-                        .font(.system(size: 15, weight: .semibold))
+                if let durationLabel {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Image(systemName: restrictionIcon)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(durationLabel)
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    .frame(height: 34)
+                } else {
+                    ZStack {
+                        Circle()
+                            .fill(GraphTheme.elevatedSurface(colorScheme))
+                            .overlay(Circle().stroke(GraphTheme.glassHighlight(colorScheme).opacity(0.22), lineWidth: 0.8))
+                        Image(systemName: restrictionIcon)
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .frame(width: 31, height: 31)
                 }
-                .frame(width: 31, height: 31)
 
                 Text("RESTRICTION")
                     .font(.system(size: 6.5, weight: .bold, design: .monospaced))
@@ -221,6 +232,21 @@ struct RestrictionNodeView: View {
         case .coolDown: "Cooldown"
         case .timer: "Timer"
         }
+    }
+
+    private var durationLabel: String? {
+        guard node.kind == .timer || node.kind == .coolDown else { return nil }
+        let minutes = max(1, node.durationMinutes ?? (node.kind == .timer ? 25 : 30))
+        if minutes >= 1_440, minutes % 1_440 == 0 {
+            return "\(minutes / 1_440)d"
+        }
+        if minutes >= 60, minutes % 60 == 0 {
+            return "\(minutes / 60)h"
+        }
+        if minutes >= 60 {
+            return "\(minutes / 60)h\(minutes % 60)m"
+        }
+        return "\(minutes)m"
     }
 }
 

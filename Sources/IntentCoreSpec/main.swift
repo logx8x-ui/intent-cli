@@ -36,7 +36,14 @@ do {
                 .init(value: "https://instagram.com/direct", browserBundleIdentifier: "org.mozilla.firefox"),
                 .init(value: "example.com", browserBundleIdentifier: "com.fake.app")
             ],
-            allowBrowserSearches: true
+            allowBrowserSearches: true,
+            restrictions: [
+                .init(kind: .timer, durationMinutes: 3),
+                .init(kind: .coolDown, durationMinutes: 0)
+            ],
+            frictions: [
+                .init(kind: .typedPhrase, text: "I want to reply right now")
+            ]
         ),
         AIIntentionSuggestion(
             name: "   ",
@@ -55,6 +62,19 @@ do {
     try expect(
         validatedAIPlan.intentions[0].websites == [.init(value: "instagram.com/direct", browserBundleIdentifier: "org.mozilla.firefox")],
         "AI plans should keep websites only for selected installed browsers"
+    )
+    try expect(
+        validatedAIPlan.intentions[0].restrictions.contains { $0.kind == .timer && $0.durationMinutes == 3 },
+        "AI plans should preserve requested timers"
+    )
+    try expect(
+        validatedAIPlan.intentions[0].restrictions.contains { $0.kind == .coolDown && $0.durationMinutes == 1 },
+        "AI plans should clamp restriction durations"
+    )
+    try expect(
+        validatedAIPlan.intentions[0].frictions.first?.friction(intentionName: "Reply to messages")
+            == .typedPhrase("I want to reply right now"),
+        "AI plans should preserve editable friction suggestions"
     )
     let aiPrompt = AIIntentionPrompt.user(description: "University and messages", installedApps: installedForAI)
     try expect(aiPrompt.contains("Firefox | org.mozilla.firefox"), "AI prompts should include the installed app catalog")
