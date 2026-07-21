@@ -87,7 +87,7 @@ test("browser search permission requires an explicit search request", () => {
   ]);
 });
 
-test("Gmail resolves to an installed browser and distracting resources receive friction", () => {
+test("Gmail resolves to an installed browser and friction is never inferred", () => {
   const plan = {
     intentions: [{
       name: "Reply to messages",
@@ -116,7 +116,31 @@ test("Gmail resolves to an installed browser and distracting resources receive f
   }]);
 
   const instagramPlan = applyExplicitRequestRules(plan, "Reply to Instagram messages", installedApps);
-  assert.equal(instagramPlan.intentions[0].frictions[0].kind, "reasonPrompt");
+  assert.deepEqual(instagramPlan.intentions[0].frictions, []);
+});
+
+test("explicit friction requests preserve the generated friction", () => {
+  const installedApps = [
+    { name: "Firefox", bundleIdentifier: "org.mozilla.firefox" },
+  ];
+  const plan = applyExplicitRequestRules({
+    intentions: [{
+      name: "Instagram replies",
+      appBundleIdentifiers: ["org.mozilla.firefox"],
+      websites: [{ value: "instagram.com/direct", browserBundleIdentifier: "org.mozilla.firefox" }],
+      allowBrowserSearches: false,
+      restrictions: [],
+      frictions: [{
+        kind: "reasonPrompt",
+        text: "What are you here to do?",
+        seconds: 0,
+        minutes: 0,
+        tasks: [],
+      }],
+    }],
+  }, "Instagram replies with a reason prompt friction", installedApps);
+
+  assert.equal(plan.intentions[0].frictions[0].kind, "reasonPrompt");
 });
 
 test("generation route rate limits by Cloudflare client address", async () => {

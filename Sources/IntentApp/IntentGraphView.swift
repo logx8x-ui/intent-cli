@@ -460,8 +460,8 @@ struct IntentGraphView: View {
                     }
                 }
                 .frame(maxWidth: 180)
-            } else {
-                Text(currentPage == .desktop ? "Press E to edit" : "Three fingers to move")
+            } else if currentPage == .desktop {
+                Text("Press E to edit")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }

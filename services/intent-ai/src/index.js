@@ -94,7 +94,7 @@ Choose only applications from the installed-app catalog supplied by the user. Co
 
 Translate explicit requests into connected restrictions. A timer limits the session and a cooldown delays reuse after it ends. Only add allowBrowserSearches when the person explicitly asks to search, browse, Google, look something up, or do research. Never infer browser-search permission merely because a browser or website is needed. Use durationMinutes for timer and coolDown, and use 0 for restrictions without a duration. Use resourceIDs only for dontStartUp and otherwise return an empty array. Keep allowBrowserSearches consistent with the matching restriction.
 
-Translate explicit friction requests into frictions. For distracting games, YouTube, Instagram, or similarly addictive resources, suggest one light editable friction such as a countdown, reason prompt, time budget, or typed commitment phrase unless the person says not to. For unused friction fields, return an empty string, 0, or an empty array.
+Translate only explicit friction requests into frictions. Never infer or suggest friction from the selected apps, websites, or task. If the person does not explicitly request friction, return an empty frictions array. For unused friction fields, return an empty string, 0, or an empty array.
 `.trim();
 
 export default {
@@ -169,9 +169,8 @@ export function applyExplicitRequestRules(plan, description, installedApps = [])
     .test(description);
   const requestsGmail = /\bgmail\b/i.test(description);
   const requestsAppleMail = /\b(apple\s+mail|mail\s+app)\b/i.test(description);
-  const requestsDistractingResource = /\b(instagram|youtube|tiktok|reddit|roblox|game|gaming|social\s+media)\b/i
+  const explicitlyRequestsFriction = /\b(friction|countdown|commitment\s+phrase|typed?\s+phrase|reason\s+prompt|task\s+checklist|hard\s+mode|double\s+confirmation|write\s+(?:a\s+)?reason|before\s+(?:starting|i\s+can\s+start))\b/i
     .test(description);
-  const rejectsFriction = /\b(no|without)\s+friction\b/i.test(description);
   const availableIDs = new Set(installedApps.map((app) => app.bundleIdentifier));
   const browserPriority = [
     "com.google.Chrome",
@@ -204,16 +203,7 @@ export function applyExplicitRequestRules(plan, description, installedApps = [])
         }
       }
 
-      let frictions = [...intention.frictions];
-      if (requestsDistractingResource && !rejectsFriction && frictions.length === 0) {
-        frictions = [{
-          kind: "reasonPrompt",
-          text: "What are you here to do?",
-          seconds: 0,
-          minutes: 0,
-          tasks: [],
-        }];
-      }
+      const frictions = explicitlyRequestsFriction ? [...intention.frictions] : [];
 
       return {
         ...intention,

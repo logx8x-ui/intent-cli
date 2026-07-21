@@ -65,8 +65,9 @@ struct AIIntentionWorkspaceView: View {
             }
             .padding(.top, 52)
         }
-        .onAppear(perform: generatePendingRequest)
-        .onChange(of: request?.id) { _ in generatePendingRequest() }
+        .task(id: request?.id) {
+            generatePendingRequest()
+        }
     }
 
     private var emptyView: some View {
