@@ -36,7 +36,7 @@ test("OpenRouter request uses strict structured output and privacy routing", () 
   assert.equal(request.model, "openai/gpt-5.6-luna");
   assert.equal(request.response_format.type, "json_schema");
   assert.equal(request.response_format.json_schema.strict, true);
-  assert.equal(request.max_completion_tokens, 1_200);
+  assert.equal(request.max_completion_tokens, 800);
   assert.equal(request.provider.data_collection, "deny");
   assert.equal(request.provider.require_parameters, true);
   assert.equal(request.provider.zdr, true);
@@ -48,6 +48,28 @@ test("OpenRouter request uses strict structured output and privacy routing", () 
   assert.ok(itemSchema.required.includes("frictions"));
   assert.match(request.messages[0].content, /exactly one specific/);
   assert.match(request.messages[0].content, /timer limits the session/);
+});
+
+test("OpenRouter request accepts a reduced completion budget for credit recovery", () => {
+  const request = openRouterRequest(requestBody, "openai/gpt-5.6-luna", 450);
+  assert.equal(request.max_completion_tokens, 450);
+});
+
+test("OpenRouter request clearly separates a follow-up from its current intention", () => {
+  const request = openRouterRequest({
+    ...requestBody,
+    description: "Add a three minute timer",
+    currentIntention: {
+      name: "Message replies",
+      allowedApps: [{ name: "Messages", bundleIdentifier: "com.apple.MobileSMS" }],
+      restrictionNodes: [],
+      frictionNodes: [],
+    },
+  });
+  assert.match(request.messages[1].content, /Latest request:\nAdd a three minute timer/);
+  assert.match(request.messages[1].content, /Current intention to modify/);
+  assert.match(request.messages[1].content, /Message replies/);
+  assert.match(request.messages[0].content, /Preserve its name, apps, websites, restrictions, and frictions/);
 });
 
 test("generation route rejects a missing server key without forwarding", async () => {
@@ -141,6 +163,33 @@ test("explicit friction requests preserve the generated friction", () => {
   }, "Instagram replies with a reason prompt friction", installedApps);
 
   assert.equal(plan.intentions[0].frictions[0].kind, "reasonPrompt");
+});
+
+test("follow-ups preserve existing search and friction while new drafts do not infer them", () => {
+  const generated = {
+    intentions: [{
+      name: "Message replies",
+      appBundleIdentifiers: ["com.apple.MobileSMS"],
+      websites: [],
+      allowBrowserSearches: true,
+      restrictions: [{ kind: "allowBrowserSearches", durationMinutes: 0, resourceIDs: [] }],
+      frictions: [{
+        kind: "countdown",
+        text: "",
+        seconds: 5,
+        minutes: 0,
+        tasks: [],
+      }],
+    }],
+  };
+
+  const followUp = applyExplicitRequestRules(generated, "Add a three minute timer", [], true);
+  assert.equal(followUp.intentions[0].allowBrowserSearches, true);
+  assert.equal(followUp.intentions[0].frictions.length, 1);
+
+  const newDraft = applyExplicitRequestRules(generated, "Make a message intention", [], false);
+  assert.equal(newDraft.intentions[0].allowBrowserSearches, false);
+  assert.deepEqual(newDraft.intentions[0].frictions, []);
 });
 
 test("generation route rate limits by Cloudflare client address", async () => {

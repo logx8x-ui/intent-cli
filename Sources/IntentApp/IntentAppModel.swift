@@ -235,6 +235,52 @@ final class IntentAppModel: ObservableObject {
         return imported.id
     }
 
+    @discardableResult
+    func replaceIntention(id: String, with draft: Intention) -> Bool {
+        guard !hasActiveSession,
+              !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !draft.allowedApps.isEmpty,
+              let index = intentions.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+
+        let existing = intentions[index]
+        let deltaX = existing.graphPosition.x - draft.graphPosition.x
+        let deltaY = existing.graphPosition.y - draft.graphPosition.y
+        var updated = draft
+        updated.id = existing.id
+        updated.graphPosition = existing.graphPosition
+        updated.restrictionNodes = draft.restrictionNodes.map { node in
+            var moved = node
+            moved.id = UUID().uuidString
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+        updated.frictionNodes = draft.frictionNodes.map { node in
+            var moved = node
+            moved.id = UUID().uuidString
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+
+        recordUndoSnapshot()
+        intentions[index] = updated
+        selectedID = id
+        save()
+        return true
+    }
+
+    func intentionReferenced(in prompt: String) -> Intention? {
+        intentions
+            .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.name.count > $1.name.count }
+            .first { intention in
+                let escaped = NSRegularExpression.escapedPattern(for: intention.name)
+                let pattern = "(?<![\\p{L}\\p{N}])\(escaped)(?![\\p{L}\\p{N}])"
+                return prompt.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+            }
+    }
+
     func moveIntentionGroup(id: String, to position: GraphPoint, persist: Bool) {
         guard !hasActiveSession,
               let index = intentions.firstIndex(where: { $0.id == id }) else {

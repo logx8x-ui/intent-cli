@@ -5,12 +5,21 @@ import IntentCore
 struct AIWorkspaceRequest: Equatable {
     let id = UUID()
     let prompt: String
+    let targetIntentionID: String?
+    let currentIntention: Intention?
+
+    init(prompt: String, targetIntentionID: String? = nil, currentIntention: Intention? = nil) {
+        self.prompt = prompt
+        self.targetIntentionID = targetIntentionID
+        self.currentIntention = currentIntention
+    }
 }
 
 struct AIIntentionWorkspaceView: View {
     let catalog: [InstalledApp]
+    let existingIntentions: [Intention]
     let request: AIWorkspaceRequest?
-    let onFinalise: (Intention) -> Void
+    let onFinalise: (Intention, String?) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft: Intention?
@@ -20,6 +29,7 @@ struct AIIntentionWorkspaceView: View {
     @State private var isGenerating = false
     @State private var errorMessage: String?
     @State private var handledRequestID: UUID?
+    @State private var targetIntentionID: String?
     @FocusState private var promptFocused: Bool
 
     private let service = IntentAIService()
@@ -43,9 +53,9 @@ struct AIIntentionWorkspaceView: View {
                 }
 
                 if let errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.circle")
+                    Label(errorMessage, systemImage: "arrow.clockwise")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Color.red)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
@@ -275,7 +285,7 @@ struct AIIntentionWorkspaceView: View {
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
-            TextField(draft == nil ? "What intention would you like to build today?" : "Describe a different intention", text: $prompt)
+            TextField(draft == nil ? "What intention would you like to build today?" : "Add or change something in this intention", text: $prompt)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .focused($promptFocused)
@@ -318,7 +328,7 @@ struct AIIntentionWorkspaceView: View {
                 return
             }
             selection = nil
-            onFinalise(draft)
+            onFinalise(draft, targetIntentionID)
         } label: {
             Label("Finalise", systemImage: "cursorarrow.click.2")
                 .font(.system(size: 12, weight: .semibold))
@@ -390,12 +400,31 @@ struct AIIntentionWorkspaceView: View {
         guard !value.isEmpty, !isGenerating else { return }
         prompt = ""
         promptFocused = false
+        if let referenced = intentionReferenced(in: value) {
+            draft = referenced
+            targetIntentionID = referenced.id
+        }
         generate(value)
+    }
+
+    private func intentionReferenced(in prompt: String) -> Intention? {
+        existingIntentions
+            .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.name.count > $1.name.count }
+            .first { intention in
+                let escaped = NSRegularExpression.escapedPattern(for: intention.name)
+                let pattern = "(?<![\\p{L}\\p{N}])\(escaped)(?![\\p{L}\\p{N}])"
+                return prompt.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+            }
     }
 
     private func generatePendingRequest() {
         guard let request, handledRequestID != request.id else { return }
         handledRequestID = request.id
+        targetIntentionID = request.targetIntentionID
+        if let currentIntention = request.currentIntention {
+            draft = currentIntention
+        }
         generate(request.prompt)
     }
 
@@ -412,19 +441,29 @@ struct AIIntentionWorkspaceView: View {
             do {
                 let plan = try await service.generate(
                     description: description,
-                    installedApps: installedApps
+                    installedApps: installedApps,
+                    currentIntention: draft
                 ).validated(against: installedApps)
                 guard let suggestion = plan.intentions.first else {
                     throw IntentAIError.invalidResponse
                 }
-                let intention = Self.makeDraft(from: suggestion, apps: installedApps)
+                var intention = Self.makeDraft(from: suggestion, apps: installedApps)
+                if let current = draft {
+                    intention.id = current.id
+                    intention.icon = current.icon
+                    intention.colorHex = current.colorHex
+                    intention.graphPosition = current.graphPosition
+                }
+                let updatedIntention = intention
                 await MainActor.run {
-                    withAnimation(.easeOut(duration: 0.24)) { draft = intention }
+                    withAnimation(.easeOut(duration: 0.24)) { draft = updatedIntention }
                     isGenerating = false
                 }
             } catch {
                 await MainActor.run {
-                    errorMessage = error.localizedDescription
+                    errorMessage = draft == nil
+                        ? "Intent AI paused for a moment. Send that request again."
+                        : "Your draft is safe. Send that change again."
                     isGenerating = false
                 }
             }

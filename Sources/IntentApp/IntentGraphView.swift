@@ -64,9 +64,14 @@ struct IntentGraphView: View {
                 HStack(spacing: 0) {
                     AIIntentionWorkspaceView(
                         catalog: model.installedApps,
+                        existingIntentions: model.intentions,
                         request: aiWorkspaceRequest,
-                        onFinalise: { draft in
-                            finaliseAIDraft(draft, viewportSize: viewportSize)
+                        onFinalise: { draft, targetIntentionID in
+                            finaliseAIDraft(
+                                draft,
+                                targetIntentionID: targetIntentionID,
+                                viewportSize: viewportSize
+                            )
                         }
                     )
                     .frame(width: viewportSize.width, height: viewportSize.height)
@@ -793,15 +798,37 @@ struct IntentGraphView: View {
         }
         aiPrompt = ""
         aiPromptFocused = false
-        aiWorkspaceRequest = AIWorkspaceRequest(prompt: prompt)
+        let target = model.intentionReferenced(in: prompt)
+        aiWorkspaceRequest = AIWorkspaceRequest(
+            prompt: prompt,
+            targetIntentionID: target?.id,
+            currentIntention: target
+        )
         switchPage(to: .ai)
     }
 
-    private func finaliseAIDraft(_ draft: Intention, viewportSize: CGSize) {
+    private func finaliseAIDraft(
+        _ draft: Intention,
+        targetIntentionID: String?,
+        viewportSize: CGSize
+    ) {
         guard !model.hasActiveSession else {
             showStatus("Finish the active intention before adding this draft")
             return
         }
+        if let targetIntentionID {
+            guard model.replaceIntention(id: targetIntentionID, with: draft) else {
+                showStatus("That intention could not be updated")
+                return
+            }
+            selection = .intention(targetIntentionID)
+            pendingPlacementID = nil
+            editMode = false
+            switchPage(to: .desktop)
+            showStatus("Intention updated")
+            return
+        }
+
         let placement = pointerWorldPoint(in: viewportSize)
         guard let id = model.addDraftIntention(draft, at: placement) else {
             showStatus("Name the intention and choose at least one app")
@@ -922,6 +949,12 @@ struct IntentGraphView: View {
             switchPage(to: currentPage.previous)
         case .pageRight:
             switchPage(to: currentPage.next)
+        case .pageAI:
+            switchPage(to: .ai)
+        case .pageDesktop:
+            switchPage(to: .desktop)
+        case .pageScheduler:
+            switchPage(to: .scheduler)
         }
     }
 
@@ -1372,6 +1405,9 @@ private enum GraphKeyboardKey {
     case undo
     case pageLeft
     case pageRight
+    case pageAI
+    case pageDesktop
+    case pageScheduler
 }
 
 private enum QuickAddKind {
@@ -1532,6 +1568,9 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     case 7, 51, 117: key = .delete
                     case 123: key = .pageLeft
                     case 124: key = .pageRight
+                    case 18, 83: key = .pageAI
+                    case 19, 84: key = .pageDesktop
+                    case 20, 85: key = .pageScheduler
                     default: key = nil
                     }
 

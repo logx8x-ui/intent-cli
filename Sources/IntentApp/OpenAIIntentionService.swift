@@ -54,39 +54,68 @@ struct IntentAIService {
 
     func generate(
         description: String,
-        installedApps: [AllowedApp]
+        installedApps: [AllowedApp],
+        currentIntention: Intention? = nil
     ) async throws -> AIIntentionPlan {
         guard let endpoint else { throw IntentAIError.invalidEndpoint }
 
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 75
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(IntentAIInstallation.identifier, forHTTPHeaderField: "X-Intent-Installation-ID")
-        request.httpBody = try JSONEncoder().encode(IntentAIRequest(
+        let body = try JSONEncoder().encode(IntentAIRequest(
             version: 1,
             installationId: IntentAIInstallation.identifier,
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
             description: description,
+            currentIntention: currentIntention,
             installedApps: installedApps
         ))
 
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw IntentAIError.invalidResponse
-        }
-        if httpResponse.statusCode == 429 {
-            throw IntentAIError.rateLimited
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw IntentAIError.server(Self.serverMessage(from: data, status: httpResponse.statusCode))
-        }
+        var lastError: Error = IntentAIError.invalidResponse
+        for attempt in 0..<3 {
+            do {
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 75
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(IntentAIInstallation.identifier, forHTTPHeaderField: "X-Intent-Installation-ID")
+                request.httpBody = body
 
-        do {
-            return try JSONDecoder().decode(AIIntentionPlan.self, from: data)
-        } catch {
-            throw IntentAIError.invalidResponse
+                let (data, response) = try await session.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw IntentAIError.invalidResponse
+                }
+                if httpResponse.statusCode == 429 {
+                    throw IntentAIError.rateLimited
+                }
+                guard (200..<300).contains(httpResponse.statusCode) else {
+                    let error = IntentAIError.server(Self.serverMessage(from: data, status: httpResponse.statusCode))
+                    guard Self.isRetryable(httpResponse.statusCode), attempt < 2 else { throw error }
+                    lastError = error
+                    try await Task.sleep(for: .milliseconds(450 * (attempt + 1)))
+                    continue
+                }
+
+                do {
+                    return try JSONDecoder().decode(AIIntentionPlan.self, from: data)
+                } catch {
+                    lastError = IntentAIError.invalidResponse
+                    guard attempt < 2 else { throw lastError }
+                    try await Task.sleep(for: .milliseconds(450 * (attempt + 1)))
+                }
+            } catch let error as IntentAIError {
+                if case .rateLimited = error { throw error }
+                lastError = error
+                guard attempt < 2 else { throw error }
+                try await Task.sleep(for: .milliseconds(450 * (attempt + 1)))
+            } catch {
+                lastError = error
+                guard attempt < 2 else { throw error }
+                try await Task.sleep(for: .milliseconds(450 * (attempt + 1)))
+            }
         }
+        throw lastError
+    }
+
+    private static func isRetryable(_ status: Int) -> Bool {
+        status == 408 || status == 409 || status == 425 || status >= 500
     }
 
     private static func serverMessage(from data: Data, status: Int) -> String {
@@ -103,6 +132,7 @@ private struct IntentAIRequest: Encodable {
     let installationId: String
     let appVersion: String
     let description: String
+    let currentIntention: Intention?
     let installedApps: [AllowedApp]
 }
 

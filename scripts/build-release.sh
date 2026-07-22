@@ -4,7 +4,7 @@ export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-0.8.0}"
-BUILD_NUMBER="${2:-20}"
+BUILD_NUMBER="${2:-21}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"

@@ -20,7 +20,7 @@
       "name": "INTENT_RATE_LIMITER",
       "namespace_id": "1701",
       "simple": {
-        "limit": 3,
+        "limit": 15,
         "period": 60
       }
     }
