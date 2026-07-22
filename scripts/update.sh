@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-cd "$ROOT"
-git pull --ff-only
-"$ROOT/scripts/install.sh"
+/usr/bin/curl -fsSL https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/install.sh | /bin/bash

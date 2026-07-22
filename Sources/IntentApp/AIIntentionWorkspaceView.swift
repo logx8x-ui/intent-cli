@@ -19,7 +19,7 @@ struct AIIntentionWorkspaceView: View {
     let catalog: [InstalledApp]
     let existingIntentions: [Intention]
     let request: AIWorkspaceRequest?
-    let onFinalise: (Intention, String?) -> Void
+    let onFinalise: (Intention, String?) -> Bool
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft: Intention?
@@ -158,6 +158,11 @@ struct AIIntentionWorkspaceView: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(GraphTheme.surface(colorScheme).opacity(colorScheme == .dark ? 0.72 : 0.84))
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                .onTapGesture {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    withAnimation(.easeOut(duration: 0.14)) { selection = nil }
+                }
 
             Canvas { context, canvasSize in
                 let spacing: CGFloat = 26
@@ -368,8 +373,16 @@ struct AIIntentionWorkspaceView: View {
                 errorMessage = "Name the intention and choose at least one app."
                 return
             }
+            let finalDraft = draft
+            let finalTargetID = targetIntentionID
+            NSApp.keyWindow?.makeFirstResponder(nil)
             selection = nil
-            onFinalise(draft, targetIntentionID)
+            if onFinalise(finalDraft, finalTargetID) {
+                self.draft = nil
+                targetIntentionID = nil
+                displayedPrompt = ""
+                errorMessage = nil
+            }
         } label: {
             Label("Finalise", systemImage: "cursorarrow.click.2")
                 .font(.system(size: 12, weight: .semibold))
@@ -377,7 +390,9 @@ struct AIIntentionWorkspaceView: View {
                 .frame(height: 40)
         }
         .buttonStyle(.borderedProminent)
-        .tint(GraphTheme.editBlue)
+        .tint(Color(red: 0.22, green: 0.72, blue: 0.38))
+        .disabled(isGenerating)
+        .zIndex(100)
         .help("Move this draft to the intentions desktop")
     }
 

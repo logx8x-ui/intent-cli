@@ -23,6 +23,11 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    try expect(AppReleaseVersion.isNewer("v0.8.1", than: "0.8.0"), "patch releases should compare correctly")
+    try expect(AppReleaseVersion.isNewer("1.0.0", than: "0.99.9"), "major releases should compare correctly")
+    try expect(!AppReleaseVersion.isNewer("0.8", than: "0.8.0"), "equivalent versions should not update")
+    try expect(!AppReleaseVersion.isNewer("0.7.9", than: "0.8.0"), "older versions should not update")
+
     let installedForAI = [
         AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox"),
         AllowedApp(name: "Messages", bundleIdentifier: "com.apple.MobileSMS")

@@ -7,13 +7,23 @@ builder while every generated app and website remains editable before import.
 
 ## Download
 
-These are the only three downloads most people need:
+### One-command install
+
+Paste this into Terminal, or give the repository link to Codex and say **install the latest Intent release**:
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/install.sh | bash
+```
+
+macOS asks once for administrator approval, installs the latest published release, and opens Intent. Future updates appear inside Intent at the bottom left; installing an update keeps every intention, schedule, background, and setting.
+
+These are the only three manual downloads:
 
 | Download | Use it for |
 | --- | --- |
-| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/download/v0.8.0/Intent-0.8.0.dmg)** | The main app. Requires macOS 13 or newer. |
-| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.8.0/Intent-Firefox-Extension.zip)** | Website restrictions in Firefox. |
-| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/download/v0.8.0/Intent-Chrome-Extension.zip)** | Website restrictions in Chrome. |
+| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent.dmg)** | The main app. Requires macOS 13 or newer. |
+| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.zip)** | Website restrictions in Firefox. |
+| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Chrome-Extension.zip)** | Website restrictions in Chrome. |
 
 Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only enforces rules while an intention is running.
 
@@ -37,7 +47,7 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 
 - Click an intention to run it.
 - Press `~` to show or hide Intent, or change that shortcut in Settings.
-- Press `E` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
+- Press `Tab` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
 - Pinch to zoom and use two fingers to pan.
 - Press `Cmd+Shift+M` to finish an active intention.
 - Add a **Timer** restriction to end a session automatically.
@@ -56,7 +66,7 @@ The first session asks once for macOS Accessibility permission so Intent can enf
 ```zsh
 git clone https://github.com/logx8x-ui/intent-cli.git
 cd intent-cli
-./scripts/install.sh
+./scripts/install-dev.sh
 ```
 
 Run the complete checks:

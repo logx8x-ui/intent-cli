@@ -5,6 +5,7 @@ import IntentCore
 struct IntentGraphView: View {
     @EnvironmentObject private var model: IntentAppModel
     @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject private var updateManager = IntentUpdateManager.shared
     @AppStorage("intentAppearance") private var appearance = "dark"
     @AppStorage("intentWelcomeTitle") private var welcomeTitle = "Welcome to my desktop"
     @AppStorage("intentBackgroundSelection") private var backgroundSelection = IntentBackgroundChoice.none.rawValue
@@ -92,6 +93,12 @@ struct IntentGraphView: View {
                 bottomControls(in: viewportSize)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                     .zIndex(50)
+
+                if let release = updateManager.availableRelease {
+                    updateControl(release)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                        .zIndex(52)
+                }
 
                 if currentPage == .desktop {
                     aiPromptBar
@@ -224,6 +231,11 @@ struct IntentGraphView: View {
             if activeSessionName != nil {
                 leaveEditMode()
             }
+        }
+        .onChange(of: updateManager.errorMessage) { message in
+            guard let message else { return }
+            model.errorMessage = message
+            updateManager.errorMessage = nil
         }
     }
 
@@ -750,6 +762,33 @@ struct IntentGraphView: View {
         .padding(18)
     }
 
+    private func updateControl(_ release: IntentGitHubRelease) -> some View {
+        Button {
+            updateManager.installAvailableUpdate()
+        } label: {
+            HStack(spacing: 8) {
+                if updateManager.isInstalling {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.32, green: 0.82, blue: 0.48))
+                }
+                Text(updateManager.isInstalling ? "Updating" : "Update")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .padding(.horizontal, 13)
+            .frame(height: 36)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 18)
+        .disabled(updateManager.isInstalling)
+        .help("Install Intent \(release.version). Your intentions and settings will stay in place.")
+        .padding(18)
+    }
+
     private var aiPromptBar: some View {
         HStack(spacing: 10) {
             Image(systemName: "sparkles")
@@ -811,28 +850,28 @@ struct IntentGraphView: View {
         _ draft: Intention,
         targetIntentionID: String?,
         viewportSize: CGSize
-    ) {
+    ) -> Bool {
         guard !model.hasActiveSession else {
             showStatus("Finish the active intention before adding this draft")
-            return
+            return false
         }
         if let targetIntentionID {
             guard model.replaceIntention(id: targetIntentionID, with: draft) else {
                 showStatus("That intention could not be updated")
-                return
+                return false
             }
             selection = .intention(targetIntentionID)
             pendingPlacementID = nil
             editMode = false
             switchPage(to: .desktop)
             showStatus("Intention updated")
-            return
+            return true
         }
 
         let placement = pointerWorldPoint(in: viewportSize)
         guard let id = model.addDraftIntention(draft, at: placement) else {
             showStatus("Name the intention and choose at least one app")
-            return
+            return false
         }
 
         pendingPlacementID = id
@@ -841,6 +880,7 @@ struct IntentGraphView: View {
         editMode = true
         switchPage(to: .desktop)
         showStatus("Move the draft, then click to place it")
+        return true
     }
 
     @discardableResult
