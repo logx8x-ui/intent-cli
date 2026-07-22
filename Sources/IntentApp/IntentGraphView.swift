@@ -282,7 +282,7 @@ struct IntentGraphView: View {
                                 beginEditingWelcomeTitle()
                             }
                         }
-                        .help(editMode ? "Double-click to rename this desktop" : "Press E to edit")
+                        .help(editMode ? "Double-click to rename this desktop" : "Press Tab to edit")
                 }
             }
             .foregroundStyle(GraphTheme.text(colorScheme))
@@ -466,7 +466,7 @@ struct IntentGraphView: View {
                 }
                 .frame(maxWidth: 180)
             } else if currentPage == .desktop {
-                Text("Press E to edit")
+                Text("Press Tab to edit")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }
@@ -1560,7 +1560,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
 
                     let key: GraphKeyboardKey?
                     switch event.keyCode {
-                    case 14: key = .edit
+                    case 48: key = .edit
                     case 34: key = .intention
                     case 15: key = .restriction
                     case 3: key = .friction

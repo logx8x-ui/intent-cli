@@ -6,8 +6,7 @@ BIN_DIR="${HOME}/.local/bin"
 APP_DIR="${HOME}/.intent/bin"
 APPLICATIONS_DIR="${HOME}/Applications"
 APP_BUNDLE="${APPLICATIONS_DIR}/Intent.app"
-LAUNCH_AGENTS_DIR="${HOME}/Library/LaunchAgents"
-LAUNCH_AGENT_FILE="${LAUNCH_AGENTS_DIR}/dev.loganmondi.intent.plist"
+LAUNCH_AGENT_FILE="${HOME}/Library/LaunchAgents/dev.loganmondi.intent.plist"
 
 cd "$ROOT"
 swift build -c release --product Intent
@@ -62,7 +61,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>0.8.0</string>
   <key>CFBundleVersion</key>
-  <string>21</string>
+  <string>22</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -90,25 +89,8 @@ open "$APP_BUNDLE"
 LAUNCHER
 chmod +x "$BIN_DIR/intent-app"
 
-mkdir -p "$LAUNCH_AGENTS_DIR"
-cat > "$LAUNCH_AGENT_FILE" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>dev.loganmondi.intent</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${APP_BUNDLE}/Contents/MacOS/IntentApp</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-</dict>
-</plist>
-PLIST
 launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
+rm -f "$LAUNCH_AGENT_FILE"
 
 HOST_DIR="${HOME}/Library/Application Support/Mozilla/NativeMessagingHosts"
 HOST_FILE="${HOST_DIR}/intent_native_host.json"
@@ -127,7 +109,7 @@ JSON
 
 echo "Installed Intent, IntentApp, and intent-app to $BIN_DIR"
 echo "Installed Intent.app to $APP_BUNDLE"
-echo "Installed Intent as a login menu-bar app via $LAUNCH_AGENT_FILE"
+echo "Intent runs as a menu-bar app after you open it; no background login item was installed."
 echo "Installed Firefox native host manifest to $HOST_FILE"
 
 CHROME_HOST_DIR="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"

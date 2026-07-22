@@ -4,7 +4,7 @@ export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-0.8.0}"
-BUILD_NUMBER="${2:-21}"
+BUILD_NUMBER="${2:-22}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"
@@ -37,7 +37,6 @@ fi
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mkdir -p "$SUPPORT_DIR"
-mkdir -p "$PKG_ROOT/Library/LaunchAgents"
 mkdir -p "$PKG_ROOT/Library/Application Support/Mozilla/NativeMessagingHosts"
 mkdir -p "$PKG_ROOT/Library/Google/Chrome/NativeMessagingHosts"
 rm -rf "$DIST"
@@ -89,19 +88,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-cat > "$PKG_ROOT/Library/LaunchAgents/dev.loganmondi.intent.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>dev.loganmondi.intent</string>
-  <key>ProgramArguments</key>
-  <array><string>/Applications/Intent.app/Contents/MacOS/IntentApp</string></array>
-  <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-PLIST
-
 cat > "$PKG_ROOT/Library/Application Support/Mozilla/NativeMessagingHosts/intent_native_host.json" <<'JSON'
 {
   "name": "intent_native_host",
@@ -137,7 +123,7 @@ CONSOLE_USER="$(stat -f '%Su' /dev/console)"
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" && "$CONSOLE_USER" != "loginwindow" ]]; then
   USER_ID="$(id -u "$CONSOLE_USER")"
   launchctl bootout "gui/$USER_ID" /Library/LaunchAgents/dev.loganmondi.intent.plist 2>/dev/null || true
-  launchctl bootstrap "gui/$USER_ID" /Library/LaunchAgents/dev.loganmondi.intent.plist 2>/dev/null || true
+  rm -f /Library/LaunchAgents/dev.loganmondi.intent.plist
   launchctl asuser "$USER_ID" sudo -u "$CONSOLE_USER" open -a "/Applications/Intent.app" || true
 fi
 exit 0

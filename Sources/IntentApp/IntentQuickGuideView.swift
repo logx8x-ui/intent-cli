@@ -97,11 +97,11 @@ struct IntentQuickGuideView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Build one clear intention")
                     .font(.system(size: 24, weight: .semibold))
-                Text("Press E to enter edit mode, then place the pieces your session needs.")
+                Text("Press Tab to enter edit mode, then place the pieces your session needs.")
                     .font(.system(size: 14))
                     .foregroundStyle(GraphTheme.muted(colorScheme))
 
-                shortcut("E", "Enter or leave edit mode")
+                shortcut("Tab", "Enter or leave edit mode")
                 shortcut("I", "Add an intention")
                 shortcut("R", "Add a restriction")
                 shortcut("F", "Add friction")

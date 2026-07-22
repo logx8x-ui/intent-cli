@@ -112,45 +112,34 @@ struct AIIntentionWorkspaceView: View {
     }
 
     private func draftConversation(_ intention: Intention, in size: CGSize) -> some View {
-        ZStack {
-            if !displayedPrompt.isEmpty {
-                Text(displayedPrompt)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(GraphTheme.text(colorScheme))
-                    .padding(.horizontal, 15)
-                    .padding(.vertical, 10)
-                    .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 18))
-                    .overlay(RoundedRectangle(cornerRadius: 18).stroke(GraphTheme.stroke(colorScheme)))
-                    .frame(maxWidth: min(460, size.width * 0.38), alignment: .trailing)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 30)
-                    .padding(.trailing, 34)
-            }
+        let boardWidth = min(max(size.width * 0.72, 680), 1_020)
+        let boardHeight = min(max(size.height * 0.62, 440), 650)
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 9) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(GraphTheme.editBlue)
-                    Text("Intent AI")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("DRAFT")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .tracking(1.1)
-                        .padding(.horizontal, 7)
-                        .frame(height: 21)
-                        .background(GraphTheme.editBlue.opacity(0.15), in: Capsule())
-                        .overlay(Capsule().stroke(GraphTheme.editBlue.opacity(0.42)))
-                        .foregroundStyle(GraphTheme.editBlue)
+        return ZStack {
+            VStack(spacing: 14) {
+                if !displayedPrompt.isEmpty {
+                    Text(displayedPrompt)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(GraphTheme.text(colorScheme))
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(3)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: min(620, boardWidth * 0.72), alignment: .leading)
+                        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 20))
+                        .overlay(RoundedRectangle(cornerRadius: 20).stroke(GraphTheme.stroke(colorScheme)))
+                        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 12, y: 6)
                 }
-                Text("I drafted one focused setup. Select any shape to change it before finalising.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.top, 32)
-            .padding(.leading, max(36, size.width * 0.18))
 
-            draftGraph(intention, in: size)
+                draftWhiteboard(
+                    intention,
+                    size: CGSize(width: boardWidth, height: boardHeight)
+                )
+                .frame(width: boardWidth, height: boardHeight)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.top, 10)
+            .padding(.bottom, 74)
 
             if let selection {
                 draftEditor(selection)
@@ -164,28 +153,81 @@ struct AIIntentionWorkspaceView: View {
         }
     }
 
-    private func draftGraph(_ intention: Intention, in size: CGSize) -> some View {
-        let center = CGPoint(x: size.width * 0.47, y: size.height * 0.47)
-        return ZStack {
+    private func draftWhiteboard(_ intention: Intention, size: CGSize) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(GraphTheme.surface(colorScheme).opacity(colorScheme == .dark ? 0.72 : 0.84))
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+
+            Canvas { context, canvasSize in
+                let spacing: CGFloat = 26
+                let dotColor = GraphTheme.text(colorScheme).opacity(colorScheme == .dark ? 0.085 : 0.075)
+                var x: CGFloat = 22
+                while x < canvasSize.width - 22 {
+                    var y: CGFloat = 22
+                    while y < canvasSize.height - 22 {
+                        context.fill(
+                            Path(ellipseIn: CGRect(x: x - 1, y: y - 1, width: 2, height: 2)),
+                            with: .color(dotColor)
+                        )
+                        y += spacing
+                    }
+                    x += spacing
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .allowsHitTesting(false)
+
             Text("DRAFT")
-                .font(.system(size: min(92, size.width * 0.075), weight: .black, design: .rounded))
-                .tracking(10)
-                .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.035))
-                .rotationEffect(.degrees(-9))
+                .font(.system(size: min(108, size.width * 0.12), weight: .black, design: .rounded))
+                .tracking(12)
+                .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.045))
+                .rotationEffect(.degrees(-8))
                 .allowsHitTesting(false)
 
+            draftGraph(intention, in: size)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "pencil.and.outline")
+                    Text("DRAFT BOARD")
+                        .tracking(1.2)
+                }
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(GraphTheme.text(colorScheme).opacity(0.82))
+
+                Text("Select any shape to refine it before finalising.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(22)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(
+                    GraphTheme.text(colorScheme).opacity(colorScheme == .dark ? 0.52 : 0.38),
+                    style: StrokeStyle(lineWidth: 1.35, dash: [7, 7], dashPhase: 1)
+                )
+        )
+        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 24, y: 12)
+    }
+
+    private func draftGraph(_ intention: Intention, in size: CGSize) -> some View {
+        let center = CGPoint(x: size.width * 0.5, y: size.height * 0.48)
+        return ZStack {
             Canvas { context, _ in
                 for node in intention.restrictionNodes {
                     drawDraftConnection(
                         from: center,
-                        to: draftPoint(node.position, center: center),
+                        to: draftPoint(node.position, center: center, size: size),
                         context: &context
                     )
                 }
                 for node in intention.frictionNodes {
                     drawDraftConnection(
                         from: center,
-                        to: draftPoint(node.position, center: center),
+                        to: draftPoint(node.position, center: center, size: size),
                         context: &context
                     )
                 }
@@ -220,7 +262,7 @@ struct AIIntentionWorkspaceView: View {
                     RestrictionNodeView(node: node, selected: selection == .restriction(node.id))
                 }
                 .buttonStyle(.plain)
-                .position(draftPoint(node.position, center: center))
+                .position(draftPoint(node.position, center: center, size: size))
             }
 
             ForEach(intention.frictionNodes) { node in
@@ -230,12 +272,11 @@ struct AIIntentionWorkspaceView: View {
                     FrictionNodeView(node: node, selected: selection == .friction(node.id))
                 }
                 .buttonStyle(.plain)
-                .position(draftPoint(node.position, center: center))
+                .position(draftPoint(node.position, center: center, size: size))
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.top, 52)
-        .padding(.bottom, 78)
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
     @ViewBuilder
@@ -515,8 +556,13 @@ struct AIIntentionWorkspaceView: View {
         return .init(x: offset, y: above ? -210 : 225)
     }
 
-    private func draftPoint(_ point: GraphPoint, center: CGPoint) -> CGPoint {
-        CGPoint(x: center.x + point.x, y: center.y + point.y)
+    private func draftPoint(_ point: GraphPoint, center: CGPoint, size: CGSize) -> CGPoint {
+        let horizontalScale = min(1, max(0.7, (size.width - 220) / 620))
+        let verticalScale = min(1, max(0.65, (size.height - 160) / 450))
+        return CGPoint(
+            x: center.x + point.x * horizontalScale,
+            y: center.y + point.y * verticalScale
+        )
     }
 
     private func drawDraftConnection(
