@@ -221,7 +221,7 @@ struct AIIntentionBuilderView: View {
         let selectedIdentifiers = Set(drafts[index].suggestion.appBundleIdentifiers)
         let matchingApps = catalog.filter {
             !selectedIdentifiers.contains($0.bundleIdentifier)
-            && (appQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(appQuery))
+            && (appQuery.isEmpty || $0.matchesSearch(appQuery))
         }.prefix(6)
         let selectedBrowsers = catalog.filter {
             selectedIdentifiers.contains($0.bundleIdentifier)

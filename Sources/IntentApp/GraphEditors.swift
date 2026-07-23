@@ -20,7 +20,7 @@ struct IntentionEditorMenu: View {
         guard !query.isEmpty else { return [] }
         return catalog
             .filter { app in
-                app.name.range(of: query, options: [.caseInsensitive, .anchored]) != nil
+                app.matchesSearch(query, anchored: true)
                     && !intention.allowedApps.contains { $0.bundleIdentifier == app.bundleIdentifier }
             }
             .prefix(7)
