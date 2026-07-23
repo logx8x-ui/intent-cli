@@ -83,6 +83,13 @@ final class IntentStatusItemController: NSObject {
             menu.addItem(finishItem)
         }
 
+        if let shortcutWarning = model.shortcutWarning {
+            menu.addItem(.separator())
+            let warningItem = NSMenuItem(title: shortcutWarning, action: nil, keyEquivalent: "")
+            warningItem.isEnabled = false
+            menu.addItem(warningItem)
+        }
+
         menu.addItem(.separator())
         if let release = updateManager.availableRelease {
             let updateItem = NSMenuItem(
@@ -157,6 +164,9 @@ final class IntentRuntime {
                 IntentRuntime.shared.model.toggleOverlay()
             }
         }
+        if hotKeyManager?.isRegistered != true {
+            model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
+        }
         showOverlayObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("dev.loganmondi.intent.showOverlay"),
             object: nil,
@@ -184,9 +194,11 @@ final class IntentRuntime {
 
         let status = hotKeyManager.update(to: candidate)
         guard status == noErr else {
+            model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
             return "\(candidate.displayName) is already being used by macOS or another app."
         }
 
+        model.shortcutWarning = nil
         OverlayShortcutStore.save(candidate)
         return nil
     }

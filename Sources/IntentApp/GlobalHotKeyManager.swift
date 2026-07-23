@@ -190,15 +190,25 @@ final class GlobalHotKeyManager {
     private var eventHandlerRef: EventHandlerRef?
     private let handler: () -> Void
     private(set) var shortcut: OverlayShortcut
+    private(set) var registrationStatus: OSStatus = OSStatus(eventNotHandledErr)
+
+    var isRegistered: Bool {
+        hotKeyRef != nil && registrationStatus == noErr
+    }
 
     init(shortcut: OverlayShortcut = OverlayShortcutStore.load(), handler: @escaping () -> Void) {
         self.shortcut = shortcut
         self.handler = handler
-        installHandler()
-        if register(shortcut) != noErr, shortcut != .defaultShortcut {
+        registrationStatus = installHandler()
+        guard registrationStatus == noErr else { return }
+
+        registrationStatus = register(shortcut)
+        if registrationStatus != noErr, shortcut != .defaultShortcut {
             self.shortcut = .defaultShortcut
-            _ = register(.defaultShortcut)
-            OverlayShortcutStore.save(.defaultShortcut)
+            registrationStatus = register(.defaultShortcut)
+            if registrationStatus == noErr {
+                OverlayShortcutStore.save(.defaultShortcut)
+            }
         }
     }
 
@@ -210,21 +220,22 @@ final class GlobalHotKeyManager {
     }
 
     func update(to candidate: OverlayShortcut) -> OSStatus {
-        guard candidate != shortcut else { return noErr }
+        guard candidate != shortcut || !isRegistered else { return noErr }
         let previous = shortcut
         unregister()
 
         let status = register(candidate)
         if status == noErr {
             shortcut = candidate
+            registrationStatus = noErr
             return noErr
         }
 
-        _ = register(previous)
+        registrationStatus = register(previous)
         return status
     }
 
-    private func installHandler() {
+    private func installHandler() -> OSStatus {
         var eventSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
@@ -237,7 +248,7 @@ final class GlobalHotKeyManager {
             return noErr
         }
 
-        InstallEventHandler(
+        return InstallEventHandler(
             GetApplicationEventTarget(),
             callback,
             1,
@@ -249,14 +260,19 @@ final class GlobalHotKeyManager {
 
     private func register(_ shortcut: OverlayShortcut) -> OSStatus {
         let hotKeyID = EventHotKeyID(signature: fourCharCode("IntO"), id: 1)
-        return RegisterEventHotKey(
+        var newHotKeyRef: EventHotKeyRef?
+        let status = RegisterEventHotKey(
             shortcut.keyCode,
             shortcut.modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
-            &hotKeyRef
+            &newHotKeyRef
         )
+        if status == noErr {
+            hotKeyRef = newHotKeyRef
+        }
+        return status
     }
 
     private func unregister() {
@@ -264,6 +280,7 @@ final class GlobalHotKeyManager {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
         }
+        registrationStatus = OSStatus(eventNotHandledErr)
     }
 }
 

@@ -26,6 +26,7 @@ final class IntentAppModel: ObservableObject {
     @Published var installedApps: [InstalledApp] = []
     @Published var schedules: [IntentSchedule] = []
     @Published var sessionSwitchWarning: SessionSwitchWarning?
+    @Published var shortcutWarning: String?
     @Published var requireManualFinishBeforeSwitching: Bool {
         didSet {
             UserDefaults.standard.set(requireManualFinishBeforeSwitching, forKey: Self.requireManualFinishKey)

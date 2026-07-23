@@ -1735,7 +1735,6 @@ private struct GraphInputMonitor: NSViewRepresentable {
                 target: self,
                 action: #selector(handleThreeFingerPan(_:))
             )
-            recognizer.allowedTouchTypes = [.indirect]
             recognizer.delegate = self
             hostView.addGestureRecognizer(recognizer)
             gestureHostView = hostView
@@ -1961,6 +1960,7 @@ private final class ThreeFingerSwipeGestureRecognizer: NSGestureRecognizer {
 
     private func activeTouches(in event: NSEvent) -> [NSTouch] {
         Array(event.touches(matching: .touching, in: view))
+            .filter { $0.type == .indirect }
     }
 
     private func centroid(of touches: [NSTouch]) -> CGPoint? {

@@ -7,6 +7,11 @@ builder while every generated app and website remains editable before import.
 
 ## Download
 
+> **Release safety:** public binary installation is enabled only for a Developer ID
+> signed and Apple-notarized release. Intent deliberately refuses unsigned GitHub
+> binaries. The current source is available now; the next binary release requires
+> the Apple signing credentials described in [Releasing](docs/RELEASING.md).
+
 ### One-command install
 
 Paste this into Terminal, or give the repository link to Codex and say **install the latest Intent release**:
@@ -16,6 +21,11 @@ curl -fsSL https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/install.s
 ```
 
 macOS asks once for administrator approval, installs the latest published release, and opens Intent. Future updates appear inside Intent at the bottom left; installing an update keeps every intention, schedule, background, and setting.
+
+The command downloads a small release manifest first, checks the DMG checksum,
+Apple notarization ticket, installer signature, and publisher Team ID, and only
+then asks for installation approval. It never clones the repository and does not
+require Xcode or Command Line Tools.
 
 These are the only three manual downloads:
 
@@ -79,6 +89,26 @@ npm run extension:lint
 ```
 
 Public DMGs must be signed with Apple Developer ID certificates and notarized. `scripts/build-release.sh` supports that process and refuses a public release when the required Apple credentials are missing.
+
+For a local developer-only build:
+
+```zsh
+./scripts/build-local-release.sh
+```
+
+That produces `Intent-local-unsigned.dmg`, which is intentionally unsuitable for
+sharing or publishing.
+
+## Uninstall
+
+Remove the app while keeping your intentions and settings:
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/uninstall.sh | bash
+```
+
+Add `--delete-data` when running a downloaded copy of `uninstall.sh` to also
+remove the local data under `~/.intent`.
 
 Intent is a personal focus tool, not security software. See [Privacy](PRIVACY.md) for its local-only data behavior.
 

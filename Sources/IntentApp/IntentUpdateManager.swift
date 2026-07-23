@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import IntentCore
 
@@ -29,7 +30,24 @@ struct IntentGitHubRelease: Decodable, Equatable {
 
     var diskImage: Asset? {
         assets.first { $0.name == "Intent.dmg" }
-            ?? assets.first { $0.name.lowercased().hasSuffix(".dmg") }
+    }
+
+    var releaseManifest: Asset? {
+        assets.first { $0.name == "release-manifest.json" }
+    }
+}
+
+private struct IntentReleaseManifest: Decodable {
+    let version: String
+    let sha256: String
+    let teamID: String
+    let notarized: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case sha256
+        case teamID = "team_id"
+        case notarized
     }
 }
 
@@ -74,7 +92,7 @@ final class IntentUpdateManager: ObservableObject {
                 }
 
                 let release = try JSONDecoder().decode(IntentGitHubRelease.self, from: data)
-                guard release.diskImage != nil else {
+                guard release.diskImage != nil, release.releaseManifest != nil else {
                     throw IntentUpdateError.missingDiskImage
                 }
                 availableRelease = AppReleaseVersion.isNewer(release.version, than: currentVersion)
@@ -91,6 +109,7 @@ final class IntentUpdateManager: ObservableObject {
     func installAvailableUpdate() {
         guard let release = availableRelease,
               let asset = release.diskImage,
+              let manifestAsset = release.releaseManifest,
               !isInstalling else { return }
 
         isInstalling = true
@@ -101,18 +120,22 @@ final class IntentUpdateManager: ObservableObject {
                 let root = FileManager.default.temporaryDirectory
                     .appendingPathComponent("IntentUpdate-(UUID().uuidString)", isDirectory: true)
                 let diskImage = root.appendingPathComponent("Intent.dmg")
+                let manifestFile = root.appendingPathComponent("release-manifest.json")
                 let mountPoint = root.appendingPathComponent("mounted", isDirectory: true)
                 try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
 
-                var request = URLRequest(url: asset.browserDownloadURL)
-                request.setValue("Intent/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-                request.timeoutInterval = 120
-                let (downloadedFile, response) = try await URLSession.shared.download(for: request)
-                guard let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode) else {
-                    throw IntentUpdateError.downloadFailed
+                try await download(asset.browserDownloadURL, to: diskImage)
+                try await download(manifestAsset.browserDownloadURL, to: manifestFile)
+                let manifest = try JSONDecoder().decode(
+                    IntentReleaseManifest.self,
+                    from: Data(contentsOf: manifestFile)
+                )
+                guard manifest.notarized,
+                      !manifest.teamID.isEmpty,
+                      manifest.version == release.version,
+                      try sha256(of: diskImage) == manifest.sha256.lowercased() else {
+                    throw IntentUpdateError.unverifiedRelease
                 }
-                try FileManager.default.moveItem(at: downloadedFile, to: diskImage)
 
                 try mount(diskImage, at: mountPoint)
                 guard let package = try FileManager.default.contentsOfDirectory(
@@ -121,6 +144,7 @@ final class IntentUpdateManager: ObservableObject {
                 ).first(where: { $0.pathExtension.lowercased() == "pkg" }) else {
                     throw IntentUpdateError.missingInstaller
                 }
+                try verify(package: package, teamID: manifest.teamID)
 
                 try launchInstaller(package: package, mountPoint: mountPoint)
             } catch {
@@ -128,6 +152,55 @@ final class IntentUpdateManager: ObservableObject {
                 isInstalling = false
             }
         }
+    }
+
+    private func download(_ source: URL, to destination: URL) async throws {
+        var request = URLRequest(url: source)
+        request.setValue("Intent/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 120
+        let (downloadedFile, response) = try await URLSession.shared.download(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw IntentUpdateError.downloadFailed
+        }
+        try FileManager.default.moveItem(at: downloadedFile, to: destination)
+    }
+
+    private func sha256(of file: URL) throws -> String {
+        let digest = SHA256.hash(data: try Data(contentsOf: file))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func verify(package: URL, teamID: String) throws {
+        let signatureOutput = try processOutput(
+            executable: "/usr/sbin/pkgutil",
+            arguments: ["--check-signature", package.path]
+        )
+        guard signatureOutput.contains("(\(teamID))")
+                || signatureOutput.contains("Team Identifier: \(teamID)") else {
+            throw IntentUpdateError.unverifiedRelease
+        }
+        _ = try processOutput(
+            executable: "/usr/sbin/spctl",
+            arguments: ["--assess", "--type", "install", "--verbose=2", package.path]
+        )
+    }
+
+    private func processOutput(executable: String, arguments: [String]) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw IntentUpdateError.unverifiedRelease
+        }
+        return text
     }
 
     private func mount(_ diskImage: URL, at mountPoint: URL) throws {
@@ -183,6 +256,7 @@ private enum IntentUpdateError: LocalizedError {
     case releaseLookupFailed
     case missingDiskImage
     case downloadFailed
+    case unverifiedRelease
     case mountFailed(String)
     case missingInstaller
 
@@ -194,6 +268,8 @@ private enum IntentUpdateError: LocalizedError {
             "The latest Intent release does not contain Intent.dmg."
         case .downloadFailed:
             "The Intent update could not be downloaded."
+        case .unverifiedRelease:
+            "Intent refused this update because its Apple signature or published checksum could not be verified."
         case .mountFailed(let detail):
             detail.isEmpty ? "The Intent update could not be opened." : detail
         case .missingInstaller:
