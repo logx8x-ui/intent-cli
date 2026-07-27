@@ -49,9 +49,12 @@ final class IntentStatusItemController: NSObject {
         guard let button = statusItem.button else { return }
         statusItem.autosaveName = "Intent"
         statusItem.isVisible = true
-        button.image = nil
-        button.title = "◎"
-        button.font = .systemFont(ofSize: 17, weight: .semibold)
+        let menuBarIcon = NSApp.applicationIconImage.copy() as? NSImage
+        menuBarIcon?.size = NSSize(width: 19, height: 19)
+        menuBarIcon?.isTemplate = false
+        button.image = menuBarIcon
+        button.imagePosition = .imageOnly
+        button.title = ""
         button.toolTip = "Intent"
         button.setAccessibilityLabel("Intent")
         button.target = self
