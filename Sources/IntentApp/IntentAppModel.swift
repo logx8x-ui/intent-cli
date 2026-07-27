@@ -62,6 +62,17 @@ final class IntentAppModel: ObservableObject {
 
     var hasActiveSession: Bool { activeSessionName != nil }
 
+    var activeSessionCanFinishManually: Bool {
+        guard let activeSessionID,
+              let intention = intentions.first(where: { $0.id == activeSessionID }),
+              intention.timerLocksManualFinish,
+              let activeSessionEndsAt,
+              activeSessionEndsAt > Date() else {
+            return true
+        }
+        return false
+    }
+
     func load() {
         if installedApps.isEmpty {
             installedApps = AppCatalog.load()
@@ -165,7 +176,8 @@ final class IntentAppModel: ObservableObject {
                         : nil,
                     showsRemainingTime: restriction.kind == .timer || restriction.kind == .coolDown
                         ? true
-                        : nil
+                        : nil,
+                    locksSessionUntilTimerEnds: restriction.kind == .timer ? true : nil
                 )
             }
             let frictionNodes = suggestion.frictions.enumerated().map { offset, friction in
@@ -511,7 +523,14 @@ final class IntentAppModel: ObservableObject {
         if requireManualFinishBeforeSwitching {
             let activeName = activeSessionName ?? "An intention"
             sessionSwitchWarning = SessionSwitchWarning(
-                message: "\(activeName) is running. Press Cmd+Shift+M to finish it before starting \(intention.name)."
+                message: "\(activeName) is running. Press \(FinishShortcutStore.load().displayName) to finish it before starting \(intention.name)."
+            )
+            return
+        }
+
+        guard activeSessionCanFinishManually else {
+            sessionSwitchWarning = SessionSwitchWarning(
+                message: "\(activeSessionName ?? "This intention") is locked until its timer finishes."
             )
             return
         }
@@ -575,6 +594,12 @@ final class IntentAppModel: ObservableObject {
 
     func endActiveSession() {
         sessionSwitchWarning = nil
+        guard activeSessionCanFinishManually else {
+            if let activeSessionEndsAt {
+                errorMessage = "This intention is locked for another \(Self.durationText(until: activeSessionEndsAt))."
+            }
+            return
+        }
         activeLock?.stop()
     }
 
@@ -624,7 +649,10 @@ final class IntentAppModel: ObservableObject {
             }
         }
 
-        let spec = FocusSessionSpec.make(for: intention)
+        let spec = FocusSessionSpec.make(
+            for: intention,
+            finishShortcut: FinishShortcutStore.load().focusShortcut
+        )
         let websitesByBrowser = Dictionary(uniqueKeysWithValues: requiredBrowserGuards(for: intention).map { browser in
             let websites = intention.websites(for: browser.bundleIdentifier).map(\.value)
             return (browser.bundleIdentifier, websites.isEmpty ? ["intent.invalid"] : websites)

@@ -3,8 +3,8 @@ set -euo pipefail
 export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.8.2}"
-BUILD_NUMBER="${2:-24}"
+VERSION="${1:-0.8.3}"
+BUILD_NUMBER="${2:-25}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"

@@ -15,6 +15,8 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var restrictionNodes: [RestrictionNode]
     public var frictionNodes: [FrictionNode]
     public var graphModelVersion: Int
+    public var usesCustomIcon: Bool
+    public var customIconData: Data?
 
     public init(
         id: String = UUID().uuidString,
@@ -30,7 +32,9 @@ public struct Intention: Identifiable, Codable, Equatable {
         graphPosition: GraphPoint? = nil,
         restrictionNodes: [RestrictionNode] = [],
         frictionNodes: [FrictionNode] = [],
-        graphModelVersion: Int = 3
+        graphModelVersion: Int = 4,
+        usesCustomIcon: Bool = false,
+        customIconData: Data? = nil
     ) {
         self.id = id
         self.name = name
@@ -46,6 +50,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         self.restrictionNodes = restrictionNodes
         self.frictionNodes = frictionNodes
         self.graphModelVersion = graphModelVersion
+        self.usesCustomIcon = usesCustomIcon
+        self.customIconData = customIconData
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -63,6 +69,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         case restrictionNodes
         case frictionNodes
         case graphModelVersion
+        case usesCustomIcon
+        case customIconData
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,6 +85,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         startupActions = try container.decodeIfPresent([StartupAction].self, forKey: .startupActions) ?? []
         restrictions = try container.decodeIfPresent(RestrictionSet.self, forKey: .restrictions) ?? .init()
         friction = try container.decodeIfPresent(Friction.self, forKey: .friction) ?? .none
+        usesCustomIcon = try container.decodeIfPresent(Bool.self, forKey: .usesCustomIcon) ?? false
+        customIconData = try container.decodeIfPresent(Data.self, forKey: .customIconData)
         graphPosition = try container.decodeIfPresent(GraphPoint.self, forKey: .graphPosition)
             ?? GraphPoint.defaultPosition(for: id)
         let decodedGraphModelVersion = try container.decodeIfPresent(Int.self, forKey: .graphModelVersion)
@@ -115,7 +125,7 @@ public struct Intention: Identifiable, Codable, Equatable {
             frictionNodes = []
         }
 
-        graphModelVersion = 2
+        graphModelVersion = 4
         if (decodedGraphModelVersion ?? (container.contains(.restrictionNodes) ? 1 : 0)) < 2 {
             restrictionNodes = Self.repairFirstGraphMigration(
                 id: id,

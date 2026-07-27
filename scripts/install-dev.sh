@@ -59,9 +59,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>Intent</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.8.1</string>
+  <string>0.8.3</string>
   <key>CFBundleVersion</key>
-  <string>23</string>
+  <string>25</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -109,7 +109,7 @@ JSON
 
 echo "Installed Intent, IntentApp, and intent-app to $BIN_DIR"
 echo "Installed Intent.app to $APP_BUNDLE"
-echo "Intent runs as a menu-bar app after you open it; no background login item was installed."
+echo "Intent runs as a menu-bar app and manages Open at Login from its settings."
 echo "Installed Firefox native host manifest to $HOST_FILE"
 
 CHROME_HOST_DIR="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import IntentCore
+import UniformTypeIdentifiers
 
 struct IntentionEditorMenu: View {
     @Binding var intention: Intention
@@ -13,6 +14,8 @@ struct IntentionEditorMenu: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var appQuery = ""
     @State private var websiteDrafts: [String: String] = [:]
+    @State private var isIconDropTarget = false
+    @State private var iconImportError: String?
     @FocusState private var nameFocused: Bool
 
     private var matches: [InstalledApp] {
@@ -36,6 +39,8 @@ struct IntentionEditorMenu: View {
                 TextField("Intention name", text: $intention.name)
                     .textFieldStyle(.roundedBorder)
                     .focused($nameFocused)
+
+                intentionArtworkEditor
 
                 fieldLabel("Allowed apps")
                 tokenFlow
@@ -104,6 +109,95 @@ struct IntentionEditorMenu: View {
         .onAppear {
             guard intention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             DispatchQueue.main.async { nameFocused = true }
+        }
+    }
+
+    private var intentionArtworkEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            fieldLabel("Intention artwork")
+            Picker(
+                "Intention artwork",
+                selection: Binding(
+                    get: { intention.usesCustomIcon ? "icon" : "apps" },
+                    set: { intention.usesCustomIcon = $0 == "icon" }
+                )
+            ) {
+                Text("App logos").tag("apps")
+                Text("One icon").tag("icon")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if intention.usesCustomIcon {
+                HStack(spacing: 7) {
+                    ForEach(["target", "scope", "sparkles", "bolt.fill", "brain.head.profile", "graduationcap.fill"], id: \.self) { symbol in
+                        Button {
+                            intention.icon = symbol
+                            intention.customIconData = nil
+                        } label: {
+                            Image(systemName: symbol)
+                                .font(.system(size: 16, weight: .medium))
+                                .frame(width: 34, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .background(GraphTheme.surface(colorScheme))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7)
+                                .stroke(
+                                    intention.customIconData == nil && intention.icon == symbol
+                                        ? GraphTheme.editBlue
+                                        : GraphTheme.stroke(colorScheme),
+                                    lineWidth: intention.customIconData == nil && intention.icon == symbol ? 1.5 : 1
+                                )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        chooseIconImage()
+                    } label: {
+                        Label("Choose image", systemImage: "photo")
+                    }
+                    Button {
+                        pasteIconImage()
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.doc")
+                    Text("Drop an image here")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                }
+                .foregroundStyle(isIconDropTarget ? GraphTheme.editBlue : GraphTheme.muted(colorScheme))
+                .padding(.horizontal, 10)
+                .frame(height: 38)
+                .background(GraphTheme.surface(colorScheme))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            isIconDropTarget ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                            style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                        )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onDrop(
+                    of: [UTType.fileURL.identifier, UTType.image.identifier],
+                    isTargeted: $isIconDropTarget,
+                    perform: importIconFromDrop
+                )
+
+                if let iconImportError {
+                    Text(iconImportError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+            }
         }
     }
 
@@ -256,6 +350,67 @@ struct IntentionEditorMenu: View {
         }
     }
 
+    private func chooseIconImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let image = NSImage(contentsOf: url) else {
+            iconImportError = "That file is not a readable image."
+            return
+        }
+        saveIconImage(image)
+    }
+
+    private func pasteIconImage() {
+        guard let image = NSImage(pasteboard: .general) else {
+            iconImportError = "Copy an image first."
+            return
+        }
+        saveIconImage(image)
+    }
+
+    private func importIconFromDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                guard let data,
+                      let raw = String(data: data, encoding: .utf8),
+                      let url = URL(string: raw),
+                      let image = NSImage(contentsOf: url) else { return }
+                DispatchQueue.main.async { saveIconImage(image) }
+            }
+            return true
+        }
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+            guard let data, let image = NSImage(data: data) else { return }
+            DispatchQueue.main.async { saveIconImage(image) }
+        }
+        return true
+    }
+
+    private func saveIconImage(_ image: NSImage) {
+        let target = NSImage(size: NSSize(width: 512, height: 512))
+        target.lockFocus()
+        image.draw(
+            in: NSRect(x: 0, y: 0, width: 512, height: 512),
+            from: .zero,
+            operation: .copy,
+            fraction: 1
+        )
+        target.unlockFocus()
+        guard let tiff = target.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            iconImportError = "Intent could not prepare that image."
+            return
+        }
+        intention.customIconData = png
+        intention.usesCustomIcon = true
+        iconImportError = nil
+    }
+
     private func quickAddButton(
         title: String,
         symbol: String,
@@ -331,6 +486,15 @@ struct RestrictionEditorMenu: View {
                     detail: "Automatically ends this intention when the timer reaches zero.",
                     defaultMinutes: 25
                 )
+                Toggle(
+                    "Keep intention running until timer ends",
+                    isOn: Binding(
+                        get: { node.locksSessionUntilTimerEnds ?? true },
+                        set: { node.locksSessionUntilTimerEnds = $0 }
+                    )
+                )
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12, weight: .medium))
                 remainingTimeToggle("Show timer while running")
                 if node.showsRemainingTime ?? true {
                     fieldLabel("Timer position")
@@ -357,6 +521,13 @@ struct RestrictionEditorMenu: View {
         }
         .frame(width: 300)
         .graphMenuPanel(colorScheme: colorScheme)
+        .onChange(of: node.kind) { kind in
+            guard kind == .timer else { return }
+            if node.durationMinutes == nil { node.durationMinutes = 25 }
+            if node.locksSessionUntilTimerEnds == nil {
+                node.locksSessionUntilTimerEnds = true
+            }
+        }
     }
 
     private func remainingTimeToggle(_ title: String) -> some View {
@@ -378,21 +549,10 @@ struct RestrictionEditorMenu: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             fieldLabel(title)
-            Stepper(
-                value: Binding(
-                    get: { max(1, node.durationMinutes ?? defaultMinutes) },
-                    set: { node.durationMinutes = max(1, $0) }
-                ),
-                in: 1...1_440
-            ) {
-                HStack {
-                    Text("\(max(1, node.durationMinutes ?? defaultMinutes))")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    Text("minutes")
-                        .font(.system(size: 12))
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-            }
+            HourMinuteFields(totalMinutes: Binding(
+                get: { max(1, node.durationMinutes ?? defaultMinutes) },
+                set: { node.durationMinutes = max(1, $0) }
+            ))
             Text(detail)
                 .font(.caption)
                 .foregroundStyle(GraphTheme.muted(colorScheme))
@@ -400,6 +560,9 @@ struct RestrictionEditorMenu: View {
         .onAppear {
             if node.durationMinutes == nil {
                 node.durationMinutes = defaultMinutes
+            }
+            if node.kind == .timer, node.locksSessionUntilTimerEnds == nil {
+                node.locksSessionUntilTimerEnds = true
             }
         }
     }
@@ -565,13 +728,11 @@ struct FrictionEditorMenu: View {
             .frame(height: 90)
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(GraphTheme.stroke(colorScheme)))
         case .timeBudget(let minutes):
-            fieldLabel("Minutes")
-            Stepper(value: Binding(
+            fieldLabel("Time budget")
+            HourMinuteFields(totalMinutes: Binding(
                 get: { minutes },
                 set: { node.friction = .timeBudget(minutes: max(1, $0)) }
-            ), in: 1...240) {
-                Text("\(minutes) minutes")
-            }
+            ))
         }
     }
 
@@ -654,6 +815,44 @@ private func fieldLabel(_ title: String) -> some View {
         .font(.system(size: 9, weight: .semibold, design: .monospaced))
         .tracking(0.8)
         .foregroundStyle(.secondary)
+}
+
+private struct HourMinuteFields: View {
+    @Binding var totalMinutes: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            durationField(
+                label: "Hours",
+                value: Binding(
+                    get: { max(0, totalMinutes) / 60 },
+                    set: { hours in
+                        totalMinutes = max(1, min(999, hours) * 60 + max(0, totalMinutes) % 60)
+                    }
+                )
+            )
+            durationField(
+                label: "Minutes",
+                value: Binding(
+                    get: { max(0, totalMinutes) % 60 },
+                    set: { minutes in
+                        totalMinutes = max(1, (max(0, totalMinutes) / 60) * 60 + min(59, max(0, minutes)))
+                    }
+                )
+            )
+        }
+    }
+
+    private func durationField(label: String, value: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            TextField("0", value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 86)
+        }
+    }
 }
 
 private extension String {

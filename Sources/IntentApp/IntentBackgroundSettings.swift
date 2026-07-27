@@ -64,6 +64,8 @@ struct IntentSettingsView: View {
     @Binding var backgroundSelection: String
     @Binding var requireManualFinishBeforeSwitching: Bool
     @Binding var overlayShortcut: OverlayShortcut
+    @Binding var finishShortcut: OverlayShortcut
+    @Binding var launchAtLogin: Bool
     let onBackgroundChanged: () -> Void
     let onShowGuide: () -> Void
 
@@ -169,9 +171,27 @@ struct IntentSettingsView: View {
                     .tracking(1.1)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
 
-                OverlayShortcutRecorder(shortcut: $overlayShortcut)
+                OverlayShortcutRecorder(
+                    shortcut: $overlayShortcut,
+                    onUpdate: IntentRuntime.shared.updateOverlayShortcut
+                )
 
                 Text("Opens or hides Intent anywhere on your Mac.")
+                    .font(.caption2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                Text("FINISH INTENTION")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                    .padding(.top, 6)
+
+                OverlayShortcutRecorder(
+                    shortcut: $finishShortcut,
+                    onUpdate: IntentRuntime.shared.updateFinishShortcut
+                )
+
+                Text("Ends the active intention unless a Timer is locking it.")
                     .font(.caption2)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }
@@ -186,6 +206,14 @@ struct IntentSettingsView: View {
 
                 Toggle("Require finish before switching", isOn: $requireManualFinishBeforeSwitching)
                     .toggleStyle(.switch)
+
+                Toggle("Open Intent at login", isOn: $launchAtLogin)
+                    .toggleStyle(.switch)
+                    .onChange(of: launchAtLogin) { enabled in
+                        if let message = IntentRuntime.shared.updateLaunchAtLogin(enabled) {
+                            importError = message
+                        }
+                    }
 
                 Text("When off, clicking another intention ends the current session and starts the new one.")
                     .font(.caption2)
@@ -341,6 +369,7 @@ struct IntentSettingsView: View {
 
 private struct OverlayShortcutRecorder: View {
     @Binding var shortcut: OverlayShortcut
+    let onUpdate: (OverlayShortcut) -> String?
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var isRecording = false
@@ -380,7 +409,7 @@ private struct OverlayShortcutRecorder: View {
 
             ShortcutKeyMonitor(isActive: $isRecording) { event in
                 let candidate = OverlayShortcut(event: event)
-                if let message = IntentRuntime.shared.updateOverlayShortcut(candidate) {
+                if let message = onUpdate(candidate) {
                     validationMessage = message
                     NSSound.beep()
                 } else {

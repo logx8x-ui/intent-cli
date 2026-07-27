@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import Foundation
+import IntentLock
 
 struct OverlayShortcut: Codable, Equatable {
     let keyCode: UInt32
@@ -11,6 +12,12 @@ struct OverlayShortcut: Codable, Equatable {
         keyCode: UInt32(kVK_ANSI_Grave),
         modifiers: UInt32(shiftKey),
         keyLabel: "~"
+    )
+
+    static let defaultFinishShortcut = OverlayShortcut(
+        keyCode: UInt32(kVK_ANSI_M),
+        modifiers: UInt32(cmdKey | shiftKey),
+        keyLabel: "M"
     )
 
     init(keyCode: UInt32, modifiers: UInt32, keyLabel: String) {
@@ -44,6 +51,16 @@ struct OverlayShortcut: Codable, Equatable {
         if modifiers & UInt32(shiftKey) != 0 { result.insert(.shift) }
         if modifiers & UInt32(cmdKey) != 0 { result.insert(.command) }
         return result
+    }
+
+    var focusShortcut: FocusKeyboardShortcut {
+        FocusKeyboardShortcut(
+            keyCode: Int64(keyCode),
+            command: cocoaModifiers.contains(.command),
+            shift: cocoaModifiers.contains(.shift),
+            control: cocoaModifiers.contains(.control),
+            option: cocoaModifiers.contains(.option)
+        )
     }
 
     private static let supportedCarbonModifiers = UInt32(cmdKey | optionKey | controlKey | shiftKey)
@@ -104,6 +121,23 @@ enum OverlayShortcutStore {
         guard let data = UserDefaults.standard.data(forKey: key),
               let shortcut = try? JSONDecoder().decode(OverlayShortcut.self, from: data) else {
             return .defaultShortcut
+        }
+        return shortcut
+    }
+
+    static func save(_ shortcut: OverlayShortcut) {
+        guard let data = try? JSONEncoder().encode(shortcut) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+enum FinishShortcutStore {
+    private static let key = "intentFinishShortcut"
+
+    static func load() -> OverlayShortcut {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let shortcut = try? JSONDecoder().decode(OverlayShortcut.self, from: data) else {
+            return .defaultFinishShortcut
         }
         return shortcut
     }

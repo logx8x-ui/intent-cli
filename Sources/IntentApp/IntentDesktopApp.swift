@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 final class IntentAppDelegate: NSObject, NSApplicationDelegate {
@@ -6,6 +7,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        LaunchAtLoginController.applySavedPreference()
         IntentRuntime.shared.start()
         statusItemController = IntentStatusItemController(
             model: IntentRuntime.shared.model,
@@ -16,6 +18,11 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
                 .filter { $0.title == "Intent Settings" }
                 .forEach { $0.close() }
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        IntentRuntime.shared.model.showOverlay()
+        return true
     }
 }
 
@@ -32,7 +39,7 @@ struct IntentDesktopApp: App {
 final class IntentStatusItemController: NSObject {
     private let model: IntentAppModel
     private let updateManager: IntentUpdateManager
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let statusItem = NSStatusBar.system.statusItem(withLength: 28)
 
     init(model: IntentAppModel, updateManager: IntentUpdateManager) {
         self.model = model
@@ -40,18 +47,13 @@ final class IntentStatusItemController: NSObject {
         super.init()
 
         guard let button = statusItem.button else { return }
-        let bundledIcon = Bundle.main.url(forResource: "Intent", withExtension: "icns")
-            .flatMap(NSImage.init(contentsOf:))
-        if let icon = (bundledIcon ?? NSApp.applicationIconImage)?.copy() as? NSImage {
-            icon.size = NSSize(width: 19, height: 19)
-            icon.isTemplate = false
-            button.image = icon
-        } else {
-            button.image = NSImage(systemSymbolName: "scope", accessibilityDescription: "Intent")
-        }
-        button.imageScaling = .scaleProportionallyDown
-        button.imagePosition = .imageOnly
+        statusItem.autosaveName = "Intent"
+        statusItem.isVisible = true
+        button.image = nil
+        button.title = "◎"
+        button.font = .systemFont(ofSize: 17, weight: .semibold)
         button.toolTip = "Intent"
+        button.setAccessibilityLabel("Intent")
         button.target = self
         button.action = #selector(statusItemPressed(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -80,6 +82,7 @@ final class IntentStatusItemController: NSObject {
 
             let finishItem = NSMenuItem(title: "Finish Intention", action: #selector(finishIntention), keyEquivalent: "")
             finishItem.target = self
+            finishItem.isEnabled = model.activeSessionCanFinishManually
             menu.addItem(finishItem)
         }
 
@@ -134,6 +137,7 @@ final class IntentStatusItemController: NSObject {
     @objc private func quitIntent() {
         NSApp.terminate(nil)
     }
+
 }
 
 @MainActor
@@ -185,6 +189,9 @@ final class IntentRuntime {
     }
 
     func updateOverlayShortcut(_ candidate: OverlayShortcut) -> String? {
+        if candidate == FinishShortcutStore.load() {
+            return "Use a different shortcut from the one that finishes an intention."
+        }
         if let message = OverlayShortcutConflictChecker.validationMessage(for: candidate) {
             return message
         }
@@ -201,5 +208,56 @@ final class IntentRuntime {
         model.shortcutWarning = nil
         OverlayShortcutStore.save(candidate)
         return nil
+    }
+
+    func updateFinishShortcut(_ candidate: OverlayShortcut) -> String? {
+        if candidate == OverlayShortcutStore.load() {
+            return "Use a different shortcut from the one that opens Intent."
+        }
+        if let message = OverlayShortcutConflictChecker.validationMessage(for: candidate) {
+            return message
+        }
+        FinishShortcutStore.save(candidate)
+        return nil
+    }
+
+    func updateLaunchAtLogin(_ enabled: Bool) -> String? {
+        LaunchAtLoginController.setEnabled(enabled)
+    }
+}
+
+enum LaunchAtLoginController {
+    private static let preferenceKey = "intentLaunchAtLogin"
+
+    static var savedPreference: Bool {
+        if UserDefaults.standard.object(forKey: preferenceKey) == nil {
+            UserDefaults.standard.set(true, forKey: preferenceKey)
+        }
+        return UserDefaults.standard.bool(forKey: preferenceKey)
+    }
+
+    static func applySavedPreference() {
+        _ = setEnabled(savedPreference)
+    }
+
+    @discardableResult
+    static func setEnabled(_ enabled: Bool) -> String? {
+        UserDefaults.standard.set(enabled, forKey: preferenceKey)
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return nil }
+
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            }
+            return nil
+        } catch {
+            return enabled
+                ? "macOS could not enable Open at Login for this build."
+                : "macOS could not disable Open at Login for this build."
+        }
     }
 }

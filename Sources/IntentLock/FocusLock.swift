@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import IntentCore
 
 public enum FocusLockError: Error, CustomStringConvertible {
     case accessibilityPermissionRequired
@@ -122,7 +123,7 @@ public final class FocusLock {
             case .openBundle(let bundleIdentifier):
                 try open(arguments: ["-b", bundleIdentifier], label: bundleIdentifier)
             case .openURL(let url, let bundleIdentifier):
-                try open(arguments: ["-b", bundleIdentifier, url], label: url)
+                try openURLOrActivateExisting(url, bundleIdentifier: bundleIdentifier)
             case .selectSideberyDataSciencePanel:
                 selectSideberyDataSciencePanel()
             case .playSpotifyPlaylist(let uri):
@@ -140,6 +141,56 @@ public final class FocusLock {
         }
 
         throw FocusLockError.unableToOpen(spec.displayName)
+    }
+
+    private func openURLOrActivateExisting(_ url: String, bundleIdentifier: String) throws {
+        let browserIsRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == bundleIdentifier
+        }
+        if browserIsRunning {
+            let snapshotStore = BrowserTabSnapshotStore(browserBundleIdentifier: bundleIdentifier)
+            let deadline = Date(timeIntervalSinceNow: 0.8)
+            repeat {
+                if let tab = snapshotStore.load(maxAge: 2)?.tabs.first(where: {
+                    Self.urlsRepresentSameStartupSite($0.url, url)
+                }) {
+                    try? BrowserTabCommandStore(browserBundleIdentifier: bundleIdentifier).write(
+                        BrowserTabCommand(tabID: tab.id, windowID: tab.windowID)
+                    )
+                    _ = activateApp(bundleIdentifier: bundleIdentifier)
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25))
+                    return
+                }
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.08))
+            } while Date() < deadline
+        }
+
+        try open(arguments: ["-b", bundleIdentifier, url], label: url)
+    }
+
+    private static func urlsRepresentSameStartupSite(_ existing: String, _ requested: String) -> Bool {
+        guard let existingURL = URL(string: existing),
+              let requestedURL = URL(string: requested),
+              normalizedHost(existingURL.host) == normalizedHost(requestedURL.host) else {
+            return false
+        }
+
+        let requestedPath = normalizedPath(requestedURL.path)
+        let existingPath = normalizedPath(existingURL.path)
+        return requestedPath == "/" ||
+            existingPath == requestedPath ||
+            existingPath.hasPrefix("\(requestedPath)/")
+    }
+
+    private static func normalizedHost(_ host: String?) -> String {
+        let value = (host ?? "").lowercased()
+        return value.hasPrefix("www.") ? String(value.dropFirst(4)) : value
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        guard !path.isEmpty else { return "/" }
+        let trimmed = path.last == "/" && path.count > 1 ? String(path.dropLast()) : path
+        return trimmed.lowercased()
     }
 
     private func open(arguments: [String], label: String) throws {
@@ -335,8 +386,16 @@ public final class FocusLock {
             return nil
         }
 
-        if command && shift && keyCode == KeyCode.m {
-            stop()
+        if spec.finishShortcut.matches(
+            keyCode: keyCode,
+            command: command,
+            shift: shift,
+            control: control,
+            option: option
+        ) {
+            if spec.allowsManualFinish {
+                stop()
+            }
             return nil
         }
 

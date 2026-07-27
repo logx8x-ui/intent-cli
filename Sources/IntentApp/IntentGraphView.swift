@@ -27,6 +27,8 @@ struct IntentGraphView: View {
     @State private var showQuickGuide = false
     @State private var backgroundRevision = 0
     @State private var overlayShortcut = OverlayShortcutStore.load()
+    @State private var finishShortcut = FinishShortcutStore.load()
+    @State private var launchAtLogin = LaunchAtLoginController.savedPreference
     @State private var currentPage: OverlayPage = .desktop
     @State private var pagePosition: CGFloat = OverlayPage.desktop.position
     @State private var warningShakeCount: CGFloat = 0
@@ -360,7 +362,12 @@ struct IntentGraphView: View {
                         Label("End \(activeSessionName)", systemImage: "stop.fill")
                     }
                     .buttonStyle(.bordered)
-                    .help("End intention (Cmd+Shift+M)")
+                    .disabled(!model.activeSessionCanFinishManually)
+                    .help(
+                        model.activeSessionCanFinishManually
+                            ? "End intention (\(finishShortcut.displayName))"
+                            : "This intention is locked until its timer finishes"
+                    )
                 }
             }
 
@@ -747,6 +754,8 @@ struct IntentGraphView: View {
                     backgroundSelection: $backgroundSelection,
                     requireManualFinishBeforeSwitching: $model.requireManualFinishBeforeSwitching,
                     overlayShortcut: $overlayShortcut,
+                    finishShortcut: $finishShortcut,
+                    launchAtLogin: $launchAtLogin,
                     onBackgroundChanged: { backgroundRevision += 1 },
                     onShowGuide: {
                         showSettings = false

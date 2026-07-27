@@ -17,7 +17,7 @@ struct IntentionNodeView: View {
                 .frame(maxWidth: 190)
 
             ZStack {
-                appGrid
+                intentionArtwork
                     .frame(width: squareSize, height: squareSize)
                     .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
 
@@ -33,6 +33,30 @@ struct IntentionNodeView: View {
     }
 
     @Environment(\.colorScheme) private var colorScheme
+
+    @ViewBuilder
+    private var intentionArtwork: some View {
+        if intention.usesCustomIcon {
+            if let data = intention.customIconData, let image = NSImage(data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                ZStack {
+                    GraphTheme.elevatedSurface(colorScheme)
+                    Image(systemName: intention.icon)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(34)
+                        .foregroundStyle(GraphTheme.text(colorScheme))
+                }
+            }
+        } else {
+            appGrid
+        }
+    }
 
     private var appGrid: some View {
         Group {

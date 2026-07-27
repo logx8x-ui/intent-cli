@@ -15,6 +15,8 @@ public struct FocusSessionSpec {
     public let allowGoogleSearchTabs: Bool
     public let spotifyPlaylistURI: String?
     public let allowSpotifyForeground: Bool
+    public let finishShortcut: FocusKeyboardShortcut
+    public let allowsManualFinish: Bool
 
     public init(
         displayName: String,
@@ -29,7 +31,9 @@ public struct FocusSessionSpec {
         blockFirefoxChromeClicks: Bool,
         allowGoogleSearchTabs: Bool,
         spotifyPlaylistURI: String?,
-        allowSpotifyForeground: Bool
+        allowSpotifyForeground: Bool,
+        finishShortcut: FocusKeyboardShortcut = .defaultFinish,
+        allowsManualFinish: Bool = true
     ) {
         self.displayName = displayName
         self.startupSteps = startupSteps
@@ -44,6 +48,8 @@ public struct FocusSessionSpec {
         self.allowGoogleSearchTabs = allowGoogleSearchTabs
         self.spotifyPlaylistURI = spotifyPlaylistURI
         self.allowSpotifyForeground = allowSpotifyForeground
+        self.finishShortcut = finishShortcut
+        self.allowsManualFinish = allowsManualFinish
     }
 
     public static func make(for task: IntentWorkTask) -> FocusSessionSpec {
@@ -55,7 +61,10 @@ public struct FocusSessionSpec {
         }
     }
 
-    public static func make(for intention: Intention) -> FocusSessionSpec {
+    public static func make(
+        for intention: Intention,
+        finishShortcut: FocusKeyboardShortcut = .defaultFinish
+    ) -> FocusSessionSpec {
         let startupSteps = IntentionStartupPlanner.steps(for: intention)
         let fallback = IntentionStartupPlanner.fallbackBundleIdentifier(for: intention)
         let spotifyPlaylistURI = intention.startupActions.compactMap { action in
@@ -79,7 +88,9 @@ public struct FocusSessionSpec {
             blockFirefoxChromeClicks: false,
             allowGoogleSearchTabs: intention.browserSearchesAllowed,
             spotifyPlaylistURI: spotifyPlaylistURI,
-            allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" }
+            allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" },
+            finishShortcut: finishShortcut,
+            allowsManualFinish: !intention.timerLocksManualFinish
         )
     }
 
@@ -181,23 +192,33 @@ public struct FocusSessionSpec {
 public enum IntentionStartupPlanner {
     public static func steps(for intention: Intention) -> [StartupStep] {
         let excluded = intention.dontStartResourceIDs
-        var steps: [StartupStep] = intention.allowedApps.compactMap { app in
-            excluded.contains(app.resourceID) ? nil : .openBundle(app.bundleIdentifier)
+        let websiteSteps = intention.allowedWebsites.compactMap { website -> StartupStep? in
+            guard !excluded.contains(website.resourceID),
+                  let browserBundleIdentifier = website.browserBundleIdentifier,
+                  intention.allowedApps.contains(where: { $0.bundleIdentifier == browserBundleIdentifier }),
+                  !excluded.contains("app:\(browserBundleIdentifier)") else {
+                return nil
+            }
+            return .openURL(website.startupURL, bundleIdentifier: browserBundleIdentifier)
         }
+        let browsersStartedByURL = Set(websiteSteps.compactMap { step -> String? in
+            guard case .openURL(_, let bundleIdentifier) = step else { return nil }
+            return bundleIdentifier
+        })
+        var steps = websiteSteps
+
+        steps.append(contentsOf: intention.allowedApps.compactMap { app in
+            guard !excluded.contains(app.resourceID),
+                  !browsersStartedByURL.contains(app.bundleIdentifier) else {
+                return nil
+            }
+            return .openBundle(app.bundleIdentifier)
+        })
 
         if intention.startupActions.contains(.selectSideberyDataSciencePanel),
            !excluded.contains("app:org.mozilla.firefox") {
             steps.append(.selectSideberyDataSciencePanel)
         }
-
-        steps.append(contentsOf: intention.allowedWebsites.compactMap { website in
-            guard !excluded.contains(website.resourceID),
-                  let browserBundleIdentifier = website.browserBundleIdentifier,
-                  intention.allowedApps.contains(where: { $0.bundleIdentifier == browserBundleIdentifier }) else {
-                return nil
-            }
-            return .openURL(website.startupURL, bundleIdentifier: browserBundleIdentifier)
-        })
 
         for action in intention.startupActions {
             guard case .playSpotifyPlaylist(let uri) = action,
@@ -212,9 +233,64 @@ public enum IntentionStartupPlanner {
 
     public static func fallbackBundleIdentifier(for intention: Intention) -> String {
         let excluded = intention.dontStartResourceIDs
+        if let browserBundleIdentifier = intention.allowedWebsites.compactMap({ website -> String? in
+            guard !excluded.contains(website.resourceID),
+                  let browserBundleIdentifier = website.browserBundleIdentifier,
+                  !excluded.contains("app:\(browserBundleIdentifier)"),
+                  intention.allowedApps.contains(where: { $0.bundleIdentifier == browserBundleIdentifier }) else {
+                return nil
+            }
+            return browserBundleIdentifier
+        }).first {
+            return browserBundleIdentifier
+        }
         return intention.allowedApps.first(where: { !excluded.contains($0.resourceID) })?.bundleIdentifier
             ?? intention.allowedApps.first?.bundleIdentifier
             ?? "org.mozilla.firefox"
+    }
+}
+
+public struct FocusKeyboardShortcut: Equatable {
+    public let keyCode: Int64
+    public let command: Bool
+    public let shift: Bool
+    public let control: Bool
+    public let option: Bool
+
+    public init(
+        keyCode: Int64,
+        command: Bool,
+        shift: Bool,
+        control: Bool,
+        option: Bool
+    ) {
+        self.keyCode = keyCode
+        self.command = command
+        self.shift = shift
+        self.control = control
+        self.option = option
+    }
+
+    public static let defaultFinish = FocusKeyboardShortcut(
+        keyCode: KeyCode.m,
+        command: true,
+        shift: true,
+        control: false,
+        option: false
+    )
+
+    func matches(
+        keyCode: Int64,
+        command: Bool,
+        shift: Bool,
+        control: Bool,
+        option: Bool
+    ) -> Bool {
+        self.keyCode == keyCode &&
+            self.command == command &&
+            self.shift == shift &&
+            self.control == control &&
+            self.option == option
     }
 }
 

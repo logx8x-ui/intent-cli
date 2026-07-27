@@ -541,7 +541,8 @@ struct AIIntentionWorkspaceView: View {
                 position: connectedPosition(index: index, total: suggestion.restrictions.count, above: true),
                 excludedResourceIDs: item.resourceIDs,
                 durationMinutes: item.kind == .timer || item.kind == .coolDown ? max(1, item.durationMinutes) : nil,
-                showsRemainingTime: item.kind == .timer || item.kind == .coolDown ? true : nil
+                showsRemainingTime: item.kind == .timer || item.kind == .coolDown ? true : nil,
+                locksSessionUntilTimerEnds: item.kind == .timer ? true : nil
             )
         }
         let frictions = suggestion.frictions.enumerated().map { index, item in

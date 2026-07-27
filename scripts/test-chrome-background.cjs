@@ -208,6 +208,13 @@ async function run() {
   await allowed.remove(2);
   assert.equal(allowed.tabs.get(1).active, true, "Closing an allowed tab should return to another allowed tab");
 
+  const closeBrowser = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }
+  ]);
+  await closeBrowser.settle();
+  await closeBrowser.remove(1);
+  assert.equal(closeBrowser.tabs.size, 0, "Closing Chrome should not manufacture a recovery tab");
+
   const strictNewTab = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }
   ]);
@@ -215,8 +222,17 @@ async function run() {
   await strictNewTab.create({ id: 3, active: true, url: "chrome://new-tab-page/" });
   assert.equal(strictNewTab.tabs.has(3), true, "New tabs should always be creatable");
   await strictNewTab.navigate(3, "https://instagram.com/direct/inbox/");
-  assert.equal(strictNewTab.tabs.has(3), false, "Submitting from a new tab should close it when browser searches are disabled");
-  assert.equal(strictNewTab.tabs.get(1).active, true, "Closing a submitted new tab should return to an allowed tab");
+  assert.equal(strictNewTab.tabs.has(3), true, "Typing an allowed website in a new tab should work without browser-search permission");
+  assert.equal(strictNewTab.tabs.get(3).active, true, "The manually opened allowed website should remain active");
+
+  const strictSearch = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }
+  ]);
+  await strictSearch.settle();
+  await strictSearch.create({ id: 3, active: true, url: "chrome://new-tab-page/" });
+  await strictSearch.navigate(3, "https://www.google.com/search?q=intent");
+  assert.equal(strictSearch.tabs.has(3), false, "A search submission should close when browser searches are disabled");
+  assert.equal(strictSearch.tabs.get(1).active, true, "Closing a blocked search should return to an allowed tab");
 
   const searches = createHarness({ ...lockedRules, allowGoogleSearchTabs: true }, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }

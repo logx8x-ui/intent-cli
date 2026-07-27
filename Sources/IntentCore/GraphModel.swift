@@ -93,6 +93,7 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
     public var durationMinutes: Int?
     public var showsRemainingTime: Bool?
     public var timerDisplayPosition: TimerDisplayPosition?
+    public var locksSessionUntilTimerEnds: Bool?
 
     public init(
         id: String = UUID().uuidString,
@@ -101,7 +102,8 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
         excludedResourceIDs: [String] = [],
         durationMinutes: Int? = nil,
         showsRemainingTime: Bool? = nil,
-        timerDisplayPosition: TimerDisplayPosition? = nil
+        timerDisplayPosition: TimerDisplayPosition? = nil,
+        locksSessionUntilTimerEnds: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -110,6 +112,7 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
         self.durationMinutes = durationMinutes
         self.showsRemainingTime = showsRemainingTime
         self.timerDisplayPosition = timerDisplayPosition
+        self.locksSessionUntilTimerEnds = locksSessionUntilTimerEnds
     }
 }
 
@@ -187,6 +190,11 @@ public extension Intention {
 
     var sessionTimerDisplayPosition: TimerDisplayPosition {
         effectiveTimerRestriction?.timerDisplayPosition ?? .topTrailing
+    }
+
+    var timerLocksManualFinish: Bool {
+        guard let restriction = effectiveTimerRestriction else { return false }
+        return restriction.locksSessionUntilTimerEnds ?? true
     }
 
     var orderedFrictionNodes: [FrictionNode] {

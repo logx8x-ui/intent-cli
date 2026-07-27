@@ -17,7 +17,6 @@ let rulesFingerprint = fingerprintRules(rules);
 let guardEnabled = true;
 let initialized = false;
 let freshBlankTabIds = new Set();
-let creatingRecoveryBlankTab = false;
 let commandPort = null;
 let reconnectTimer = null;
 
@@ -249,7 +248,12 @@ async function returnToAllowedTab() {
       return;
     }
 
-    await openRecoveryBlankTab();
+    // A still-open window must not fall through to an old unallowed tab. If
+    // Firefox fully closed, however, create nothing; its next launch owns the
+    // new-tab surface and can accept a manually typed allowed URL.
+    if (tabs.length > 0) {
+      await openRecoveryBlankTab();
+    }
   } catch (_) {
     lastAllowedTabId = null;
   } finally {
@@ -258,14 +262,9 @@ async function returnToAllowedTab() {
 }
 
 async function openRecoveryBlankTab() {
-  creatingRecoveryBlankTab = true;
-  try {
-    const tab = await browser.tabs.create({ url: "about:blank", active: true });
-    freshBlankTabIds.add(tab.id);
-    lastAllowedTabId = tab.id;
-  } finally {
-    creatingRecoveryBlankTab = false;
-  }
+  const tab = await browser.tabs.create({ url: "about:blank", active: true });
+  freshBlankTabIds.add(tab.id);
+  lastAllowedTabId = tab.id;
 }
 
 function shouldBlockNavigation(url) {
@@ -364,7 +363,8 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs &&
     changeInfo.url &&
-    !isSearchStagingURL(changeInfo.url)
+    !isSearchStagingURL(changeInfo.url) &&
+    !isAllowedURL(changeInfo.url, rules)
   ) {
     await recoverBlockedNavigation(tabId);
     return;
@@ -444,7 +444,8 @@ browser.webRequest.onBeforeRequest.addListener(
       freshBlankTabIds.has(details.tabId) &&
       !rules.allowGoogleSearchTabs &&
       details.url &&
-      !isSearchStagingURL(details.url)
+      !isSearchStagingURL(details.url) &&
+      !isAllowedURL(details.url, rules)
     ) {
       setTimeout(() => recoverBlockedNavigation(details.tabId), 0);
       return { cancel: true };

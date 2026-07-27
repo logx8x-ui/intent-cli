@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Intent Browser Guard",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Enforces active Intent browser rules inside Google Chrome.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAorkaybQNpnovPyFM5OYY24f0dQWEqskrLg4KveRPMql1GSUkYdfKbu+rctw7Dy3JvIXuWq4b7k6Yl/hcoOZSOus9U3SpN5VOPlLYNcjICrQXeB7oNH8Ns6W6vK3qAnGytoBxXmzGzm6hb/mBmDGqHgIXjyXJW2t21bSSdOCZg0pM32P6S9j1o3IHt2tJDV3Kf+p1KCYFuwNIaWRCbjRHxApVshPjdN1l+E6d15Cr8Y3zVS3zMgg2kvvgXCGxYzY4szz/vVGIasFdedmqqi7ySvVT+LMjB8oKdR10a3g5983aPjxaHudR3V1GP7medxKjIxub5zKOoLu0cG6h2+dOOwIDAQAB",
   "icons": {

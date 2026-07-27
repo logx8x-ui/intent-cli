@@ -374,6 +374,18 @@ do {
     try expect(dataScienceSpec.allowSpotifyForeground, "An explicitly allowed Spotify app should be switchable like other allowed apps")
     let dataScienceStartup = IntentionStartupPlanner.steps(for: dataScience)
     try expect(dataScienceStartup.contains(.openBundle("com.rstudio.desktop")), "Allowed apps should start automatically")
+    try expect(
+        dataScienceStartup.first == .openURL("https://github.com", bundleIdentifier: "org.mozilla.firefox"),
+        "The first allowed website should launch before secondary apps"
+    )
+    try expect(
+        !dataScienceStartup.contains(.openBundle("org.mozilla.firefox")),
+        "A browser opened by an allowed URL must not also create a spare blank tab"
+    )
+    try expect(
+        IntentionStartupPlanner.fallbackBundleIdentifier(for: dataScience) == "org.mozilla.firefox",
+        "An intention with a startup website should leave its browser in front"
+    )
     try expect(!dataScienceStartup.contains(.openBundle("com.openai.codex")), "Don't-start-up should keep Codex closed initially")
     try expect(!dataScienceStartup.contains(.openBundle("io.remnote")), "Don't-start-up should keep RemNote closed initially")
     try expect(dataScienceStartup.contains(.openURL("https://github.com", bundleIdentifier: "org.mozilla.firefox")), "Allowed websites should start in their assigned browser")
@@ -397,6 +409,11 @@ do {
     try expect(timedIntention.showsCooldownRemainingTime, "Cooldown display should default on")
     try expect(timedIntention.showsSessionTimer, "Timer display should default on")
     try expect(timedIntention.sessionTimerDisplayPosition == .topTrailing, "Timer should default to top right")
+    try expect(timedIntention.timerLocksManualFinish, "Timer lock should default on")
+    try expect(
+        !FocusSessionSpec.make(for: timedIntention).allowsManualFinish,
+        "A locked timer should prevent the finish shortcut from ending the session"
+    )
 
     timedIntention.restrictionNodes = [
         .init(
@@ -410,12 +427,24 @@ do {
             position: .zero,
             durationMinutes: 25,
             showsRemainingTime: false,
-            timerDisplayPosition: .bottomLeading
+            timerDisplayPosition: .bottomLeading,
+            locksSessionUntilTimerEnds: false
         )
     ]
     try expect(!timedIntention.showsCooldownRemainingTime, "Cooldown badge should be configurable")
     try expect(!timedIntention.showsSessionTimer, "Session timer should be configurable")
     try expect(timedIntention.sessionTimerDisplayPosition == .bottomLeading, "Timer position should persist")
+    try expect(!timedIntention.timerLocksManualFinish, "Timer lock should be configurable")
+
+    var artworkIntention = dataScience
+    artworkIntention.usesCustomIcon = true
+    artworkIntention.customIconData = Data([0, 1, 2, 3])
+    let artworkRoundTrip = try JSONDecoder().decode(
+        Intention.self,
+        from: JSONEncoder().encode(artworkIntention)
+    )
+    try expect(artworkRoundTrip.usesCustomIcon, "Custom intention artwork choice should persist")
+    try expect(artworkRoundTrip.customIconData == Data([0, 1, 2, 3]), "Custom intention artwork data should persist")
 
     var collidedIntentions = [
         Intention(

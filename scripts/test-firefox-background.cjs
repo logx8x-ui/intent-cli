@@ -212,8 +212,17 @@ async function run() {
   assert.equal(strictNewTabHarness.tabs.has(3), true, "New tabs should always be creatable");
   await strictNewTabHarness.update(3, { url: "https://www.instagram.com/direct/inbox/" });
   await strictNewTabHarness.ready();
-  assert.equal(strictNewTabHarness.tabs.has(3), false, "Submitting from a new tab should close it when browser searches are disabled");
-  assert.equal(strictNewTabHarness.tabs.get(1).active, true, "Closing a submitted new tab should return to an allowed tab");
+  assert.equal(strictNewTabHarness.tabs.has(3), true, "Typing an allowed website in a new tab should work without browser-search permission");
+  assert.equal(strictNewTabHarness.tabs.get(3).active, true, "The manually opened allowed website should remain active");
+
+  const strictSearchHarness = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
+  ]);
+  await strictSearchHarness.create({ id: 3, active: true, url: "about:newtab" });
+  await strictSearchHarness.update(3, { url: "https://www.google.com/search?q=intent" });
+  await strictSearchHarness.ready();
+  assert.equal(strictSearchHarness.tabs.has(3), false, "A search submission should close when browser searches are disabled");
+  assert.equal(strictSearchHarness.tabs.get(1).active, true, "Closing a blocked search should return to an allowed tab");
 
   const searchRules = {
     ...lockedRules,
@@ -259,6 +268,13 @@ async function run() {
     true,
     "Closing the final allowed tab should create a blank recovery tab instead of leaving an unallowed tab active"
   );
+
+  const closeBrowserHarness = createHarness(lockedRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
+  ]);
+  await closeBrowserHarness.ready();
+  await closeBrowserHarness.remove(1);
+  assert.equal(closeBrowserHarness.tabs.size, 0, "Closing Firefox should not manufacture a recovery tab");
 
   const typedUrlHarness = createHarness(searchRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }

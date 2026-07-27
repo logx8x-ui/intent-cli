@@ -18,7 +18,6 @@ let reconnectTimer = null;
 let lastAllowedTabId = null;
 let enforcing = false;
 let freshBlankTabIds = new Set();
-let creatingRecoveryBlankTab = false;
 let rulesFingerprint = fingerprintRules(rules);
 let dnrFingerprint = "";
 const lastAllowedURLByTab = new Map();
@@ -293,21 +292,20 @@ async function returnToAllowedTab() {
       await chrome.tabs.update(allowed.id, { active: true });
       return;
     }
-    await openRecoveryBlankTab();
+    // Keep a still-open Chrome window from exposing an old unallowed tab, but
+    // do not manufacture a tab after Chrome fully closes.
+    if (tabs.length > 0) {
+      await openRecoveryBlankTab();
+    }
   } finally {
     enforcing = false;
   }
 }
 
 async function openRecoveryBlankTab() {
-  creatingRecoveryBlankTab = true;
-  try {
-    const tab = await chrome.tabs.create({ url: "chrome://newtab/", active: true });
-    freshBlankTabIds.add(tab.id);
-    lastAllowedTabId = tab.id;
-  } finally {
-    creatingRecoveryBlankTab = false;
-  }
+  const tab = await chrome.tabs.create({ url: "chrome://newtab/", active: true });
+  freshBlankTabIds.add(tab.id);
+  lastAllowedTabId = tab.id;
 }
 
 async function recoverBlockedNavigation(tabId) {
@@ -365,7 +363,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs &&
     changeInfo.url &&
-    !isSearchStagingURL(changeInfo.url)
+    !isSearchStagingURL(changeInfo.url) &&
+    !isAllowedURL(changeInfo.url, rules)
   ) {
     freshBlankTabIds.delete(tabId);
     await chrome.tabs.remove(tabId).catch(() => {});
@@ -424,7 +423,8 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
     if (
       freshBlankTabIds.has(details.tabId) &&
       !rules.allowGoogleSearchTabs &&
-      !isSearchStagingURL(details.url)
+      !isSearchStagingURL(details.url) &&
+      !isAllowedURL(details.url, rules)
     ) {
       freshBlankTabIds.delete(details.tabId);
       await chrome.tabs.remove(details.tabId).catch(() => {});

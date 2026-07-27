@@ -144,7 +144,7 @@ struct IntentQuickGuideView: View {
 
                 shortcut("Click", "Start an intention")
                 shortcut("Cmd Tab", "Switch between launched allowed apps")
-                shortcut("Cmd Shift M", "Finish the active intention")
+                shortcut(FinishShortcutStore.load().displayName, "Finish the active intention")
                 shortcut(OverlayShortcutStore.load().displayName, "Show or hide Intent")
                 shortcut("Three fingers", "Move between intentions and scheduler")
                 shortcut("Pinch", "Zoom the desktop")

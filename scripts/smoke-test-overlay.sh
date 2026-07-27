@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="${1:-/Applications/Intent.app}"
+DEFAULT_APP="/Applications/Intent.app"
+if [[ ! -x "$DEFAULT_APP/Contents/MacOS/IntentApp" ]]; then
+  DEFAULT_APP="$HOME/Applications/Intent.app"
+fi
+APP="${1:-$DEFAULT_APP}"
 TOGGLES="${2:-100}"
 [[ -x "$APP/Contents/MacOS/IntentApp" ]] || { echo "Intent is not installed at $APP" >&2; exit 1; }
 
