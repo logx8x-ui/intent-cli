@@ -184,14 +184,6 @@ public extension Intention {
         effectiveCooldownRestriction?.showsRemainingTime ?? true
     }
 
-    var showsSessionTimer: Bool {
-        effectiveTimerRestriction?.showsRemainingTime ?? true
-    }
-
-    var sessionTimerDisplayPosition: TimerDisplayPosition {
-        effectiveTimerRestriction?.timerDisplayPosition ?? .topTrailing
-    }
-
     var timerLocksManualFinish: Bool {
         guard let restriction = effectiveTimerRestriction else { return false }
         return restriction.locksSessionUntilTimerEnds ?? true

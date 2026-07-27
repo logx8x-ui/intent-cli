@@ -296,8 +296,7 @@ struct AIIntentionWorkspaceView: View {
                     selection = nil
                 },
                 onAddRestriction: addRestriction,
-                onAddFriction: addFriction,
-                onSave: { selection = nil }
+                onAddFriction: addFriction
             )
         case .restriction(let id):
             if let intention = draft,
@@ -308,8 +307,7 @@ struct AIIntentionWorkspaceView: View {
                     onDelete: {
                         draft?.restrictionNodes.removeAll { $0.id == id }
                         selection = nil
-                    },
-                    onSave: { selection = nil }
+                    }
                 )
             }
         case .friction(let id):
@@ -319,8 +317,7 @@ struct AIIntentionWorkspaceView: View {
                     onDelete: {
                         draft?.frictionNodes.removeAll { $0.id == id }
                         selection = nil
-                    },
-                    onSave: { selection = nil }
+                    }
                 )
             }
         }

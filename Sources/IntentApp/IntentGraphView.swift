@@ -663,8 +663,7 @@ struct IntentGraphView: View {
                         if let nodeID = model.addFriction(to: intentionID, at: position) {
                             self.selection = .friction(intentionID: intentionID, nodeID: nodeID)
                         }
-                    },
-                    onSave: finishEditingSelection
+                    }
                 )
                 .position(anchor)
             }
@@ -679,8 +678,7 @@ struct IntentGraphView: View {
                             $0.restrictionNodes.removeAll { $0.id == nodeID }
                         }
                         self.selection = nil
-                    },
-                    onSave: { self.selection = nil }
+                    }
                 )
                 .position(anchor)
             }
@@ -694,8 +692,7 @@ struct IntentGraphView: View {
                             $0.frictionNodes.removeAll { $0.id == nodeID }
                         }
                         self.selection = nil
-                    },
-                    onSave: { self.selection = nil }
+                    }
                 )
                 .position(anchor)
             }
@@ -983,10 +980,6 @@ struct IntentGraphView: View {
             if let id = model.addFriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
                 selection = .friction(intentionID: intentionID, nodeID: id)
             }
-        case .save:
-            guard editMode else { return }
-            NSApp.keyWindow?.makeFirstResponder(nil)
-            finishEditingSelection()
         case .delete:
             guard editMode else { return }
             deleteSelection()
@@ -1449,7 +1442,6 @@ private enum GraphKeyboardKey {
     case intention
     case restriction
     case friction
-    case save
     case delete
     case undo
     case pageLeft
@@ -1613,7 +1605,6 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     case 34: key = .intention
                     case 15: key = .restriction
                     case 3: key = .friction
-                    case 1: key = .save
                     case 7, 51, 117: key = .delete
                     case 123: key = .pageLeft
                     case 124: key = .pageRight

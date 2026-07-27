@@ -8,7 +8,7 @@ protocol IntentOverlayPresenting: AnyObject {
     func showOverlay(animated: Bool)
     func hideOverlay(animated: Bool)
     func toggleOverlay()
-    func showSessionTimer(name: String, endsAt: Date, position: TimerDisplayPosition)
+    func showSessionTimer(name: String, endsAt: Date)
     func hideSessionTimer()
 }
 
@@ -736,14 +736,11 @@ final class IntentAppModel: ObservableObject {
 
         let duration = TimeInterval(minutes * 60)
         activeSessionEndsAt = Date().addingTimeInterval(duration)
-        if intention.showsSessionTimer, let activeSessionEndsAt {
+        if let activeSessionEndsAt {
             overlayPresenter?.showSessionTimer(
                 name: intention.name,
-                endsAt: activeSessionEndsAt,
-                position: intention.sessionTimerDisplayPosition
+                endsAt: activeSessionEndsAt
             )
-        } else {
-            overlayPresenter?.hideSessionTimer()
         }
         sessionLimitTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))

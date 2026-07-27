@@ -407,8 +407,6 @@ do {
     try expect(timedIntention.coolDownMinutes == 30, "The strictest cooldown should win")
     try expect(timedIntention.timerMinutes == 25, "The shortest session timer should win")
     try expect(timedIntention.showsCooldownRemainingTime, "Cooldown display should default on")
-    try expect(timedIntention.showsSessionTimer, "Timer display should default on")
-    try expect(timedIntention.sessionTimerDisplayPosition == .topTrailing, "Timer should default to top right")
     try expect(timedIntention.timerLocksManualFinish, "Timer lock should default on")
     try expect(
         !FocusSessionSpec.make(for: timedIntention).allowsManualFinish,
@@ -432,8 +430,6 @@ do {
         )
     ]
     try expect(!timedIntention.showsCooldownRemainingTime, "Cooldown badge should be configurable")
-    try expect(!timedIntention.showsSessionTimer, "Session timer should be configurable")
-    try expect(timedIntention.sessionTimerDisplayPosition == .bottomLeading, "Timer position should persist")
     try expect(!timedIntention.timerLocksManualFinish, "Timer lock should be configurable")
 
     var artworkIntention = dataScience

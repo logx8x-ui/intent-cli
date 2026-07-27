@@ -9,7 +9,6 @@ struct IntentionEditorMenu: View {
     let onDelete: () -> Void
     let onAddRestriction: () -> Void
     let onAddFriction: () -> Void
-    let onSave: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var appQuery = ""
@@ -33,7 +32,7 @@ struct IntentionEditorMenu: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 13) {
-                editorHeader("Intention", symbol: "square", onSave: onSave)
+                editorHeader("Intention", symbol: "square")
 
                 fieldLabel("Name")
                 TextField("Intention name", text: $intention.name)
@@ -443,14 +442,13 @@ struct RestrictionEditorMenu: View {
     @Binding var node: RestrictionNode
     let intention: Intention
     let onDelete: () -> Void
-    let onSave: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var lastResourceSelectionIndex: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            editorHeader("Restriction", symbol: "circle", onSave: onSave)
+            editorHeader("Restriction", symbol: "circle")
 
             fieldLabel("Type")
             Picker("Restriction type", selection: $node.kind) {
@@ -495,22 +493,6 @@ struct RestrictionEditorMenu: View {
                 )
                 .toggleStyle(.checkbox)
                 .font(.system(size: 12, weight: .medium))
-                remainingTimeToggle("Show timer while running")
-                if node.showsRemainingTime ?? true {
-                    fieldLabel("Timer position")
-                    Picker(
-                        "Timer position",
-                        selection: Binding(
-                            get: { node.timerDisplayPosition ?? .topTrailing },
-                            set: { node.timerDisplayPosition = $0 }
-                        )
-                    ) {
-                        ForEach(TimerDisplayPosition.allCases, id: \.self) { position in
-                            Text(position.displayName).tag(position)
-                        }
-                    }
-                    .labelsHidden()
-                }
             }
 
             Divider()
@@ -662,13 +644,12 @@ struct RestrictionEditorMenu: View {
 struct FrictionEditorMenu: View {
     @Binding var node: FrictionNode
     let onDelete: () -> Void
-    let onSave: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            editorHeader("Friction", symbol: "triangle", onSave: onSave)
+            editorHeader("Friction", symbol: "triangle")
             fieldLabel("Type")
             Picker("Friction type", selection: frictionKind) {
                 ForEach(FrictionKind.allCases, id: \.self) { kind in
@@ -790,23 +771,12 @@ private struct RestrictionResource: Identifiable {
 
 private func editorHeader(
     _ title: String,
-    symbol: String,
-    onSave: @escaping () -> Void
+    symbol: String
 ) -> some View {
     HStack {
         Label(title, systemImage: symbol)
             .font(.system(size: 13, weight: .semibold))
         Spacer()
-        Button(action: onSave) {
-            Text("SAVE (S)")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .frame(height: 22)
-                .background(Color.green.opacity(0.82), in: RoundedRectangle(cornerRadius: 5))
-        }
-        .buttonStyle(.plain)
-        .help("Save and close this editor (S)")
     }
 }
 

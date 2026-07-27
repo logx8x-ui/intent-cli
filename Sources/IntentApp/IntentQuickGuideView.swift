@@ -105,7 +105,6 @@ struct IntentQuickGuideView: View {
                 shortcut("I", "Add an intention")
                 shortcut("R", "Add a restriction")
                 shortcut("F", "Add friction")
-                shortcut("S", "Save and close an editor")
                 shortcut("X / Delete", "Remove the selected shape")
                 shortcut("Cmd Z", "Undo the last change")
             }
