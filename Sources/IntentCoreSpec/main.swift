@@ -647,6 +647,246 @@ do {
     try expect(!guardStateStore.isEnabled(), "Browser guard state should persist disabled")
     try guardStateStore.write(enabled: true, date: Date(timeIntervalSince1970: 100))
     try expect(guardStateStore.isEnabled(), "Browser guard state should persist enabled")
+
+    // MARK: AI history
+    let historyURL = tempDirectory.appendingPathComponent("ai-history.json")
+    let historyStore = AIHistoryStore(fileURL: historyURL)
+    try expect(historyStore.load().isEmpty, "Missing AI history should start empty")
+
+    var session = AIWorkspaceSession(
+        title: "Emails",
+        messages: [
+            .init(role: .user, content: "Add a timer to @[Emails](emails)"),
+            .init(role: .assistant, content: "Updated @Emails with a 10-minute timer.")
+        ],
+        draft: Intention(
+            id: "emails",
+            name: "Emails",
+            icon: "envelope",
+            colorHex: "#FFFFFF",
+            folder: "",
+            allowedApps: [.init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")],
+            allowedWebsites: [],
+            startupActions: [],
+            restrictions: .init()
+        ),
+        targetIntentionID: "emails",
+        status: .draft
+    )
+    try historyStore.save([session])
+    let loadedHistory = historyStore.load()
+    try expect(loadedHistory.count == 1, "AI history should round-trip")
+    try expect(loadedHistory[0].targetIntentionID == "emails", "AI history should keep the stable intention id")
+    try expect(loadedHistory[0].status == .draft, "AI history should preserve draft status")
+
+    session.status = .applied
+    session.finalisedAt = Date(timeIntervalSince1970: 1_800_000_100)
+    session.touch(at: Date(timeIntervalSince1970: 1_800_000_100))
+    try historyStore.save([session])
+    try expect(historyStore.load()[0].status == .applied, "Applied drafts should remain in history")
+
+    try "not-json".write(to: historyURL, atomically: true, encoding: .utf8)
+    let recovered = AIHistoryStore(fileURL: historyURL).load()
+    try expect(recovered.isEmpty, "Corrupt AI history should recover to an empty list")
+    let backupNames = (try? FileManager.default.contentsOfDirectory(atPath: tempDirectory.path)) ?? []
+    try expect(
+        backupNames.contains { $0.contains("corrupt-") },
+        "Corrupt AI history should be backed up instead of deleting intentions"
+    )
+
+    let mentionIntentions = [
+        Intention(
+            id: "emails",
+            name: "Emails",
+            icon: "envelope",
+            colorHex: "#FFFFFF",
+            folder: "",
+            allowedApps: [],
+            allowedWebsites: [],
+            startupActions: [],
+            restrictions: .init()
+        ),
+        Intention(
+            id: "data-science",
+            name: "Data Science",
+            icon: "function",
+            colorHex: "#FFFFFF",
+            folder: "",
+            allowedApps: [],
+            allowedWebsites: [],
+            startupActions: [],
+            restrictions: .init()
+        )
+    ]
+    let encoded = AIIntentionMentionResolver.encodeMention(displayName: "Emails", intentionID: "emails")
+    try expect(encoded == "@[Emails](emails)", "Mentions should encode a stable intention id")
+    switch AIIntentionMentionResolver.resolvePrimaryTarget(
+        in: "Add a 15-minute timer to \(encoded).",
+        intentions: mentionIntentions
+    ) {
+    case .resolved(let id, let name):
+        try expect(id == "emails" && name == "Emails", "Encoded mentions should resolve by id")
+    default:
+        throw SpecFailure(description: "Encoded mention should resolve")
+    }
+
+    var renamed = mentionIntentions
+    renamed[0].name = "Inbox"
+    switch AIIntentionMentionResolver.resolvePrimaryTarget(
+        in: "Change \(encoded) so it opens WhatsApp too.",
+        intentions: renamed
+    ) {
+    case .resolved(let id, let name):
+        try expect(id == "emails" && name == "Inbox", "Renamed intentions should still resolve by id")
+    default:
+        throw SpecFailure(description: "Renamed intention mention should still resolve")
+    }
+
+    switch AIIntentionMentionResolver.resolvePrimaryTarget(
+        in: "Update @[Gone](missing-id).",
+        intentions: mentionIntentions
+    ) {
+    case .missing(let id, _):
+        try expect(id == "missing-id", "Deleted intentions should surface a missing mention state")
+    default:
+        throw SpecFailure(description: "Missing intention should not resolve to another intention")
+    }
+
+    switch AIIntentionMentionResolver.resolvePrimaryTarget(
+        in: "Update Emails and Data Science together",
+        intentions: mentionIntentions
+    ) {
+    case .ambiguous(let matches):
+        try expect(matches.count == 2, "Ambiguous multi-intention prompts should ask for clarification")
+    default:
+        throw SpecFailure(description: "Ambiguous prompts should not mutate multiple intentions")
+    }
+
+    let typeahead = AIIntentionMentionResolver.typeahead(query: "em", intentions: mentionIntentions)
+    try expect(typeahead.map(\.id) == ["emails"], "@ typeahead should filter intentions case-insensitively")
+
+    let noFrictionPlan = AIIntentionPlan(intentions: [
+        AIIntentionSuggestion(
+            name: "Study",
+            purpose: "Focus",
+            appBundleIdentifiers: ["org.mozilla.firefox"],
+            websites: [],
+            allowBrowserSearches: false,
+            restrictions: [],
+            frictions: []
+        )
+    ]).validated(against: [AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")])
+    try expect(noFrictionPlan.intentions[0].frictions.isEmpty, "Unrequested friction must remain empty")
+    try expect(noFrictionPlan.intentions[0].restrictions.isEmpty, "Unrequested restrictions must remain empty")
+
+    // MARK: Calendar sync
+    let prefsStore = CalendarPreferencesStore(fileURL: tempDirectory.appendingPathComponent("calendar-preferences.json"))
+    try prefsStore.save(CalendarPreferences(appleVisibleCalendarIDs: ["home"]))
+    try expect(prefsStore.load().appleVisibleCalendarIDs == ["home"], "Calendar preferences should round-trip")
+
+    let localOnlySchedule = IntentSchedule(
+        id: "local-1",
+        intentionID: "emails",
+        scheduledAt: scheduleDate
+    )
+    try expect(localOnlySchedule.sync == nil, "Local schedules should work with no providers")
+    try expect(localOnlySchedule.triggerKeyIfDue(at: scheduleDate, calendar: scheduleCalendar) != nil, "Local schedules should still become due")
+
+    let linkedEvent = ExternalCalendarEvent(
+        id: "evt-1",
+        provider: .apple,
+        calendarID: "home",
+        title: "Intent: Emails",
+        startAt: scheduleDate.addingTimeInterval(3_600),
+        linkedScheduleID: "local-1",
+        supportsIntentSync: true,
+        lastModifiedAt: scheduleDate.addingTimeInterval(10)
+    )
+    let unrelatedEvent = ExternalCalendarEvent(
+        id: "evt-2",
+        provider: .google,
+        calendarID: "primary",
+        title: "Dentist",
+        startAt: scheduleDate,
+        supportsIntentSync: false
+    )
+    let coordinator = CalendarSyncCoordinator()
+    try expect(!coordinator.shouldLaunch(from: unrelatedEvent), "Unrelated external events must never trigger intentions")
+    try expect(coordinator.shouldLaunch(from: linkedEvent), "Only linked Intent events may relate to launches")
+
+    var syncedSchedule = localOnlySchedule
+    syncedSchedule.sync = ScheduleSyncMetadata(
+        provider: .apple,
+        calendarID: "home",
+        externalEventID: "evt-1",
+        lastLocalModifiedAt: scheduleDate
+    )
+    let externallyUpdated = coordinator.applyExternalChange(to: syncedSchedule, from: linkedEvent)
+    try expect(externallyUpdated?.scheduledAt == linkedEvent.startAt, "External edits should update linked local schedules")
+
+    let deleted = coordinator.handleExternalDeletion(of: syncedSchedule)
+    try expect(!deleted.isEnabled && deleted.sync == nil, "External deletion should disable/unlink without deleting the intention")
+
+    let fake = FakeCalendarProvider(
+        kind: .google,
+        status: .connected,
+        calendars: [.init(id: "primary", provider: .google, title: "Primary")],
+        events: [linkedEvent, unrelatedEvent, linkedEvent]
+    )
+    let deduped = CalendarSyncMapper.deduplicatedEvents(fake.events)
+    try expect(deduped.count == 2, "Calendar events should deduplicate by provider/calendar/id")
+
+    try expect(
+        CalendarSyncMapper.resolveConflict(
+            localModified: scheduleDate.addingTimeInterval(20),
+            externalModified: scheduleDate.addingTimeInterval(5)
+        ) == .keepLocal,
+        "Newer local edits should win conflicts"
+    )
+    try expect(
+        CalendarSyncMapper.resolveConflict(
+            localModified: scheduleDate,
+            externalModified: scheduleDate.addingTimeInterval(30)
+        ) == .keepExternal,
+        "Newer external edits should win conflicts"
+    )
+
+    let unsupported = ExternalCalendarEvent(
+        id: "month",
+        provider: .google,
+        calendarID: "primary",
+        title: "Monthly review",
+        startAt: scheduleDate,
+        recurrenceSummary: "MONTHLY",
+        supportsIntentSync: false
+    )
+    try expect(!coordinator.shouldLaunch(from: unsupported), "Unsupported recurrence must remain display-only")
+
+    let tokenStore = InMemoryTokenStore()
+    try tokenStore.save(account: "google-calendar", data: Data("token".utf8))
+    let loadedToken = try tokenStore.load(account: "google-calendar")
+    try expect(loadedToken == Data("token".utf8), "Token store abstraction should round-trip")
+    try tokenStore.delete(account: "google-calendar")
+    let clearedToken = try tokenStore.load(account: "google-calendar")
+    try expect(clearedToken == nil, "Token store should clear credentials")
+
+    try expect(
+        CalendarSyncMapper.scheduleID(from: "intent://schedule/local-1") == "local-1",
+        "Intent schedule URLs should map back to local schedule ids"
+    )
+    try expect(
+        CalendarSyncMapper.googlePrivateProperty(scheduleID: "local-1")["intentScheduleId"] == "local-1",
+        "Google private properties should carry the schedule id"
+    )
+
+    let display = coordinator.mergeVisibleEvents(
+        localSchedules: [syncedSchedule],
+        intentionNames: ["emails": "Emails"],
+        externalEvents: [linkedEvent, unrelatedEvent, unsupported]
+    )
+    try expect(display.contains { if case .intentSchedule = $0 { return true }; return false }, "Merged display should keep Intent schedules")
+    try expect(display.contains { if case .external = $0 { return true }; return false }, "Merged display should keep unrelated events")
+
     try? FileManager.default.removeItem(at: tempDirectory)
 
     print("IntentCoreSpec passed")

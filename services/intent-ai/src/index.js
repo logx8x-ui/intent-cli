@@ -93,6 +93,8 @@ Turn the person's request into exactly one specific, reusable intention. An inte
 
 When a current intention is supplied, modify that intention instead of creating a different one. Preserve its name, apps, websites, restrictions, and frictions unless the person's latest request explicitly adds, changes, or removes them. Return the complete updated intention, not a partial patch.
 
+If the request mentions an intention with @Name or includes [intention-id:...], treat that as the single target intention. If more than one intention is clearly referenced and the target is ambiguous, keep the current intention unchanged and leave its fields intact rather than inventing a merge.
+
 Choose only applications from the installed-app catalog supplied by the user. Copy bundle identifiers exactly. Include only apps genuinely needed for the outcome. Suggest narrow website hosts or paths only when a selected installed app is a browser, and assign each website to that browser's exact bundle identifier. Do not invent applications or bundle identifiers. Keep the name short.
 
 Translate explicit requests into connected restrictions. A timer limits the session and a cooldown delays reuse after it ends. Only add allowBrowserSearches when the person explicitly asks to search, browse, Google, look something up, or do research. Never infer browser-search permission merely because a browser or website is needed. Use durationMinutes for timer and coolDown, and use 0 for restrictions without a duration. Use resourceIDs only for dontStartUp and otherwise return an empty array. Keep allowBrowserSearches consistent with the matching restriction.

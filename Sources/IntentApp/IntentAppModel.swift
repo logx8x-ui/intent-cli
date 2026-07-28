@@ -284,14 +284,16 @@ final class IntentAppModel: ObservableObject {
     }
 
     func intentionReferenced(in prompt: String) -> Intention? {
-        intentions
-            .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .sorted { $0.name.count > $1.name.count }
-            .first { intention in
-                let escaped = NSRegularExpression.escapedPattern(for: intention.name)
-                let pattern = "(?<![\\p{L}\\p{N}])\(escaped)(?![\\p{L}\\p{N}])"
-                return prompt.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
-            }
+        switch AIIntentionMentionResolver.resolvePrimaryTarget(in: prompt, intentions: intentions) {
+        case .resolved(let intentionID, _):
+            return intentions.first { $0.id == intentionID }
+        case .missing, .ambiguous, .none:
+            return nil
+        }
+    }
+
+    func resolveAIMention(in prompt: String) -> AIIntentionMention? {
+        AIIntentionMentionResolver.resolvePrimaryTarget(in: prompt, intentions: intentions)
     }
 
     func moveIntentionGroup(id: String, to position: GraphPoint, persist: Bool) {
@@ -466,7 +468,8 @@ final class IntentAppModel: ObservableObject {
         let schedule = IntentSchedule(
             intentionID: intentionID,
             recurrence: .once,
-            scheduledAt: scheduledAt
+            scheduledAt: scheduledAt,
+            lastLocalModifiedAt: Date()
         )
         schedules.append(schedule)
         saveSchedules()
@@ -477,6 +480,11 @@ final class IntentAppModel: ObservableObject {
         guard let index = schedules.firstIndex(where: { $0.id == schedule.id }) else { return }
         var normalized = schedule
         normalized.weekdays = Array(Set(schedule.weekdays)).sorted()
+        normalized.lastLocalModifiedAt = Date()
+        if var sync = normalized.sync {
+            sync.lastLocalModifiedAt = normalized.lastLocalModifiedAt
+            normalized.sync = sync
+        }
         schedules[index] = normalized
         saveSchedules()
     }
@@ -789,12 +797,17 @@ final class IntentAppModel: ObservableObject {
         "com.google.Chrome"
     ]
 
-    private func saveSchedules() {
+    func saveSchedules() {
         do {
             try scheduleStore.save(schedules)
         } catch {
             errorMessage = "Could not save schedules: \(error)"
         }
+    }
+
+    /// Used by calendar sync when an external linked event updates a local schedule.
+    func persistSchedulesFromSync() {
+        saveSchedules()
     }
 
     private func startScheduleTimer() {

@@ -7,11 +7,18 @@ struct AIWorkspaceRequest: Equatable {
     let prompt: String
     let targetIntentionID: String?
     let currentIntention: Intention?
+    let resumeSessionID: String?
 
-    init(prompt: String, targetIntentionID: String? = nil, currentIntention: Intention? = nil) {
+    init(
+        prompt: String,
+        targetIntentionID: String? = nil,
+        currentIntention: Intention? = nil,
+        resumeSessionID: String? = nil
+    ) {
         self.prompt = prompt
         self.targetIntentionID = targetIntentionID
         self.currentIntention = currentIntention
+        self.resumeSessionID = resumeSessionID
     }
 }
 
@@ -22,14 +29,19 @@ struct AIIntentionWorkspaceView: View {
     let onFinalise: (Intention, String?) -> Bool
 
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var history = AIWorkspaceSessionController()
     @State private var draft: Intention?
     @State private var selection: AIDraftSelection?
     @State private var displayedPrompt = ""
+    @State private var assistantSummary = ""
     @State private var prompt = ""
     @State private var isGenerating = false
     @State private var errorMessage: String?
     @State private var handledRequestID: UUID?
     @State private var targetIntentionID: String?
+    @State private var showHistory = false
+    @State private var pendingDeleteID: String?
+    @State private var mentionQuery: String?
     @FocusState private var promptFocused: Bool
 
     private let service = IntentAIService()
@@ -42,6 +54,10 @@ struct AIIntentionWorkspaceView: View {
                     .onTapGesture {
                         NSApp.keyWindow?.makeFirstResponder(nil)
                         selection = nil
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            showHistory = false
+                            mentionQuery = nil
+                        }
                     }
 
                 if isGenerating {
@@ -63,6 +79,32 @@ struct AIIntentionWorkspaceView: View {
                         .padding(.top, 84)
                 }
 
+                if let clarification = history.clarificationMessage {
+                    Text(clarification)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(GraphTheme.text(colorScheme))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 14)
+                        .frame(maxWidth: 420)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 88)
+                }
+
+                historyButton
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.leading, 22)
+                    .padding(.top, 64)
+
+                if showHistory {
+                    historyRail
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.leading, 18)
+                        .padding(.top, 104)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .zIndex(30)
+                }
+
                 bottomComposer
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
 
@@ -78,6 +120,147 @@ struct AIIntentionWorkspaceView: View {
         .task(id: request?.id) {
             generatePendingRequest()
         }
+        .onExitCommand {
+            if showHistory {
+                showHistory = false
+            } else if mentionQuery != nil {
+                mentionQuery = nil
+            }
+        }
+        .confirmationDialog(
+            "Delete this draft history?",
+            isPresented: Binding(
+                get: { pendingDeleteID != nil },
+                set: { if !$0 { pendingDeleteID = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) {
+                if let pendingDeleteID {
+                    history.delete(id: pendingDeleteID)
+                }
+                pendingDeleteID = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeleteID = nil
+            }
+        } message: {
+            Text("The conversation and structured draft will be removed. Your canvas intentions stay as they are.")
+        }
+    }
+
+    private var historyButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) {
+                showHistory.toggle()
+            }
+        } label: {
+            Image(systemName: "clock")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+                .frame(width: 34, height: 34)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 11)
+        .help("Draft history")
+    }
+
+    private var historyRail: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("DRAFTS")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Spacer()
+                Button("New") {
+                    beginNewDraft()
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(GraphTheme.editBlue)
+            }
+
+            if history.sessions.isEmpty {
+                Text("No drafts yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                    .padding(.top, 8)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(history.sessions) { session in
+                            historyRow(session)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 280, height: 360, alignment: .top)
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 16)
+        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 18, y: 8)
+    }
+
+    private func historyRow(_ session: AIWorkspaceSession) -> some View {
+        let selected = history.activeSessionID == session.id
+        return Button {
+            resume(session)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                appPreview(for: session.draft)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(session.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                        .foregroundStyle(GraphTheme.text(colorScheme))
+                    Text(session.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                    Text(session.status == .applied ? "Applied" : "Draft")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(session.status == .applied
+                            ? Color(red: 0.32, green: 0.72, blue: 0.42)
+                            : GraphTheme.editBlue)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    pendingDeleteID = session.id
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(10)
+            .background(
+                selected ? GraphTheme.elevatedSurface(colorScheme) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func appPreview(for intention: Intention?) -> some View {
+        let apps = Array((intention?.allowedApps ?? []).prefix(3))
+        return ZStack {
+            ForEach(Array(apps.enumerated()), id: \.offset) { index, app in
+                if let installed = catalog.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+                    Image(nsImage: installed.icon)
+                        .resizable()
+                        .frame(width: 16, height: 16)
+                        .offset(x: CGFloat(index) * 8)
+                } else {
+                    Image(systemName: "app")
+                        .font(.system(size: 10))
+                        .frame(width: 16, height: 16)
+                        .offset(x: CGFloat(index) * 8)
+                }
+            }
+        }
+        .frame(width: 36, height: 18, alignment: .leading)
     }
 
     private var emptyView: some View {
@@ -87,7 +270,7 @@ struct AIIntentionWorkspaceView: View {
                 .foregroundStyle(GraphTheme.editBlue)
             Text("What intention would you like to build today?")
                 .font(.system(size: 24, weight: .medium))
-            Text("Describe one outcome. Intent will draft the apps, websites, restrictions, and friction around it.")
+            Text("Describe one outcome, or type @ to revise an existing intention.")
                 .font(.system(size: 12))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
                 .multilineTextAlignment(.center)
@@ -118,7 +301,7 @@ struct AIIntentionWorkspaceView: View {
         return ZStack {
             VStack(spacing: 14) {
                 if !displayedPrompt.isEmpty {
-                    Text(displayedPrompt)
+                    Text(AIIntentionMentionResolver.displayText(for: displayedPrompt, intentions: existingIntentions))
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(GraphTheme.text(colorScheme))
                         .multilineTextAlignment(.leading)
@@ -129,6 +312,20 @@ struct AIIntentionWorkspaceView: View {
                         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 20))
                         .overlay(RoundedRectangle(cornerRadius: 20).stroke(GraphTheme.stroke(colorScheme)))
                         .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 12, y: 6)
+                }
+
+                if !assistantSummary.isEmpty {
+                    Text(assistantSummary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                        .frame(maxWidth: min(620, boardWidth * 0.72), alignment: .leading)
+                }
+
+                if let targetIntentionID,
+                   existingIntentions.first(where: { $0.id == targetIntentionID }) == nil {
+                    Label("Intention no longer exists", systemImage: "info.circle")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
                 }
 
                 draftWhiteboard(
@@ -294,6 +491,7 @@ struct AIIntentionWorkspaceView: View {
                 onDelete: {
                     draft = nil
                     selection = nil
+                    history.recordDraftEdit(nil)
                 },
                 onAddRestriction: addRestriction,
                 onAddFriction: addFriction
@@ -307,6 +505,7 @@ struct AIIntentionWorkspaceView: View {
                     onDelete: {
                         draft?.restrictionNodes.removeAll { $0.id == id }
                         selection = nil
+                        history.recordDraftEdit(draft)
                     }
                 )
             }
@@ -317,6 +516,7 @@ struct AIIntentionWorkspaceView: View {
                     onDelete: {
                         draft?.frictionNodes.removeAll { $0.id == id }
                         selection = nil
+                        history.recordDraftEdit(draft)
                     }
                 )
             }
@@ -324,42 +524,82 @@ struct AIIntentionWorkspaceView: View {
     }
 
     private var bottomComposer: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "plus")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(GraphTheme.muted(colorScheme))
-            TextField(draft == nil ? "What intention would you like to build today?" : "Add or change something in this intention", text: $prompt)
+        VStack(spacing: 8) {
+            if let mentionQuery {
+                mentionTypeahead(query: mentionQuery)
+            }
+
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                TextField(
+                    draft == nil
+                        ? "What intention would you like to build today?"
+                        : "Add or change something — type @ to target an intention",
+                    text: $prompt
+                )
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .focused($promptFocused)
                 .onSubmit(submitPrompt)
-            if isGenerating {
-                ProgressView().controlSize(.small)
-            } else {
-                Button(action: submitPrompt) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
-                        .frame(width: 28, height: 28)
-                        .background(
-                            prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? GraphTheme.muted(colorScheme).opacity(0.35)
-                                : GraphTheme.text(colorScheme),
-                            in: Circle()
-                        )
+                .onChange(of: prompt) { value in
+                    mentionQuery = AIIntentionMentionResolver.extractAtQuery(from: value)
                 }
-                .buttonStyle(.plain)
-                .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if isGenerating {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button(action: submitPrompt) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    ? GraphTheme.muted(colorScheme).opacity(0.35)
+                                    : GraphTheme.text(colorScheme),
+                                in: Circle()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
+            .padding(.leading, 16)
+            .padding(.trailing, 8)
+            .frame(maxWidth: 650)
+            .frame(height: 48)
+            .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
+            .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 16, y: 8)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 8)
-        .frame(maxWidth: 650)
-        .frame(height: 48)
-        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
-        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 16, y: 8)
         .padding(.horizontal, 170)
         .padding(.bottom, 18)
+    }
+
+    private func mentionTypeahead(query: String) -> some View {
+        let matches = AIIntentionMentionResolver.typeahead(query: query, intentions: existingIntentions).prefix(6)
+        return VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(matches)) { intention in
+                Button {
+                    insertMention(intention)
+                } label: {
+                    HStack(spacing: 10) {
+                        appPreview(for: intention)
+                        Text(intention.name)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(GraphTheme.text(colorScheme))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: 420, alignment: .leading)
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 14)
     }
 
     private var finaliseButton: some View {
@@ -370,15 +610,23 @@ struct AIIntentionWorkspaceView: View {
                 errorMessage = "Name the intention and choose at least one app."
                 return
             }
+            if let targetIntentionID,
+               existingIntentions.first(where: { $0.id == targetIntentionID }) == nil {
+                errorMessage = "That intention no longer exists. Start a new draft or choose another @ mention."
+                return
+            }
             let finalDraft = draft
             let finalTargetID = targetIntentionID
             NSApp.keyWindow?.makeFirstResponder(nil)
             selection = nil
             if onFinalise(finalDraft, finalTargetID) {
+                history.markFinalised(draft: finalDraft, targetIntentionID: finalTargetID)
                 self.draft = nil
                 targetIntentionID = nil
                 displayedPrompt = ""
+                assistantSummary = ""
                 errorMessage = nil
+                history.startNewDraft()
             }
         } label: {
             Label("Finalise", systemImage: "cursorarrow.click.2")
@@ -396,7 +644,10 @@ struct AIIntentionWorkspaceView: View {
     private var draftBinding: Binding<Intention> {
         Binding(
             get: { draft ?? Self.emptyDraft },
-            set: { draft = $0 }
+            set: {
+                draft = $0
+                history.recordDraftEdit($0)
+            }
         )
     }
 
@@ -409,6 +660,7 @@ struct AIIntentionWorkspaceView: View {
             set: { updated in
                 guard let index = draft?.restrictionNodes.firstIndex(where: { $0.id == id }) else { return }
                 draft?.restrictionNodes[index] = updated
+                history.recordDraftEdit(draft)
             }
         )
     }
@@ -422,6 +674,7 @@ struct AIIntentionWorkspaceView: View {
             set: { updated in
                 guard let index = draft?.frictionNodes.firstIndex(where: { $0.id == id }) else { return }
                 draft?.frictionNodes[index] = updated
+                history.recordDraftEdit(draft)
             }
         )
     }
@@ -435,6 +688,7 @@ struct AIIntentionWorkspaceView: View {
         )
         draft?.restrictionNodes.append(node)
         selection = .restriction(node.id)
+        history.recordDraftEdit(draft)
     }
 
     private func addFriction() {
@@ -446,6 +700,44 @@ struct AIIntentionWorkspaceView: View {
         )
         draft?.frictionNodes.append(node)
         selection = .friction(node.id)
+        history.recordDraftEdit(draft)
+    }
+
+    private func insertMention(_ intention: Intention) {
+        guard let atIndex = prompt.lastIndex(of: "@") else { return }
+        let prefix = prompt[..<atIndex]
+        let token = AIIntentionMentionResolver.encodeMention(
+            displayName: intention.name,
+            intentionID: intention.id
+        )
+        prompt = prefix + token + " "
+        mentionQuery = nil
+        targetIntentionID = intention.id
+        draft = intention
+        history.recordTargetChange(intention.id)
+        history.recordDraftEdit(intention)
+    }
+
+    private func beginNewDraft() {
+        history.startNewDraft()
+        draft = nil
+        targetIntentionID = nil
+        displayedPrompt = ""
+        assistantSummary = ""
+        selection = nil
+        errorMessage = nil
+        showHistory = false
+    }
+
+    private func resume(_ session: AIWorkspaceSession) {
+        history.resume(id: session.id)
+        draft = session.draft
+        targetIntentionID = session.targetIntentionID
+        displayedPrompt = session.messages.last(where: { $0.role == .user })?.content ?? ""
+        assistantSummary = session.messages.last(where: { $0.role == .assistant })?.content ?? ""
+        selection = nil
+        errorMessage = nil
+        showHistory = false
     }
 
     private func submitPrompt() {
@@ -453,31 +745,44 @@ struct AIIntentionWorkspaceView: View {
         guard !value.isEmpty, !isGenerating else { return }
         prompt = ""
         promptFocused = false
-        if let referenced = intentionReferenced(in: value) {
-            draft = referenced
-            targetIntentionID = referenced.id
-        }
-        generate(value)
-    }
+        mentionQuery = nil
 
-    private func intentionReferenced(in prompt: String) -> Intention? {
-        existingIntentions
-            .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .sorted { $0.name.count > $1.name.count }
-            .first { intention in
-                let escaped = NSRegularExpression.escapedPattern(for: intention.name)
-                let pattern = "(?<![\\p{L}\\p{N}])\(escaped)(?![\\p{L}\\p{N}])"
-                return prompt.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
-            }
+        let resolution = history.resolveTarget(
+            for: value,
+            intentions: existingIntentions,
+            currentTarget: targetIntentionID
+        )
+        if resolution.blocked {
+            return
+        }
+        if let intention = resolution.intention {
+            draft = intention
+            targetIntentionID = resolution.targetID
+        } else if resolution.targetID == nil, targetIntentionID != nil,
+                  existingIntentions.first(where: { $0.id == targetIntentionID }) == nil {
+            targetIntentionID = nil
+        }
+
+        history.recordUserPrompt(value, draft: draft, targetIntentionID: targetIntentionID)
+        generate(value)
     }
 
     private func generatePendingRequest() {
         guard let request, handledRequestID != request.id else { return }
         handledRequestID = request.id
+        if let resumeSessionID = request.resumeSessionID,
+           let session = history.sessions.first(where: { $0.id == resumeSessionID }) {
+            resume(session)
+            return
+        }
+        _ = history.ensureActiveSession()
         targetIntentionID = request.targetIntentionID
         if let currentIntention = request.currentIntention {
             draft = currentIntention
+            history.recordDraftEdit(currentIntention)
+            history.recordTargetChange(request.targetIntentionID)
         }
+        history.recordUserPrompt(request.prompt, draft: draft, targetIntentionID: targetIntentionID)
         generate(request.prompt)
     }
 
@@ -485,6 +790,10 @@ struct AIIntentionWorkspaceView: View {
         let installedApps = catalog.map {
             AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
         }
+        let aiPrompt = AIIntentionMentionResolver.promptForAI(
+            stored: description,
+            intentions: existingIntentions
+        )
         displayedPrompt = description
         errorMessage = nil
         isGenerating = true
@@ -493,7 +802,7 @@ struct AIIntentionWorkspaceView: View {
         Task {
             do {
                 let plan = try await service.generate(
-                    description: description,
+                    description: aiPrompt,
                     installedApps: installedApps,
                     currentIntention: draft
                 ).validated(against: installedApps)
@@ -507,9 +816,23 @@ struct AIIntentionWorkspaceView: View {
                     intention.colorHex = current.colorHex
                     intention.graphPosition = current.graphPosition
                 }
+                let summary = Self.summary(
+                    for: suggestion,
+                    targetName: existingIntentions.first { $0.id == targetIntentionID }?.name
+                        ?? suggestion.name,
+                    isUpdate: targetIntentionID != nil
+                )
                 let updatedIntention = intention
                 await MainActor.run {
-                    withAnimation(.easeOut(duration: 0.24)) { draft = updatedIntention }
+                    withAnimation(.easeOut(duration: 0.24)) {
+                        draft = updatedIntention
+                        assistantSummary = summary
+                    }
+                    history.recordAssistantResult(
+                        summary: summary,
+                        draft: updatedIntention,
+                        targetIntentionID: targetIntentionID
+                    )
                     isGenerating = false
                 }
             } catch {
@@ -521,6 +844,23 @@ struct AIIntentionWorkspaceView: View {
                 }
             }
         }
+    }
+
+    private static func summary(
+        for suggestion: AIIntentionSuggestion,
+        targetName: String,
+        isUpdate: Bool
+    ) -> String {
+        if isUpdate {
+            if let timer = suggestion.restrictions.first(where: { $0.kind == .timer }) {
+                return "Updated @\(targetName) with a \(timer.durationMinutes)-minute timer."
+            }
+            if suggestion.frictions.contains(where: { $0.kind == .typedPhrase }) {
+                return "Updated @\(targetName) with a typed phrase friction."
+            }
+            return "Updated @\(targetName)."
+        }
+        return "Drafted \(suggestion.name)."
     }
 
     private static func makeDraft(

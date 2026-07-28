@@ -50,6 +50,8 @@ public struct IntentSchedule: Identifiable, Codable, Equatable {
     public var weekdays: [Int]
     public var isEnabled: Bool
     public var lastTriggeredKey: String?
+    public var sync: ScheduleSyncMetadata?
+    public var lastLocalModifiedAt: Date?
 
     public init(
         id: String = UUID().uuidString,
@@ -58,7 +60,9 @@ public struct IntentSchedule: Identifiable, Codable, Equatable {
         scheduledAt: Date,
         weekdays: [Int] = [],
         isEnabled: Bool = true,
-        lastTriggeredKey: String? = nil
+        lastTriggeredKey: String? = nil,
+        sync: ScheduleSyncMetadata? = nil,
+        lastLocalModifiedAt: Date? = nil
     ) {
         self.id = id
         self.intentionID = intentionID
@@ -67,7 +71,29 @@ public struct IntentSchedule: Identifiable, Codable, Equatable {
         self.weekdays = Array(Set(weekdays)).sorted()
         self.isEnabled = isEnabled
         self.lastTriggeredKey = lastTriggeredKey
+        self.sync = sync
+        self.lastLocalModifiedAt = lastLocalModifiedAt
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, intentionID, recurrence, scheduledAt, weekdays
+        case isEnabled, lastTriggeredKey, sync, lastLocalModifiedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        intentionID = try container.decode(String.self, forKey: .intentionID)
+        recurrence = try container.decode(ScheduleRecurrence.self, forKey: .recurrence)
+        scheduledAt = try container.decode(Date.self, forKey: .scheduledAt)
+        weekdays = Array(Set(try container.decodeIfPresent([Int].self, forKey: .weekdays) ?? [])).sorted()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        lastTriggeredKey = try container.decodeIfPresent(String.self, forKey: .lastTriggeredKey)
+        sync = try container.decodeIfPresent(ScheduleSyncMetadata.self, forKey: .sync)
+        lastLocalModifiedAt = try container.decodeIfPresent(Date.self, forKey: .lastLocalModifiedAt)
+    }
+
+    public var isSynced: Bool { sync != nil }
 
     public func occurs(on date: Date, calendar: Calendar = .current) -> Bool {
         guard isEnabled else { return false }

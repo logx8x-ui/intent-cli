@@ -148,17 +148,22 @@ final class IntentRuntime {
     static let shared = IntentRuntime()
 
     let model: IntentAppModel
+    let calendarSync: CalendarSyncManager
     private let overlayController: OverlayWindowController
     private var hotKeyManager: GlobalHotKeyManager?
     private var showOverlayObserver: NSObjectProtocol?
+    private var becomeActiveObserver: NSObjectProtocol?
     private var hasStarted = false
 
     init() {
         let model = IntentAppModel()
-        let controller = OverlayWindowController(model: model)
+        let calendarSync = CalendarSyncManager(model: model)
+        calendarSync.attach(model: model)
+        let controller = OverlayWindowController(model: model, calendarSync: calendarSync)
         model.overlayPresenter = controller
 
         self.model = model
+        self.calendarSync = calendarSync
         overlayController = controller
     }
 
@@ -181,6 +186,15 @@ final class IntentRuntime {
         ) { _ in
             DispatchQueue.main.async {
                 IntentRuntime.shared.model.showOverlay()
+            }
+        }
+        becomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                IntentRuntime.shared.calendarSync.appBecameActive()
             }
         }
 

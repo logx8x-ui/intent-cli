@@ -5,6 +5,7 @@ import IntentCore
 @MainActor
 final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private let model: IntentAppModel
+    private let calendarSync: CalendarSyncManager
     private var panel: NSPanel?
     private var sessionTimerPanel: NSPanel?
     private var sessionTimerName = ""
@@ -13,8 +14,9 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
 
-    init(model: IntentAppModel) {
+    init(model: IntentAppModel, calendarSync: CalendarSyncManager) {
         self.model = model
+        self.calendarSync = calendarSync
     }
 
     func toggleOverlay() {
@@ -127,6 +129,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         panel.contentViewController = NSHostingController(
             rootView: IntentGraphView()
                 .environmentObject(model)
+                .environmentObject(calendarSync)
         )
         return panel
     }

@@ -4,6 +4,7 @@ import IntentCore
 
 struct IntentGraphView: View {
     @EnvironmentObject private var model: IntentAppModel
+    @EnvironmentObject private var calendarSync: CalendarSyncManager
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var updateManager = IntentUpdateManager.shared
     @AppStorage("intentAppearance") private var appearance = "dark"
@@ -84,6 +85,7 @@ struct IntentGraphView: View {
 
                     IntentSchedulerView()
                         .environmentObject(model)
+                        .environmentObject(calendarSync)
                         .frame(width: viewportSize.width, height: viewportSize.height)
                 }
                 .frame(width: viewportSize.width, height: viewportSize.height, alignment: .leading)

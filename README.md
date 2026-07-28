@@ -67,7 +67,13 @@ New installs open to a blank canvas with **Welcome to my desktop** and a short g
 
 The AI prompt bar at the bottom asks what intention you want to build, moves to a dedicated AI draft workspace, and creates one editable intention with the requested apps, websites, restrictions, and friction. Choose **Finalise**, then click the main canvas to place it. Manual creation with `I` still works exactly as before.
 
-No API key is required. Intent sends the description you submit plus installed app names and bundle identifiers to its hosted AI service. Generated apps and sites are checked locally before import, and nothing starts until you review and finalise the draft.
+Draft history is saved locally under `~/.intent/ai-history.json`. Open the clock control in the AI workspace to resume or delete drafts. Type `@` to mention an existing intention by stable id so Finalise updates that intention in place.
+
+No API key is required. Intent sends the description you submit plus installed app names and bundle identifiers to its hosted AI service. Generated apps and sites are checked locally before import, and nothing starts until you review and finalise the draft. Calendar contents are never included in AI requests.
+
+### Scheduler and calendars
+
+The scheduler page keeps local Intent schedules in `~/.intent/schedules.json` and can start intentions when they become due. Optional Apple Calendar and Google Calendar connections appear under **Calendars** in the scheduler header. Local scheduling always works without an account, permission, or network. See [Google Calendar setup](docs/GOOGLE_CALENDAR.md) for the optional OAuth client ID.
 
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
 

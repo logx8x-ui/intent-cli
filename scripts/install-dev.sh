@@ -59,9 +59,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>Intent</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.8.5</string>
+  <string>0.9.0</string>
   <key>CFBundleVersion</key>
-  <string>27</string>
+  <string>28</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -70,6 +70,25 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Intent can show your calendars beside local schedules and optionally mirror linked Intent sessions. Calendar access is requested only when you choose Connect.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Intent can show your calendars beside local schedules and optionally mirror linked Intent sessions. Calendar access is requested only when you choose Connect.</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>dev.loganmondi.intent.oauth</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>intent</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
