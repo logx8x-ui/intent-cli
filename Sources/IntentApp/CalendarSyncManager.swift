@@ -18,6 +18,7 @@ final class CalendarSyncManager: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var backgroundTimer: Timer?
     private weak var model: IntentAppModel?
+    private var visibleInterval = CalendarSyncManager.defaultVisibleInterval()
 
     init(
         preferencesStore: CalendarPreferencesStore = CalendarPreferencesStore(),
@@ -53,24 +54,41 @@ final class CalendarSyncManager: ObservableObject {
         self.model = model
     }
 
-    func appear() {
+    func appear(visibleInterval: DateInterval? = nil) {
+        if let visibleInterval {
+            self.visibleInterval = visibleInterval
+        }
         publishStates()
         Task { await refresh(reason: .appear) }
         startBackgroundRefresh()
+    }
+
+    func updateVisibleInterval(_ interval: DateInterval) {
+        guard abs(interval.start.timeIntervalSince(visibleInterval.start)) > 1
+            || abs(interval.end.timeIntervalSince(visibleInterval.end)) > 1 else {
+            return
+        }
+        visibleInterval = interval
+        Task { await refresh(reason: .manual) }
     }
 
     func appBecameActive() {
         Task { await refresh(reason: .active) }
     }
 
-    func connectApple() async {
+    @discardableResult
+    func connectApple() async -> Bool {
+        appleState.status = .connecting
+        appleState.message = nil
         do {
             try await appleProvider.connect()
             publishStates()
             await refresh(reason: .manual)
+            return appleState.isConnected
         } catch {
             publishStates()
             syncStatusMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -80,14 +98,19 @@ final class CalendarSyncManager: ObservableObject {
         await refresh(reason: .manual)
     }
 
-    func connectGoogle() async {
+    @discardableResult
+    func connectGoogle() async -> Bool {
+        googleState.status = .connecting
+        googleState.message = nil
         do {
             try await googleProvider.connect()
             publishStates()
             await refresh(reason: .manual)
+            return googleState.isConnected
         } catch {
             publishStates()
             syncStatusMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -130,9 +153,9 @@ final class CalendarSyncManager: ObservableObject {
         }
     }
 
-    func syncSchedule(_ schedule: IntentSchedule, intentionName: String) async -> IntentSchedule {
+    func syncSchedule(_ schedule: IntentSchedule, intentionName: String) async -> IntentSchedule? {
         guard let syncTarget = schedule.sync?.provider ?? preferredWriteProvider() else {
-            return schedule
+            return nil
         }
         do {
             let metadata: ScheduleSyncMetadata
@@ -142,7 +165,7 @@ final class CalendarSyncManager: ObservableObject {
             case .google:
                 metadata = try await googleProvider.upsertLinkedEvent(for: schedule, intentionName: intentionName)
             case .local:
-                return schedule
+                return nil
             }
             var updated = schedule
             updated.sync = metadata
@@ -151,7 +174,7 @@ final class CalendarSyncManager: ObservableObject {
             return updated
         } catch {
             syncStatusMessage = error.localizedDescription
-            return schedule
+            return nil
         }
     }
 
@@ -196,24 +219,40 @@ final class CalendarSyncManager: ObservableObject {
         refreshTask?.cancel()
         let task = Task { @MainActor in
             publishStates()
-            let interval = DateInterval(
-                start: Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date(),
-                end: Calendar.current.date(byAdding: .day, value: 21, to: Date()) ?? Date()
-            )
+            let interval = visibleInterval
             var collected: [ExternalCalendarEvent] = []
+            var errors: [String] = []
             if appleProvider.connectionState.isConnected {
-                if let events = try? await appleProvider.fetchEvents(from: interval.start, to: interval.end) {
+                do {
+                    try await appleProvider.refreshCalendars()
+                    guard !Task.isCancelled else { return }
+                    let events = try await appleProvider.fetchEvents(from: interval.start, to: interval.end)
+                    guard !Task.isCancelled else { return }
                     collected.append(contentsOf: events)
+                } catch {
+                    collected.append(contentsOf: externalEvents.filter { $0.provider == .apple })
+                    errors.append("Apple Calendar could not refresh.")
                 }
             }
             if googleProvider.connectionState.isConnected {
-                if let events = try? await googleProvider.fetchEvents(from: interval.start, to: interval.end) {
+                do {
+                    try await googleProvider.refreshCalendars()
+                    guard !Task.isCancelled else { return }
+                    let events = try await googleProvider.fetchEvents(from: interval.start, to: interval.end)
+                    guard !Task.isCancelled else { return }
                     collected.append(contentsOf: events)
+                } catch {
+                    collected.append(contentsOf: externalEvents.filter { $0.provider == .google })
+                    errors.append("Google Calendar could not refresh.")
                 }
             }
+            guard !Task.isCancelled else { return }
+            publishStates()
             externalEvents = CalendarSyncMapper.deduplicatedEvents(collected)
             await applyInboundSync()
-            if reason != .background {
+            if !errors.isEmpty {
+                syncStatusMessage = errors.joined(separator: " ")
+            } else if reason != .background {
                 syncStatusMessage = nil
             }
         }
@@ -234,15 +273,6 @@ final class CalendarSyncManager: ObservableObject {
                     model.schedules[index] = updated
                     changed = true
                     syncStatusMessage = "Updated a linked schedule from \(sync.provider.displayName)."
-                }
-            } else if sync.unlinkOnExternalDelete {
-                // Only unlink when provider is connected; offline should not wipe links.
-                let providerConnected = (sync.provider == .apple && appleState.isConnected)
-                    || (sync.provider == .google && googleState.isConnected)
-                if providerConnected {
-                    model.schedules[index] = coordinator.handleExternalDeletion(of: model.schedules[index])
-                    changed = true
-                    syncStatusMessage = "A linked calendar event was removed. The local schedule was disabled."
                 }
             }
         }
@@ -272,6 +302,19 @@ final class CalendarSyncManager: ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         backgroundTimer = timer
+    }
+
+    private static func defaultVisibleInterval(
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> DateInterval {
+        var mondayCalendar = calendar
+        mondayCalendar.firstWeekday = 2
+        let week = mondayCalendar.dateInterval(of: .weekOfYear, for: now)
+        let start = week?.start ?? mondayCalendar.startOfDay(for: now)
+        let end = mondayCalendar.date(byAdding: .day, value: 7, to: start)
+            ?? now.addingTimeInterval(7 * 24 * 60 * 60)
+        return DateInterval(start: start, end: end)
     }
 }
 

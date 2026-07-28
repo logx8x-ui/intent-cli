@@ -1,21 +1,19 @@
 import AppKit
-import AuthenticationServices
 import CryptoKit
 import Foundation
 import IntentCore
+import Network
 
 struct GoogleCalendarConfiguration: Equatable {
     var clientID: String
-    var redirectURI: String
 
-    static let redirectURI = "intent://oauth/google"
     private static let configResourceName = "GoogleCalendarConfig"
 
     static func load() -> GoogleCalendarConfiguration? {
         if let env = ProcessInfo.processInfo.environment["INTENT_GOOGLE_CLIENT_ID"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !env.isEmpty {
-            return .init(clientID: env, redirectURI: redirectURI)
+            return .init(clientID: env)
         }
 
         let resourceURLs = [
@@ -30,14 +28,14 @@ struct GoogleCalendarConfiguration: Equatable {
                let clientID = plist["CLIENT_ID"] as? String,
                !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                !clientID.contains("YOUR_") {
-                return .init(clientID: clientID, redirectURI: redirectURI)
+                return .init(clientID: clientID)
             }
             if url.pathExtension == "json",
                let data = try? Data(contentsOf: url),
                let object = try? JSONDecoder().decode(GoogleConfigFile.self, from: data),
                !object.clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                !object.clientID.contains("YOUR_") {
-                return .init(clientID: object.clientID, redirectURI: object.redirectURI ?? redirectURI)
+                return .init(clientID: object.clientID)
             }
         }
         return nil
@@ -65,7 +63,7 @@ private struct GoogleConfigFile: Decodable {
 }
 
 @MainActor
-final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticationPresentationContextProviding {
+final class GoogleCalendarProvider: CalendarProvider {
     let kind: CalendarProviderKind = .google
     private(set) var connectionState: CalendarConnectionState
 
@@ -74,10 +72,8 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
     private var preferences: CalendarPreferences
     private let onPreferencesChange: (CalendarPreferences) -> Void
     private let configuration: GoogleCalendarConfiguration?
-    private var authSession: ASWebAuthenticationSession?
 
     private let calendarScope = "https://www.googleapis.com/auth/calendar"
-    private let tasksScope = "https://www.googleapis.com/auth/tasks.readonly"
 
     init(
         preferences: CalendarPreferences,
@@ -92,8 +88,6 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
         self.session = session
         self.configuration = configuration
         self.connectionState = CalendarConnectionState(provider: .google)
-
-        super.init()
 
         if configuration == nil {
             connectionState.status = .configurationMissing
@@ -112,62 +106,65 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
         }
 
         connectionState.status = .connecting
-        let verifier = Self.makeCodeVerifier()
-        let challenge = Self.makeCodeChallenge(verifier)
-        let state = UUID().uuidString
-
-        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
-        components.queryItems = [
-            .init(name: "client_id", value: configuration.clientID),
-            .init(name: "redirect_uri", value: configuration.redirectURI),
-            .init(name: "response_type", value: "code"),
-            .init(name: "scope", value: "\(calendarScope) \(tasksScope)"),
-            .init(name: "access_type", value: "offline"),
-            .init(name: "prompt", value: "consent"),
-            .init(name: "code_challenge", value: challenge),
-            .init(name: "code_challenge_method", value: "S256"),
-            .init(name: "state", value: state)
-        ]
-
-        guard let authURL = components.url else {
-            throw CalendarProviderError.underlying("Could not start Google sign-in.")
-        }
-
-        let callbackURL: URL = try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: authURL,
-                callbackURLScheme: "intent"
-            ) { url, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard let url else {
-                    continuation.resume(throwing: CalendarProviderError.underlying("Google sign-in was cancelled."))
-                    return
-                }
-                continuation.resume(returning: url)
-            }
-            session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = false
-            self.authSession = session
-            if !session.start() {
-                continuation.resume(throwing: CalendarProviderError.underlying("Could not open the system browser."))
-            }
-        }
-
-        let items = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let returnedState = items.first(where: { $0.name == "state" })?.value
-        guard returnedState == state,
-              let code = items.first(where: { $0.name == "code" })?.value else {
-            throw CalendarProviderError.underlying("Google sign-in returned an invalid response.")
-        }
-
-        let tokens = try await exchangeCode(code, verifier: verifier, configuration: configuration)
-        try tokenVault.save(tokens)
-        connectionState.status = .connected
         connectionState.message = nil
-        try await refreshCalendars()
+
+        do {
+            let receiver = try OAuthLoopbackReceiver()
+            let redirectURL = try await receiver.start()
+            defer { receiver.cancel() }
+
+            let verifier = Self.makeCodeVerifier()
+            let challenge = Self.makeCodeChallenge(verifier)
+            let state = UUID().uuidString
+
+            var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+            components.queryItems = [
+                .init(name: "client_id", value: configuration.clientID),
+                .init(name: "redirect_uri", value: redirectURL.absoluteString),
+                .init(name: "response_type", value: "code"),
+                .init(name: "scope", value: calendarScope),
+                .init(name: "access_type", value: "offline"),
+                .init(name: "prompt", value: "consent"),
+                .init(name: "code_challenge", value: challenge),
+                .init(name: "code_challenge_method", value: "S256"),
+                .init(name: "state", value: state)
+            ]
+
+            guard let authURL = components.url, NSWorkspace.shared.open(authURL) else {
+                throw CalendarProviderError.underlying("Could not open Google sign-in.")
+            }
+
+            let callbackURL = try await receiver.waitForCallback()
+            let items = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if let returnedError = items.first(where: { $0.name == "error" })?.value {
+                throw CalendarProviderError.underlying(
+                    returnedError == "access_denied"
+                        ? "Google Calendar permission was not granted."
+                        : "Google sign-in could not finish."
+                )
+            }
+            let returnedState = items.first(where: { $0.name == "state" })?.value
+            guard returnedState == state,
+                  let code = items.first(where: { $0.name == "code" })?.value else {
+                throw CalendarProviderError.underlying("Google sign-in returned an invalid response.")
+            }
+
+            let tokens = try await exchangeCode(
+                code,
+                verifier: verifier,
+                redirectURI: redirectURL.absoluteString,
+                configuration: configuration
+            )
+            try tokenVault.save(tokens)
+            connectionState.status = .connected
+            connectionState.message = nil
+            try await refreshCalendars()
+            NSApp.activate(ignoringOtherApps: true)
+        } catch {
+            connectionState.status = .error
+            connectionState.message = error.localizedDescription
+            throw error
+        }
     }
 
     func disconnect() async {
@@ -357,12 +354,6 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
         }
     }
 
-    nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        MainActor.assumeIsolated {
-            NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
-        }
-    }
-
     private func fetchTasks(accessToken: String, from start: Date, to end: Date) async throws -> [ExternalCalendarEvent] {
         var components = URLComponents(string: "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks")!
         components.queryItems = [
@@ -409,6 +400,7 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
     private func exchangeCode(
         _ code: String,
         verifier: String,
+        redirectURI: String,
         configuration: GoogleCalendarConfiguration
     ) async throws -> OAuthTokenSet {
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
@@ -417,14 +409,11 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
         let body = [
             "code": code,
             "client_id": configuration.clientID,
-            "redirect_uri": configuration.redirectURI,
+            "redirect_uri": redirectURI,
             "grant_type": "authorization_code",
             "code_verifier": verifier
         ]
-        request.httpBody = body
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }
-            .joined(separator: "&")
-            .data(using: .utf8)
+        request.httpBody = Self.formEncoded(body)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw CalendarProviderError.underlying("Google token exchange failed.")
@@ -451,10 +440,7 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
             "refresh_token": refreshToken,
             "grant_type": "refresh_token"
         ]
-        request.httpBody = body
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }
-            .joined(separator: "&")
-            .data(using: .utf8)
+        request.httpBody = Self.formEncoded(body)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             connectionState.status = .offline
@@ -475,7 +461,7 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/revoke")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = "token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? token)".data(using: .utf8)
+        request.httpBody = Self.formEncoded(["token": token])
         _ = try? await session.data(for: request)
     }
 
@@ -501,6 +487,200 @@ final class GoogleCalendarProvider: NSObject, CalendarProvider, ASWebAuthenticat
     private static func makeCodeChallenge(_ verifier: String) -> String {
         let digest = SHA256.hash(data: Data(verifier.utf8))
         return Data(digest).base64URLEncodedString()
+    }
+
+    private static func formEncoded(_ values: [String: String]) -> Data? {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return values
+            .sorted { $0.key < $1.key }
+            .map { key, value in
+                let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+                return "\(encodedKey)=\(encodedValue)"
+            }
+            .joined(separator: "&")
+            .data(using: .utf8)
+    }
+}
+
+@MainActor
+private final class OAuthLoopbackReceiver: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "com.intent.google-oauth-loopback")
+    private var startContinuation: CheckedContinuation<URL, Error>?
+    private var callbackContinuation: CheckedContinuation<URL, Error>?
+    private var pendingCallback: Result<URL, Error>?
+    private var redirectURL: URL?
+    private var timeoutTask: Task<Void, Never>?
+
+    init() throws {
+        let parameters = NWParameters.tcp
+        guard let port = NWEndpoint.Port(rawValue: 0) else {
+            throw CalendarProviderError.underlying("Could not reserve a Google sign-in callback.")
+        }
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        listener = try NWListener(using: parameters)
+    }
+
+    func start() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            startContinuation = continuation
+            let receiver = self
+            listener.stateUpdateHandler = { state in
+                Task { @MainActor in
+                    receiver.handleListenerState(state)
+                }
+            }
+            listener.newConnectionHandler = { connection in
+                Task { @MainActor in
+                    receiver.handle(connection)
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func waitForCallback() async throws -> URL {
+        if let pendingCallback {
+            self.pendingCallback = nil
+            return try pendingCallback.get()
+        }
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.completeCallback(.failure(
+                    CalendarProviderError.underlying("Google sign-in timed out. Please try again.")
+                ))
+            }
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            callbackContinuation = continuation
+        }
+    }
+
+    func cancel() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        listener.cancel()
+    }
+
+    private func handleListenerState(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            guard let port = listener.port,
+                  let url = URL(string: "http://127.0.0.1:\(port.rawValue)/oauth2callback") else {
+                completeStart(.failure(
+                    CalendarProviderError.underlying("Could not start Google sign-in.")
+                ))
+                return
+            }
+            redirectURL = url
+            completeStart(.success(url))
+        case .failed(let error):
+            let wrapped = CalendarProviderError.underlying(
+                "Could not receive Google sign-in: \(error.localizedDescription)"
+            )
+            completeStart(.failure(wrapped))
+            completeCallback(.failure(wrapped))
+        case .cancelled:
+            break
+        default:
+            break
+        }
+    }
+
+    private func handle(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        let receiver = self
+        connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: 32_768
+        ) { data, _, _, error in
+            Task { @MainActor in
+                if let error {
+                    receiver.completeCallback(.failure(
+                        CalendarProviderError.underlying(
+                            "Google sign-in callback failed: \(error.localizedDescription)"
+                        )
+                    ))
+                    connection.cancel()
+                    return
+                }
+                receiver.handleRequest(data, connection: connection)
+            }
+        }
+    }
+
+    private func handleRequest(_ data: Data?, connection: NWConnection) {
+        guard let data,
+              let request = String(data: data, encoding: .utf8),
+              let requestLine = request.components(separatedBy: "\r\n").first else {
+            send(status: "400 Bad Request", body: "Invalid request.", on: connection)
+            return
+        }
+        let pieces = requestLine.split(separator: " ")
+        guard pieces.count >= 2,
+              pieces[0] == "GET",
+              let redirectURL,
+              let callback = URL(string: "\(redirectURL.scheme ?? "http")://\(redirectURL.host ?? "127.0.0.1"):\(redirectURL.port ?? 80)\(pieces[1])"),
+              callback.path == redirectURL.path else {
+            send(status: "404 Not Found", body: "Not found.", on: connection)
+            return
+        }
+
+        send(
+            status: "200 OK",
+            body: """
+            <!doctype html>
+            <html><head><meta charset="utf-8"><title>Intent connected</title></head>
+            <body style="font-family:-apple-system;margin:64px;color:#1d1d1f">
+            <h2>Google Calendar is connected.</h2>
+            <p>You can close this tab and return to Intent.</p>
+            </body></html>
+            """,
+            contentType: "text/html; charset=utf-8",
+            on: connection
+        )
+        completeCallback(.success(callback))
+    }
+
+    private func send(
+        status: String,
+        body: String,
+        contentType: String = "text/plain; charset=utf-8",
+        on connection: NWConnection
+    ) {
+        let bodyData = Data(body.utf8)
+        let headers = """
+        HTTP/1.1 \(status)\r
+        Content-Type: \(contentType)\r
+        Content-Length: \(bodyData.count)\r
+        Connection: close\r
+        \r
+        """
+        var response = Data(headers.utf8)
+        response.append(bodyData)
+        connection.send(content: response, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    private func completeStart(_ result: Result<URL, Error>) {
+        guard let continuation = startContinuation else { return }
+        startContinuation = nil
+        continuation.resume(with: result)
+    }
+
+    private func completeCallback(_ result: Result<URL, Error>) {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        if let continuation = callbackContinuation {
+            callbackContinuation = nil
+            continuation.resume(with: result)
+        } else {
+            pendingCallback = result
+        }
     }
 }
 

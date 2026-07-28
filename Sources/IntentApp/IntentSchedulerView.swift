@@ -8,7 +8,7 @@ struct IntentSchedulerView: View {
 
     @State private var weekOffset = 0
     @State private var editorContext: ScheduleEditorContext?
-    @State private var showCalendars = false
+    @State private var showCalendarConnections = false
 
     private let calendar = Calendar.current
 
@@ -25,7 +25,10 @@ struct IntentSchedulerView: View {
                 .frame(maxHeight: .infinity)
         }
         .onAppear {
-            calendarSync.appear()
+            calendarSync.appear(visibleInterval: visibleWeekInterval)
+        }
+        .onChange(of: weekOffset) { _ in
+            calendarSync.updateVisibleInterval(visibleWeekInterval)
         }
         .sheet(item: $editorContext) { context in
             ScheduleEditorSheet(
@@ -50,10 +53,6 @@ struct IntentSchedulerView: View {
                 }
             )
         }
-        .sheet(isPresented: $showCalendars) {
-            CalendarsSettingsSheet()
-                .environmentObject(calendarSync)
-        }
     }
 
     private var schedulerHeader: some View {
@@ -74,9 +73,9 @@ struct IntentSchedulerView: View {
             Spacer()
 
             Button {
-                showCalendars = true
+                showCalendarConnections.toggle()
             } label: {
-                Label("Calendars", systemImage: "calendar.badge.plus")
+                Label(calendarConnectionLabel, systemImage: calendarConnectionIcon)
                     .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 12)
                     .frame(height: 36)
@@ -84,6 +83,12 @@ struct IntentSchedulerView: View {
             .buttonStyle(.plain)
             .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 11)
             .help("Connect optional calendars. Local schedules always work.")
+            .popover(isPresented: $showCalendarConnections, arrowEdge: .top) {
+                CalendarConnectionsPopover(
+                    dismiss: { showCalendarConnections = false }
+                )
+                .environmentObject(calendarSync)
+            }
 
             HStack(spacing: 8) {
                 Button {
@@ -127,6 +132,18 @@ struct IntentSchedulerView: View {
             return "Local Intent schedules stay authoritative. Linked calendar events stay in sync."
         }
         return "Intent will begin the chosen session at its scheduled time."
+    }
+
+    private var calendarConnectionLabel: String {
+        calendarSync.appleState.isConnected || calendarSync.googleState.isConnected
+            ? "Calendars"
+            : "Connect calendar"
+    }
+
+    private var calendarConnectionIcon: String {
+        calendarSync.appleState.isConnected || calendarSync.googleState.isConnected
+            ? "calendar.badge.checkmark"
+            : "calendar.badge.plus"
     }
 
     private var weekBoard: some View {
@@ -306,6 +323,13 @@ struct IntentSchedulerView: View {
         return (0..<7).compactMap { mondayCalendar.date(byAdding: .day, value: $0, to: start) }
     }
 
+    private var visibleWeekInterval: DateInterval {
+        let start = weekDates.first ?? calendar.startOfDay(for: Date())
+        let end = calendar.date(byAdding: .day, value: 7, to: start)
+            ?? start.addingTimeInterval(7 * 24 * 60 * 60)
+        return DateInterval(start: start, end: end)
+    }
+
     private func createSchedule() {
         guard let intention = model.intentions.first else { return }
         let now = Date()
@@ -324,7 +348,7 @@ struct IntentSchedulerView: View {
     private func saveSchedule(
         _ schedule: IntentSchedule,
         isNew: Bool,
-        syncProvider: CalendarProviderKind?
+        syncProvider: CalendarProviderKind
     ) async {
         var working = schedule
         if isNew {
@@ -343,17 +367,34 @@ struct IntentSchedulerView: View {
             working = model.schedules.first(where: { $0.id == schedule.id }) ?? schedule
         }
 
-        if let syncProvider, syncProvider != .local {
+        let previousSync = working.sync
+        if syncProvider == .local {
+            if previousSync != nil {
+                await calendarSync.deleteSyncedEvent(for: working)
+                working.sync = nil
+                model.updateSchedule(working)
+            }
+        } else {
+            if let previousSync, previousSync.provider != syncProvider {
+                await calendarSync.deleteSyncedEvent(for: working)
+                working.sync = nil
+            }
             working.sync = ScheduleSyncMetadata(
                 provider: syncProvider,
                 calendarID: syncProvider == .apple
                     ? (calendarSync.appleState.writeCalendarID ?? "")
                     : (calendarSync.googleState.writeCalendarID ?? ""),
-                externalEventID: working.sync?.externalEventID ?? ""
+                externalEventID: working.sync?.provider == syncProvider
+                    ? (working.sync?.externalEventID ?? "")
+                    : ""
             )
             let name = model.intentions.first { $0.id == working.intentionID }?.name ?? "Intention"
-            let synced = await calendarSync.syncSchedule(working, intentionName: name)
-            model.updateSchedule(synced)
+            if let synced = await calendarSync.syncSchedule(working, intentionName: name) {
+                model.updateSchedule(synced)
+            } else {
+                working.sync = previousSync?.provider == syncProvider ? previousSync : nil
+                model.updateSchedule(working)
+            }
         }
 
         editorContext = nil
@@ -375,7 +416,7 @@ private struct ScheduleEditorSheet: View {
     let isNew: Bool
     let appleConnected: Bool
     let googleConnected: Bool
-    let onSave: (IntentSchedule, CalendarProviderKind?) -> Void
+    let onSave: (IntentSchedule, CalendarProviderKind) -> Void
     let onDelete: (() -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
@@ -388,7 +429,7 @@ private struct ScheduleEditorSheet: View {
         isNew: Bool,
         appleConnected: Bool,
         googleConnected: Bool,
-        onSave: @escaping (IntentSchedule, CalendarProviderKind?) -> Void,
+        onSave: @escaping (IntentSchedule, CalendarProviderKind) -> Void,
         onDelete: (() -> Void)?
     ) {
         self.intentions = intentions
@@ -461,14 +502,14 @@ private struct ScheduleEditorSheet: View {
                 }
             }
 
-            if appleConnected || googleConnected {
+            if appleConnected || googleConnected || draft.sync != nil {
                 field("CALENDAR SYNC") {
                     Picker("Sync", selection: $syncDestination) {
                         Text("Local only").tag(CalendarProviderKind.local)
-                        if appleConnected {
+                        if appleConnected || draft.sync?.provider == .apple {
                             Text("Apple Calendar").tag(CalendarProviderKind.apple)
                         }
-                        if googleConnected {
+                        if googleConnected || draft.sync?.provider == .google {
                             Text("Google Calendar").tag(CalendarProviderKind.google)
                         }
                     }
@@ -490,7 +531,7 @@ private struct ScheduleEditorSheet: View {
                     if draft.recurrence == .weekly, draft.weekdays.isEmpty {
                         draft.weekdays = [Calendar.current.component(.weekday, from: draft.scheduledAt)]
                     }
-                    onSave(draft, syncDestination == .local ? nil : syncDestination)
+                    onSave(draft, syncDestination)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(GraphTheme.editBlue)
@@ -523,192 +564,136 @@ private struct ScheduleEditorSheet: View {
     }
 }
 
-private struct CalendarsSettingsSheet: View {
+private struct CalendarConnectionsPopover: View {
     @EnvironmentObject private var calendarSync: CalendarSyncManager
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    let dismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Calendars")
-                        .font(.system(size: 18, weight: .semibold))
-                    Text("Optional. Local Intent schedules always work without an account.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-                Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Connect calendar")
+                .font(.system(size: 15, weight: .semibold))
 
-            Text("Calendar contents stay on this Mac and are never sent to Intent AI.")
-                .font(.system(size: 11))
-                .foregroundStyle(GraphTheme.muted(colorScheme))
-
-            providerCard(
-                title: "Local Intent",
-                detail: "Schedules saved in ~/.intent/schedules.json",
-                status: "Always available",
-                connected: true
-            ) {
-                EmptyView()
-            }
-
-            providerCard(
+            providerRow(
                 title: "Apple Calendar",
-                detail: calendarSync.appleState.message
-                    ?? (calendarSync.appleState.isConnected ? "Connected" : "Not connected"),
-                status: calendarSync.appleState.status.rawValue,
-                connected: calendarSync.appleState.isConnected
-            ) {
-                appleControls
-            }
+                icon: "apple.logo",
+                state: calendarSync.appleState,
+                connect: {
+                    if await calendarSync.connectApple() {
+                        dismiss()
+                    }
+                },
+                disconnect: {
+                    await calendarSync.disconnectApple()
+                }
+            )
 
-            providerCard(
+            Divider()
+
+            providerRow(
                 title: "Google Calendar",
-                detail: calendarSync.googleState.message
-                    ?? (calendarSync.googleState.isConnected ? "Connected" : "Not connected"),
-                status: calendarSync.googleState.status.rawValue,
-                connected: calendarSync.googleState.isConnected
-            ) {
-                googleControls
-            }
+                icon: "g.circle.fill",
+                state: calendarSync.googleState,
+                connect: {
+                    if await calendarSync.connectGoogle() {
+                        dismiss()
+                    }
+                },
+                disconnect: {
+                    await calendarSync.disconnectGoogle()
+                }
+            )
 
-            Spacer(minLength: 0)
+            Text("Your events appear here in the scheduler. Calendar contents stay on this Mac and are never sent to Intent AI.")
+                .font(.system(size: 10))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(24)
-        .frame(width: 560, height: 620)
+        .padding(16)
+        .frame(width: 360)
         .background(GraphTheme.background(colorScheme))
+        .onExitCommand(perform: dismiss)
     }
 
-    private var appleControls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if calendarSync.appleState.isConnected {
-                calendarToggles(
-                    calendars: calendarSync.appleState.calendars,
-                    visible: calendarSync.appleState.visibleCalendarIDs,
-                    writeID: calendarSync.appleState.writeCalendarID,
-                    onToggleVisible: { id, on in
-                        var ids = calendarSync.appleState.visibleCalendarIDs
-                        if on { ids.insert(id) } else { ids.remove(id) }
-                        Task { await calendarSync.setAppleVisible(ids) }
-                    },
-                    onWrite: { id in
-                        Task { await calendarSync.setAppleWriteCalendar(id) }
-                    }
-                )
-                Button("Show Reminders") {
-                    Task { await calendarSync.enableAppleReminders() }
-                }
-                .buttonStyle(.bordered)
-                Button("Disconnect") {
-                    Task { await calendarSync.disconnectApple() }
-                }
-                .buttonStyle(.plain)
-            } else {
-                Button("Connect Apple Calendar") {
-                    Task { await calendarSync.connectApple() }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(GraphTheme.editBlue)
-            }
-        }
-    }
-
-    private var googleControls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if calendarSync.googleState.status == .configurationMissing {
-                Text("Google Calendar needs a public OAuth client ID. See docs/GOOGLE_CALENDAR.md.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-            } else if calendarSync.googleState.isConnected {
-                calendarToggles(
-                    calendars: calendarSync.googleState.calendars,
-                    visible: calendarSync.googleState.visibleCalendarIDs,
-                    writeID: calendarSync.googleState.writeCalendarID,
-                    onToggleVisible: { id, on in
-                        var ids = calendarSync.googleState.visibleCalendarIDs
-                        if on { ids.insert(id) } else { ids.remove(id) }
-                        Task { await calendarSync.setGoogleVisible(ids) }
-                    },
-                    onWrite: { id in
-                        Task { await calendarSync.setGoogleWriteCalendar(id) }
-                    }
-                )
-                Button("Disconnect") {
-                    Task { await calendarSync.disconnectGoogle() }
-                }
-                .buttonStyle(.plain)
-            } else {
-                Button("Connect Google Calendar") {
-                    Task { await calendarSync.connectGoogle() }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(GraphTheme.editBlue)
-                .disabled(calendarSync.googleState.status == .configurationMissing)
-            }
-        }
-    }
-
-    private func providerCard<Content: View>(
+    private func providerRow(
         title: String,
-        detail: String,
-        status: String,
-        connected: Bool,
-        @ViewBuilder content: () -> Content
+        icon: String,
+        state: CalendarConnectionState,
+        connect: @escaping () async -> Void,
+        disconnect: @escaping () async -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(detail)
-                        .font(.system(size: 11))
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-                Spacer()
-                Circle()
-                    .fill(connected ? Color.green : GraphTheme.muted(colorScheme))
-                    .frame(width: 7, height: 7)
-                Text(status)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-            }
-            content()
-        }
-        .padding(14)
-        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 14)
-    }
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 28, height: 28)
+                .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 8))
 
-    private func calendarToggles(
-        calendars: [ExternalCalendar],
-        visible: Set<String>,
-        writeID: String?,
-        onToggleVisible: @escaping (String, Bool) -> Void,
-        onWrite: @escaping (String) -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(calendars) { calendar in
-                HStack {
-                    Toggle(calendar.title, isOn: Binding(
-                        get: { visible.contains(calendar.id) },
-                        set: { onToggleVisible(calendar.id, $0) }
-                    ))
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
-                    Spacer()
-                    if calendar.allowsModifications {
-                        Button(writeID == calendar.id ? "Writing here" : "Use for Intent") {
-                            onWrite(calendar.id)
-                        }
-                        .font(.system(size: 10, weight: .medium))
-                        .buttonStyle(.plain)
-                        .foregroundStyle(writeID == calendar.id ? GraphTheme.editBlue : GraphTheme.muted(colorScheme))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(providerDetail(state))
+                    .font(.system(size: 10))
+                    .foregroundStyle(state.status == .permissionDenied || state.status == .error
+                        ? Color.red
+                        : GraphTheme.muted(colorScheme))
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            if state.status == .connecting {
+                ProgressView()
+                    .controlSize(.small)
+            } else if state.isConnected {
+                HStack(spacing: 7) {
+                    Label("Connected", systemImage: "checkmark.circle.fill")
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(Color.green)
+                        .help("Connected")
+                    Button {
+                        Task { await disconnect() }
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                    .help("Disconnect \(title)")
+                }
+            } else {
+                Button(state.status == .configurationMissing ? "Unavailable" : "Connect") {
+                    Task {
+                        await connect()
                     }
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(GraphTheme.editBlue)
+                .disabled(state.status == .configurationMissing)
             }
+        }
+    }
+
+    private func providerDetail(_ state: CalendarConnectionState) -> String {
+        if state.isConnected {
+            if let account = state.accountLabel, !account.isEmpty {
+                return account
+            }
+            return "Connected"
+        }
+        if state.status == .configurationMissing {
+            return "Google sign-in is not configured in this build."
+        }
+        switch state.status {
+        case .permissionDenied:
+            return "Permission was not granted."
+        case .restricted:
+            return "Calendar access is restricted."
+        case .offline:
+            return "Could not refresh. Check your connection."
+        case .error:
+            return state.message ?? "Could not connect."
+        default:
+            return "Not connected"
         }
     }
 }

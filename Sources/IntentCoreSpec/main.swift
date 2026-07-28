@@ -827,13 +827,11 @@ do {
     let deleted = coordinator.handleExternalDeletion(of: syncedSchedule)
     try expect(!deleted.isEnabled && deleted.sync == nil, "External deletion should disable/unlink without deleting the intention")
 
-    let fake = FakeCalendarProvider(
-        kind: .google,
-        status: .connected,
-        calendars: [.init(id: "primary", provider: .google, title: "Primary")],
-        events: [linkedEvent, unrelatedEvent, linkedEvent]
-    )
-    let deduped = CalendarSyncMapper.deduplicatedEvents(fake.events)
+    let deduped = CalendarSyncMapper.deduplicatedEvents([
+        linkedEvent,
+        unrelatedEvent,
+        linkedEvent
+    ])
     try expect(deduped.count == 2, "Calendar events should deduplicate by provider/calendar/id")
 
     try expect(
@@ -885,6 +883,19 @@ do {
         externalEvents: [linkedEvent, unrelatedEvent, unsupported]
     )
     try expect(display.contains { if case .intentSchedule = $0 { return true }; return false }, "Merged display should keep Intent schedules")
+    try expect(
+        display.filter {
+            switch $0 {
+            case .intentSchedule(let schedule, _):
+                return schedule.id == linkedEvent.linkedScheduleID
+            case .linkedExternal(let event):
+                return event.id == linkedEvent.id
+            default:
+                return false
+            }
+        }.count == 1,
+        "A linked external event should not duplicate its local schedule"
+    )
     try expect(display.contains { if case .external = $0 { return true }; return false }, "Merged display should keep unrelated events")
 
     try? FileManager.default.removeItem(at: tempDirectory)

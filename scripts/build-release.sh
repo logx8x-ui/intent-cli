@@ -3,8 +3,8 @@ set -euo pipefail
 export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.9.0}"
-BUILD_NUMBER="${2:-28}"
+VERSION="${1:-0.9.1}"
+BUILD_NUMBER="${2:-29}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"
@@ -96,17 +96,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
   <key>NSRemindersFullAccessUsageDescription</key>
   <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
-  <key>CFBundleURLTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleURLName</key>
-      <string>dev.loganmondi.intent.oauth</string>
-      <key>CFBundleURLSchemes</key>
-      <array>
-        <string>intent</string>
-      </array>
-    </dict>
-  </array>
 </dict>
 </plist>
 PLIST

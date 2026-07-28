@@ -59,9 +59,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>Intent</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.9.0</string>
+  <string>0.9.1</string>
   <key>CFBundleVersion</key>
-  <string>28</string>
+  <string>29</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -78,17 +78,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
   <key>NSRemindersFullAccessUsageDescription</key>
   <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
-  <key>CFBundleURLTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleURLName</key>
-      <string>dev.loganmondi.intent.oauth</string>
-      <key>CFBundleURLSchemes</key>
-      <array>
-        <string>intent</string>
-      </array>
-    </dict>
-  </array>
 </dict>
 </plist>
 PLIST

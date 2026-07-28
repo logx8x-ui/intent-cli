@@ -253,6 +253,7 @@ public enum CalendarSyncMapper {
     }
 }
 
+@MainActor
 public protocol CalendarProvider: AnyObject {
     var kind: CalendarProviderKind { get }
     var connectionState: CalendarConnectionState { get }
@@ -394,7 +395,8 @@ public struct CalendarSyncCoordinator {
         for event in CalendarSyncMapper.deduplicatedEvents(externalEvents) {
             if let linkedID = event.linkedScheduleID,
                localSchedules.contains(where: { $0.id == linkedID }) {
-                items.append(.linkedExternal(event))
+                // The local schedule already represents this linked event.
+                continue
             } else if event.kind == .reminder || event.kind == .task {
                 items.append(.task(event))
             } else {
@@ -446,6 +448,7 @@ public enum SchedulerDisplayItem: Identifiable, Equatable {
 }
 
 /// In-memory provider used by specs.
+@MainActor
 public final class FakeCalendarProvider: CalendarProvider {
     public let kind: CalendarProviderKind
     public private(set) var connectionState: CalendarConnectionState
