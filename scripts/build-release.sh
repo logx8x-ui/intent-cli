@@ -19,6 +19,16 @@ INSTALLER_IDENTITY="${INTENT_INSTALLER_IDENTITY:-}"
 NOTARY_PROFILE="${INTENT_NOTARY_PROFILE:-}"
 ALLOW_UNSIGNED_LOCAL="${INTENT_ALLOW_UNSIGNED_LOCAL:-0}"
 MINIMUM_MACOS="13.0"
+GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
+
+if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
+  GOOGLE_CLIENT_SECRET="$(
+    security find-generic-password \
+      -s "dev.loganmondi.intent.build" \
+      -a "google-oauth-client-secret" \
+      -w 2>/dev/null || true
+  )"
+fi
 
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]] && {
   [[ -z "$APPLICATION_IDENTITY" ]] || [[ -z "$INSTALLER_IDENTITY" ]] || [[ -z "$NOTARY_PROFILE" ]]
@@ -70,6 +80,27 @@ cp -R "$ARM_BUILD/arm64-apple-macosx/release/Intent_IntentApp.bundle" "$APP/Cont
 chmod +x "$APP/Contents/MacOS/IntentApp" "$SUPPORT_DIR/Intent" "$SUPPORT_DIR/IntentNativeHost"
 
 cp "$ROOT/Assets/Intent.icns" "$APP/Contents/Resources/Intent.icns"
+
+if [[ -n "$GOOGLE_CLIENT_SECRET" ]]; then
+  GOOGLE_CONFIG="$APP/Contents/Resources/GoogleCalendarConfig.plist"
+  cp "$ROOT/Sources/IntentApp/Resources/GoogleCalendarConfig.plist" "$GOOGLE_CONFIG"
+  /usr/libexec/PlistBuddy -c "Delete :CLIENT_SECRET" "$GOOGLE_CONFIG" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :CLIENT_SECRET string $GOOGLE_CLIENT_SECRET" "$GOOGLE_CONFIG"
+elif [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
+  cat >&2 <<'MSG'
+Release refused: Google Calendar OAuth is missing its protected client secret.
+
+Store it in Keychain:
+  security add-generic-password \
+    -U \
+    -s 'dev.loganmondi.intent.build' \
+    -a 'google-oauth-client-secret' \
+    -w
+
+Or set INTENT_GOOGLE_CLIENT_SECRET for this build.
+MSG
+  exit 5
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

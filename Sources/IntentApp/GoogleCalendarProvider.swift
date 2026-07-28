@@ -6,20 +6,37 @@ import Network
 
 struct GoogleCalendarConfiguration: Equatable {
     var clientID: String
+    var clientSecret: String?
 
     private static let configResourceName = "GoogleCalendarConfig"
 
     static func load() -> GoogleCalendarConfiguration? {
-        if let env = ProcessInfo.processInfo.environment["INTENT_GOOGLE_CLIENT_ID"]?
+        let environment = ProcessInfo.processInfo.environment
+        let environmentSecret = normalizedSecret(environment["INTENT_GOOGLE_CLIENT_SECRET"])
+
+        if let env = environment["INTENT_GOOGLE_CLIENT_ID"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !env.isEmpty {
-            return .init(clientID: env)
+            return .init(clientID: env, clientSecret: environmentSecret)
         }
 
-        let resourceURLs = [
-            Bundle.main.url(forResource: configResourceName, withExtension: "plist"),
-            Bundle.main.url(forResource: configResourceName, withExtension: "json")
-        ].compactMap { $0 }
+        let moduleBundleName = "Intent_IntentApp.bundle"
+        let resourceURLs = ["plist", "json"].flatMap { fileExtension in
+            let fileName = "\(configResourceName).\(fileExtension)"
+            return [
+                Bundle.main.url(forResource: configResourceName, withExtension: fileExtension),
+                Bundle.main.resourceURL?
+                    .appendingPathComponent(moduleBundleName, isDirectory: true)
+                    .appendingPathComponent(fileName),
+                Bundle.main.bundleURL
+                    .appendingPathComponent(moduleBundleName, isDirectory: true)
+                    .appendingPathComponent(fileName),
+                Bundle.main.bundleURL
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(moduleBundleName, isDirectory: true)
+                    .appendingPathComponent(fileName)
+            ].compactMap { $0 }
+        }
 
         for url in resourceURLs {
             if url.pathExtension == "plist",
@@ -28,28 +45,46 @@ struct GoogleCalendarConfiguration: Equatable {
                let clientID = plist["CLIENT_ID"] as? String,
                !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                !clientID.contains("YOUR_") {
-                return .init(clientID: clientID)
+                return .init(
+                    clientID: clientID,
+                    clientSecret: normalizedSecret(plist["CLIENT_SECRET"] as? String) ?? environmentSecret
+                )
             }
             if url.pathExtension == "json",
                let data = try? Data(contentsOf: url),
                let object = try? JSONDecoder().decode(GoogleConfigFile.self, from: data),
                !object.clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                !object.clientID.contains("YOUR_") {
-                return .init(clientID: object.clientID)
+                return .init(
+                    clientID: object.clientID,
+                    clientSecret: normalizedSecret(object.clientSecret) ?? environmentSecret
+                )
             }
         }
         return nil
+    }
+
+    private static func normalizedSecret(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              !value.contains("YOUR_") else {
+            return nil
+        }
+        return value
     }
 }
 
 private struct GoogleConfigFile: Decodable {
     let clientID: String
+    let clientSecret: String?
     let redirectURI: String?
 
     enum CodingKeys: String, CodingKey {
         case clientID = "client_id"
+        case clientSecret = "client_secret"
         case redirectURI = "redirect_uri"
         case CLIENT_ID
+        case CLIENT_SECRET
         case REDIRECT_URI
     }
 
@@ -57,6 +92,8 @@ private struct GoogleConfigFile: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         clientID = try container.decodeIfPresent(String.self, forKey: .clientID)
             ?? container.decode(String.self, forKey: .CLIENT_ID)
+        clientSecret = try container.decodeIfPresent(String.self, forKey: .clientSecret)
+            ?? container.decodeIfPresent(String.self, forKey: .CLIENT_SECRET)
         redirectURI = try container.decodeIfPresent(String.self, forKey: .redirectURI)
             ?? container.decodeIfPresent(String.self, forKey: .REDIRECT_URI)
     }
@@ -406,17 +443,25 @@ final class GoogleCalendarProvider: CalendarProvider {
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = [
+        var body = [
             "code": code,
             "client_id": configuration.clientID,
             "redirect_uri": redirectURI,
             "grant_type": "authorization_code",
             "code_verifier": verifier
         ]
+        if let clientSecret = configuration.clientSecret {
+            body["client_secret"] = clientSecret
+        }
         request.httpBody = Self.formEncoded(body)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw CalendarProviderError.underlying("Google token exchange failed.")
+            let detail = (try? JSONDecoder().decode(GoogleOAuthErrorResponse.self, from: data))
+                .flatMap { $0.errorDescription ?? $0.error }
+            throw CalendarProviderError.underlying(
+                detail.map { "Google sign-in could not finish: \($0)" }
+                    ?? "Google token exchange failed."
+            )
         }
         let payload = try JSONDecoder().decode(GoogleTokenResponse.self, from: data)
         return OAuthTokenSet(
@@ -435,11 +480,14 @@ final class GoogleCalendarProvider: CalendarProvider {
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = [
+        var body = [
             "client_id": configuration.clientID,
             "refresh_token": refreshToken,
             "grant_type": "refresh_token"
         ]
+        if let clientSecret = configuration.clientSecret {
+            body["client_secret"] = clientSecret
+        }
         request.httpBody = Self.formEncoded(body)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -505,6 +553,8 @@ final class GoogleCalendarProvider: CalendarProvider {
 
 @MainActor
 private final class OAuthLoopbackReceiver: @unchecked Sendable {
+    private static let authorizationTimeout: Duration = .seconds(30 * 60)
+
     private let listener: NWListener
     private let queue = DispatchQueue(label: "com.intent.google-oauth-loopback")
     private var startContinuation: CheckedContinuation<URL, Error>?
@@ -546,7 +596,7 @@ private final class OAuthLoopbackReceiver: @unchecked Sendable {
             return try pendingCallback.get()
         }
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            try? await Task.sleep(for: Self.authorizationTimeout)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self?.completeCallback(.failure(
@@ -641,15 +691,17 @@ private final class OAuthLoopbackReceiver: @unchecked Sendable {
             """,
             contentType: "text/html; charset=utf-8",
             on: connection
-        )
-        completeCallback(.success(callback))
+        ) { [weak self] in
+            self?.completeCallback(.success(callback))
+        }
     }
 
     private func send(
         status: String,
         body: String,
         contentType: String = "text/plain; charset=utf-8",
-        on connection: NWConnection
+        on connection: NWConnection,
+        completion: (() -> Void)? = nil
     ) {
         let bodyData = Data(body.utf8)
         let headers = """
@@ -662,7 +714,10 @@ private final class OAuthLoopbackReceiver: @unchecked Sendable {
         var response = Data(headers.utf8)
         response.append(bodyData)
         connection.send(content: response, completion: .contentProcessed { _ in
-            connection.cancel()
+            Task { @MainActor in
+                connection.cancel()
+                completion?()
+            }
         })
     }
 
@@ -706,6 +761,16 @@ private struct GoogleTokenResponse: Decodable {
         case refreshToken = "refresh_token"
         case scope
         case tokenType = "token_type"
+    }
+}
+
+private struct GoogleOAuthErrorResponse: Decodable {
+    let error: String?
+    let errorDescription: String?
+
+    enum CodingKeys: String, CodingKey {
+        case error
+        case errorDescription = "error_description"
     }
 }
 

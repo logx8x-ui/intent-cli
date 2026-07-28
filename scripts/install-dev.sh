@@ -7,6 +7,16 @@ APP_DIR="${HOME}/.intent/bin"
 APPLICATIONS_DIR="${HOME}/Applications"
 APP_BUNDLE="${APPLICATIONS_DIR}/Intent.app"
 LAUNCH_AGENT_FILE="${HOME}/Library/LaunchAgents/dev.loganmondi.intent.plist"
+GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
+
+if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
+  GOOGLE_CLIENT_SECRET="$(
+    security find-generic-password \
+      -s "dev.loganmondi.intent.build" \
+      -a "google-oauth-client-secret" \
+      -w 2>/dev/null || true
+  )"
+fi
 
 cd "$ROOT"
 swift build -c release --product Intent
@@ -40,6 +50,12 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 atomic_install_executable "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
 /usr/bin/ditto "$ROOT/.build/release/Intent_IntentApp.bundle" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle"
 cp "$ROOT/Assets/Intent.icns" "$APP_BUNDLE/Contents/Resources/Intent.icns"
+if [[ -n "$GOOGLE_CLIENT_SECRET" ]]; then
+  GOOGLE_CONFIG="$APP_BUNDLE/Contents/Resources/GoogleCalendarConfig.plist"
+  cp "$ROOT/Sources/IntentApp/Resources/GoogleCalendarConfig.plist" "$GOOGLE_CONFIG"
+  /usr/libexec/PlistBuddy -c "Delete :CLIENT_SECRET" "$GOOGLE_CONFIG" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :CLIENT_SECRET string $GOOGLE_CLIENT_SECRET" "$GOOGLE_CONFIG"
+fi
 chmod +x "$APP_BUNDLE/Contents/MacOS/IntentApp"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
