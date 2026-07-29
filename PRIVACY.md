@@ -6,6 +6,8 @@ The optional AI intention builder sends the activity description the user enters
 
 Optional Apple Calendar and Google Calendar connections are off by default. Intent requests calendar access only after the user chooses Connect. Calendar event titles and contents are never sent to the Intent AI service. Google OAuth tokens are stored in the macOS Keychain, not in JSON files. Disconnecting a provider keeps local Intent schedules.
 
+For Google Calendar, Intent requests permission to view the list of calendars the user subscribes to and to view, create, update, and delete calendar events. Intent does not request permission to change calendar sharing, subscription, or access-control settings, and it does not delete calendars.
+
 The Intent Browser Guard extensions read the active tab URL only to apply the website rules chosen in the Intent Mac app. Browser rules and extension status travel only between the extension and Intent's native helper on the same computer.
 
 Intentions, schedules, AI drafts, settings, and custom background images are stored locally on the user's Mac. Removing Intent does not automatically upload or transfer this data anywhere.

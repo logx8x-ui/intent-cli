@@ -29,3 +29,14 @@ Mac. No custom URL scheme or client secret is required.
 
 Tokens are stored in the macOS Keychain under service `dev.loganmondi.intent.calendar`.  
 They are never written to `~/.intent` JSON files or sent to Intent AI.
+
+Intent requests only these Google permissions:
+
+- `calendar.calendarlist.readonly` to show the user's available calendars.
+- `calendar.events` to display events and sync Intent schedules.
+
+Intent does not request permission to manage calendar sharing or delete calendars.
+
+Public releases must also complete Google OAuth verification. See
+[`GOOGLE_OAUTH_VERIFICATION.md`](GOOGLE_OAUTH_VERIFICATION.md) for the exact
+production checklist and scope justification.

@@ -110,7 +110,10 @@ final class GoogleCalendarProvider: CalendarProvider {
     private let onPreferencesChange: (CalendarPreferences) -> Void
     private let configuration: GoogleCalendarConfiguration?
 
-    private let calendarScope = "https://www.googleapis.com/auth/calendar"
+    private let calendarScopes = [
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events"
+    ]
 
     init(
         preferences: CalendarPreferences,
@@ -159,7 +162,7 @@ final class GoogleCalendarProvider: CalendarProvider {
                 .init(name: "client_id", value: configuration.clientID),
                 .init(name: "redirect_uri", value: redirectURL.absoluteString),
                 .init(name: "response_type", value: "code"),
-                .init(name: "scope", value: calendarScope),
+                .init(name: "scope", value: calendarScopes.joined(separator: " ")),
                 .init(name: "access_type", value: "offline"),
                 .init(name: "prompt", value: "consent"),
                 .init(name: "code_challenge", value: challenge),
