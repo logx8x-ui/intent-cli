@@ -438,7 +438,8 @@ do {
             kind: .endTime,
             position: .zero,
             endTimeHour: 14,
-            endTimeMinute: 0
+            endTimeMinute: 0,
+            usesPresetEndTime: true
         )
     ]
     var perthCalendar = Calendar(identifier: .gregorian)
@@ -467,6 +468,30 @@ do {
     try expect(
         !FocusSessionSpec.make(for: endTimeIntention).allowsManualFinish,
         "A locked End Time should prevent the finish shortcut before the selected time"
+    )
+    endTimeIntention.restrictionNodes[0].usesPresetEndTime = false
+    try expect(endTimeIntention.requiresRuntimeEndTime, "End Time should choose its finish time at launch by default")
+    try expect(
+        endTimeIntention.endTimeDate(after: startBeforeEndTime, calendar: perthCalendar) == nil,
+        "An End Time without a preset should not silently use a stored clock time"
+    )
+
+    endTimeIntention.closeSessionResourcesOnFinish = true
+    try expect(
+        FocusSessionSpec.make(for: endTimeIntention).closeSessionResourcesOnFinish,
+        "The session spec should preserve the intention's resource cleanup preference"
+    )
+    try expect(
+        FocusSessionSpec.make(for: endTimeIntention)
+            .allowedWebsitesByBrowser["org.mozilla.firefox"]?
+            .contains("github.com") == true,
+        "The session spec should carry browser websites into cleanup"
+    )
+    let encodedCleanupIntention = try JSONEncoder().encode(endTimeIntention)
+    let decodedCleanupIntention = try JSONDecoder().decode(Intention.self, from: encodedCleanupIntention)
+    try expect(
+        decodedCleanupIntention.closeSessionResourcesOnFinish,
+        "The session resource cleanup preference should persist"
     )
 
     let firefoxStartupURL = "https://instagram.com/direct"
@@ -591,10 +616,15 @@ do {
     let tabCommandStore = BrowserTabCommandStore(
         fileURL: tempDirectory.appendingPathComponent("browser-tab-command.json")
     )
-    let tabCommand = BrowserTabCommand(tabID: 8, windowID: 2, createdAt: cooldownStart)
+    let tabCommand = BrowserTabCommand(
+        tabID: 8,
+        windowID: 2,
+        createdAt: cooldownStart,
+        action: .close
+    )
     try tabCommandStore.write(tabCommand)
-    try expect(tabCommandStore.take() == tabCommand, "Browser tab activation commands should round-trip")
-    try expect(tabCommandStore.take() == nil, "Browser tab activation commands should be consumed once")
+    try expect(tabCommandStore.take() == tabCommand, "Browser tab commands should round-trip with their action")
+    try expect(tabCommandStore.take() == nil, "Browser tab commands should be consumed once")
 
     let intentionStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("intentions.json"))
     try intentionStore.save(intentions)

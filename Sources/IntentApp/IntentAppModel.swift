@@ -22,6 +22,7 @@ final class IntentAppModel: ObservableObject {
     @Published var activeSessionEndsAt: Date?
     @Published var cooldownExpirations: [String: Date] = [:]
     @Published var pendingFriction: PendingFriction?
+    @Published var pendingEndTimeRequest: PendingEndTimeRequest?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
     @Published var schedules: [IntentSchedule] = []
@@ -40,6 +41,7 @@ final class IntentAppModel: ObservableObject {
     private let cooldownStore = IntentionCooldownStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private var pendingStartIntention: Intention?
+    private var pendingRuntimeEndDate: Date?
     private var pendingReplacementIntention: Intention?
     private var remainingFrictions: [FrictionNode] = []
     private var activeLock: FocusLock?
@@ -549,15 +551,16 @@ final class IntentAppModel: ObservableObject {
     }
 
     private func beginStartFlow(for intention: Intention) {
-        let frictions = intention.orderedFrictionNodes
-        guard !frictions.isEmpty else {
-            start(intention)
+        pendingStartIntention = intention
+        pendingRuntimeEndDate = nil
+        remainingFrictions = intention.orderedFrictionNodes
+
+        if intention.requiresRuntimeEndTime {
+            pendingEndTimeRequest = PendingEndTimeRequest(intention: intention)
             return
         }
 
-        pendingStartIntention = intention
-        remainingFrictions = frictions
-        presentNextFriction()
+        continueStartFlow()
     }
 
     func requestStart(intentionID: String) {
@@ -586,9 +589,7 @@ final class IntentAppModel: ObservableObject {
         }
 
         if remainingFrictions.isEmpty {
-            guard let intention = pendingStartIntention else { return }
-            pendingStartIntention = nil
-            start(intention)
+            continueStartFlow()
         } else {
             presentNextFriction()
         }
@@ -597,6 +598,30 @@ final class IntentAppModel: ObservableObject {
     func cancelFriction() {
         pendingFriction = nil
         pendingStartIntention = nil
+        pendingRuntimeEndDate = nil
+        remainingFrictions = []
+    }
+
+    func confirmEndTime(_ date: Date) {
+        guard pendingEndTimeRequest != nil else { return }
+        let calendar = Calendar.autoupdatingCurrent
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        pendingRuntimeEndDate = calendar.nextDate(
+            after: Date(),
+            matching: components,
+            matchingPolicy: .nextTime,
+            repeatedTimePolicy: .first,
+            direction: .forward
+        ) ?? date
+        pendingEndTimeRequest = nil
+        continueStartFlow()
+    }
+
+    func cancelEndTimeSelection() {
+        pendingEndTimeRequest = nil
+        pendingFriction = nil
+        pendingStartIntention = nil
+        pendingRuntimeEndDate = nil
         remainingFrictions = []
     }
 
@@ -638,7 +663,20 @@ final class IntentAppModel: ObservableObject {
         )
     }
 
-    private func start(_ intention: Intention) {
+    private func continueStartFlow() {
+        guard let intention = pendingStartIntention else { return }
+        if !remainingFrictions.isEmpty {
+            presentNextFriction()
+            return
+        }
+
+        let runtimeEndDate = pendingRuntimeEndDate
+        pendingStartIntention = nil
+        pendingRuntimeEndDate = nil
+        start(intention, runtimeEndDate: runtimeEndDate)
+    }
+
+    private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
         for browser in requiredBrowserGuards(for: intention) {
             let heartbeatStore = BrowserGuardHeartbeatStore(
                 fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser.bundleIdentifier)
@@ -689,7 +727,7 @@ final class IntentAppModel: ObservableObject {
         activeLock = lock
         activeSessionID = intention.id
         activeSessionName = intention.name
-        scheduleSessionLimit(for: intention)
+        scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
         overlayPresenter?.hideOverlay(animated: true)
 
         Thread.detachNewThread {
@@ -733,12 +771,12 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    private func scheduleSessionLimit(for intention: Intention) {
+    private func scheduleSessionLimit(for intention: Intention, runtimeEndDate: Date?) {
         sessionLimitTask?.cancel()
         let now = Date()
         let timerEndDate = intention.timerMinutes.map { now.addingTimeInterval(TimeInterval($0 * 60)) }
         let clockEndDate = intention.endTimeDate(after: now)
-        let candidates = [timerEndDate, clockEndDate].compactMap { $0 }
+        let candidates = [timerEndDate, clockEndDate, runtimeEndDate].compactMap { $0 }
         guard let endDate = candidates.min() else {
             activeSessionEndsAt = nil
             sessionLimitTask = nil
@@ -937,5 +975,23 @@ struct PendingFriction: Identifiable {
         case .timeBudget(let minutes):
             return input == "\(minutes)"
         }
+    }
+}
+
+struct PendingEndTimeRequest: Identifiable {
+    let id = UUID()
+    let intentionID: String
+    let intentionName: String
+    let suggestedEndDate: Date
+
+    init(intention: Intention, now: Date = Date(), calendar: Calendar = .autoupdatingCurrent) {
+        intentionID = intention.id
+        intentionName = intention.name
+        let oneHourLater = calendar.date(byAdding: .hour, value: 1, to: now) ?? now.addingTimeInterval(3_600)
+        suggestedEndDate = calendar.date(
+            bySetting: .second,
+            value: 0,
+            of: oneHourLater
+        ) ?? oneHourLater
     }
 }

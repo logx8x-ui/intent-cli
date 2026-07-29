@@ -205,6 +205,11 @@ async function run() {
     tabCommand: { tabID: 99, windowID: 8 }
   });
   assert.equal(allowed.tabs.get(1).active, true, "A stale or unallowed native tab command should do nothing");
+  await allowed.receiveNative({
+    ...lockedRules,
+    tabCommand: { tabID: 2, windowID: 7, action: "close" }
+  });
+  assert.equal(allowed.tabs.has(2), false, "A native cleanup command should close its session-created tab");
   await allowed.remove(2);
   assert.equal(allowed.tabs.get(1).active, true, "Closing an allowed tab should return to another allowed tab");
 

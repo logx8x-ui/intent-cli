@@ -56,7 +56,7 @@ function connectNativeHost() {
     const port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
     port.onMessage.addListener((message) => {
-      if (message?.tabCommand) activateRequestedTab(message.tabCommand);
+      if (message?.tabCommand) handleRequestedTab(message.tabCommand);
       applyNativeRules(message);
     });
     port.onDisconnect.addListener(() => {
@@ -117,9 +117,14 @@ function settleRuleRequests() {
   pendingRuleRequests.clear();
 }
 
-async function activateRequestedTab(message) {
+async function handleRequestedTab(message) {
   const tab = await chrome.tabs.get(message.tabID).catch(() => null);
-  if (!tab || !isRuntimeAllowedTab(tab)) return;
+  if (!tab) return;
+  if (message.action === "close") {
+    await chrome.tabs.remove(tab.id).catch(() => {});
+    return;
+  }
+  if (!isRuntimeAllowedTab(tab)) return;
   if (tab.windowId != null) {
     await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
   }

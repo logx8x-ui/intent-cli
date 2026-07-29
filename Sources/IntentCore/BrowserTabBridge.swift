@@ -46,18 +46,26 @@ public struct BrowserTabCommand: Codable, Equatable, Identifiable {
     public var tabID: Int
     public var windowID: Int
     public var createdAt: Date
+    public var action: BrowserTabCommandAction?
 
     public init(
         id: String = UUID().uuidString,
         tabID: Int,
         windowID: Int,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        action: BrowserTabCommandAction = .activate
     ) {
         self.id = id
         self.tabID = tabID
         self.windowID = windowID
         self.createdAt = createdAt
+        self.action = action
     }
+}
+
+public enum BrowserTabCommandAction: String, Codable, Equatable {
+    case activate
+    case close
 }
 
 public final class BrowserTabSnapshotStore {

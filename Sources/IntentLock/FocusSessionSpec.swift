@@ -17,6 +17,8 @@ public struct FocusSessionSpec {
     public let allowSpotifyForeground: Bool
     public let finishShortcut: FocusKeyboardShortcut
     public let allowsManualFinish: Bool
+    public let closeSessionResourcesOnFinish: Bool
+    public let allowedWebsitesByBrowser: [String: [String]]
 
     public init(
         displayName: String,
@@ -33,7 +35,9 @@ public struct FocusSessionSpec {
         spotifyPlaylistURI: String?,
         allowSpotifyForeground: Bool,
         finishShortcut: FocusKeyboardShortcut = .defaultFinish,
-        allowsManualFinish: Bool = true
+        allowsManualFinish: Bool = true,
+        closeSessionResourcesOnFinish: Bool = false,
+        allowedWebsitesByBrowser: [String: [String]] = [:]
     ) {
         self.displayName = displayName
         self.startupSteps = startupSteps
@@ -50,6 +54,8 @@ public struct FocusSessionSpec {
         self.allowSpotifyForeground = allowSpotifyForeground
         self.finishShortcut = finishShortcut
         self.allowsManualFinish = allowsManualFinish
+        self.closeSessionResourcesOnFinish = closeSessionResourcesOnFinish
+        self.allowedWebsitesByBrowser = allowedWebsitesByBrowser
     }
 
     public static func make(for task: IntentWorkTask) -> FocusSessionSpec {
@@ -90,7 +96,15 @@ public struct FocusSessionSpec {
             spotifyPlaylistURI: spotifyPlaylistURI,
             allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" },
             finishShortcut: finishShortcut,
-            allowsManualFinish: !intention.sessionLocksManualFinish
+            allowsManualFinish: !intention.sessionLocksManualFinish,
+            closeSessionResourcesOnFinish: intention.closeSessionResourcesOnFinish,
+            allowedWebsitesByBrowser: Dictionary(
+                grouping: intention.allowedWebsites.compactMap { website -> (String, String)? in
+                    guard let browser = website.browserBundleIdentifier else { return nil }
+                    return (browser, website.value)
+                },
+                by: \.0
+            ).mapValues { $0.map(\.1) }
         )
     }
 

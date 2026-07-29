@@ -223,6 +223,11 @@ struct IntentGraphView: View {
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
+        .sheet(item: $model.pendingEndTimeRequest) { pending in
+            EndTimeSheet(pending: pending)
+                .environmentObject(model)
+                .interactiveDismissDisabled()
+        }
         .alert("Intent", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -510,7 +515,10 @@ struct IntentGraphView: View {
                     currentPage == page ? GraphTheme.elevatedSurface(colorScheme) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 7)
                 )
+                .contentShape(RoundedRectangle(cornerRadius: 7))
         }
+        .frame(width: 34, height: 26)
+        .contentShape(RoundedRectangle(cornerRadius: 7))
         .buttonStyle(.plain)
         .help(page.helpText)
     }
@@ -707,14 +715,20 @@ struct IntentGraphView: View {
                 setScale(cameraScale / 1.18)
             } label: {
                 Image(systemName: "minus")
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .help("Zoom out")
 
             Button {
                 fitGraph(in: size)
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .help("Fit all intentions")
 
             Text("\(Int(cameraScale * 100))%")
@@ -726,7 +740,10 @@ struct IntentGraphView: View {
                 setScale(cameraScale * 1.18)
             } label: {
                 Image(systemName: "plus")
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .help("Zoom in")
         }
         .buttonStyle(.plain)

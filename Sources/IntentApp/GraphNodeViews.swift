@@ -262,6 +262,9 @@ struct RestrictionNodeView: View {
 
     private var durationLabel: String? {
         if node.kind == .endTime {
+            guard node.usesPresetEndTime ?? false else {
+                return "Choose at start"
+            }
             let hour = min(max(node.endTimeHour ?? 17, 0), 23)
             let minute = min(max(node.endTimeMinute ?? 0, 0), 59)
             let date = Calendar.autoupdatingCurrent.date(

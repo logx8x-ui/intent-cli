@@ -166,6 +166,12 @@ function createHarness(activeRules, initialTabs, options = {}) {
       await browser.tabs.remove(tabId);
       await Promise.resolve();
       await Promise.resolve();
+    },
+    async receiveNative(message) {
+      if (message?.tabCommand) {
+        await context.handleRequestedTab(message.tabCommand);
+      }
+      await Promise.resolve();
     }
   };
 }
@@ -194,6 +200,14 @@ async function run() {
   await allowedActivationHarness.ready();
   await allowedActivationHarness.activate(2);
   assert.equal(allowedActivationHarness.tabs.get(2).active, true, "Allowed tab activation should stay active");
+  await allowedActivationHarness.receiveNative({
+    tabCommand: { tabID: 2, windowID: 1, action: "close" }
+  });
+  assert.equal(
+    allowedActivationHarness.tabs.has(2),
+    false,
+    "A native cleanup command should close its session-created Firefox tab"
+  );
 
   const navigationHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },

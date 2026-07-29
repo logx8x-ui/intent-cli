@@ -80,6 +80,18 @@ struct IntentionEditorMenu: View {
                 browserWebsiteEditors
 
                 Divider()
+                fieldLabel("When finished")
+                Toggle(
+                    "Close session resources",
+                    isOn: $intention.closeSessionResourcesOnFinish
+                )
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12, weight: .medium))
+                Text("Closes this intention's allowed apps and website tabs when it ends.")
+                    .font(.caption)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete intention", systemImage: "trash")
                 }
@@ -494,16 +506,36 @@ struct RestrictionEditorMenu: View {
                 .toggleStyle(.checkbox)
                 .font(.system(size: 12, weight: .medium))
             case .endTime:
-                fieldLabel("Finish at")
-                DatePicker(
-                    "Finish at",
-                    selection: endTimeSelection,
-                    displayedComponents: .hourAndMinute
+                Toggle(
+                    "Use preset end time",
+                    isOn: Binding(
+                        get: { node.usesPresetEndTime ?? false },
+                        set: { enabled in
+                            node.usesPresetEndTime = enabled
+                            if enabled {
+                                setDefaultEndTimeIfNeeded()
+                            }
+                        }
+                    )
                 )
-                .labelsHidden()
-                Text("Uses this Mac's local time. If that time has already passed today, the intention runs until that time tomorrow.")
-                    .font(.caption)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12, weight: .medium))
+                if node.usesPresetEndTime ?? false {
+                    fieldLabel("Preset finish time")
+                    DatePicker(
+                        "Preset finish time",
+                        selection: endTimeSelection,
+                        displayedComponents: .hourAndMinute
+                    )
+                    .labelsHidden()
+                    Text("Uses this Mac's local time. If it has passed today, Intent uses tomorrow.")
+                        .font(.caption)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                } else {
+                    Text("Choose the finish time each time this intention starts.")
+                        .font(.caption)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
                 Toggle(
                     "Keep intention running until end time",
                     isOn: Binding(
@@ -563,6 +595,9 @@ struct RestrictionEditorMenu: View {
     }
 
     private func setDefaultEndTimeIfNeeded() {
+        if node.usesPresetEndTime == nil {
+            node.usesPresetEndTime = false
+        }
         if node.endTimeHour == nil || node.endTimeMinute == nil {
             let suggested = Calendar.autoupdatingCurrent.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
             let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: suggested)

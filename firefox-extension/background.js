@@ -59,7 +59,7 @@ function connectCommandPort() {
     const port = browser.runtime.connectNative(HOST_NAME);
     commandPort = port;
     port.onMessage.addListener(async (message) => {
-      if (message?.tabCommand) await activateRequestedTab(message.tabCommand);
+      if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
       await applyNativeRules(message);
     });
     port.onDisconnect.addListener(() => {
@@ -94,9 +94,14 @@ function postCommandPort(message) {
   }
 }
 
-async function activateRequestedTab(message) {
+async function handleRequestedTab(message) {
   const tab = await browser.tabs.get(message.tabID).catch(() => null);
-  if (!tab || !isRuntimeAllowedTab(tab)) return;
+  if (!tab) return;
+  if (message.action === "close") {
+    await browser.tabs.remove(tab.id).catch(() => {});
+    return;
+  }
+  if (!isRuntimeAllowedTab(tab)) return;
   if (tab.windowId != null) {
     await browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
   }

@@ -17,6 +17,7 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var graphModelVersion: Int
     public var usesCustomIcon: Bool
     public var customIconData: Data?
+    public var closeSessionResourcesOnFinish: Bool
 
     public init(
         id: String = UUID().uuidString,
@@ -34,7 +35,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         frictionNodes: [FrictionNode] = [],
         graphModelVersion: Int = 4,
         usesCustomIcon: Bool = false,
-        customIconData: Data? = nil
+        customIconData: Data? = nil,
+        closeSessionResourcesOnFinish: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -52,6 +54,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         self.graphModelVersion = graphModelVersion
         self.usesCustomIcon = usesCustomIcon
         self.customIconData = customIconData
+        self.closeSessionResourcesOnFinish = closeSessionResourcesOnFinish
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -71,6 +74,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         case graphModelVersion
         case usesCustomIcon
         case customIconData
+        case closeSessionResourcesOnFinish
     }
 
     public init(from decoder: Decoder) throws {
@@ -87,6 +91,10 @@ public struct Intention: Identifiable, Codable, Equatable {
         friction = try container.decodeIfPresent(Friction.self, forKey: .friction) ?? .none
         usesCustomIcon = try container.decodeIfPresent(Bool.self, forKey: .usesCustomIcon) ?? false
         customIconData = try container.decodeIfPresent(Data.self, forKey: .customIconData)
+        closeSessionResourcesOnFinish = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .closeSessionResourcesOnFinish
+        ) ?? false
         graphPosition = try container.decodeIfPresent(GraphPoint.self, forKey: .graphPosition)
             ?? GraphPoint.defaultPosition(for: id)
         let decodedGraphModelVersion = try container.decodeIfPresent(Int.self, forKey: .graphModelVersion)

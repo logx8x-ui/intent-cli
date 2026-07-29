@@ -99,6 +99,7 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
     public var locksSessionUntilTimerEnds: Bool?
     public var endTimeHour: Int?
     public var endTimeMinute: Int?
+    public var usesPresetEndTime: Bool?
 
     public init(
         id: String = UUID().uuidString,
@@ -110,7 +111,8 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
         timerDisplayPosition: TimerDisplayPosition? = nil,
         locksSessionUntilTimerEnds: Bool? = nil,
         endTimeHour: Int? = nil,
-        endTimeMinute: Int? = nil
+        endTimeMinute: Int? = nil,
+        usesPresetEndTime: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -122,6 +124,7 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
         self.locksSessionUntilTimerEnds = locksSessionUntilTimerEnds
         self.endTimeHour = endTimeHour
         self.endTimeMinute = endTimeMinute
+        self.usesPresetEndTime = usesPresetEndTime
     }
 }
 
@@ -204,6 +207,12 @@ public extension Intention {
             .contains { $0.locksSessionUntilTimerEnds ?? true }
     }
 
+    var requiresRuntimeEndTime: Bool {
+        restrictionNodes.contains {
+            $0.kind == .endTime && !($0.usesPresetEndTime ?? false)
+        }
+    }
+
     var sessionLocksManualFinish: Bool {
         timerLocksManualFinish || endTimeLocksManualFinish
     }
@@ -213,7 +222,7 @@ public extension Intention {
         calendar: Calendar = .autoupdatingCurrent
     ) -> Date? {
         restrictionNodes
-            .filter { $0.kind == .endTime }
+            .filter { $0.kind == .endTime && ($0.usesPresetEndTime ?? false) }
             .compactMap { restriction in
                 let hour = min(max(restriction.endTimeHour ?? 17, 0), 23)
                 let minute = min(max(restriction.endTimeMinute ?? 0, 0), 59)

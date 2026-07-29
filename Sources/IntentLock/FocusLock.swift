@@ -657,6 +657,36 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
+        if spec.closeSessionResourcesOnFinish {
+            closeSessionResources()
+        }
+    }
+
+    private func closeSessionResources() {
+        for browserBundleIdentifier in spec.allowedWebsitesByBrowser.keys {
+            let snapshot = BrowserTabSnapshotStore(
+                browserBundleIdentifier: browserBundleIdentifier
+            ).load(maxAge: 3)
+            for tab in snapshot?.tabs ?? [] {
+                let store = BrowserTabCommandStore(browserBundleIdentifier: browserBundleIdentifier)
+                try? store.write(
+                    BrowserTabCommand(
+                        tabID: tab.id,
+                        windowID: tab.windowID,
+                        action: .close
+                    )
+                )
+                let deadline = Date(timeIntervalSinceNow: 1)
+                while FileManager.default.fileExists(atPath: store.fileURL.path), Date() < deadline {
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+                }
+            }
+        }
+
+        for application in NSWorkspace.shared.runningApplications where
+            spec.allowedBundleIdentifiers.contains(application.bundleIdentifier ?? "") {
+            application.terminate()
+        }
     }
 
     private var isStopped: Bool {
