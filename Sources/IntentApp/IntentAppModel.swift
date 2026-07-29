@@ -65,7 +65,7 @@ final class IntentAppModel: ObservableObject {
     var activeSessionCanFinishManually: Bool {
         guard let activeSessionID,
               let intention = intentions.first(where: { $0.id == activeSessionID }),
-              intention.timerLocksManualFinish,
+              intention.sessionLocksManualFinish,
               let activeSessionEndsAt,
               activeSessionEndsAt > Date() else {
             return true
@@ -538,7 +538,7 @@ final class IntentAppModel: ObservableObject {
 
         guard activeSessionCanFinishManually else {
             sessionSwitchWarning = SessionSwitchWarning(
-                message: "\(activeSessionName ?? "This intention") is locked until its timer finishes."
+                message: "\(activeSessionName ?? "This intention") is locked until its scheduled finish."
             )
             return
         }
@@ -735,15 +735,19 @@ final class IntentAppModel: ObservableObject {
 
     private func scheduleSessionLimit(for intention: Intention) {
         sessionLimitTask?.cancel()
-        guard let minutes = intention.timerMinutes else {
+        let now = Date()
+        let timerEndDate = intention.timerMinutes.map { now.addingTimeInterval(TimeInterval($0 * 60)) }
+        let clockEndDate = intention.endTimeDate(after: now)
+        let candidates = [timerEndDate, clockEndDate].compactMap { $0 }
+        guard let endDate = candidates.min() else {
             activeSessionEndsAt = nil
             sessionLimitTask = nil
             overlayPresenter?.hideSessionTimer()
             return
         }
 
-        let duration = TimeInterval(minutes * 60)
-        activeSessionEndsAt = Date().addingTimeInterval(duration)
+        let duration = max(0.1, endDate.timeIntervalSince(now))
+        activeSessionEndsAt = endDate
         if let activeSessionEndsAt {
             overlayPresenter?.showSessionTimer(
                 name: intention.name,
@@ -757,7 +761,7 @@ final class IntentAppModel: ObservableObject {
                   self.activeSessionID == intention.id else {
                 return
             }
-            self.errorMessage = "\(intention.name)'s \(minutes)-minute timer finished."
+            self.errorMessage = "\(intention.name)'s scheduled session finished."
             self.activeLock?.stop()
         }
     }

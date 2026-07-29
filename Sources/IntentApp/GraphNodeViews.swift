@@ -246,6 +246,7 @@ struct RestrictionNodeView: View {
         case .dontStartUp: "poweroff"
         case .coolDown: "hourglass"
         case .timer: "timer"
+        case .endTime: "clock.badge.checkmark"
         }
     }
 
@@ -255,10 +256,22 @@ struct RestrictionNodeView: View {
         case .dontStartUp: "Don't\nstart up"
         case .coolDown: "Cooldown"
         case .timer: "Timer"
+        case .endTime: "End Time"
         }
     }
 
     private var durationLabel: String? {
+        if node.kind == .endTime {
+            let hour = min(max(node.endTimeHour ?? 17, 0), 23)
+            let minute = min(max(node.endTimeMinute ?? 0, 0), 59)
+            let date = Calendar.autoupdatingCurrent.date(
+                bySettingHour: hour,
+                minute: minute,
+                second: 0,
+                of: Date()
+            ) ?? Date()
+            return date.formatted(date: .omitted, time: .shortened)
+        }
         guard node.kind == .timer || node.kind == .coolDown else { return nil }
         let minutes = max(1, node.durationMinutes ?? (node.kind == .timer ? 25 : 30))
         if minutes >= 1_440, minutes % 1_440 == 0 {

@@ -493,6 +493,26 @@ struct RestrictionEditorMenu: View {
                 )
                 .toggleStyle(.checkbox)
                 .font(.system(size: 12, weight: .medium))
+            case .endTime:
+                fieldLabel("Finish at")
+                DatePicker(
+                    "Finish at",
+                    selection: endTimeSelection,
+                    displayedComponents: .hourAndMinute
+                )
+                .labelsHidden()
+                Text("Uses this Mac's local time. If that time has already passed today, the intention runs until that time tomorrow.")
+                    .font(.caption)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Toggle(
+                    "Keep intention running until end time",
+                    isOn: Binding(
+                        get: { node.locksSessionUntilTimerEnds ?? true },
+                        set: { node.locksSessionUntilTimerEnds = $0 }
+                    )
+                )
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12, weight: .medium))
             }
 
             Divider()
@@ -504,11 +524,53 @@ struct RestrictionEditorMenu: View {
         .frame(width: 300)
         .graphMenuPanel(colorScheme: colorScheme)
         .onChange(of: node.kind) { kind in
-            guard kind == .timer else { return }
-            if node.durationMinutes == nil { node.durationMinutes = 25 }
-            if node.locksSessionUntilTimerEnds == nil {
-                node.locksSessionUntilTimerEnds = true
+            switch kind {
+            case .timer:
+                if node.durationMinutes == nil { node.durationMinutes = 25 }
+                if node.locksSessionUntilTimerEnds == nil {
+                    node.locksSessionUntilTimerEnds = true
+                }
+            case .endTime:
+                setDefaultEndTimeIfNeeded()
+            default:
+                break
             }
+        }
+        .onAppear {
+            if node.kind == .endTime {
+                setDefaultEndTimeIfNeeded()
+            }
+        }
+    }
+
+    private var endTimeSelection: Binding<Date> {
+        Binding(
+            get: {
+                let calendar = Calendar.autoupdatingCurrent
+                return calendar.date(
+                    bySettingHour: min(max(node.endTimeHour ?? 17, 0), 23),
+                    minute: min(max(node.endTimeMinute ?? 0, 0), 59),
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { date in
+                let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: date)
+                node.endTimeHour = components.hour
+                node.endTimeMinute = components.minute
+            }
+        )
+    }
+
+    private func setDefaultEndTimeIfNeeded() {
+        if node.endTimeHour == nil || node.endTimeMinute == nil {
+            let suggested = Calendar.autoupdatingCurrent.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
+            let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: suggested)
+            node.endTimeHour = components.hour
+            node.endTimeMinute = components.minute
+        }
+        if node.locksSessionUntilTimerEnds == nil {
+            node.locksSessionUntilTimerEnds = true
         }
     }
 

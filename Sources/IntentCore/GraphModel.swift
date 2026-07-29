@@ -52,6 +52,7 @@ public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
     case dontStartUp
     case coolDown
     case timer
+    case endTime
 
     public var displayName: String {
         switch self {
@@ -63,6 +64,8 @@ public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
             return "Cooldown"
         case .timer:
             return "Timer"
+        case .endTime:
+            return "End Time"
         }
     }
 }
@@ -94,6 +97,8 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
     public var showsRemainingTime: Bool?
     public var timerDisplayPosition: TimerDisplayPosition?
     public var locksSessionUntilTimerEnds: Bool?
+    public var endTimeHour: Int?
+    public var endTimeMinute: Int?
 
     public init(
         id: String = UUID().uuidString,
@@ -103,7 +108,9 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
         durationMinutes: Int? = nil,
         showsRemainingTime: Bool? = nil,
         timerDisplayPosition: TimerDisplayPosition? = nil,
-        locksSessionUntilTimerEnds: Bool? = nil
+        locksSessionUntilTimerEnds: Bool? = nil,
+        endTimeHour: Int? = nil,
+        endTimeMinute: Int? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -113,6 +120,8 @@ public struct RestrictionNode: Identifiable, Codable, Equatable {
         self.showsRemainingTime = showsRemainingTime
         self.timerDisplayPosition = timerDisplayPosition
         self.locksSessionUntilTimerEnds = locksSessionUntilTimerEnds
+        self.endTimeHour = endTimeHour
+        self.endTimeMinute = endTimeMinute
     }
 }
 
@@ -187,6 +196,36 @@ public extension Intention {
     var timerLocksManualFinish: Bool {
         guard let restriction = effectiveTimerRestriction else { return false }
         return restriction.locksSessionUntilTimerEnds ?? true
+    }
+
+    var endTimeLocksManualFinish: Bool {
+        restrictionNodes
+            .filter { $0.kind == .endTime }
+            .contains { $0.locksSessionUntilTimerEnds ?? true }
+    }
+
+    var sessionLocksManualFinish: Bool {
+        timerLocksManualFinish || endTimeLocksManualFinish
+    }
+
+    func endTimeDate(
+        after startDate: Date,
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> Date? {
+        restrictionNodes
+            .filter { $0.kind == .endTime }
+            .compactMap { restriction in
+                let hour = min(max(restriction.endTimeHour ?? 17, 0), 23)
+                let minute = min(max(restriction.endTimeMinute ?? 0, 0), 59)
+                return calendar.nextDate(
+                    after: startDate,
+                    matching: DateComponents(hour: hour, minute: minute),
+                    matchingPolicy: .nextTime,
+                    repeatedTimePolicy: .first,
+                    direction: .forward
+                )
+            }
+            .min()
     }
 
     var orderedFrictionNodes: [FrictionNode] {

@@ -90,7 +90,7 @@ public struct FocusSessionSpec {
             spotifyPlaylistURI: spotifyPlaylistURI,
             allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" },
             finishShortcut: finishShortcut,
-            allowsManualFinish: !intention.timerLocksManualFinish
+            allowsManualFinish: !intention.sessionLocksManualFinish
         )
     }
 
@@ -311,5 +311,18 @@ public enum StartupStep: Equatable {
         case .playSpotifyPlaylist(let uri):
             self = .playSpotifyPlaylist(uri)
         }
+    }
+}
+
+public enum BrowserLaunchPlanner {
+    public static func openArguments(
+        bundleIdentifier: String,
+        url: String,
+        isRunning: Bool
+    ) -> [String] {
+        if !isRunning, bundleIdentifier == "org.mozilla.firefox" {
+            return ["-b", bundleIdentifier, "--args", "-url", url]
+        }
+        return ["-b", bundleIdentifier, url]
     }
 }

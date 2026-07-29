@@ -165,7 +165,14 @@ public final class FocusLock {
             } while Date() < deadline
         }
 
-        try open(arguments: ["-b", bundleIdentifier, url], label: url)
+        try open(
+            arguments: BrowserLaunchPlanner.openArguments(
+                bundleIdentifier: bundleIdentifier,
+                url: url,
+                isRunning: browserIsRunning
+            ),
+            label: url
+        )
     }
 
     private static func urlsRepresentSameStartupSite(_ existing: String, _ requested: String) -> Bool {

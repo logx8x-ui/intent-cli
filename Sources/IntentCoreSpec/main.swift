@@ -432,6 +432,61 @@ do {
     try expect(!timedIntention.showsCooldownRemainingTime, "Cooldown badge should be configurable")
     try expect(!timedIntention.timerLocksManualFinish, "Timer lock should be configurable")
 
+    var endTimeIntention = dataScience
+    endTimeIntention.restrictionNodes = [
+        .init(
+            kind: .endTime,
+            position: .zero,
+            endTimeHour: 14,
+            endTimeMinute: 0
+        )
+    ]
+    var perthCalendar = Calendar(identifier: .gregorian)
+    perthCalendar.timeZone = TimeZone(identifier: "Australia/Perth")!
+    let startBeforeEndTime = perthCalendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 29, hour: 13, minute: 0)
+    )!
+    let expectedSameDayEnd = perthCalendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 29, hour: 14, minute: 0)
+    )!
+    try expect(
+        endTimeIntention.endTimeDate(after: startBeforeEndTime, calendar: perthCalendar) == expectedSameDayEnd,
+        "End Time should use the user's local clock on the same day"
+    )
+    let startAfterEndTime = perthCalendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 29, hour: 15, minute: 0)
+    )!
+    let expectedNextDayEnd = perthCalendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 30, hour: 14, minute: 0)
+    )!
+    try expect(
+        endTimeIntention.endTimeDate(after: startAfterEndTime, calendar: perthCalendar) == expectedNextDayEnd,
+        "End Time should use tomorrow when today's selected time has passed"
+    )
+    try expect(endTimeIntention.endTimeLocksManualFinish, "End Time should lock early finishing by default")
+    try expect(
+        !FocusSessionSpec.make(for: endTimeIntention).allowsManualFinish,
+        "A locked End Time should prevent the finish shortcut before the selected time"
+    )
+
+    let firefoxStartupURL = "https://instagram.com/direct"
+    try expect(
+        BrowserLaunchPlanner.openArguments(
+            bundleIdentifier: "org.mozilla.firefox",
+            url: firefoxStartupURL,
+            isRunning: false
+        ) == ["-b", "org.mozilla.firefox", "--args", "-url", firefoxStartupURL],
+        "A closed Firefox should receive its allowed URL at launch without creating a spare blank tab"
+    )
+    try expect(
+        BrowserLaunchPlanner.openArguments(
+            bundleIdentifier: "org.mozilla.firefox",
+            url: firefoxStartupURL,
+            isRunning: true
+        ) == ["-b", "org.mozilla.firefox", firefoxStartupURL],
+        "A running Firefox should open the allowed URL normally"
+    )
+
     var artworkIntention = dataScience
     artworkIntention.usesCustomIcon = true
     artworkIntention.customIconData = Data([0, 1, 2, 3])
