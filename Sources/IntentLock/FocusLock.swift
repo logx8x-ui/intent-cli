@@ -114,7 +114,9 @@ public final class FocusLock {
         }
 
         cleanup()
-        returnApplication?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        if spec.restorePreviousApplicationOnStop {
+            returnApplication?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        }
     }
 
     private func requestAccessibilityIfNeeded() -> Bool {
@@ -624,7 +626,7 @@ public final class FocusLock {
             guard let currentElement = current else { break }
 
             if let url = accessibilityURL(currentElement),
-               let bundleIdentifier = Bundle(url: url)?.bundleIdentifier {
+               let bundleIdentifier = ApplicationBundleIdentifierResolver.resolve(from: url) {
                 return bundleIdentifier
             }
 

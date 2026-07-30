@@ -24,6 +24,14 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
         IntentRuntime.shared.model.showOverlay()
         return true
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let model = IntentRuntime.shared.model
+        guard model.isZeroDriftActive else { return .terminateNow }
+        model.errorMessage = "Zero Drift is active. Intent will remain open until its timer finishes."
+        model.showOverlay()
+        return .terminateCancel
+    }
 }
 
 @main
@@ -89,6 +97,13 @@ final class IntentStatusItemController: NSObject {
             menu.addItem(finishItem)
         }
 
+        if model.isZeroDriftActive {
+            let status = model.zeroDriftStatusText.map { "Zero Drift: \($0) remaining" } ?? "Zero Drift: Active"
+            let zeroDriftItem = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            zeroDriftItem.isEnabled = false
+            menu.addItem(zeroDriftItem)
+        }
+
         if let shortcutWarning = model.shortcutWarning {
             menu.addItem(.separator())
             let warningItem = NSMenuItem(title: shortcutWarning, action: nil, keyEquivalent: "")
@@ -116,6 +131,7 @@ final class IntentStatusItemController: NSObject {
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "Quit Intent", action: #selector(quitIntent), keyEquivalent: "q")
         quitItem.target = self
+        quitItem.isEnabled = !model.isZeroDriftActive
         menu.addItem(quitItem)
 
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)

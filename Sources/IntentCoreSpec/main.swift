@@ -252,6 +252,57 @@ do {
         ),
         "Unknown and desktop click targets should stay blocked"
     )
+    let temporaryAppURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("IntentBundleResolver-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("Transient.app", isDirectory: true)
+    let temporaryContentsURL = temporaryAppURL.appendingPathComponent("Contents", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: temporaryContentsURL,
+        withIntermediateDirectories: true
+    )
+    let temporaryInfoPlist: [String: Any] = [
+        "CFBundleIdentifier": "dev.intent.transient",
+        "CFBundleDisplayName": "Transient Intent App"
+    ]
+    let temporaryInfoData = try PropertyListSerialization.data(
+        fromPropertyList: temporaryInfoPlist,
+        format: .binary,
+        options: 0
+    )
+    try temporaryInfoData.write(
+        to: temporaryContentsURL.appendingPathComponent("Info.plist"),
+        options: .atomic
+    )
+    defer {
+        try? FileManager.default.removeItem(at: temporaryAppURL.deletingLastPathComponent())
+    }
+    try expect(
+        ApplicationBundleIdentifierResolver.resolve(from: temporaryAppURL)
+            == "dev.intent.transient",
+        "Click targets should resolve an application bundle without constructing NSBundle"
+    )
+    try expect(
+        ApplicationBundleIdentifierResolver.metadata(from: temporaryAppURL)?.displayName
+            == "Transient Intent App",
+        "The installed app catalog should read safe application metadata without constructing NSBundle"
+    )
+    try expect(
+        ApplicationBundleIdentifierResolver.resolve(
+            from: temporaryContentsURL.appendingPathComponent("MacOS/Transient")
+        ) == "dev.intent.transient",
+        "Click targets inside an application bundle should resolve the enclosing application"
+    )
+    try expect(
+        ApplicationBundleIdentifierResolver.resolve(from: URL(string: "https://example.com")!) == nil,
+        "Web URLs exposed by accessibility should not be treated as application bundles"
+    )
+    try expect(
+        ApplicationBundleIdentifierResolver.resolve(
+            from: FileManager.default.temporaryDirectory
+                .appendingPathComponent("Missing.app")
+        ) == nil,
+        "Missing or transient application paths should fail closed without crashing"
+    )
     try expect(
         FocusForegroundPolicy.isMissionControlOverlay(
             ownerName: "Dock",
@@ -1045,6 +1096,75 @@ do {
         "A linked external event should not duplicate its local schedule"
     )
     try expect(display.contains { if case .external = $0 { return true }; return false }, "Merged display should keep unrelated events")
+
+    // MARK: Zero Drift
+    let zeroDriftStart = Date(timeIntervalSince1970: 1_800_000_000)
+    let durationEnd = ZeroDriftTiming.durationEndDate(
+        from: zeroDriftStart,
+        days: 1,
+        hours: 2,
+        minutes: 3
+    )
+    try expect(
+        durationEnd == zeroDriftStart.addingTimeInterval(TimeInterval((24 * 60 + 2 * 60 + 3) * 60)),
+        "Zero Drift duration should combine days, hours, and minutes"
+    )
+    try expect(
+        ZeroDriftTiming.durationEndDate(from: zeroDriftStart, days: 0, hours: 0, minutes: 0) == nil,
+        "Zero Drift should reject an empty duration"
+    )
+
+    var zeroDriftCalendar = Calendar(identifier: .gregorian)
+    zeroDriftCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let currentComponents = DateComponents(
+        calendar: zeroDriftCalendar,
+        timeZone: zeroDriftCalendar.timeZone,
+        year: 2027,
+        month: 1,
+        day: 1,
+        hour: 15,
+        minute: 30
+    )
+    let targetComponents = DateComponents(
+        calendar: zeroDriftCalendar,
+        timeZone: zeroDriftCalendar.timeZone,
+        year: 2027,
+        month: 1,
+        day: 1,
+        hour: 14,
+        minute: 0
+    )
+    let currentTime = zeroDriftCalendar.date(from: currentComponents)!
+    let targetTime = zeroDriftCalendar.date(from: targetComponents)!
+    let nextTarget = ZeroDriftTiming.nextEndDate(
+        matching: targetTime,
+        after: currentTime,
+        calendar: zeroDriftCalendar
+    )
+    try expect(
+        nextTarget == zeroDriftCalendar.date(byAdding: .day, value: 1, to: targetTime),
+        "A passed Zero Drift clock time should resolve to the next day"
+    )
+
+    let zeroDriftURL = tempDirectory.appendingPathComponent("zero-drift.json")
+    let zeroDriftStore = ZeroDriftStateStore(fileURL: zeroDriftURL)
+    let zeroDriftState = ZeroDriftState(
+        startedAt: zeroDriftStart,
+        endsAt: zeroDriftStart.addingTimeInterval(3_600)
+    )
+    try zeroDriftStore.save(zeroDriftState)
+    let loadedZeroDriftState = try zeroDriftStore.load(now: zeroDriftStart)
+    try expect(
+        loadedZeroDriftState == zeroDriftState,
+        "An active Zero Drift state should survive relaunch"
+    )
+    let expiredZeroDriftState = try zeroDriftStore.load(
+        now: zeroDriftStart.addingTimeInterval(7_200)
+    )
+    try expect(
+        expiredZeroDriftState == nil,
+        "An expired Zero Drift state should clear itself"
+    )
 
     try? FileManager.default.removeItem(at: tempDirectory)
 

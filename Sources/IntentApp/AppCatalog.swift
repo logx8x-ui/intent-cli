@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import IntentLock
 
 struct InstalledApp: Identifiable, Hashable {
     var id: String { bundleIdentifier }
@@ -55,15 +56,17 @@ enum AppCatalog {
 
         for url in candidateURLs {
             guard !url.path.contains(".app/Contents/"),
-                  let bundle = Bundle(url: url),
-                  let bundleIdentifier = bundle.bundleIdentifier,
-                  !seen.contains(bundleIdentifier) else {
+                  let metadata = ApplicationBundleIdentifierResolver.metadata(from: url) else {
+                continue
+            }
+            let bundleIdentifier = metadata.bundleIdentifier
+            guard !seen.contains(bundleIdentifier) else {
                 continue
             }
 
             seen.insert(bundleIdentifier)
-            let metadataName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
-                ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+            let metadataName = metadata.displayName
+                ?? metadata.bundleName
                 ?? url.deletingPathExtension().lastPathComponent
             let name = visibleText(metadataName)
 

@@ -20,6 +20,7 @@ final class IntentAppModel: ObservableObject {
     @Published var selectedID: String?
     @Published var activeSessionName: String?
     @Published var activeSessionEndsAt: Date?
+    @Published var zeroDriftEndsAt: Date?
     @Published var cooldownExpirations: [String: Date] = [:]
     @Published var pendingFriction: PendingFriction?
     @Published var pendingEndTimeRequest: PendingEndTimeRequest?
@@ -39,17 +40,21 @@ final class IntentAppModel: ObservableObject {
     private let store = IntentionStore()
     private let scheduleStore = IntentScheduleStore()
     private let cooldownStore = IntentionCooldownStore()
+    private let zeroDriftStore = ZeroDriftStateStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
     private var pendingStartIntention: Intention?
     private var pendingRuntimeEndDate: Date?
     private var pendingReplacementIntention: Intention?
     private var remainingFrictions: [FrictionNode] = []
     private var activeLock: FocusLock?
+    private var zeroDriftIdleLock: FocusLock?
     private var activeSessionID: String?
+    private var pendingZeroDriftStart: (intention: Intention, runtimeEndDate: Date?)?
     private var undoStack: [[Intention]] = []
     private var activeMoveUndoKeys: Set<String> = []
     private var scheduleTimer: Timer?
     private var sessionLimitTask: Task<Void, Never>?
+    private var zeroDriftLimitTask: Task<Void, Never>?
 
     init() {
         requireManualFinishBeforeSwitching = UserDefaults.standard.object(
@@ -63,6 +68,16 @@ final class IntentAppModel: ObservableObject {
     }
 
     var hasActiveSession: Bool { activeSessionName != nil }
+
+    var isZeroDriftActive: Bool {
+        guard let zeroDriftEndsAt else { return false }
+        return zeroDriftEndsAt > Date()
+    }
+
+    var zeroDriftStatusText: String? {
+        guard let zeroDriftEndsAt, zeroDriftEndsAt > Date() else { return nil }
+        return Self.durationText(until: zeroDriftEndsAt)
+    }
 
     var activeSessionCanFinishManually: Bool {
         guard let activeSessionID,
@@ -103,6 +118,7 @@ final class IntentAppModel: ObservableObject {
         } catch {
             cooldownExpirations = [:]
         }
+        restoreZeroDriftIfNeeded()
         startScheduleTimer()
     }
 
@@ -636,15 +652,44 @@ final class IntentAppModel: ObservableObject {
         activeLock?.stop()
     }
 
+    func activateZeroDrift(until endDate: Date) {
+        guard endDate > Date() else {
+            errorMessage = "Choose a Zero Drift finish time in the future."
+            return
+        }
+
+        let state = ZeroDriftState(startedAt: Date(), endsAt: endDate)
+        do {
+            try zeroDriftStore.save(state)
+        } catch {
+            errorMessage = "Could not save Zero Drift: \(error)"
+            return
+        }
+
+        zeroDriftEndsAt = endDate
+        scheduleZeroDriftLimit(until: endDate)
+        showOverlay()
+        startZeroDriftIdleLockIfNeeded()
+    }
+
     func showOverlay() {
         overlayPresenter?.showOverlay(animated: true)
     }
 
     func hideOverlay() {
+        guard !isZeroDriftActive || hasActiveSession else {
+            errorMessage = "Zero Drift is active. Start an intention before hiding Intent."
+            showOverlay()
+            return
+        }
         overlayPresenter?.hideOverlay(animated: true)
     }
 
     func toggleOverlay() {
+        if isZeroDriftActive, !hasActiveSession {
+            showOverlay()
+            return
+        }
         overlayPresenter?.toggleOverlay()
     }
 
@@ -677,6 +722,12 @@ final class IntentAppModel: ObservableObject {
     }
 
     private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
+        if let zeroDriftIdleLock {
+            pendingZeroDriftStart = (intention, runtimeEndDate)
+            zeroDriftIdleLock.stop()
+            return
+        }
+
         for browser in requiredBrowserGuards(for: intention) {
             let heartbeatStore = BrowserGuardHeartbeatStore(
                 fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser.bundleIdentifier)
@@ -776,7 +827,103 @@ final class IntentAppModel: ObservableObject {
                 self.overlayPresenter?.showOverlay(animated: true)
                 if let replacement {
                     self.requestStart(replacement)
+                } else {
+                    self.startZeroDriftIdleLockIfNeeded()
                 }
+            }
+        }
+    }
+
+    private func restoreZeroDriftIfNeeded() {
+        do {
+            guard let state = try zeroDriftStore.load() else {
+                zeroDriftEndsAt = nil
+                return
+            }
+            zeroDriftEndsAt = state.endsAt
+            scheduleZeroDriftLimit(until: state.endsAt)
+            showOverlay()
+            startZeroDriftIdleLockIfNeeded()
+        } catch {
+            try? zeroDriftStore.clear()
+            zeroDriftEndsAt = nil
+            errorMessage = "Zero Drift could not be restored: \(error)"
+        }
+    }
+
+    private func scheduleZeroDriftLimit(until endDate: Date) {
+        zeroDriftLimitTask?.cancel()
+        let duration = max(0.1, endDate.timeIntervalSinceNow)
+        zeroDriftLimitTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.zeroDriftEndsAt = nil
+            self.zeroDriftLimitTask = nil
+            try? self.zeroDriftStore.clear()
+            self.zeroDriftIdleLock?.stop()
+            self.errorMessage = "Zero Drift finished."
+        }
+    }
+
+    private func startZeroDriftIdleLockIfNeeded() {
+        guard isZeroDriftActive,
+              !hasActiveSession,
+              zeroDriftIdleLock == nil else {
+            return
+        }
+
+        let intentBundleIdentifier = Bundle.main.bundleIdentifier ?? "dev.loganmondi.intent"
+        let spec = FocusSessionSpec(
+            displayName: "Zero Drift",
+            startupSteps: [],
+            allowedBundleIdentifiers: [intentBundleIdentifier],
+            fallbackBundleIdentifier: intentBundleIdentifier,
+            strictSingleApp: true,
+            blockAppSwitching: true,
+            blockNewApps: true,
+            keepFocused: true,
+            blockBrowserTabEscape: false,
+            blockFirefoxChromeClicks: false,
+            allowGoogleSearchTabs: false,
+            spotifyPlaylistURI: nil,
+            allowSpotifyForeground: false,
+            finishShortcut: FinishShortcutStore.load().focusShortcut,
+            allowsManualFinish: false,
+            closeSessionResourcesOnFinish: false,
+            restorePreviousApplicationOnStop: false
+        )
+        let lock = FocusLock(spec: spec)
+        zeroDriftIdleLock = lock
+
+        Thread.detachNewThread {
+            let failureMessage: String?
+            do {
+                try lock.run()
+                failureMessage = nil
+            } catch {
+                failureMessage = "Zero Drift could not secure this Mac: \(error)"
+            }
+
+            Task { @MainActor in
+                guard self.zeroDriftIdleLock === lock else { return }
+                self.zeroDriftIdleLock = nil
+
+                if let pending = self.pendingZeroDriftStart {
+                    self.pendingZeroDriftStart = nil
+                    self.start(pending.intention, runtimeEndDate: pending.runtimeEndDate)
+                    return
+                }
+
+                if let failureMessage {
+                    self.zeroDriftEndsAt = nil
+                    self.zeroDriftLimitTask?.cancel()
+                    self.zeroDriftLimitTask = nil
+                    try? self.zeroDriftStore.clear()
+                    self.errorMessage = failureMessage
+                    return
+                }
+
+                self.startZeroDriftIdleLockIfNeeded()
             }
         }
     }

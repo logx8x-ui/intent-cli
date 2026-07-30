@@ -18,6 +18,7 @@ public struct FocusSessionSpec {
     public let finishShortcut: FocusKeyboardShortcut
     public let allowsManualFinish: Bool
     public let closeSessionResourcesOnFinish: Bool
+    public let restorePreviousApplicationOnStop: Bool
     public let allowedWebsitesByBrowser: [String: [String]]
 
     public init(
@@ -37,6 +38,7 @@ public struct FocusSessionSpec {
         finishShortcut: FocusKeyboardShortcut = .defaultFinish,
         allowsManualFinish: Bool = true,
         closeSessionResourcesOnFinish: Bool = false,
+        restorePreviousApplicationOnStop: Bool = true,
         allowedWebsitesByBrowser: [String: [String]] = [:]
     ) {
         self.displayName = displayName
@@ -55,6 +57,7 @@ public struct FocusSessionSpec {
         self.finishShortcut = finishShortcut
         self.allowsManualFinish = allowsManualFinish
         self.closeSessionResourcesOnFinish = closeSessionResourcesOnFinish
+        self.restorePreviousApplicationOnStop = restorePreviousApplicationOnStop
         self.allowedWebsitesByBrowser = allowedWebsitesByBrowser
     }
 

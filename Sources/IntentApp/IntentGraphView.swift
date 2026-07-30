@@ -11,6 +11,7 @@ struct IntentGraphView: View {
     @AppStorage("intentWelcomeTitle") private var welcomeTitle = "Welcome to my desktop"
     @AppStorage("intentBackgroundSelection") private var backgroundSelection = IntentBackgroundChoice.none.rawValue
     @AppStorage("intentDidCompleteOnboarding") private var didCompleteOnboarding = false
+    @AppStorage("intentZeroDriftWarningSuppressed") private var zeroDriftWarningSuppressed = false
 
     @State private var editMode = false
     @State private var selection: GraphSelection?
@@ -26,6 +27,8 @@ struct IntentGraphView: View {
     @State private var aiWorkspaceRequest: AIWorkspaceRequest?
     @State private var pendingPlacementID: String?
     @State private var showQuickGuide = false
+    @State private var showZeroDriftWarning = false
+    @State private var showZeroDriftTiming = false
     @State private var backgroundRevision = 0
     @State private var overlayShortcut = OverlayShortcutStore.load()
     @State private var finishShortcut = FinishShortcutStore.load()
@@ -228,6 +231,33 @@ struct IntentGraphView: View {
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
+        .sheet(isPresented: $showZeroDriftWarning) {
+            ZeroDriftWarningSheet(
+                onCancel: {
+                    showZeroDriftWarning = false
+                },
+                onContinue: { doNotShowAgain in
+                    zeroDriftWarningSuppressed = doNotShowAgain
+                    showZeroDriftWarning = false
+                    DispatchQueue.main.async {
+                        showZeroDriftTiming = true
+                    }
+                }
+            )
+            .interactiveDismissDisabled()
+        }
+        .sheet(isPresented: $showZeroDriftTiming) {
+            ZeroDriftTimingSheet(
+                onCancel: {
+                    showZeroDriftTiming = false
+                },
+                onActivate: { endDate in
+                    showZeroDriftTiming = false
+                    model.activateZeroDrift(until: endDate)
+                }
+            )
+            .interactiveDismissDisabled()
+        }
         .alert("Intent", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -344,6 +374,39 @@ struct IntentGraphView: View {
                 }
 
                 Spacer()
+
+                Button {
+                    if model.isZeroDriftActive {
+                        let remaining = model.zeroDriftStatusText.map { " \($0) remaining." } ?? ""
+                        model.errorMessage = "Zero Drift is active.\(remaining)"
+                    } else if zeroDriftWarningSuppressed {
+                        showZeroDriftTiming = true
+                    } else {
+                        showZeroDriftWarning = true
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(model.isZeroDriftActive ? Color.green : GraphTheme.muted(colorScheme))
+                            .frame(width: 7, height: 7)
+                        Text("Zero Drift: \(model.isZeroDriftActive ? "True" : "False")")
+                    }
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 11)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
+                    .background(
+                        model.isZeroDriftActive ? Color.green.opacity(0.13) : Color.clear,
+                        in: Capsule()
+                    )
+                    .overlay(Capsule().stroke(GraphTheme.stroke(colorScheme)))
+                }
+                .buttonStyle(.plain)
+                .help(
+                    model.isZeroDriftActive
+                        ? "Zero Drift is active\(model.zeroDriftStatusText.map { " for \($0)" } ?? "")"
+                        : "Require an intention to be running at all times"
+                )
 
                 Button {
                     model.hideOverlay()
