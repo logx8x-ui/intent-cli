@@ -74,7 +74,6 @@ public final class FocusLock {
     private var activationObserver: NSObjectProtocol?
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
-    private var lastOpenRefocusAt: Date = .distantPast
     private var systemSwitcherGraceUntil: Date = .distantPast
 
     public init(spec: FocusSessionSpec) {
@@ -98,15 +97,20 @@ public final class FocusLock {
 
         baselinePids = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
 
-        try runStartupSteps()
         try installEventTap()
         installLaunchObserver()
         installActivationObserver()
         startFocusTimer()
         startSpotifyTimerIfNeeded()
 
-        while !isStopped {
-            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2))
+        do {
+            try runStartupSteps()
+            while !isStopped {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2))
+            }
+        } catch {
+            cleanup()
+            throw error
         }
 
         cleanup()
@@ -139,8 +143,6 @@ public final class FocusLock {
             }
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
         }
-
-        throw FocusLockError.unableToOpen(spec.displayName)
     }
 
     private func openURLOrActivateExisting(_ url: String, bundleIdentifier: String) throws {
@@ -240,18 +242,14 @@ public final class FocusLock {
 
     @discardableResult
     private func activateApp(bundleIdentifier: String) -> Bool {
-        let app = NSWorkspace.shared.runningApplications.first(where: {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleIdentifier
-        })
-
-        if let app {
-            _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            if app.isActive {
-                return true
-            }
+        }) else {
+            return false
         }
 
-        return openForRefocus(bundleIdentifier: bundleIdentifier)
+        _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        return app.isActive
     }
 
     @discardableResult
@@ -261,26 +259,6 @@ public final class FocusLock {
         }
 
         return app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-    }
-
-    @discardableResult
-    private func openForRefocus(bundleIdentifier: String) -> Bool {
-        let now = Date()
-        guard now.timeIntervalSince(lastOpenRefocusAt) >= 0.45 else {
-            return false
-        }
-
-        lastOpenRefocusAt = now
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-b", bundleIdentifier]
-
-        do {
-            try process.run()
-            return true
-        } catch {
-            return false
-        }
     }
 
     private func installEventTap() throws {
@@ -323,11 +301,6 @@ public final class FocusLock {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
-            if isMissionControlActive() {
-                systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
-                return Unmanaged.passUnretained(event)
-            }
-
             if spec.blockFirefoxChromeClicks,
                isFirefoxFrontmost(),
                isProtectedFirefoxChromeClick(event.location) {
@@ -335,6 +308,14 @@ public final class FocusLock {
                 return nil
             }
 
+            guard shouldAllowMouseDown(at: event.location) else {
+                refocus()
+                return nil
+            }
+
+            if isMissionControlActive() {
+                systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -514,6 +495,7 @@ public final class FocusLock {
 
         if spec.strictSingleApp {
             guard bundleIdentifier == spec.fallbackBundleIdentifier else {
+                app.hide()
                 refocus()
                 return
             }
@@ -521,13 +503,14 @@ public final class FocusLock {
         }
 
         guard spec.allowedBundleIdentifiers.contains(bundleIdentifier) else {
+            app.hide()
             refocus()
             return
         }
     }
 
     private func startFocusTimer() {
-        focusTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+        focusTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             self?.enforceFocus()
         }
         RunLoop.current.add(focusTimer!, forMode: .common)
@@ -596,6 +579,134 @@ public final class FocusLock {
         }
 
         activateFallbackApp()
+    }
+
+    private func shouldAllowMouseDown(at point: CGPoint) -> Bool {
+        guard spec.blockAppSwitching || spec.keepFocused else {
+            return true
+        }
+
+        let target = clickTarget(at: point)
+        return FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: target.ownerBundleIdentifier,
+            representedBundleIdentifier: target.representedBundleIdentifier,
+            allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
+            intentBundleIdentifier: Bundle.main.bundleIdentifier
+        )
+    }
+
+    private func clickTarget(at point: CGPoint) -> (
+        ownerBundleIdentifier: String?,
+        representedBundleIdentifier: String?
+    ) {
+        let systemWide = AXUIElementCreateSystemWide()
+        var element: AXUIElement?
+        if AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) == .success,
+           let element {
+            var pid: pid_t = 0
+            AXUIElementGetPid(element, &pid)
+            let ownerBundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+                ?? windowOwnerBundleIdentifier(at: point)
+            return (
+                ownerBundleIdentifier,
+                representedBundleIdentifier(startingAt: element)
+            )
+        }
+
+        return (windowOwnerBundleIdentifier(at: point), nil)
+    }
+
+    private func representedBundleIdentifier(startingAt element: AXUIElement) -> String? {
+        var current: AXUIElement? = element
+        var labels: [String] = []
+
+        for _ in 0..<8 {
+            guard let currentElement = current else { break }
+
+            if let url = accessibilityURL(currentElement),
+               let bundleIdentifier = Bundle(url: url)?.bundleIdentifier {
+                return bundleIdentifier
+            }
+
+            for attribute in [
+                kAXTitleAttribute,
+                kAXDescriptionAttribute,
+                kAXHelpAttribute,
+                kAXRoleDescriptionAttribute
+            ] {
+                if let value = accessibilityString(currentElement, attribute: attribute) {
+                    labels.append(value)
+                }
+            }
+
+            current = accessibilityElement(currentElement, attribute: kAXParentAttribute)
+        }
+
+        let normalizedLabels = labels.map { $0.lowercased() }
+        for bundleIdentifier in spec.allowedBundleIdentifiers {
+            guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+                continue
+            }
+            let appName = FileManager.default.displayName(atPath: appURL.path)
+                .replacingOccurrences(of: ".app", with: "")
+                .lowercased()
+            if normalizedLabels.contains(where: { $0 == appName || $0.contains(appName) }) {
+                return bundleIdentifier
+            }
+        }
+
+        return nil
+    }
+
+    private func accessibilityURL(_ element: AXUIElement) -> URL? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value) == .success else {
+            return nil
+        }
+        if let url = value as? URL {
+            return url
+        }
+        if let string = value as? String {
+            return URL(string: string)
+        }
+        return nil
+    }
+
+    private func accessibilityString(_ element: AXUIElement, attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
+            return nil
+        }
+        return value as? String
+    }
+
+    private func accessibilityElement(_ element: AXUIElement, attribute: String) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value else {
+            return nil
+        }
+        return unsafeBitCast(value, to: AXUIElement.self)
+    }
+
+    private func windowOwnerBundleIdentifier(at point: CGPoint) -> String? {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        for window in windows {
+            guard let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let boundsDictionary = window[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+                  bounds.contains(point),
+                  let pid = window[kCGWindowOwnerPID as String] as? pid_t else {
+                continue
+            }
+            return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        }
+        return nil
     }
 
     private func shouldWaitForSystemSwitcher(bundleIdentifier: String?) -> Bool {

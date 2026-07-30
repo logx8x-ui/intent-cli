@@ -704,12 +704,22 @@ final class IntentAppModel: ObservableObject {
             return (browser.bundleIdentifier, websites.isEmpty ? ["intent.invalid"] : websites)
         })
         let firefoxWebsites = websitesByBrowser["org.mozilla.firefox"] ?? []
+        let startupWebsitesByBrowser = Dictionary(
+            grouping: spec.startupSteps.compactMap { step -> (String, String)? in
+                guard case .openURL(let url, let browserBundleIdentifier) = step else {
+                    return nil
+                }
+                return (browserBundleIdentifier, url)
+            },
+            by: \.0
+        ).mapValues { $0.map(\.1) }
         let rules = ActiveBrowserRules(
             active: true,
             // A non-matching sentinel keeps already-installed Browser Guard 0.1.3 builds strict
             // when Firefox is allowed but the intention has no website spikes.
             allowedWebsites: firefoxWebsites,
             allowedWebsitesByBrowser: websitesByBrowser,
+            startupWebsitesByBrowser: startupWebsitesByBrowser,
             blockTabSwitching: true,
             blockNavigation: true,
             blockNewTabs: false,

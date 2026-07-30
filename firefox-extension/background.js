@@ -24,6 +24,7 @@ function inactiveRules() {
   return {
     active: false,
     allowedWebsites: [],
+    startupWebsites: [],
     blockTabSwitching: false,
     blockNavigation: false,
     blockNewTabs: false,
@@ -147,6 +148,7 @@ function effectiveRules(nativeRules) {
     ...inactiveRules(),
     active: true,
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
+    startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
     blockNavigation: Boolean(nativeRules.blockNavigation),
     blockNewTabs: Boolean(nativeRules.blockNewTabs),
@@ -184,6 +186,7 @@ async function applyNativeRules(nativeRules) {
   }
 
   if (rules.active) {
+    await synchronizeStartupTabs();
     await primeAllowedTab();
   } else {
     lastAllowedTabId = null;
@@ -216,6 +219,55 @@ async function primeAllowedTab() {
   const activeAllowed = tabs.find((tab) => tab.active && isRuntimeAllowedTab(tab));
   const firstAllowed = activeAllowed || tabs.find((tab) => isRuntimeAllowedTab(tab));
   lastAllowedTabId = firstAllowed?.id ?? null;
+}
+
+function startupURLMatches(existingURL, requestedURL) {
+  try {
+    const existing = new URL(existingURL);
+    const requested = new URL(requestedURL);
+    const normalizeHost = (host) => host.toLowerCase().replace(/^www\./, "");
+    const normalizePath = (path) => {
+      const value = path.replace(/\/+$/, "");
+      return value || "/";
+    };
+    return normalizeHost(existing.hostname) === normalizeHost(requested.hostname) &&
+      (normalizePath(requested.pathname) === "/" ||
+        normalizePath(existing.pathname) === normalizePath(requested.pathname) ||
+        normalizePath(existing.pathname).startsWith(`${normalizePath(requested.pathname)}/`));
+  } catch (_) {
+    return existingURL === requestedURL;
+  }
+}
+
+async function synchronizeStartupTabs() {
+  if (!rules.active || rules.startupWebsites.length === 0) return;
+
+  const tabs = await browser.tabs.query({});
+  if (tabs.length === 0) return;
+
+  const claimedTabIds = new Set();
+  let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
+  let firstStartupTab = null;
+
+  for (const startupURL of rules.startupWebsites) {
+    let tab = tabs.find((candidate) =>
+      !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
+    );
+    if (!tab) {
+      const staging = stagingTabs.shift();
+      tab = staging
+        ? await browser.tabs.update(staging.id, { url: startupURL, active: false })
+        : await browser.tabs.create({ url: startupURL, active: false });
+    }
+    claimedTabIds.add(tab.id);
+    freshBlankTabIds.delete(tab.id);
+    firstStartupTab ||= tab;
+  }
+
+  if (firstStartupTab) {
+    lastAllowedTabId = firstStartupTab.id;
+    await browser.tabs.update(firstStartupTab.id, { active: true });
+  }
 }
 
 async function rememberIfAllowed(tabId) {
@@ -253,23 +305,14 @@ async function returnToAllowedTab() {
       return;
     }
 
-    // A still-open window must not fall through to an old unallowed tab. If
-    // Firefox fully closed, however, create nothing; its next launch owns the
-    // new-tab surface and can accept a manually typed allowed URL.
-    if (tabs.length > 0) {
-      await openRecoveryBlankTab();
+    if (tabs.length > 0 && rules.startupWebsites.length > 0) {
+      await synchronizeStartupTabs();
     }
   } catch (_) {
     lastAllowedTabId = null;
   } finally {
     enforcing = false;
   }
-}
-
-async function openRecoveryBlankTab() {
-  const tab = await browser.tabs.create({ url: "about:blank", active: true });
-  freshBlankTabIds.add(tab.id);
-  lastAllowedTabId = tab.id;
 }
 
 function shouldBlockNavigation(url) {
@@ -399,6 +442,14 @@ browser.tabs.onCreated.addListener(async (tab) => {
   }
 
   if (!tab.url || isSearchStagingURL(tab.url)) {
+    const tabs = await browser.tabs.query({});
+    const hasOtherAllowedTab = tabs.some((candidate) =>
+      candidate.id !== tab.id && isAllowedURL(candidate.url, rules)
+    );
+    if (rules.startupWebsites.length > 0 && !hasOtherAllowedTab) {
+      await synchronizeStartupTabs();
+      return;
+    }
     freshBlankTabIds.add(tab.id);
     lastAllowedTabId = tab.id;
     return;

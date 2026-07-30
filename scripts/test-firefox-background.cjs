@@ -101,6 +101,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const context = {
     browser,
     IntentBrowserRules: helpers,
+    URL,
     setInterval: () => 0,
     setTimeout: (fn) => {
       Promise.resolve().then(fn);
@@ -126,9 +127,15 @@ function createHarness(activeRules, initialTabs, options = {}) {
       return response;
     },
     async ready() {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      for (let index = 0; index < 12; index += 1) {
+        await Promise.resolve();
+      }
+    },
+    async refresh() {
+      await context.refreshRules();
+      for (let index = 0; index < 12; index += 1) {
+        await Promise.resolve();
+      }
     },
     async activate(tabId) {
       setActiveTab(tabId);
@@ -164,8 +171,9 @@ function createHarness(activeRules, initialTabs, options = {}) {
     },
     async remove(tabId) {
       await browser.tabs.remove(tabId);
-      await Promise.resolve();
-      await Promise.resolve();
+      for (let index = 0; index < 12; index += 1) {
+        await Promise.resolve();
+      }
     },
     async receiveNative(message) {
       if (message?.tabCommand) {
@@ -180,11 +188,33 @@ async function run() {
   const lockedRules = {
     active: true,
     allowedWebsites: ["instagram.com/direct"],
+    startupWebsites: [],
     blockTabSwitching: true,
     blockNavigation: true,
     blockNewTabs: true,
     allowGoogleSearchTabs: false
   };
+  const startupRules = {
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  };
+
+  const startupHarness = createHarness(startupRules, [
+    { id: 1, active: true, url: "about:blank" }
+  ]);
+  await startupHarness.refresh();
+  assert.equal(
+    startupHarness.tabs.get(1).url,
+    "https://www.instagram.com/direct/inbox/",
+    "Firefox should replace its startup blank with the first allowed website"
+  );
+  assert.equal(startupHarness.tabs.size, 1, "Firefox startup should not create an extra blank tab");
+
+  const existingStartupHarness = createHarness(startupRules, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
+  ]);
+  await existingStartupHarness.refresh();
+  assert.equal(existingStartupHarness.tabs.size, 1, "Firefox should not duplicate an open startup website");
 
   const activationHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
@@ -269,7 +299,7 @@ async function run() {
   assert.equal(closeAllowedHarness.tabs.has(1), false, "Allowed tabs should be closable");
   assert.equal(closeAllowedHarness.tabs.get(3).active, true, "Closing an allowed tab should land on another allowed tab, not the next unallowed tab");
 
-  const closeOnlyAllowedHarness = createHarness(lockedRules, [
+  const closeOnlyAllowedHarness = createHarness(startupRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://www.youtube.com/" }
   ]);
@@ -278,12 +308,14 @@ async function run() {
   await closeOnlyAllowedHarness.remove(1);
   assert.equal(closeOnlyAllowedHarness.tabs.has(1), false, "The final allowed tab should still be closable");
   assert.equal(
-    Array.from(closeOnlyAllowedHarness.tabs.values()).some((tab) => tab.active && tab.url === "about:blank"),
+    Array.from(closeOnlyAllowedHarness.tabs.values()).some((tab) =>
+      tab.active && tab.url === "https://www.instagram.com/direct/inbox/"
+    ),
     true,
-    "Closing the final allowed tab should create a blank recovery tab instead of leaving an unallowed tab active"
+    "Closing the final allowed tab should restore the startup website instead of exposing an unallowed tab"
   );
 
-  const closeBrowserHarness = createHarness(lockedRules, [
+  const closeBrowserHarness = createHarness(startupRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
   ]);
   await closeBrowserHarness.ready();

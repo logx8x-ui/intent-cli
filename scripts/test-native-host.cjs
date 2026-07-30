@@ -15,6 +15,7 @@ const hostPath = path.join(intentDir, "bin", "IntentNativeHost");
 const inactiveRules = {
   active: false,
   allowedWebsites: [],
+  startupWebsitesByBrowser: {},
   blockTabSwitching: false,
   blockNavigation: false,
   blockNewTabs: false,
@@ -53,6 +54,14 @@ try {
   const activeRules = {
     active: true,
     allowedWebsites: ["instagram.com/direct"],
+    allowedWebsitesByBrowser: {
+      "org.mozilla.firefox": ["instagram.com/direct"],
+      "com.google.Chrome": ["youtube.com"]
+    },
+    startupWebsitesByBrowser: {
+      "org.mozilla.firefox": ["https://www.instagram.com/direct/inbox/"],
+      "com.google.Chrome": ["https://www.youtube.com/"]
+    },
     blockTabSwitching: true,
     blockNavigation: true,
     blockNewTabs: true,
@@ -67,6 +76,10 @@ try {
   const rulesResponse = callHost({ type: "getRules" });
   assert.equal(rulesResponse.active, true, "Native host should return active app rules");
   assert.deepEqual(rulesResponse.allowedWebsites, activeRules.allowedWebsites);
+  assert.deepEqual(
+    rulesResponse.startupWebsites,
+    activeRules.startupWebsitesByBrowser["org.mozilla.firefox"]
+  );
   assert.equal(rulesResponse.guardEnabled, false, "Native host should include guard enabled state");
 
   const staleRules = {

@@ -46,6 +46,7 @@ struct HostRequest: Codable {
 struct HostResponse: Codable {
     var active: Bool
     var allowedWebsites: [String]
+    var startupWebsites: [String]
     var blockTabSwitching: Bool
     var blockNavigation: Bool
     var blockNewTabs: Bool
@@ -98,9 +99,11 @@ while let requestData = readMessage() {
        !rules.active || rules.isFresh() {
         let browserWebsites = rules.allowedWebsitesByBrowser[browserBundleIdentifier]
             ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
+        let startupWebsites = rules.startupWebsitesByBrowser[browserBundleIdentifier] ?? []
         response = HostResponse(
             active: rules.active,
             allowedWebsites: browserWebsites,
+            startupWebsites: startupWebsites,
             blockTabSwitching: rules.blockTabSwitching,
             blockNavigation: rules.blockNavigation,
             blockNewTabs: rules.blockNewTabs,
@@ -112,6 +115,7 @@ while let requestData = readMessage() {
         response = HostResponse(
             active: false,
             allowedWebsites: [],
+            startupWebsites: [],
             blockTabSwitching: false,
             blockNavigation: false,
             blockNewTabs: false,

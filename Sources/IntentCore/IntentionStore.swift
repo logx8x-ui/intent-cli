@@ -53,6 +53,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     public var active: Bool
     public var allowedWebsites: [String]
     public var allowedWebsitesByBrowser: [String: [String]]
+    public var startupWebsitesByBrowser: [String: [String]]
     public var blockTabSwitching: Bool
     public var blockNavigation: Bool
     public var blockNewTabs: Bool
@@ -63,6 +64,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         active: Bool,
         allowedWebsites: [String],
         allowedWebsitesByBrowser: [String: [String]] = [:],
+        startupWebsitesByBrowser: [String: [String]] = [:],
         blockTabSwitching: Bool,
         blockNavigation: Bool,
         blockNewTabs: Bool,
@@ -72,6 +74,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         self.active = active
         self.allowedWebsites = allowedWebsites
         self.allowedWebsitesByBrowser = allowedWebsitesByBrowser
+        self.startupWebsitesByBrowser = startupWebsitesByBrowser
         self.blockTabSwitching = blockTabSwitching
         self.blockNavigation = blockNavigation
         self.blockNewTabs = blockNewTabs
@@ -83,6 +86,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         case active
         case allowedWebsites
         case allowedWebsitesByBrowser
+        case startupWebsitesByBrowser
         case blockTabSwitching
         case blockNavigation
         case blockNewTabs
@@ -95,6 +99,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
         allowedWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .allowedWebsitesByBrowser) ?? [:]
+        startupWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .startupWebsitesByBrowser) ?? [:]
         blockTabSwitching = try container.decodeIfPresent(Bool.self, forKey: .blockTabSwitching) ?? false
         blockNavigation = try container.decodeIfPresent(Bool.self, forKey: .blockNavigation) ?? false
         blockNewTabs = try container.decodeIfPresent(Bool.self, forKey: .blockNewTabs) ?? false
@@ -107,6 +112,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
             active: active,
             allowedWebsites: allowedWebsites,
             allowedWebsitesByBrowser: allowedWebsitesByBrowser,
+            startupWebsitesByBrowser: startupWebsitesByBrowser,
             blockTabSwitching: blockTabSwitching,
             blockNavigation: blockNavigation,
             blockNewTabs: blockNewTabs,

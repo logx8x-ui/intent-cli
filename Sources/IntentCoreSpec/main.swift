@@ -197,6 +197,61 @@ do {
         !FocusForegroundPolicy.shouldDeferRefocus(bundleIdentifier: "io.remnote"),
         "Regular unallowed apps should not get Mission Control grace"
     )
+    let allowedClickBundles: Set<String> = ["org.mozilla.firefox"]
+    try expect(
+        FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "org.mozilla.firefox",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent"
+        ),
+        "Clicks inside an allowed application should pass through"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.spotify.client",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent"
+        ),
+        "Clicks inside an unallowed application should stop before activation"
+    )
+    try expect(
+        FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: "org.mozilla.firefox",
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent"
+        ),
+        "A Dock or Mission Control target representing an allowed app should pass through"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: "com.spotify.client",
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent"
+        ),
+        "A Dock or Mission Control target representing an unallowed app should stop"
+    )
+    try expect(
+        FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.apple.Spotlight",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent"
+        ),
+        "Spotlight should remain available to reopen an allowed app"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: nil,
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent"
+        ),
+        "Unknown and desktop click targets should stay blocked"
+    )
     try expect(
         FocusForegroundPolicy.isMissionControlOverlay(
             ownerName: "Dock",
@@ -694,6 +749,10 @@ do {
             "org.mozilla.firefox": ["github.com"],
             "com.google.Chrome": ["instagram.com/direct"]
         ],
+        startupWebsitesByBrowser: [
+            "org.mozilla.firefox": ["https://github.com/"],
+            "com.google.Chrome": ["https://www.instagram.com/direct/inbox/"]
+        ],
         blockTabSwitching: true,
         blockNavigation: true,
         blockNewTabs: false,
@@ -703,6 +762,10 @@ do {
     let loadedRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: rulesStore.fileURL))
     try expect(loadedRules == browserRules, "Active browser rules should round-trip")
     try expect(loadedRules.allowedWebsitesByBrowser["com.google.Chrome"] == ["instagram.com/direct"], "Chrome websites should remain browser-specific")
+    try expect(
+        loadedRules.startupWebsitesByBrowser["org.mozilla.firefox"] == ["https://github.com/"],
+        "Full startup URLs should remain browser-specific"
+    )
     try expect(loadedRules.isFresh(), "Freshly written active browser rules should be fresh")
     let staleLegacyRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data("""
     {

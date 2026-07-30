@@ -104,6 +104,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const context = {
     chrome,
     IntentBrowserRules: helpers,
+    URL,
     importScripts: () => {},
     setInterval: () => 0,
     setTimeout: (callback) => { Promise.resolve().then(callback); return 0; },
@@ -172,11 +173,42 @@ async function run() {
   const lockedRules = {
     active: true,
     allowedWebsites: ["instagram.com/direct"],
+    startupWebsites: [],
     blockTabSwitching: true,
     blockNavigation: true,
     blockNewTabs: true,
     allowGoogleSearchTabs: false
   };
+  const startup = createHarness({
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  }, [
+    { id: 1, active: true, url: "chrome://newtab/" }
+  ]);
+  await startup.settle();
+  await startup.receiveNative({
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  });
+  assert.equal(
+    startup.tabs.get(1).url,
+    "https://www.instagram.com/direct/inbox/",
+    "Chrome should replace its startup blank with the first allowed website"
+  );
+  assert.equal(startup.tabs.size, 1, "Chrome startup should not create an extra blank tab");
+
+  const existingStartup = createHarness({
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  }, [
+    { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
+  ]);
+  await existingStartup.settle();
+  await existingStartup.receiveNative({
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  });
+  assert.equal(existingStartup.tabs.size, 1, "Chrome should not duplicate an open startup website");
   const locked = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://youtube.com/" }
