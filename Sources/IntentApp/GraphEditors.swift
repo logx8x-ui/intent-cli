@@ -15,6 +15,8 @@ struct IntentionEditorMenu: View {
     @State private var websiteDrafts: [String: String] = [:]
     @State private var isIconDropTarget = false
     @State private var iconImportError: String?
+    @State private var lastQuickAppIndex: Int?
+    @State private var lastQuickWebsiteIndexByBrowser: [String: Int] = [:]
     @FocusState private var nameFocused: Bool
 
     private var matches: [InstalledApp] {
@@ -27,6 +29,35 @@ struct IntentionEditorMenu: View {
             }
             .prefix(7)
             .map { $0 }
+    }
+
+    private var quickApps: [InstalledApp] {
+        let preferredBundleIdentifiers = [
+            "com.apple.MobileSMS",
+            "org.mozilla.firefox",
+            "com.google.Chrome",
+            "com.apple.mail",
+            "com.apple.iCal",
+            "com.apple.Notes",
+            "com.apple.reminders",
+            "com.openai.codex",
+            "com.spotify.client",
+            "net.ankiweb.dtop",
+            "com.todesktop.230313mzl4w4u92",
+            "com.microsoft.VSCode",
+            "com.rstudio.desktop",
+            "io.remnote",
+            "com.remnote.desktop",
+            "net.whatsapp.WhatsApp",
+            "com.hnc.Discord",
+            "com.tinyspeck.slackmacgap",
+            "us.zoom.xos"
+        ]
+        let appsByIdentifier = Dictionary(
+            catalog.map { ($0.bundleIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return preferredBundleIdentifiers.compactMap { appsByIdentifier[$0] }
     }
 
     var body: some View {
@@ -47,6 +78,8 @@ struct IntentionEditorMenu: View {
                 TextField("Search installed apps", text: $appQuery)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(addFirstMatch)
+
+                quickAppGrid
 
                 if !matches.isEmpty {
                     VStack(spacing: 2) {
@@ -241,6 +274,56 @@ struct IntentionEditorMenu: View {
     }
 
     @ViewBuilder
+    private var quickAppGrid: some View {
+        if !quickApps.isEmpty {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.fixed(38), spacing: 8), count: 6),
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(Array(quickApps.enumerated()), id: \.element.id) { index, app in
+                    let isSelected = intention.allowedApps.contains {
+                        $0.bundleIdentifier == app.bundleIdentifier
+                    }
+                    Button {
+                        handleQuickAppClick(app, at: index)
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            Image(nsImage: app.icon)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .padding(6)
+                                .frame(width: 38, height: 38)
+
+                            if isSelected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, GraphTheme.editBlue)
+                                    .offset(x: 3, y: -3)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .background(GraphTheme.surface(colorScheme))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(
+                                    isSelected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                                    lineWidth: isSelected ? 1.5 : 1
+                                )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .help(app.name)
+                    .accessibilityLabel("\(isSelected ? "Remove" : "Add") \(app.name)")
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    @ViewBuilder
     private var browserWebsiteEditors: some View {
         let browsers = intention.allowedApps.filter(\.isBrowser)
         if browsers.isEmpty {
@@ -299,9 +382,63 @@ struct IntentionEditorMenu: View {
                         .buttonStyle(.bordered)
                         .help("Add website")
                     }
+
+                    quickWebsiteGrid(for: browser)
                 }
             }
         }
+    }
+
+    private func quickWebsiteGrid(for browser: AllowedApp) -> some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.fixed(38), spacing: 8), count: 6),
+            alignment: .leading,
+            spacing: 8
+        ) {
+            ForEach(Array(QuickWebsitePreset.common.enumerated()), id: \.element.id) { index, preset in
+                let website = AllowedWebsite(
+                    preset.value,
+                    browserBundleIdentifier: browser.bundleIdentifier
+                )
+                let isSelected = intention.allowedWebsites.contains { $0.id == website.id }
+                Button {
+                    handleQuickWebsiteClick(
+                        preset,
+                        for: browser,
+                        at: index
+                    )
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: preset.symbol)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(preset.color)
+                            .frame(width: 38, height: 38)
+
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, GraphTheme.editBlue)
+                                .offset(x: 3, y: -3)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .background(GraphTheme.surface(colorScheme))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(
+                                isSelected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                                lineWidth: isSelected ? 1.5 : 1
+                            )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                }
+                .buttonStyle(.plain)
+                .help(preset.name)
+                .accessibilityLabel("\(isSelected ? "Remove" : "Add") \(preset.name)")
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private func appIcon(_ app: AllowedApp) -> some View {
@@ -316,8 +453,30 @@ struct IntentionEditorMenu: View {
     }
 
     private func add(_ app: InstalledApp) {
+        guard !intention.allowedApps.contains(where: {
+            $0.bundleIdentifier == app.bundleIdentifier
+        }) else {
+            return
+        }
         intention.allowedApps.append(.init(name: app.name, bundleIdentifier: app.bundleIdentifier))
         appQuery = ""
+    }
+
+    private func handleQuickAppClick(_ app: InstalledApp, at index: Int) {
+        let modifiers = NSEvent.modifierFlags
+        if modifiers.contains(.shift), let anchor = lastQuickAppIndex {
+            let range = min(anchor, index)...max(anchor, index)
+            for quickApp in quickApps[range] {
+                add(quickApp)
+            }
+        } else if intention.allowedApps.contains(where: {
+            $0.bundleIdentifier == app.bundleIdentifier
+        }) {
+            remove(.init(name: app.name, bundleIdentifier: app.bundleIdentifier))
+        } else {
+            add(app)
+        }
+        lastQuickAppIndex = index
     }
 
     private func addFirstMatch() {
@@ -350,6 +509,43 @@ struct IntentionEditorMenu: View {
         }
         intention.allowedWebsites.append(website)
         websiteDrafts[browser.bundleIdentifier] = ""
+    }
+
+    private func handleQuickWebsiteClick(
+        _ preset: QuickWebsitePreset,
+        for browser: AllowedApp,
+        at index: Int
+    ) {
+        let modifiers = NSEvent.modifierFlags
+        let anchor = lastQuickWebsiteIndexByBrowser[browser.bundleIdentifier]
+        if modifiers.contains(.shift), let anchor {
+            let range = min(anchor, index)...max(anchor, index)
+            for quickWebsite in QuickWebsitePreset.common[range] {
+                addQuickWebsite(quickWebsite, for: browser)
+            }
+        } else {
+            let website = AllowedWebsite(
+                preset.value,
+                browserBundleIdentifier: browser.bundleIdentifier
+            )
+            if intention.allowedWebsites.contains(where: { $0.id == website.id }) {
+                remove(website)
+            } else {
+                addQuickWebsite(preset, for: browser)
+            }
+        }
+        lastQuickWebsiteIndexByBrowser[browser.bundleIdentifier] = index
+    }
+
+    private func addQuickWebsite(_ preset: QuickWebsitePreset, for browser: AllowedApp) {
+        let website = AllowedWebsite(
+            preset.value,
+            browserBundleIdentifier: browser.bundleIdentifier
+        )
+        guard !intention.allowedWebsites.contains(where: { $0.id == website.id }) else {
+            return
+        }
+        intention.allowedWebsites.append(website)
     }
 
     private func remove(_ website: AllowedWebsite) {
@@ -448,6 +644,30 @@ struct IntentionEditorMenu: View {
         .buttonStyle(.plain)
         .help("Add a connected \(title.lowercased())")
     }
+}
+
+private struct QuickWebsitePreset: Identifiable {
+    let name: String
+    let value: String
+    let symbol: String
+    let color: Color
+
+    var id: String { value }
+
+    static let common = [
+        QuickWebsitePreset(name: "YouTube", value: "youtube.com", symbol: "play.fill", color: .red),
+        QuickWebsitePreset(name: "Gmail", value: "mail.google.com", symbol: "envelope.fill", color: .red),
+        QuickWebsitePreset(name: "Instagram", value: "instagram.com", symbol: "camera.fill", color: .pink),
+        QuickWebsitePreset(name: "GitHub", value: "github.com", symbol: "chevron.left.forwardslash.chevron.right", color: .gray),
+        QuickWebsitePreset(name: "ChatGPT", value: "chatgpt.com", symbol: "sparkles", color: .teal),
+        QuickWebsitePreset(name: "Notion", value: "notion.so", symbol: "doc.text.fill", color: .gray),
+        QuickWebsitePreset(name: "Reddit", value: "reddit.com", symbol: "bubble.left.and.bubble.right.fill", color: .orange),
+        QuickWebsitePreset(name: "LinkedIn", value: "linkedin.com", symbol: "person.crop.square.fill", color: .blue),
+        QuickWebsitePreset(name: "X", value: "x.com", symbol: "xmark", color: .gray),
+        QuickWebsitePreset(name: "Google Calendar", value: "calendar.google.com", symbol: "calendar", color: .blue),
+        QuickWebsitePreset(name: "Google Drive", value: "drive.google.com", symbol: "folder.fill", color: .blue),
+        QuickWebsitePreset(name: "Spotify", value: "open.spotify.com", symbol: "music.note", color: .green)
+    ]
 }
 
 struct RestrictionEditorMenu: View {
