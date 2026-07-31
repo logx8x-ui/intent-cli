@@ -60,6 +60,13 @@ struct IntentionEditorMenu: View {
         return preferredBundleIdentifiers.compactMap { appsByIdentifier[$0] }
     }
 
+    private var quickPickColumns: [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(minimum: 38), spacing: 8),
+            count: 6
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 13) {
@@ -277,8 +284,7 @@ struct IntentionEditorMenu: View {
     private var quickAppGrid: some View {
         if !quickApps.isEmpty {
             LazyVGrid(
-                columns: Array(repeating: GridItem(.fixed(38), spacing: 8), count: 6),
-                alignment: .leading,
+                columns: quickPickColumns,
                 spacing: 8
             ) {
                 ForEach(Array(quickApps.enumerated()), id: \.element.id) { index, app in
@@ -292,8 +298,8 @@ struct IntentionEditorMenu: View {
                             Image(nsImage: app.icon)
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .padding(6)
-                                .frame(width: 38, height: 38)
+                                .padding(5)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                             if isSelected {
                                 Image(systemName: "checkmark.circle.fill")
@@ -303,6 +309,8 @@ struct IntentionEditorMenu: View {
                                     .offset(x: 3, y: -3)
                             }
                         }
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(1, contentMode: .fit)
                         .contentShape(Rectangle())
                         .background(GraphTheme.surface(colorScheme))
                         .overlay(
@@ -391,8 +399,7 @@ struct IntentionEditorMenu: View {
 
     private func quickWebsiteGrid(for browser: AllowedApp) -> some View {
         LazyVGrid(
-            columns: Array(repeating: GridItem(.fixed(38), spacing: 8), count: 6),
-            alignment: .leading,
+            columns: quickPickColumns,
             spacing: 8
         ) {
             ForEach(Array(QuickWebsitePreset.common.enumerated()), id: \.element.id) { index, preset in
@@ -409,10 +416,9 @@ struct IntentionEditorMenu: View {
                     )
                 } label: {
                     ZStack(alignment: .topTrailing) {
-                        Image(systemName: preset.symbol)
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(preset.color)
-                            .frame(width: 38, height: 38)
+                        websiteIcon(named: preset.iconResource)
+                            .padding(6)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                         if isSelected {
                             Image(systemName: "checkmark.circle.fill")
@@ -422,6 +428,8 @@ struct IntentionEditorMenu: View {
                                 .offset(x: 3, y: -3)
                         }
                     }
+                    .frame(maxWidth: .infinity)
+                    .aspectRatio(1, contentMode: .fit)
                     .contentShape(Rectangle())
                     .background(GraphTheme.surface(colorScheme))
                     .overlay(
@@ -439,6 +447,19 @@ struct IntentionEditorMenu: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func websiteIcon(named resourceName: String) -> some View {
+        if let image = WebsiteIconLibrary.image(named: resourceName) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+        } else {
+            Image(systemName: "globe")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+        }
     }
 
     private func appIcon(_ app: AllowedApp) -> some View {
@@ -649,25 +670,44 @@ struct IntentionEditorMenu: View {
 private struct QuickWebsitePreset: Identifiable {
     let name: String
     let value: String
-    let symbol: String
-    let color: Color
+    let iconResource: String
 
     var id: String { value }
 
     static let common = [
-        QuickWebsitePreset(name: "YouTube", value: "youtube.com", symbol: "play.fill", color: .red),
-        QuickWebsitePreset(name: "Gmail", value: "mail.google.com", symbol: "envelope.fill", color: .red),
-        QuickWebsitePreset(name: "Instagram", value: "instagram.com", symbol: "camera.fill", color: .pink),
-        QuickWebsitePreset(name: "GitHub", value: "github.com", symbol: "chevron.left.forwardslash.chevron.right", color: .gray),
-        QuickWebsitePreset(name: "ChatGPT", value: "chatgpt.com", symbol: "sparkles", color: .teal),
-        QuickWebsitePreset(name: "Notion", value: "notion.so", symbol: "doc.text.fill", color: .gray),
-        QuickWebsitePreset(name: "Reddit", value: "reddit.com", symbol: "bubble.left.and.bubble.right.fill", color: .orange),
-        QuickWebsitePreset(name: "LinkedIn", value: "linkedin.com", symbol: "person.crop.square.fill", color: .blue),
-        QuickWebsitePreset(name: "X", value: "x.com", symbol: "xmark", color: .gray),
-        QuickWebsitePreset(name: "Google Calendar", value: "calendar.google.com", symbol: "calendar", color: .blue),
-        QuickWebsitePreset(name: "Google Drive", value: "drive.google.com", symbol: "folder.fill", color: .blue),
-        QuickWebsitePreset(name: "Spotify", value: "open.spotify.com", symbol: "music.note", color: .green)
+        QuickWebsitePreset(name: "YouTube", value: "youtube.com", iconResource: "youtube"),
+        QuickWebsitePreset(name: "Gmail", value: "mail.google.com", iconResource: "gmail"),
+        QuickWebsitePreset(name: "Instagram", value: "instagram.com", iconResource: "instagram"),
+        QuickWebsitePreset(name: "GitHub", value: "github.com", iconResource: "github"),
+        QuickWebsitePreset(name: "ChatGPT", value: "chatgpt.com", iconResource: "chatgpt"),
+        QuickWebsitePreset(name: "Notion", value: "notion.so", iconResource: "notion"),
+        QuickWebsitePreset(name: "Reddit", value: "reddit.com", iconResource: "reddit"),
+        QuickWebsitePreset(name: "LinkedIn", value: "linkedin.com", iconResource: "linkedin"),
+        QuickWebsitePreset(name: "X", value: "x.com", iconResource: "x"),
+        QuickWebsitePreset(name: "Google Calendar", value: "calendar.google.com", iconResource: "google-calendar"),
+        QuickWebsitePreset(name: "Google Drive", value: "drive.google.com", iconResource: "google-drive"),
+        QuickWebsitePreset(name: "Spotify", value: "open.spotify.com", iconResource: "spotify")
     ]
+}
+
+private enum WebsiteIconLibrary {
+    private static var cache: [String: NSImage] = [:]
+
+    static func image(named name: String) -> NSImage? {
+        if let image = cache[name] {
+            return image
+        }
+        let url = Bundle.module.url(
+            forResource: name,
+            withExtension: "png",
+            subdirectory: "WebsiteIcons"
+        ) ?? Bundle.module.url(forResource: name, withExtension: "png")
+        guard let url, let image = NSImage(contentsOf: url) else {
+            return nil
+        }
+        cache[name] = image
+        return image
+    }
 }
 
 struct RestrictionEditorMenu: View {

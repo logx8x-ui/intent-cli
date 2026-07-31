@@ -43,9 +43,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         let startFrame = targetFrame.insetBy(dx: 9, dy: 7)
         panel.setFrame(animated ? startFrame : targetFrame, display: true)
         panel.alphaValue = animated ? 0 : 1
-        panel.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        focusOverlay(panel)
 
         guard animated else { return }
         isAnimating = true
@@ -56,6 +54,9 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             panel.animator().setFrame(targetFrame, display: true)
         } completionHandler: { [weak self] in
             self?.isAnimating = false
+            if let panel = self?.panel {
+                self?.focusOverlay(panel)
+            }
         }
     }
 
@@ -132,6 +133,23 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
                 .environmentObject(calendarSync)
         )
         return panel
+    }
+
+    private func focusOverlay(_ panel: NSPanel) {
+        NSRunningApplication.current.activate(options: [
+            .activateAllWindows,
+            .activateIgnoringOtherApps
+        ])
+        NSApp.activate(ignoringOtherApps: true)
+        panel.orderFrontRegardless()
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(nil)
+
+        DispatchQueue.main.async { [weak panel] in
+            guard let panel, panel.isVisible else { return }
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeFirstResponder(nil)
+        }
     }
 
     private func makeSessionTimerPanel() -> NSPanel {
