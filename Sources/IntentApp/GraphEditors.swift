@@ -782,12 +782,7 @@ struct RestrictionEditorMenu: View {
                 .font(.system(size: 12, weight: .medium))
                 if node.usesPresetEndTime ?? false {
                     fieldLabel("Preset finish time")
-                    DatePicker(
-                        "Preset finish time",
-                        selection: endTimeSelection,
-                        displayedComponents: .hourAndMinute
-                    )
-                    .labelsHidden()
+                    LocalTimeEditor(selection: endTimeSelection)
                     Text("Uses this Mac's local time. If it has passed today, Intent uses tomorrow.")
                         .font(.caption)
                         .foregroundStyle(GraphTheme.muted(colorScheme))
@@ -859,8 +854,7 @@ struct RestrictionEditorMenu: View {
             node.usesPresetEndTime = false
         }
         if node.endTimeHour == nil || node.endTimeMinute == nil {
-            let suggested = Calendar.autoupdatingCurrent.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
-            let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: suggested)
+            let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: Date())
             node.endTimeHour = components.hour
             node.endTimeMinute = components.minute
         }

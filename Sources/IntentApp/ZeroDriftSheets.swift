@@ -64,7 +64,7 @@ struct ZeroDriftTimingSheet: View {
     @State private var days = 0
     @State private var hours = 1
     @State private var minutes = 0
-    @State private var endTime = Date().addingTimeInterval(60 * 60)
+    @State private var endTime = Date()
     @State private var validationMessage: String?
 
     var body: some View {
@@ -97,12 +97,7 @@ struct ZeroDriftTimingSheet: View {
                             .font(.title3.monospacedDigit())
                         Image(systemName: "arrow.right")
                             .foregroundStyle(.secondary)
-                        DatePicker(
-                            "Finish",
-                            selection: $endTime,
-                            displayedComponents: .hourAndMinute
-                        )
-                        .labelsHidden()
+                        LocalTimeEditor(selection: $endTime)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 10)

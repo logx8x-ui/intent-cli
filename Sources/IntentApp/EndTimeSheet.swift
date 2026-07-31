@@ -41,12 +41,7 @@ struct EndTimeSheet: View {
                         Text("Finish")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        DatePicker(
-                            "Finish",
-                            selection: $endDate,
-                            displayedComponents: .hourAndMinute
-                        )
-                        .labelsHidden()
+                        LocalTimeEditor(selection: $endDate)
                     }
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -82,7 +77,7 @@ struct EndTimeSheet: View {
                 .font(.system(size: 20, weight: .semibold, design: .rounded))
         }
         .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 }

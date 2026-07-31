@@ -333,14 +333,10 @@ struct IntentSchedulerView: View {
     private func createSchedule() {
         guard let intention = model.intentions.first else { return }
         let now = Date()
-        let nextHour = calendar.date(byAdding: .hour, value: 1, to: now) ?? now
-        var components = calendar.dateComponents([.year, .month, .day, .hour], from: nextHour)
-        components.minute = 0
-        let rounded = calendar.date(from: components) ?? nextHour
         let schedule = IntentSchedule(
             intentionID: intention.id,
             recurrence: .once,
-            scheduledAt: rounded
+            scheduledAt: now
         )
         editorContext = ScheduleEditorContext(schedule: schedule, isNew: true)
     }
@@ -465,8 +461,7 @@ private struct ScheduleEditorSheet: View {
 
             HStack(alignment: .top, spacing: 16) {
                 field("TIME") {
-                    DatePicker("Time", selection: $draft.scheduledAt, displayedComponents: .hourAndMinute)
-                        .labelsHidden()
+                    LocalTimeEditor(selection: $draft.scheduledAt)
                 }
                 field("REPEAT") {
                     Picker("Repeat", selection: $draft.recurrence) {

@@ -1144,11 +1144,10 @@ struct PendingEndTimeRequest: Identifiable {
     init(intention: Intention, now: Date = Date(), calendar: Calendar = .autoupdatingCurrent) {
         intentionID = intention.id
         intentionName = intention.name
-        let oneHourLater = calendar.date(byAdding: .hour, value: 1, to: now) ?? now.addingTimeInterval(3_600)
         suggestedEndDate = calendar.date(
             bySetting: .second,
             value: 0,
-            of: oneHourLater
-        ) ?? oneHourLater
+            of: now
+        ) ?? now
     }
 }
