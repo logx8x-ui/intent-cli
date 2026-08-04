@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import IntentCore
 
@@ -104,14 +105,23 @@ struct IntentionNodeView: View {
     private var appGrid: some View {
         Group {
             if intention.allowedApps.isEmpty {
-                VStack(spacing: 9) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 23, weight: .light))
-                    Text("Add an app")
-                        .font(.caption)
+                if intention.isLeisure {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                        .help("Leisure uses the Mac freely")
+                } else {
+                    VStack(spacing: 9) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 23, weight: .light))
+                        Text("Add an app")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .foregroundStyle(GraphTheme.muted(colorScheme))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 GeometryReader { proxy in
                     let layout = appGridLayout(count: intention.allowedApps.count)
