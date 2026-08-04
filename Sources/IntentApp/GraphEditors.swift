@@ -77,6 +77,8 @@ struct IntentionEditorMenu: View {
                     .textFieldStyle(.roundedBorder)
                     .focused($nameFocused)
 
+                leisureToggle
+
                 intentionArtworkEditor
 
                 fieldLabel("Allowed apps")
@@ -161,6 +163,33 @@ struct IntentionEditorMenu: View {
             guard intention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             DispatchQueue.main.async { nameFocused = true }
         }
+    }
+
+    private var leisureToggle: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Toggle("Leisure", isOn: $intention.isLeisure)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 13, weight: .semibold))
+                .tint(.cyan)
+
+            Text("Opens selected resources without locking the rest of your Mac. Frictions and time restrictions still apply.")
+                .font(.caption)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(
+            LinearGradient(
+                colors: [Color.cyan.opacity(0.12), Color.orange.opacity(0.07)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(intention.isLeisure ? Color.cyan.opacity(0.65) : GraphTheme.stroke(colorScheme), lineWidth: 1)
+        )
     }
 
     private var intentionArtworkEditor: some View {

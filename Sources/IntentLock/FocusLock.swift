@@ -138,6 +138,8 @@ public final class FocusLock {
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.45))
         }
 
+        guard !spec.fallbackBundleIdentifier.isEmpty else { return }
+
         let deadline = Date(timeIntervalSinceNow: 6)
         while Date() < deadline {
             if activateFallbackApp() {
@@ -344,7 +346,7 @@ public final class FocusLock {
         let control = flags.contains(.maskControl)
         let option = flags.contains(.maskAlternate)
 
-        if command && keyCode == KeyCode.tab {
+        if command && keyCode == KeyCode.tab && (spec.blockAppSwitching || spec.keepFocused) {
             allowedBrowserTabSwitcher.cancel()
             allowedAppSwitcher.advance(reverse: shift)
             return nil

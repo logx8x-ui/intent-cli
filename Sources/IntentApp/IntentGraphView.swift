@@ -540,8 +540,14 @@ struct IntentGraphView: View {
                 .foregroundStyle(GraphTheme.editBlue)
             } else if let activeSessionName = model.activeSessionName {
                 HStack(spacing: 7) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
-                    Text(activeSessionName)
+                    Circle()
+                        .fill(
+                            model.activeSessionIsLeisure
+                                ? AnyShapeStyle(LinearGradient(colors: [.cyan, .orange], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                : AnyShapeStyle(Color.green)
+                        )
+                        .frame(width: 6, height: 6)
+                    Text(model.activeSessionIsLeisure ? "Leisure · \(activeSessionName)" : activeSessionName)
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)

@@ -19,6 +19,7 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
     object.removeValue(forKey: "restrictionNodes")
     object.removeValue(forKey: "frictionNodes")
     object.removeValue(forKey: "graphModelVersion")
+    object.removeValue(forKey: "isLeisure")
     return try JSONSerialization.data(withJSONObject: object)
 }
 
@@ -189,6 +190,54 @@ do {
     try expect(instagramSpec.allowedBundleIdentifiers == ["org.mozilla.firefox"], "Instagram should only allow Firefox")
     try expect(instagramSpec.blockAppSwitching, "Instagram should block switching to unallowed apps")
     try expect(instagramSpec.blockBrowserTabEscape, "Instagram should enable browser escape blocking")
+
+    var leisure = instagram
+    leisure.id = "leisure"
+    leisure.name = "Leisure"
+    leisure.isLeisure = true
+    let leisureSpec = FocusSessionSpec.make(for: leisure)
+    try expect(!leisureSpec.strictSingleApp, "Leisure should not lock to one app")
+    try expect(!leisureSpec.blockAppSwitching, "Leisure should allow switching to every app")
+    try expect(!leisureSpec.blockNewApps, "Leisure should allow launching every app")
+    try expect(!leisureSpec.keepFocused, "Leisure should not force focus back to an allowed app")
+    try expect(!leisureSpec.blockBrowserTabEscape, "Leisure should not lock browser tabs or websites")
+    try expect(
+        leisureSpec.startupSteps.contains { step in
+            if case .openURL(_, let bundleIdentifier) = step {
+                return bundleIdentifier == "org.mozilla.firefox"
+            }
+            return false
+        },
+        "Leisure should still open its configured websites"
+    )
+    let leisureRoundTrip = try JSONDecoder().decode(
+        Intention.self,
+        from: JSONEncoder().encode(leisure)
+    )
+    try expect(leisureRoundTrip.isLeisure, "Leisure should persist in intention storage")
+
+    var emptyLeisure = leisure
+    emptyLeisure.allowedApps = []
+    emptyLeisure.allowedWebsites = []
+    emptyLeisure.startupActions = []
+    let emptyLeisureSpec = FocusSessionSpec.make(for: emptyLeisure)
+    try expect(emptyLeisureSpec.startupSteps.isEmpty, "Leisure should be runnable without startup resources")
+    try expect(emptyLeisureSpec.fallbackBundleIdentifier.isEmpty, "Empty Leisure should not force a fallback app")
+
+    var timedLeisure = leisure
+    timedLeisure.restrictionNodes.append(
+        .init(kind: .timer, position: .zero, durationMinutes: 10)
+    )
+    try expect(
+        !FocusSessionSpec.make(for: timedLeisure).allowsManualFinish,
+        "Leisure should still honor time restrictions"
+    )
+
+    let legacyLeisureDefault = try JSONDecoder().decode(
+        Intention.self,
+        from: legacyIntentionData(instagram)
+    )
+    try expect(!legacyLeisureDefault.isLeisure, "Existing intentions should remain focused by default")
     try expect(
         FocusForegroundPolicy.shouldDeferRefocus(bundleIdentifier: "com.apple.dock"),
         "Mission Control should be treated as a temporary system switcher"

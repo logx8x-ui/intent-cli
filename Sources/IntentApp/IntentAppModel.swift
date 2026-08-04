@@ -19,6 +19,7 @@ final class IntentAppModel: ObservableObject {
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
     @Published var activeSessionName: String?
+    @Published var activeSessionIsLeisure = false
     @Published var activeSessionEndsAt: Date?
     @Published var zeroDriftEndsAt: Date?
     @Published var cooldownExpirations: [String: Date] = [:]
@@ -525,11 +526,11 @@ final class IntentAppModel: ObservableObject {
             return
         }
 
-        guard !intention.allowedApps.isEmpty else {
+        guard intention.isLeisure || !intention.allowedApps.isEmpty else {
             errorMessage = "Add at least one allowed app before starting this intention."
             return
         }
-        let unsupportedBrowsers = intention.allowedApps.filter {
+        let unsupportedBrowsers = intention.isLeisure ? [] : intention.allowedApps.filter {
             $0.isBrowser && !Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
         }
         if !unsupportedBrowsers.isEmpty {
@@ -764,7 +765,7 @@ final class IntentAppModel: ObservableObject {
             },
             by: \.0
         ).mapValues { $0.map(\.1) }
-        let rules = ActiveBrowserRules(
+        let rules = intention.isLeisure ? nil : ActiveBrowserRules(
             active: true,
             // A non-matching sentinel keeps already-installed Browser Guard 0.1.3 builds strict
             // when Firefox is allowed but the intention has no website spikes.
@@ -778,7 +779,11 @@ final class IntentAppModel: ObservableObject {
         )
 
         do {
-            try browserRulesStore.write(rules)
+            if let rules {
+                try browserRulesStore.write(rules)
+            } else {
+                try browserRulesStore.clear()
+            }
         } catch {
             errorMessage = "Could not write browser rules: \(error)"
             return
@@ -788,16 +793,23 @@ final class IntentAppModel: ObservableObject {
         activeLock = lock
         activeSessionID = intention.id
         activeSessionName = intention.name
+        activeSessionIsLeisure = intention.isLeisure
         scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
         overlayPresenter?.hideOverlay(animated: true)
 
         Thread.detachNewThread {
-            let renewalTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-            renewalTimer.schedule(deadline: .now() + 1, repeating: 1)
-            renewalTimer.setEventHandler {
-                try? ActiveBrowserRulesStore().write(rules.refreshed())
+            let renewalTimer: DispatchSourceTimer?
+            if let rules {
+                let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+                timer.schedule(deadline: .now() + 1, repeating: 1)
+                timer.setEventHandler {
+                    try? ActiveBrowserRulesStore().write(rules.refreshed())
+                }
+                timer.resume()
+                renewalTimer = timer
+            } else {
+                renewalTimer = nil
             }
-            renewalTimer.resume()
 
             let failureMessage: String?
             do {
@@ -807,7 +819,7 @@ final class IntentAppModel: ObservableObject {
                 failureMessage = "Could not start session: \(error)"
             }
 
-            renewalTimer.cancel()
+            renewalTimer?.cancel()
             try? ActiveBrowserRulesStore().clear()
             Task { @MainActor in
                 let replacement = self.pendingReplacementIntention
@@ -824,6 +836,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeLock = nil
                 self.activeSessionID = nil
                 self.activeSessionName = nil
+                self.activeSessionIsLeisure = false
                 self.overlayPresenter?.showOverlay(animated: true)
                 if let replacement {
                     self.requestStart(replacement)
@@ -986,7 +999,8 @@ final class IntentAppModel: ObservableObject {
     }
 
     private func requiredBrowserGuards(for intention: Intention) -> [AllowedApp] {
-        intention.allowedApps.filter {
+        guard !intention.isLeisure else { return [] }
+        return intention.allowedApps.filter {
             Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
         }
     }

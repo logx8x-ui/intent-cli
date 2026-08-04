@@ -11,15 +11,46 @@ struct IntentionNodeView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Text(intention.name)
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(1)
-                .frame(maxWidth: 190)
+            HStack(spacing: 6) {
+                Text(intention.name)
+                    .lineLimit(1)
+
+                if intention.isLeisure {
+                    Label("LEISURE", systemImage: "sun.horizon.fill")
+                        .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                        .labelStyle(.titleAndIcon)
+                        .padding(.horizontal, 6)
+                        .frame(height: 18)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(leisureGradient.opacity(0.72), lineWidth: 0.8)
+                        )
+                }
+            }
+            .font(.system(size: 14, weight: .semibold))
+            .frame(maxWidth: 190)
 
             ZStack {
+                if intention.isLeisure {
+                    RoundedRectangle(cornerRadius: 25)
+                        .fill(leisureGradient)
+                        .frame(width: squareSize + 16, height: squareSize + 16)
+                        .blur(radius: 13)
+                        .opacity(colorScheme == .dark ? 0.38 : 0.28)
+                        .allowsHitTesting(false)
+                }
+
                 intentionArtwork
                     .frame(width: squareSize, height: squareSize)
                     .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 20, selected: selected)
+
+                if intention.isLeisure {
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(leisureGradient, lineWidth: selected ? 2.4 : 1.5)
+                        .frame(width: squareSize, height: squareSize)
+                        .allowsHitTesting(false)
+                }
 
                 if intention.showsCooldownRemainingTime, let cooldownExpiresAt {
                     CooldownBadge(expiresAt: cooldownExpiresAt)
@@ -33,6 +64,18 @@ struct IntentionNodeView: View {
     }
 
     @Environment(\.colorScheme) private var colorScheme
+
+    private var leisureGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.cyan.opacity(0.88),
+                Color.white.opacity(colorScheme == .dark ? 0.72 : 0.92),
+                Color.orange.opacity(0.82)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
 
     @ViewBuilder
     private var intentionArtwork: some View {

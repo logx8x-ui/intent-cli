@@ -75,7 +75,9 @@ public struct FocusSessionSpec {
         finishShortcut: FocusKeyboardShortcut = .defaultFinish
     ) -> FocusSessionSpec {
         let startupSteps = IntentionStartupPlanner.steps(for: intention)
-        let fallback = IntentionStartupPlanner.fallbackBundleIdentifier(for: intention)
+        let fallback = intention.isLeisure && startupSteps.isEmpty
+            ? ""
+            : IntentionStartupPlanner.fallbackBundleIdentifier(for: intention)
         let spotifyPlaylistURI = intention.startupActions.compactMap { action in
             if case .playSpotifyPlaylist(let uri) = action,
                !intention.dontStartResourceIDs.contains("app:com.spotify.client") {
@@ -89,11 +91,11 @@ public struct FocusSessionSpec {
             startupSteps: startupSteps,
             allowedBundleIdentifiers: Set(intention.allowedApps.map(\.bundleIdentifier)),
             fallbackBundleIdentifier: fallback,
-            strictSingleApp: intention.allowedApps.count == 1,
-            blockAppSwitching: true,
-            blockNewApps: true,
-            keepFocused: true,
-            blockBrowserTabEscape: intention.allowedApps.contains(where: \.isBrowser),
+            strictSingleApp: !intention.isLeisure && intention.allowedApps.count == 1,
+            blockAppSwitching: !intention.isLeisure,
+            blockNewApps: !intention.isLeisure,
+            keepFocused: !intention.isLeisure,
+            blockBrowserTabEscape: !intention.isLeisure && intention.allowedApps.contains(where: \.isBrowser),
             blockFirefoxChromeClicks: false,
             allowGoogleSearchTabs: intention.browserSearchesAllowed,
             spotifyPlaylistURI: spotifyPlaylistURI,

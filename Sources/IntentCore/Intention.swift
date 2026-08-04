@@ -18,6 +18,7 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var usesCustomIcon: Bool
     public var customIconData: Data?
     public var closeSessionResourcesOnFinish: Bool
+    public var isLeisure: Bool
 
     public init(
         id: String = UUID().uuidString,
@@ -36,7 +37,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         graphModelVersion: Int = 4,
         usesCustomIcon: Bool = false,
         customIconData: Data? = nil,
-        closeSessionResourcesOnFinish: Bool = false
+        closeSessionResourcesOnFinish: Bool = false,
+        isLeisure: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -55,6 +57,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         self.usesCustomIcon = usesCustomIcon
         self.customIconData = customIconData
         self.closeSessionResourcesOnFinish = closeSessionResourcesOnFinish
+        self.isLeisure = isLeisure
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -75,6 +78,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         case usesCustomIcon
         case customIconData
         case closeSessionResourcesOnFinish
+        case isLeisure
     }
 
     public init(from decoder: Decoder) throws {
@@ -95,6 +99,7 @@ public struct Intention: Identifiable, Codable, Equatable {
             Bool.self,
             forKey: .closeSessionResourcesOnFinish
         ) ?? false
+        isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
         graphPosition = try container.decodeIfPresent(GraphPoint.self, forKey: .graphPosition)
             ?? GraphPoint.defaultPosition(for: id)
         let decodedGraphModelVersion = try container.decodeIfPresent(Int.self, forKey: .graphModelVersion)
