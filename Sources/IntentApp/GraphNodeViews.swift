@@ -36,9 +36,9 @@ struct IntentionNodeView: View {
                 if intention.isLeisure {
                     RoundedRectangle(cornerRadius: 25)
                         .fill(leisureGradient)
-                        .frame(width: squareSize + 16, height: squareSize + 16)
-                        .blur(radius: 13)
-                        .opacity(colorScheme == .dark ? 0.25 : 0.18)
+                        .frame(width: squareSize + 22, height: squareSize + 22)
+                        .blur(radius: 15)
+                        .opacity(colorScheme == .dark ? 0.44 : 0.32)
                         .allowsHitTesting(false)
                 }
 
@@ -48,8 +48,9 @@ struct IntentionNodeView: View {
 
                 if intention.isLeisure {
                     RoundedRectangle(cornerRadius: 20)
-                        .stroke(leisureGradient, lineWidth: selected ? 2.4 : 1.5)
+                        .stroke(leisureGradient, lineWidth: selected ? 2.8 : 2.0)
                         .frame(width: squareSize, height: squareSize)
+                        .shadow(color: Color.white.opacity(colorScheme == .dark ? 0.20 : 0.10), radius: 5)
                         .allowsHitTesting(false)
                 }
 
