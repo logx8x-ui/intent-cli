@@ -7,8 +7,8 @@ struct IntentionEditorMenu: View {
     @Binding var intention: Intention
     let catalog: [InstalledApp]
     let onDelete: () -> Void
-    let onAddRestriction: () -> Void
-    let onAddFriction: () -> Void
+    let onAddRestriction: (RestrictionKind) -> Void
+    let onAddFriction: (Friction) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var appQuery = ""
@@ -88,6 +88,9 @@ struct IntentionEditorMenu: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(addFirstMatch)
 
+                if !quickApps.isEmpty {
+                    fieldLabel("Most used apps")
+                }
                 quickAppGrid
 
                 if !matches.isEmpty {
@@ -138,6 +141,7 @@ struct IntentionEditorMenu: View {
                     Label("Delete intention", systemImage: "trash")
                 }
                 .buttonStyle(.plain)
+                .foregroundStyle(Color.red)
 
                 Divider()
                 fieldLabel("Add connected shape")
@@ -145,13 +149,18 @@ struct IntentionEditorMenu: View {
                     quickAddButton(
                         title: "Restriction",
                         symbol: "circle",
-                        action: onAddRestriction
+                        action: { onAddRestriction(.allowBrowserSearches) }
                     )
                     quickAddButton(
                         title: "Friction",
                         symbol: "triangle",
-                        action: onAddFriction
+                        action: { onAddFriction(.typedPhrase("I want to do this right now")) }
                     )
+                }
+
+                HStack(alignment: .top, spacing: 12) {
+                    commonRestrictions
+                    commonFrictions
                 }
             }
         }
@@ -170,7 +179,7 @@ struct IntentionEditorMenu: View {
             Toggle("Leisure", isOn: $intention.isLeisure)
                 .toggleStyle(.checkbox)
                 .font(.system(size: 13, weight: .semibold))
-                .tint(.cyan)
+                .tint(.gray)
 
             Text("Opens selected resources without locking the rest of your Mac. Frictions and time restrictions still apply.")
                 .font(.caption)
@@ -180,7 +189,7 @@ struct IntentionEditorMenu: View {
         .padding(10)
         .background(
             LinearGradient(
-                colors: [Color.cyan.opacity(0.12), Color.orange.opacity(0.07)],
+                colors: [Color.white.opacity(0.06), Color.gray.opacity(0.10)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
@@ -188,7 +197,7 @@ struct IntentionEditorMenu: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .stroke(intention.isLeisure ? Color.cyan.opacity(0.65) : GraphTheme.stroke(colorScheme), lineWidth: 1)
+                .stroke(intention.isLeisure ? Color.gray.opacity(0.70) : GraphTheme.stroke(colorScheme), lineWidth: 1)
         )
     }
 
@@ -202,8 +211,8 @@ struct IntentionEditorMenu: View {
                     set: { intention.usesCustomIcon = $0 == "icon" }
                 )
             ) {
-                Text("App logos").tag("apps")
-                Text("One icon").tag("icon")
+                Text("Preset").tag("apps")
+                Text("Custom").tag("icon")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -693,6 +702,72 @@ struct IntentionEditorMenu: View {
         }
         .buttonStyle(.plain)
         .help("Add a connected \(title.lowercased())")
+    }
+
+    private var commonRestrictions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            fieldLabel("Most used restrictions")
+            commonChoiceButton("Timer", symbol: "timer") {
+                onAddRestriction(.timer)
+            }
+            commonChoiceButton("Cooldown", symbol: "hourglass") {
+                onAddRestriction(.coolDown)
+            }
+            commonChoiceButton("End Time", symbol: "clock.badge.checkmark") {
+                onAddRestriction(.endTime)
+            }
+            commonChoiceButton("Browser searches", symbol: "magnifyingglass") {
+                onAddRestriction(.allowBrowserSearches)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var commonFrictions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            fieldLabel("Most used frictions")
+            commonChoiceButton("Countdown", symbol: "hourglass.bottomhalf.filled") {
+                onAddFriction(.countdown(seconds: 10))
+            }
+            commonChoiceButton("Typed phrase", symbol: "text.cursor") {
+                onAddFriction(.typedPhrase("I want to do this right now"))
+            }
+            commonChoiceButton("Write a reason", symbol: "square.and.pencil") {
+                onAddFriction(.reasonPrompt("What are you here to do?"))
+            }
+            commonChoiceButton("Time budget", symbol: "stopwatch") {
+                onAddFriction(.timeBudget(minutes: 10))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func commonChoiceButton(
+        _ title: String,
+        symbol: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .frame(width: 14)
+                Text(title)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(GraphTheme.text(colorScheme))
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 31)
+            .background(GraphTheme.surface(colorScheme), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Add \(title)")
     }
 }
 

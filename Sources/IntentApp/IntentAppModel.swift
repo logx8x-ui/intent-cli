@@ -441,13 +441,17 @@ final class IntentAppModel: ObservableObject {
     }
 
     @discardableResult
-    func addRestriction(to intentionID: String, at position: GraphPoint) -> String? {
+    func addRestriction(
+        to intentionID: String,
+        at position: GraphPoint,
+        kind: RestrictionKind = .allowBrowserSearches
+    ) -> String? {
         guard !hasActiveSession,
               let index = intentions.firstIndex(where: { $0.id == intentionID }) else {
             return nil
         }
         recordUndoSnapshot()
-        let node = RestrictionNode(kind: .allowBrowserSearches, position: position)
+        let node = RestrictionNode(kind: kind, position: position)
         intentions[index].restrictionNodes.append(node)
         selectedID = intentionID
         save()
@@ -455,14 +459,18 @@ final class IntentAppModel: ObservableObject {
     }
 
     @discardableResult
-    func addFriction(to intentionID: String, at position: GraphPoint) -> String? {
+    func addFriction(
+        to intentionID: String,
+        at position: GraphPoint,
+        friction: Friction = .typedPhrase("I want to do this right now")
+    ) -> String? {
         guard !hasActiveSession,
               let index = intentions.firstIndex(where: { $0.id == intentionID }) else {
             return nil
         }
         recordUndoSnapshot()
         let node = FrictionNode(
-            friction: .typedPhrase("I want to do this right now"),
+            friction: friction,
             position: position
         )
         intentions[index].frictionNodes.append(node)

@@ -543,7 +543,7 @@ struct IntentGraphView: View {
                     Circle()
                         .fill(
                             model.activeSessionIsLeisure
-                                ? AnyShapeStyle(LinearGradient(colors: [.cyan, .orange], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                ? AnyShapeStyle(LinearGradient(colors: [.white, .gray], startPoint: .topLeading, endPoint: .bottomTrailing))
                                 : AnyShapeStyle(Color.green)
                         )
                         .frame(width: 6, height: 6)
@@ -723,23 +723,23 @@ struct IntentGraphView: View {
                         model.deleteIntention(id: intentionID)
                         self.selection = nil
                     },
-                    onAddRestriction: {
+                    onAddRestriction: { kind in
                         guard intentionHasName(intentionID) else {
                             showStatus("Name the intention first")
                             return
                         }
                         let position = quickAddPosition(for: intentionID, kind: .restriction)
-                        if let nodeID = model.addRestriction(to: intentionID, at: position) {
+                        if let nodeID = model.addRestriction(to: intentionID, at: position, kind: kind) {
                             self.selection = .restriction(intentionID: intentionID, nodeID: nodeID)
                         }
                     },
-                    onAddFriction: {
+                    onAddFriction: { friction in
                         guard intentionHasName(intentionID) else {
                             showStatus("Name the intention first")
                             return
                         }
                         let position = quickAddPosition(for: intentionID, kind: .friction)
-                        if let nodeID = model.addFriction(to: intentionID, at: position) {
+                        if let nodeID = model.addFriction(to: intentionID, at: position, friction: friction) {
                             self.selection = .friction(intentionID: intentionID, nodeID: nodeID)
                         }
                     }

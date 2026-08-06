@@ -679,11 +679,11 @@ struct AIIntentionWorkspaceView: View {
         )
     }
 
-    private func addRestriction() {
+    private func addRestriction(_ kind: RestrictionKind = .allowBrowserSearches) {
         guard draft != nil else { return }
         let count = draft?.restrictionNodes.count ?? 0
         let node = RestrictionNode(
-            kind: .allowBrowserSearches,
+            kind: kind,
             position: .init(x: Double((count % 3) - 1) * 155, y: -205 - Double(count / 3) * 130)
         )
         draft?.restrictionNodes.append(node)
@@ -691,11 +691,13 @@ struct AIIntentionWorkspaceView: View {
         history.recordDraftEdit(draft)
     }
 
-    private func addFriction() {
+    private func addFriction(
+        _ friction: Friction = .typedPhrase("I want to do this right now")
+    ) {
         guard draft != nil else { return }
         let count = draft?.frictionNodes.count ?? 0
         let node = FrictionNode(
-            friction: .typedPhrase("I want to do this right now"),
+            friction: friction,
             position: .init(x: Double((count % 3) - 1) * 155, y: 220 + Double(count / 3) * 135)
         )
         draft?.frictionNodes.append(node)

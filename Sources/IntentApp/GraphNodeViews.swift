@@ -38,7 +38,7 @@ struct IntentionNodeView: View {
                         .fill(leisureGradient)
                         .frame(width: squareSize + 16, height: squareSize + 16)
                         .blur(radius: 13)
-                        .opacity(colorScheme == .dark ? 0.38 : 0.28)
+                        .opacity(colorScheme == .dark ? 0.25 : 0.18)
                         .allowsHitTesting(false)
                 }
 
@@ -69,9 +69,9 @@ struct IntentionNodeView: View {
     private var leisureGradient: LinearGradient {
         LinearGradient(
             colors: [
-                Color.cyan.opacity(0.88),
-                Color.white.opacity(colorScheme == .dark ? 0.72 : 0.92),
-                Color.orange.opacity(0.82)
+                Color.white.opacity(colorScheme == .dark ? 0.52 : 0.74),
+                Color.gray.opacity(0.68),
+                Color.black.opacity(colorScheme == .dark ? 0.72 : 0.34)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
