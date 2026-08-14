@@ -55,7 +55,8 @@ struct IntentAIService {
     func generate(
         description: String,
         installedApps: [AllowedApp],
-        currentIntention: Intention? = nil
+        currentIntention: Intention? = nil,
+        mode: IntentAIGenerationMode = .single
     ) async throws -> AIIntentionPlan {
         guard let endpoint else { throw IntentAIError.invalidEndpoint }
 
@@ -64,6 +65,7 @@ struct IntentAIService {
             installationId: IntentAIInstallation.identifier,
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
             description: description,
+            mode: mode,
             currentIntention: currentIntention,
             installedApps: installedApps
         ))
@@ -127,11 +129,18 @@ struct IntentAIService {
     }
 }
 
+enum IntentAIGenerationMode: String, Encodable {
+    case single
+    case onboarding
+    case split
+}
+
 private struct IntentAIRequest: Encodable {
     let version: Int
     let installationId: String
     let appVersion: String
     let description: String
+    let mode: IntentAIGenerationMode
     let currentIntention: Intention?
     let installedApps: [AllowedApp]
 }

@@ -16,6 +16,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
     public var allowBrowserSearches: Bool
     public var restrictions: [AIRestrictionSuggestion]
     public var frictions: [AIFrictionSuggestion]
+    public var isLeisure: Bool
 
     public init(
         name: String,
@@ -24,7 +25,8 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         websites: [AIWebsiteSuggestion],
         allowBrowserSearches: Bool,
         restrictions: [AIRestrictionSuggestion] = [],
-        frictions: [AIFrictionSuggestion] = []
+        frictions: [AIFrictionSuggestion] = [],
+        isLeisure: Bool = false
     ) {
         self.name = name
         self.purpose = purpose
@@ -33,6 +35,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         self.allowBrowserSearches = allowBrowserSearches
         self.restrictions = restrictions
         self.frictions = frictions
+        self.isLeisure = isLeisure
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -43,6 +46,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         case allowBrowserSearches
         case restrictions
         case frictions
+        case isLeisure
     }
 
     public init(from decoder: Decoder) throws {
@@ -54,6 +58,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         allowBrowserSearches = try container.decodeIfPresent(Bool.self, forKey: .allowBrowserSearches) ?? false
         restrictions = try container.decodeIfPresent([AIRestrictionSuggestion].self, forKey: .restrictions) ?? []
         frictions = try container.decodeIfPresent([AIFrictionSuggestion].self, forKey: .frictions) ?? []
+        isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
     }
 }
 
@@ -223,7 +228,8 @@ public extension AIIntentionPlan {
                 websites: websites,
                 allowBrowserSearches: restrictions.contains { $0.kind == .allowBrowserSearches },
                 restrictions: restrictions,
-                frictions: frictions
+                frictions: frictions,
+                isLeisure: suggestion.isLeisure
             )
         }
 

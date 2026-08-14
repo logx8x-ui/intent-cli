@@ -151,10 +151,6 @@ struct IntentGraphView: View {
                 .allowsHitTesting(false)
 
                 if showQuickGuide {
-                    Color.black.opacity(0.34)
-                        .ignoresSafeArea()
-                        .onTapGesture { }
-
                     IntentQuickGuideView(
                         catalog: model.installedApps,
                         onAdd: { suggestions in
@@ -165,7 +161,10 @@ struct IntentGraphView: View {
                             showQuickGuide = false
                         }
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                    .zIndex(1_000)
                 }
             }
             .frame(width: viewportSize.width, height: viewportSize.height)

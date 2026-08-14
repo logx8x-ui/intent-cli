@@ -165,7 +165,7 @@ final class IntentAppModel: ObservableObject {
         let validated = AIIntentionPlan(intentions: suggestions)
             .validated(against: availableApps)
             .intentions
-            .filter { !$0.appBundleIdentifiers.isEmpty }
+            .filter { $0.isLeisure || !$0.appBundleIdentifiers.isEmpty }
         guard !validated.isEmpty else { return [] }
 
         let appsByIdentifier = Dictionary(
@@ -222,7 +222,8 @@ final class IntentAppModel: ObservableObject {
                 restrictions: .init(),
                 graphPosition: position,
                 restrictionNodes: restrictionNodes,
-                frictionNodes: frictionNodes
+                frictionNodes: frictionNodes,
+                isLeisure: suggestion.isLeisure
             ))
             occupied.append(position)
         }

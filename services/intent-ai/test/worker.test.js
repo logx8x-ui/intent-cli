@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import worker, {
   applyExplicitRequestRules,
+  ensureLeisure,
   handlePlanRequest,
   intentionSchema,
+  onboardingSchema,
   openRouterRequest,
   validateRequest,
 } from "../src/index.js";
@@ -53,6 +55,36 @@ test("OpenRouter request uses strict structured output and privacy routing", () 
 test("OpenRouter request accepts a reduced completion budget for credit recovery", () => {
   const request = openRouterRequest(requestBody, "openai/gpt-5.6-luna", 450);
   assert.equal(request.max_completion_tokens, 450);
+});
+
+test("onboarding mode asks for a complete starter desktop", () => {
+  const request = openRouterRequest({ ...requestBody, mode: "onboarding" }, undefined, 1800);
+  assert.equal(request.response_format.json_schema.name, "intent_onboarding_plan");
+  assert.equal(request.response_format.json_schema.schema.properties.intentions.minItems, 2);
+  assert.equal(request.response_format.json_schema.schema.properties.intentions.maxItems, 8);
+  assert.equal(request.max_completion_tokens, 1800);
+  assert.match(request.messages[0].content, /Always include exactly one Leisure intention/);
+  assert.match(request.messages[0].content, /split broad areas into outcomes/i);
+  assert.ok(onboardingSchema.properties.intentions.items.required.includes("isLeisure"));
+});
+
+test("onboarding always ends with one Leisure intention", () => {
+  const result = ensureLeisure({
+    intentions: [{
+      name: "Reply to people",
+      purpose: "Reply to messages",
+      appBundleIdentifiers: ["com.apple.MobileSMS"],
+      websites: [],
+      allowBrowserSearches: false,
+      restrictions: [],
+      frictions: [],
+      isLeisure: false,
+    }],
+  });
+  assert.equal(result.intentions.length, 2);
+  assert.equal(result.intentions.at(-1).name, "Leisure");
+  assert.equal(result.intentions.at(-1).isLeisure, true);
+  assert.deepEqual(result.intentions.at(-1).appBundleIdentifiers, []);
 });
 
 test("OpenRouter request clearly separates a follow-up from its current intention", () => {

@@ -32,6 +32,7 @@ export const intentionSchema = {
             },
           },
           allowBrowserSearches: { type: "boolean" },
+          isLeisure: { type: "boolean" },
           restrictions: {
             type: "array",
             maxItems: 4,
@@ -75,6 +76,7 @@ export const intentionSchema = {
           "appBundleIdentifiers",
           "websites",
           "allowBrowserSearches",
+          "isLeisure",
           "restrictions",
           "frictions",
         ],
@@ -85,6 +87,14 @@ export const intentionSchema = {
   required: ["intentions"],
   additionalProperties: false,
 };
+
+export const onboardingSchema = JSON.parse(JSON.stringify(intentionSchema));
+onboardingSchema.properties.intentions.minItems = 2;
+onboardingSchema.properties.intentions.maxItems = 8;
+
+export const splitSchema = JSON.parse(JSON.stringify(intentionSchema));
+splitSchema.properties.intentions.minItems = 2;
+splitSchema.properties.intentions.maxItems = 5;
 
 const systemPrompt = `
 You design focused computer sessions for Intent, an app that lets a person use only the resources needed for one task at a time.
@@ -100,6 +110,24 @@ Choose only applications from the installed-app catalog supplied by the user. Co
 Translate explicit requests into connected restrictions. A timer limits the session and a cooldown delays reuse after it ends. Only add allowBrowserSearches when the person explicitly asks to search, browse, Google, look something up, or do research. Never infer browser-search permission merely because a browser or website is needed. Use durationMinutes for timer and coolDown, and use 0 for restrictions without a duration. Use resourceIDs only for dontStartUp and otherwise return an empty array. Keep allowBrowserSearches consistent with the matching restriction.
 
 Translate only explicit friction requests into frictions. Never infer or suggest friction from the selected apps, websites, or task. If the person does not explicitly request friction, return an empty frictions array. For unused friction fields, return an empty string, 0, or an empty array.
+
+Set isLeisure to true only when the person explicitly asks for a Leisure intention. Otherwise set it to false.
+`.trim();
+
+const onboardingSystemPrompt = `
+You create a person's first Intent desktop. Intent is a focus app built from specific, reusable intentions: each intention opens only the apps and websites needed for one outcome.
+
+The person will describe broadly what they use their computer for. Turn that answer into 3 to 7 clear intentions that cover their main life on the computer. Split broad areas into outcomes a person would actually choose before sitting down. For example, split "study" into useful outcomes such as Attend classes, Work on assignments, and Review notes when the person's answer supports that. Split "reply to people" into one communication intention unless different tools clearly need different sessions. Avoid vague names such as Work, Study, or Productivity when a more concrete name is possible.
+
+Always include exactly one Leisure intention as the final item. Leisure gives unrestricted computer use, may have no apps, and must have isLeisure true. Every other item must have isLeisure false and use only applications from the installed-app catalog. Copy bundle identifiers exactly. Never invent apps or identifiers. A website may be included only with an installed browser and must use that browser's exact identifier.
+
+Make sensible, restrained setup suggestions so the person leaves onboarding ready to use Intent. Productive intentions usually need no friction. For games, social media, entertainment, or other easy-to-overuse activities, suggest a practical timer restriction and at most one light friction such as a 5-second countdown. Add allowBrowserSearches when research or open-ended web searching is central to the intention. Do not overload intentions with controls. For unused friction fields, return an empty string, 0, or an empty array.
+
+Use purpose to explain in one short sentence what belongs in each intention. Keep names short and distinct.
+`.trim();
+
+const splitSystemPrompt = `
+You refine one broad Intent intention into 2 to 5 more specific, reusable intentions. Return only the replacement intentions. Keep each one concrete and distinct, choose only apps from the supplied installed-app catalog, and copy bundle identifiers exactly. Do not include Leisure. Set isLeisure false for every item. Keep suggested restrictions and friction restrained: productive intentions normally need none, while games, social media, and entertainment may sensibly use a timer and at most one light friction.
 `.trim();
 
 export default {
@@ -141,7 +169,8 @@ export async function handlePlanRequest(request, env) {
   }
 
   let lastFailure = "No response";
-  const completionBudgets = [800, 600, 450];
+  const mode = body.mode || "single";
+  const completionBudgets = mode === "single" ? [800, 600, 450] : [1800, 1400, 1000];
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const upstream = await fetch(OPENROUTER_URL, {
@@ -166,7 +195,9 @@ export async function handlePlanRequest(request, env) {
         const payload = await upstream.json();
         const content = payload?.choices?.[0]?.message?.content;
         const plan = typeof content === "string" ? JSON.parse(content) : content;
-        if (!isPlan(plan)) throw new Error("Invalid plan");
+        if (!isPlan(plan, mode)) throw new Error("Invalid plan");
+        if (mode === "onboarding") return json(ensureLeisure(plan));
+        if (mode === "split") return json(plan);
         return json(applyExplicitRequestRules(
           plan,
           body.description,
@@ -257,6 +288,9 @@ export function validateRequest(body) {
   if (body.description.length > MAX_DESCRIPTION_LENGTH) {
     return "Keep the description under 4,000 characters.";
   }
+  if (body.mode != null && !["single", "onboarding", "split"].includes(body.mode)) {
+    return "The AI generation mode is invalid.";
+  }
   if (body.currentIntention != null) {
     let encodedContext;
     try {
@@ -281,6 +315,7 @@ export function validateRequest(body) {
 }
 
 export function openRouterRequest(body, model = "openai/gpt-5.6-luna", maxCompletionTokens = 800) {
+  const mode = body.mode || "single";
   const catalog = body.installedApps
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -294,7 +329,12 @@ export function openRouterRequest(body, model = "openai/gpt-5.6-luna", maxComple
   return {
     model: model || "openai/gpt-5.6-luna",
     messages: [
-      { role: "system", content: systemPrompt },
+      {
+        role: "system",
+        content: mode === "onboarding"
+          ? onboardingSystemPrompt
+          : mode === "split" ? splitSystemPrompt : systemPrompt,
+      },
       {
         role: "user",
         content: `Latest request:\n${body.description.trim()}${currentContext}\n\nInstalled applications available to choose from:\n${catalog}`,
@@ -306,9 +346,11 @@ export function openRouterRequest(body, model = "openai/gpt-5.6-luna", maxComple
     response_format: {
       type: "json_schema",
       json_schema: {
-        name: "intent_intention_plan",
+        name: mode === "onboarding" ? "intent_onboarding_plan" : "intent_intention_plan",
         strict: true,
-        schema: intentionSchema,
+        schema: mode === "onboarding"
+          ? onboardingSchema
+          : mode === "split" ? splitSchema : intentionSchema,
       },
     },
     provider: {
@@ -328,15 +370,41 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function isPlan(plan) {
+function isPlan(plan, mode = "single") {
+  const minimum = mode === "single" ? 1 : 2;
+  const maximum = mode === "single" ? 1 : mode === "split" ? 5 : 8;
   return plan && Array.isArray(plan.intentions) &&
-    plan.intentions.length === 1 &&
+    plan.intentions.length >= minimum && plan.intentions.length <= maximum &&
     plan.intentions.every((item) =>
       item && typeof item.name === "string" && typeof item.purpose === "string" &&
       Array.isArray(item.appBundleIdentifiers) && Array.isArray(item.websites) &&
       typeof item.allowBrowserSearches === "boolean" &&
+      typeof item.isLeisure === "boolean" &&
       Array.isArray(item.restrictions) && Array.isArray(item.frictions)
     );
+}
+
+export function ensureLeisure(plan) {
+  const nonLeisure = plan.intentions.filter((item) => !item.isLeisure);
+  const generatedLeisure = plan.intentions.find((item) => item.isLeisure);
+  const leisure = generatedLeisure || {
+    name: "Leisure",
+    purpose: "Use the computer freely without focus locking.",
+    appBundleIdentifiers: [],
+    websites: [],
+    allowBrowserSearches: false,
+    restrictions: [],
+    frictions: [],
+    isLeisure: true,
+  };
+  return {
+    ...plan,
+    intentions: [...nonLeisure.slice(0, 7), {
+      ...leisure,
+      name: leisure.name.trim() || "Leisure",
+      isLeisure: true,
+    }],
+  };
 }
 
 function json(value, status = 200) {
