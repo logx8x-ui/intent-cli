@@ -13,45 +13,51 @@ struct IntentSchedulerView: View {
     private let calendar = Calendar.current
 
     var body: some View {
-        VStack(spacing: 0) {
-            schedulerHeader
-                .padding(.horizontal, 30)
-                .padding(.top, 82)
-                .padding(.bottom, 22)
+        ZStack {
+            VStack(spacing: 0) {
+                schedulerHeader
+                    .padding(.horizontal, 30)
+                    .padding(.top, 82)
+                    .padding(.bottom, 22)
 
-            weekBoard
-                .padding(.horizontal, 30)
-                .padding(.bottom, 30)
-                .frame(maxHeight: .infinity)
+                weekBoard
+                    .padding(.horizontal, 30)
+                    .padding(.bottom, 30)
+                    .frame(maxHeight: .infinity)
+            }
+
+            if let context = editorContext {
+                ScheduleEditorOverlay(
+                    schedule: context.schedule,
+                    intentions: model.intentions,
+                    isNew: context.isNew,
+                    appleConnected: calendarSync.appleState.isConnected,
+                    googleConnected: calendarSync.googleState.isConnected,
+                    onSave: { schedule, syncProvider in
+                        Task {
+                            await saveSchedule(schedule, isNew: context.isNew, syncProvider: syncProvider)
+                        }
+                    },
+                    onDelete: context.isNew ? nil : {
+                        Task {
+                            if let existing = model.schedules.first(where: { $0.id == context.schedule.id }) {
+                                await calendarSync.deleteSyncedEvent(for: existing)
+                            }
+                            model.deleteSchedule(id: context.schedule.id)
+                            editorContext = nil
+                        }
+                    }
+                )
+                .zIndex(10)
+                .transition(.opacity.combined(with: .scale(scale: 0.985)))
+            }
         }
+        .animation(.easeOut(duration: 0.16), value: editorContext?.id)
         .onAppear {
             calendarSync.appear(visibleInterval: visibleWeekInterval)
         }
         .onChange(of: weekOffset) { _ in
             calendarSync.updateVisibleInterval(visibleWeekInterval)
-        }
-        .sheet(item: $editorContext) { context in
-            ScheduleEditorSheet(
-                schedule: context.schedule,
-                intentions: model.intentions,
-                isNew: context.isNew,
-                appleConnected: calendarSync.appleState.isConnected,
-                googleConnected: calendarSync.googleState.isConnected,
-                onSave: { schedule, syncProvider in
-                    Task {
-                        await saveSchedule(schedule, isNew: context.isNew, syncProvider: syncProvider)
-                    }
-                },
-                onDelete: context.isNew ? nil : {
-                    Task {
-                        if let existing = model.schedules.first(where: { $0.id == context.schedule.id }) {
-                            await calendarSync.deleteSyncedEvent(for: existing)
-                        }
-                        model.deleteSchedule(id: context.schedule.id)
-                        editorContext = nil
-                    }
-                }
-            )
         }
     }
 
@@ -407,7 +413,7 @@ private struct ScheduleEditorContext: Identifiable {
     let isNew: Bool
 }
 
-private struct ScheduleEditorSheet: View {
+private struct ScheduleEditorOverlay: View {
     let intentions: [Intention]
     let isNew: Bool
     let appleConnected: Bool
@@ -439,6 +445,19 @@ private struct ScheduleEditorSheet: View {
     }
 
     var body: some View {
+        ZStack {
+            Color.black.opacity(colorScheme == .dark ? 0.30 : 0.16)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(perform: saveAndDismiss)
+
+            editorPanel
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onExitCommand(perform: saveAndDismiss)
+    }
+
+    private var editorPanel: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 Image(systemName: "calendar")
@@ -522,12 +541,7 @@ private struct ScheduleEditorSheet: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Button(isNew ? "Schedule" : "Done") {
-                    if draft.recurrence == .weekly, draft.weekdays.isEmpty {
-                        draft.weekdays = [Calendar.current.component(.weekday, from: draft.scheduledAt)]
-                    }
-                    onSave(draft, syncDestination)
-                }
+                Button(isNew ? "Schedule" : "Done", action: saveAndDismiss)
                 .buttonStyle(.borderedProminent)
                 .tint(GraphTheme.editBlue)
                 .disabled(intentions.isEmpty)
@@ -535,7 +549,8 @@ private struct ScheduleEditorSheet: View {
         }
         .padding(24)
         .frame(width: 500)
-        .background(GraphTheme.background(colorScheme))
+        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 18)
+        .shadow(color: .black.opacity(0.30), radius: 28, y: 12)
     }
 
     private func field<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -556,6 +571,14 @@ private struct ScheduleEditorSheet: View {
             draft.weekdays.append(weekday.rawValue)
             draft.weekdays.sort()
         }
+    }
+
+    private func saveAndDismiss() {
+        guard !intentions.isEmpty else { return }
+        if draft.recurrence == .weekly, draft.weekdays.isEmpty {
+            draft.weekdays = [Calendar.current.component(.weekday, from: draft.scheduledAt)]
+        }
+        onSave(draft, syncDestination)
     }
 }
 

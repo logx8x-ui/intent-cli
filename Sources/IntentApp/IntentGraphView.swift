@@ -155,10 +155,16 @@ struct IntentGraphView: View {
                         .ignoresSafeArea()
                         .onTapGesture { }
 
-                    IntentQuickGuideView {
-                        didCompleteOnboarding = true
-                        showQuickGuide = false
-                    }
+                    IntentQuickGuideView(
+                        catalog: model.installedApps,
+                        onAdd: { suggestions in
+                            _ = model.addAIIntentions(suggestions)
+                        },
+                        onFinish: {
+                            didCompleteOnboarding = true
+                            showQuickGuide = false
+                        }
+                    )
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
                 }
             }
