@@ -15,7 +15,9 @@ struct IntentGraphView: View {
 
     @State private var editMode = false
     @State private var hoverSelectMode = false
+    @State private var shiftSelecting = false
     @State private var selection: GraphSelection?
+    @State private var selectedIntentionIDs: Set<String> = []
     @State private var cameraScale: CGFloat = 1
     @State private var cameraOffset: CGSize = .zero
     @State private var offsetAtGestureStart: CGSize = .zero
@@ -138,6 +140,7 @@ struct IntentGraphView: View {
                     keyboardHandler: { key in
                         handleKeyboard(key, viewportSize: viewportSize)
                     },
+                    modifierHandler: { shiftSelecting = $0 },
                     magnificationHandler: { magnification in
                         applyTrackpadMagnification(magnification, viewportSize: viewportSize)
                     },
@@ -308,7 +311,7 @@ struct IntentGraphView: View {
 
             graphNodes(in: size)
 
-            if editMode, let selection {
+            if editMode, selectedIntentionIDs.count < 2, let selection {
                 editor(for: selection, in: size)
                     .zIndex(40)
             }
@@ -548,19 +551,38 @@ struct IntentGraphView: View {
                 }
                 .foregroundStyle(GraphTheme.editBlue)
 
-                if hoverSelectMode {
-                    HStack(spacing: 6) {
-                        Image(systemName: "cursorarrow.motionlines")
-                            .font(.system(size: 10, weight: .bold))
-                        Text("HOVER SELECT · H")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .tracking(0.8)
+                HStack(spacing: 6) {
+                    Image(systemName: "cursorarrow.motionlines")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("H toggles Hover Select")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    if hoverSelectMode {
+                        Text("ON")
+                            .font(.system(size: 8, weight: .black, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .frame(height: 16)
+                            .background(GraphTheme.editBlue, in: Capsule())
+                            .foregroundStyle(Color.white)
                     }
-                    .foregroundStyle(GraphTheme.editBlue)
-                    .padding(.horizontal, 9)
-                    .frame(height: 24)
-                    .background(GraphTheme.editBlue.opacity(0.14), in: Capsule())
-                    .overlay(Capsule().stroke(GraphTheme.editBlue.opacity(0.72), lineWidth: 1))
+                }
+                .foregroundStyle(hoverSelectMode ? GraphTheme.editBlue : GraphTheme.muted(colorScheme))
+                .padding(.horizontal, 9)
+                .frame(height: 24)
+                .background(
+                    hoverSelectMode ? GraphTheme.editBlue.opacity(0.14) : GraphTheme.surface(colorScheme),
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule().stroke(
+                        hoverSelectMode ? GraphTheme.editBlue.opacity(0.72) : GraphTheme.stroke(colorScheme),
+                        lineWidth: 1
+                    )
+                )
+
+                if selectedIntentionIDs.count > 1 {
+                    Text("\(selectedIntentionIDs.count) SELECTED")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(GraphTheme.editBlue)
                 }
             } else if let activeSessionName = model.activeSessionName {
                 HStack(spacing: 7) {
@@ -630,8 +652,7 @@ struct IntentGraphView: View {
                         return
                     }
                     if editMode {
-                        select(.intention(intention.id))
-                        model.selectedID = intention.id
+                        selectIntention(intention.id, additive: isShiftSelectionActive)
                     } else {
                         model.requestStart(intention)
                     }
@@ -643,7 +664,7 @@ struct IntentGraphView: View {
                 IntentionNodeView(
                     intention: intention,
                     installedApps: model.installedApps,
-                    selected: selection == .intention(intention.id),
+                    selected: selectedIntentionIDs.contains(intention.id),
                     cooldownExpiresAt: model.cooldownExpirations[intention.id]
                 )
             }
@@ -746,6 +767,7 @@ struct IntentGraphView: View {
                     onDelete: {
                         model.deleteIntention(id: intentionID)
                         self.selection = nil
+                        selectedIntentionIDs.removeAll()
                     },
                     onAddRestriction: { kind in
                         guard intentionHasName(intentionID) else {
@@ -754,7 +776,7 @@ struct IntentGraphView: View {
                         }
                         let position = quickAddPosition(for: intentionID, kind: .restriction)
                         if let nodeID = model.addRestriction(to: intentionID, at: position, kind: kind) {
-                            self.selection = .restriction(intentionID: intentionID, nodeID: nodeID)
+                            select(.restriction(intentionID: intentionID, nodeID: nodeID))
                         }
                     },
                     onAddFriction: { friction in
@@ -764,7 +786,7 @@ struct IntentGraphView: View {
                         }
                         let position = quickAddPosition(for: intentionID, kind: .friction)
                         if let nodeID = model.addFriction(to: intentionID, at: position, friction: friction) {
-                            self.selection = .friction(intentionID: intentionID, nodeID: nodeID)
+                            select(.friction(intentionID: intentionID, nodeID: nodeID))
                         }
                     }
                 )
@@ -979,6 +1001,7 @@ struct IntentGraphView: View {
                 return false
             }
             selection = .intention(targetIntentionID)
+            selectedIntentionIDs.removeAll()
             pendingPlacementID = nil
             editMode = false
             switchPage(to: .desktop)
@@ -994,6 +1017,7 @@ struct IntentGraphView: View {
 
         pendingPlacementID = id
         selection = nil
+        selectedIntentionIDs.removeAll()
         model.selectedID = nil
         editMode = true
         switchPage(to: .desktop)
@@ -1010,6 +1034,7 @@ struct IntentGraphView: View {
         model.moveIntentionGroup(id: id, to: intention.graphPosition, persist: true)
         pendingPlacementID = nil
         selection = nil
+        selectedIntentionIDs.removeAll()
         model.selectedID = nil
         editMode = false
         showStatus("Intention added")
@@ -1065,9 +1090,13 @@ struct IntentGraphView: View {
             guard currentPage == .desktop, editMode else { return }
             finishEditingSelection()
             let id = model.createIntention(at: pointerWorldPoint(in: viewportSize))
-            selection = .intention(id)
+            selectIntention(id, additive: false)
         case .restriction:
             guard currentPage == .desktop, editMode else { return }
+            guard selectedIntentionIDs.count < 2 else {
+                showStatus("Select one intention to add a restriction")
+                return
+            }
             guard let intentionID = selection?.intentionID else {
                 showStatus("Select an intention first")
                 return
@@ -1081,6 +1110,10 @@ struct IntentGraphView: View {
             }
         case .friction:
             guard currentPage == .desktop, editMode else { return }
+            guard selectedIntentionIDs.count < 2 else {
+                showStatus("Select one intention to add a friction")
+                return
+            }
             guard let intentionID = selection?.intentionID else {
                 showStatus("Select an intention first")
                 return
@@ -1106,6 +1139,7 @@ struct IntentGraphView: View {
             guard editMode else { return }
             model.undoLastChange()
             selection = nil
+            selectedIntentionIDs.removeAll()
         case .pageLeft:
             switchPage(to: currentPage.previous)
         case .pageRight:
@@ -1137,14 +1171,18 @@ struct IntentGraphView: View {
                 in: viewportSize
             )
             let id = model.createIntention(at: placement)
-            selection = .intention(id)
+            selectIntention(id, additive: false)
             return
         }
         if key != .intention,
            selection?.intentionID == nil,
            let selectedID = model.selectedID,
            model.intentions.contains(where: { $0.id == selectedID }) {
-            selection = .intention(selectedID)
+            selectIntention(selectedID, additive: false)
+        }
+        guard selectedIntentionIDs.count < 2 else {
+            showStatus("Select one intention first")
+            return
         }
         guard let intentionID = selection?.intentionID else {
             showStatus("Select an intention first")
@@ -1226,6 +1264,10 @@ struct IntentGraphView: View {
     }
 
     private func deleteSelection() {
+        guard selectedIntentionIDs.count < 2 else {
+            showStatus("Select one intention to delete")
+            return
+        }
         guard let selection else { return }
         switch selection {
         case .intention(let intentionID):
@@ -1240,6 +1282,7 @@ struct IntentGraphView: View {
             }
         }
         self.selection = nil
+        selectedIntentionIDs.removeAll()
     }
 
     private func quickAddPosition(for intentionID: String, kind: QuickAddKind) -> GraphPoint {
@@ -1274,6 +1317,7 @@ struct IntentGraphView: View {
         }
         finishEditingSelection()
         hoverSelectMode = false
+        shiftSelecting = false
         editMode = false
     }
 
@@ -1281,10 +1325,52 @@ struct IntentGraphView: View {
         if selection?.intentionID != newSelection.intentionID {
             discardSelectedIntentionIfUnnamed()
         }
+        selectedIntentionIDs.removeAll()
         selection = newSelection
     }
 
+    private var isShiftSelectionActive: Bool {
+        shiftSelecting || NSEvent.modifierFlags.contains(.shift)
+    }
+
+    private func selectIntention(_ intentionID: String, additive: Bool) {
+        if !additive {
+            if selection?.intentionID != intentionID {
+                discardSelectedIntentionIfUnnamed()
+            }
+            selectedIntentionIDs = [intentionID]
+            selection = .intention(intentionID)
+            model.selectedID = intentionID
+            return
+        }
+
+        if selectedIntentionIDs.isEmpty,
+           case .intention(let selectedID) = selection {
+            selectedIntentionIDs.insert(selectedID)
+        } else if selection != nil, selectedIntentionIDs.isEmpty {
+            selection = nil
+        }
+
+        selectedIntentionIDs.insert(intentionID)
+        selection = .intention(intentionID)
+        model.selectedID = intentionID
+    }
+
     private func updateHoverSelection(at location: CGPoint, in size: CGSize) {
+        if isShiftSelectionActive {
+            for intention in model.intentions.reversed() {
+                if hoverHitRect(
+                    centeredAt: screenPoint(for: intention.graphPosition, in: size),
+                    width: 200,
+                    height: 190
+                ).contains(location) {
+                    selectIntention(intention.id, additive: true)
+                    return
+                }
+            }
+            return
+        }
+
         for intention in model.intentions.reversed() {
             for node in intention.frictionNodes.reversed() {
                 if hoverHitRect(
@@ -1321,10 +1407,8 @@ struct IntentGraphView: View {
                 width: 200,
                 height: 190
             ).contains(location) {
-                let newSelection = GraphSelection.intention(intention.id)
-                if selection != newSelection {
-                    select(newSelection)
-                    model.selectedID = intention.id
+                if selection != .intention(intention.id) || selectedIntentionIDs.count != 1 {
+                    selectIntention(intention.id, additive: false)
                 }
                 return
             }
@@ -1343,6 +1427,7 @@ struct IntentGraphView: View {
     private func finishEditingSelection() {
         discardSelectedIntentionIfUnnamed()
         selection = nil
+        selectedIntentionIDs.removeAll()
     }
 
     private func discardSelectedIntentionIfUnnamed() {
@@ -1700,6 +1785,7 @@ private struct ShakeEffect: GeometryEffect {
 
 private struct GraphInputMonitor: NSViewRepresentable {
     let keyboardHandler: (GraphKeyboardKey) -> Void
+    let modifierHandler: (Bool) -> Void
     let magnificationHandler: (CGFloat) -> Void
     let scrollHandler: (CGSize) -> Void
     let pageSwipeHandler: (PageSwipeEvent) -> Void
@@ -1707,6 +1793,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
         view.keyboardHandler = keyboardHandler
+        view.modifierHandler = modifierHandler
         view.magnificationHandler = magnificationHandler
         view.scrollHandler = scrollHandler
         view.pageSwipeHandler = pageSwipeHandler
@@ -1715,6 +1802,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
 
     func updateNSView(_ nsView: MonitorView, context: Context) {
         nsView.keyboardHandler = keyboardHandler
+        nsView.modifierHandler = modifierHandler
         nsView.magnificationHandler = magnificationHandler
         nsView.scrollHandler = scrollHandler
         nsView.pageSwipeHandler = pageSwipeHandler
@@ -1722,10 +1810,12 @@ private struct GraphInputMonitor: NSViewRepresentable {
 
     final class MonitorView: NSView, NSGestureRecognizerDelegate {
         var keyboardHandler: ((GraphKeyboardKey) -> Void)?
+        var modifierHandler: ((Bool) -> Void)?
         var magnificationHandler: ((CGFloat) -> Void)?
         var scrollHandler: ((CGSize) -> Void)?
         var pageSwipeHandler: ((PageSwipeEvent) -> Void)?
         private var keyboardMonitor: Any?
+        private var modifierMonitor: Any?
         private var magnificationMonitor: Any?
         private var scrollMonitor: Any?
         private var inputFrameTimer: Timer?
@@ -1797,6 +1887,12 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     return nil
                 }
 
+                modifierMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                    guard let self, self.window?.isKeyWindow == true else { return event }
+                    self.modifierHandler?(event.modifierFlags.contains(.shift))
+                    return event
+                }
+
                 magnificationMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
                     guard let self,
                           self.window?.isKeyWindow == true,
@@ -1863,6 +1959,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
 
         private func removeMonitors() {
             if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
+            if let modifierMonitor { NSEvent.removeMonitor(modifierMonitor) }
             if let magnificationMonitor { NSEvent.removeMonitor(magnificationMonitor) }
             if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
             if let swipeMonitor { NSEvent.removeMonitor(swipeMonitor) }
@@ -1872,6 +1969,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
             pendingMagnification = 0
             pendingPan = .zero
             keyboardMonitor = nil
+            modifierMonitor = nil
             magnificationMonitor = nil
             scrollMonitor = nil
             swipeMonitor = nil
