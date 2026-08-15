@@ -59,7 +59,7 @@ enum GraphTheme {
         colorScheme == .dark ? .white.opacity(0.30) : .black.opacity(0.25)
     }
 
-    static let editBlue = Color(red: 0.46, green: 0.66, blue: 1.0)
+    static let editBlue = Color(red: 0.18, green: 0.62, blue: 1.0)
 }
 
 struct AdaptiveBackdropView: NSViewRepresentable {
@@ -152,15 +152,15 @@ extension View {
             .overlay {
                 shape
                     .stroke(
-                        selected ? GraphTheme.editBlue.opacity(0.88) : GraphTheme.stroke(colorScheme),
-                        lineWidth: selected ? 1.8 : 1
+                        selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                        lineWidth: selected ? 3.2 : 1
                     )
                     .allowsHitTesting(false)
             }
             .clipShape(shape)
             .shadow(
-                color: selected ? GraphTheme.editBlue.opacity(0.22) : GraphTheme.glassShadow(colorScheme),
-                radius: selected ? 13 : 9,
+                color: selected ? GraphTheme.editBlue.opacity(0.68) : GraphTheme.glassShadow(colorScheme),
+                radius: selected ? 19 : 9,
                 y: 5
             )
     }

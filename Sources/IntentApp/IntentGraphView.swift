@@ -14,6 +14,7 @@ struct IntentGraphView: View {
     @AppStorage("intentZeroDriftWarningSuppressed") private var zeroDriftWarningSuppressed = false
 
     @State private var editMode = false
+    @State private var hoverSelectMode = false
     @State private var selection: GraphSelection?
     @State private var cameraScale: CGFloat = 1
     @State private var cameraOffset: CGSize = .zero
@@ -188,6 +189,9 @@ struct IntentGraphView: View {
                 switch phase {
                 case .active(let location):
                     hoverLocation = location
+                    if currentPage == .desktop, editMode, hoverSelectMode {
+                        updateHoverSelection(at: location, in: viewportSize)
+                    }
                     if currentPage == .desktop, let pendingPlacementID {
                         model.moveIntentionGroup(
                             id: pendingPlacementID,
@@ -543,6 +547,21 @@ struct IntentGraphView: View {
                         .tracking(1.1)
                 }
                 .foregroundStyle(GraphTheme.editBlue)
+
+                if hoverSelectMode {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cursorarrow.motionlines")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("HOVER SELECT · H")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .tracking(0.8)
+                    }
+                    .foregroundStyle(GraphTheme.editBlue)
+                    .padding(.horizontal, 9)
+                    .frame(height: 24)
+                    .background(GraphTheme.editBlue.opacity(0.14), in: Capsule())
+                    .overlay(Capsule().stroke(GraphTheme.editBlue.opacity(0.72), lineWidth: 1))
+                }
             } else if let activeSessionName = model.activeSessionName {
                 HStack(spacing: 7) {
                     Circle()
@@ -1073,6 +1092,13 @@ struct IntentGraphView: View {
             if let id = model.addFriction(to: intentionID, at: pointerWorldPoint(in: viewportSize)) {
                 selection = .friction(intentionID: intentionID, nodeID: id)
             }
+        case .hoverSelect:
+            guard currentPage == .desktop, editMode else {
+                showStatus("Enter Edit Mode before using Hover Select")
+                return
+            }
+            hoverSelectMode.toggle()
+            showStatus(hoverSelectMode ? "Hover Select on" : "Hover Select off")
         case .delete:
             guard editMode else { return }
             deleteSelection()
@@ -1247,6 +1273,7 @@ struct IntentGraphView: View {
             commitWelcomeTitle()
         }
         finishEditingSelection()
+        hoverSelectMode = false
         editMode = false
     }
 
@@ -1255,6 +1282,62 @@ struct IntentGraphView: View {
             discardSelectedIntentionIfUnnamed()
         }
         selection = newSelection
+    }
+
+    private func updateHoverSelection(at location: CGPoint, in size: CGSize) {
+        for intention in model.intentions.reversed() {
+            for node in intention.frictionNodes.reversed() {
+                if hoverHitRect(
+                    centeredAt: screenPoint(for: node.position, in: size),
+                    width: 126,
+                    height: 112
+                ).contains(location) {
+                    let newSelection = GraphSelection.friction(intentionID: intention.id, nodeID: node.id)
+                    if selection != newSelection {
+                        select(newSelection)
+                        model.selectedID = intention.id
+                    }
+                    return
+                }
+            }
+
+            for node in intention.restrictionNodes.reversed() {
+                if hoverHitRect(
+                    centeredAt: screenPoint(for: node.position, in: size),
+                    width: 116,
+                    height: 116
+                ).contains(location) {
+                    let newSelection = GraphSelection.restriction(intentionID: intention.id, nodeID: node.id)
+                    if selection != newSelection {
+                        select(newSelection)
+                        model.selectedID = intention.id
+                    }
+                    return
+                }
+            }
+
+            if hoverHitRect(
+                centeredAt: screenPoint(for: intention.graphPosition, in: size),
+                width: 200,
+                height: 190
+            ).contains(location) {
+                let newSelection = GraphSelection.intention(intention.id)
+                if selection != newSelection {
+                    select(newSelection)
+                    model.selectedID = intention.id
+                }
+                return
+            }
+        }
+    }
+
+    private func hoverHitRect(centeredAt center: CGPoint, width: CGFloat, height: CGFloat) -> CGRect {
+        CGRect(
+            x: center.x - (width * cameraScale / 2),
+            y: center.y - (height * cameraScale / 2),
+            width: width * cameraScale,
+            height: height * cameraScale
+        )
     }
 
     private func finishEditingSelection() {
@@ -1535,6 +1618,7 @@ private enum GraphKeyboardKey {
     case intention
     case restriction
     case friction
+    case hoverSelect
     case delete
     case undo
     case pageLeft
@@ -1698,6 +1782,7 @@ private struct GraphInputMonitor: NSViewRepresentable {
                     case 34: key = .intention
                     case 15: key = .restriction
                     case 3: key = .friction
+                    case 4: key = .hoverSelect
                     case 7, 51, 117: key = .delete
                     case 123: key = .pageLeft
                     case 124: key = .pageRight

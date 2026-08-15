@@ -54,6 +54,14 @@ struct IntentionNodeView: View {
                         .allowsHitTesting(false)
                 }
 
+                if selected {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(GraphTheme.editBlue, lineWidth: 3.6)
+                        .frame(width: squareSize, height: squareSize)
+                        .shadow(color: GraphTheme.editBlue.opacity(0.78), radius: 18)
+                        .allowsHitTesting(false)
+                }
+
                 if intention.showsCooldownRemainingTime, let cooldownExpiresAt {
                     CooldownBadge(expiresAt: cooldownExpiresAt)
                         .frame(width: squareSize - 10, height: squareSize - 10)
@@ -253,9 +261,9 @@ struct RestrictionNodeView: View {
                 }
                 .overlay(
                     Circle()
-                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1)
+                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 3.6 : 1)
                 )
-                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.25) : GraphTheme.glassShadow(colorScheme), radius: 12, y: 7)
+                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.72) : GraphTheme.glassShadow(colorScheme), radius: selected ? 19 : 12, y: 7)
 
             VStack(spacing: 4) {
                 if let durationLabel {
@@ -421,9 +429,9 @@ struct FrictionNodeView: View {
                 )
                 .overlay(
                     RoundedTriangleShape(cornerRadius: 13)
-                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1)
+                        .stroke(selected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme), lineWidth: selected ? 3.6 : 1)
                 )
-                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.25) : GraphTheme.glassShadow(colorScheme), radius: 12, y: 7)
+                .shadow(color: selected ? GraphTheme.editBlue.opacity(0.72) : GraphTheme.glassShadow(colorScheme), radius: selected ? 19 : 12, y: 7)
 
             VStack(spacing: 3) {
                 ZStack {
