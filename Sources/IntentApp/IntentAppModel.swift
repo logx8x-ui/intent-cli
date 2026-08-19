@@ -258,7 +258,8 @@ final class IntentAppModel: ObservableObject {
         purposeModeError = nil
         defer { purposeModeIsResolving = false }
 
-        if let existing = matchedIntention(for: purpose, minimumScore: 0.88),
+        if let explicitIntentionID = liveInterpretation?.includedIntentionIDs.last,
+           let existing = intentions.first(where: { $0.id == explicitIntentionID }),
            purposeInterpretation(liveInterpretation, isCompatibleWith: existing) {
             requestStart(existing)
             return
@@ -267,10 +268,6 @@ final class IntentAppModel: ObservableObject {
         let availableApps = installedApps.map {
             AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
         }
-        let existingNames = intentions
-            .map(\.name)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: ", ")
         let includedAppNames = liveInterpretation?.includedAppBundleIdentifiers.compactMap { identifier in
             availableApps.first { $0.bundleIdentifier == identifier }?.name
         } ?? []
@@ -280,18 +277,21 @@ final class IntentAppModel: ObservableObject {
         let includedIntentionNames = liveInterpretation?.includedIntentionIDs.compactMap { id in
             intentions.first { $0.id == id }?.name
         } ?? []
+        let includedWebsiteNames = liveInterpretation?.includedWebsites.map(\.name) ?? []
+        let excludedWebsiteNames = liveInterpretation?.excludedWebsites.map(\.name) ?? []
         let liveResolution = """
         Final live interpretation after applying the person's corrections in order:
         - Keep these apps: \(includedAppNames.isEmpty ? "No app was explicitly resolved" : includedAppNames.joined(separator: ", "))
         - Never include these removed apps: \(excludedAppNames.isEmpty ? "None" : excludedAppNames.joined(separator: ", "))
-        - Referenced saved intentions: \(includedIntentionNames.isEmpty ? "None" : includedIntentionNames.joined(separator: ", "))
-        Later corrections override earlier words. Never re-add an app listed as removed.
+        - Keep these websites: \(includedWebsiteNames.isEmpty ? "No website was explicitly resolved" : includedWebsiteNames.joined(separator: ", "))
+        - Never include these removed websites: \(excludedWebsiteNames.isEmpty ? "None" : excludedWebsiteNames.joined(separator: ", "))
+        - Explicitly starred saved intentions: \(includedIntentionNames.isEmpty ? "None" : includedIntentionNames.joined(separator: ", "))
+        Later corrections override earlier words. Never re-add an app or website listed as removed.
         """
         let description = """
         Start one immediate focused session for this purpose: \(purpose)
 
-        Existing intention names: \(existingNames.isEmpty ? "None" : existingNames)
-        If this is clearly the same task as an existing intention, use that exact existing name. Otherwise choose only the installed apps and narrow websites needed right now. Do not add friction, timers, cooldowns, or leisure mode unless the person explicitly requested them.
+        Choose only the installed apps and narrow websites needed right now. A saved intention may only be reused when the person explicitly prefixed its name with an asterisk; do not infer a saved intention from an unstarred name. Do not add friction, timers, cooldowns, or leisure mode unless the person explicitly requested them.
 
         \(liveResolution)
         """
@@ -310,7 +310,11 @@ final class IntentAppModel: ObservableObject {
             if let liveInterpretation {
                 let included = liveInterpretation.includedAppBundleIdentifiers
                 let excluded = Set(liveInterpretation.excludedAppBundleIdentifiers)
-                if liveInterpretation.limitsAppsToSelection, !included.isEmpty {
+                let hasExplicitIntention = !liveInterpretation.includedIntentionIDs.isEmpty
+                let hasExplicitAppCorrection = liveInterpretation.usedCorrection
+                    && (!liveInterpretation.explicitlyIncludedAppBundleIdentifiers.isEmpty || !excluded.isEmpty)
+                if (liveInterpretation.limitsAppsToSelection || hasExplicitAppCorrection || hasExplicitIntention),
+                   !included.isEmpty {
                     suggestion.appBundleIdentifiers = included
                 } else {
                     for identifier in included where !suggestion.appBundleIdentifiers.contains(identifier) {
@@ -319,15 +323,33 @@ final class IntentAppModel: ObservableObject {
                 }
                 suggestion.appBundleIdentifiers.removeAll { excluded.contains($0) }
                 suggestion.websites.removeAll { excluded.contains($0.browserBundleIdentifier) }
-            }
 
-            let suggestedPurpose = [suggestion.name, suggestion.purpose]
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
-            if let existing = matchedIntention(for: suggestedPurpose, minimumScore: 0.88),
-               purposeInterpretation(liveInterpretation, isCompatibleWith: existing) {
-                requestStart(existing)
-                return
+                let excludedWebsiteValues = Set(liveInterpretation.excludedWebsites.map(\.value))
+                let hasExplicitWebsiteCorrection = liveInterpretation.usedCorrection
+                    && (!liveInterpretation.explicitlyIncludedWebsiteValues.isEmpty || !excludedWebsiteValues.isEmpty)
+                if liveInterpretation.limitsWebsitesToSelection || hasExplicitWebsiteCorrection || hasExplicitIntention {
+                    suggestion.websites.removeAll()
+                }
+
+                let fallbackBrowser = suggestion.appBundleIdentifiers.first(where: BrowserApplication.isBrowser)
+                    ?? included.first(where: BrowserApplication.isBrowser)
+                for website in liveInterpretation.includedWebsites {
+                    guard let browser = website.browserBundleIdentifier ?? fallbackBrowser,
+                          !excluded.contains(browser),
+                          availableApps.contains(where: { $0.bundleIdentifier == browser }) else {
+                        continue
+                    }
+                    if !suggestion.appBundleIdentifiers.contains(browser) {
+                        suggestion.appBundleIdentifiers.append(browser)
+                    }
+                    let resolved = AIWebsiteSuggestion(value: website.value, browserBundleIdentifier: browser)
+                    if !suggestion.websites.contains(where: {
+                        $0.value == resolved.value && $0.browserBundleIdentifier == resolved.browserBundleIdentifier
+                    }) {
+                        suggestion.websites.append(resolved)
+                    }
+                }
+                suggestion.websites.removeAll { excludedWebsiteValues.contains(AllowedWebsite.normalized($0.value)) }
             }
 
             let appsByIdentifier = Dictionary(
@@ -1258,17 +1280,6 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    private func matchedIntention(for purpose: String, minimumScore: Double) -> Intention? {
-        guard let match = PurposeIntentionMatcher.bestMatch(
-            for: purpose,
-            in: intentions,
-            minimumScore: minimumScore
-        ) else {
-            return nil
-        }
-        return intentions.first { $0.id == match.intentionID }
-    }
-
     private func purposeInterpretation(
         _ interpretation: PurposeLiveInterpretation?,
         isCompatibleWith intention: Intention
@@ -1287,8 +1298,18 @@ final class IntentAppModel: ObservableObject {
         let explicitApps = Set(interpretation.explicitlyIncludedAppBundleIdentifiers)
         guard explicitApps.isSubset(of: existingApps) else { return false }
 
+        let existingWebsiteValues = Set(intention.allowedWebsites.map { AllowedWebsite.normalized($0.value) })
+        let excludedWebsiteValues = Set(interpretation.excludedWebsites.map(\.value))
+        guard existingWebsiteValues.isDisjoint(with: excludedWebsiteValues) else { return false }
+
+        let explicitWebsiteValues = Set(interpretation.explicitlyIncludedWebsiteValues)
+        guard explicitWebsiteValues.isSubset(of: existingWebsiteValues) else { return false }
+
         if interpretation.limitsAppsToSelection {
-            return Set(interpretation.includedAppBundleIdentifiers) == existingApps
+            guard Set(interpretation.includedAppBundleIdentifiers) == existingApps else { return false }
+        }
+        if interpretation.limitsWebsitesToSelection {
+            guard Set(interpretation.includedWebsites.map(\.value)) == existingWebsiteValues else { return false }
         }
         return true
     }

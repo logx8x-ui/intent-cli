@@ -142,6 +142,10 @@ final class PurposeSpeechRecognizer: ObservableObject {
         isListening = false
     }
 
+    func resetTranscript() {
+        transcript = ""
+    }
+
     private func beginListening() async {
         stop()
         errorMessage = nil
@@ -229,12 +233,176 @@ final class PurposeSpeechRecognizer: ObservableObject {
     }
 }
 
+private struct PurposePromptEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var measuredHeight: CGFloat
+    @Binding var isFocused: Bool
+    let intentions: [Intention]
+    let colorScheme: ColorScheme
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.drawsBackground = false
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 0, height: 8)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        scrollView.documentView = textView
+
+        context.coordinator.apply(to: textView)
+        context.coordinator.updateHeight(for: textView, in: scrollView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            context.coordinator.isApplyingUpdate = true
+            textView.string = text
+            context.coordinator.isApplyingUpdate = false
+        }
+        context.coordinator.apply(to: textView)
+        context.coordinator.updateHeight(for: textView, in: scrollView)
+        scrollView.hasVerticalScroller = measuredHeight >= Coordinator.maximumHeight
+
+        if isFocused, textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        static let minimumHeight: CGFloat = 44
+        static let maximumHeight: CGFloat = 176
+
+        var parent: PurposePromptEditor
+        var isApplyingUpdate = false
+
+        init(parent: PurposePromptEditor) {
+            self.parent = parent
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard !isApplyingUpdate,
+                  let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+            apply(to: textView)
+            if let scrollView = textView.enclosingScrollView {
+                updateHeight(for: textView, in: scrollView)
+            }
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onSubmit()
+                return true
+            }
+            return false
+        }
+
+        func apply(to textView: NSTextView) {
+            let selectedRanges = textView.selectedRanges
+            let baseColor = parent.colorScheme == .dark
+                ? NSColor(calibratedWhite: 0.96, alpha: 1)
+                : NSColor(calibratedWhite: 0.08, alpha: 1)
+            let baseAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 17, weight: .medium),
+                .foregroundColor: baseColor
+            ]
+
+            isApplyingUpdate = true
+            let storage = textView.textStorage ?? NSTextStorage()
+            storage.beginEditing()
+            storage.setAttributes(baseAttributes, range: NSRange(location: 0, length: storage.length))
+
+            let source = textView.string as NSString
+            for intention in parent.intentions.sorted(by: { $0.name.count > $1.name.count }) {
+                let escapedName = NSRegularExpression.escapedPattern(for: intention.name)
+                let pattern = "(?i)\\*(?:\\s+(?:the|intention|called|named))*\\s+(\(escapedName))(?=$|[^A-Za-z0-9])"
+                guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+                for match in expression.matches(in: textView.string, range: NSRange(location: 0, length: source.length)) {
+                    let nameRange = match.range(at: 1)
+                    guard nameRange.location != NSNotFound else { continue }
+                    storage.addAttributes([
+                        .foregroundColor: NSColor.systemIndigo,
+                        .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .underlineColor: NSColor.systemIndigo
+                    ], range: nameRange)
+                }
+            }
+            storage.endEditing()
+            textView.typingAttributes = baseAttributes
+            textView.selectedRanges = selectedRanges
+            isApplyingUpdate = false
+        }
+
+        func updateHeight(for textView: NSTextView, in scrollView: NSScrollView) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            let availableWidth = max(scrollView.contentSize.width, 280)
+            textContainer.containerSize = NSSize(width: availableWidth, height: CGFloat.greatestFiniteMagnitude)
+            layoutManager.ensureLayout(for: textContainer)
+            let usedHeight = layoutManager.usedRect(for: textContainer).height + textView.textContainerInset.height * 2
+            let nextHeight = min(max(Self.minimumHeight, ceil(usedHeight)), Self.maximumHeight)
+            guard abs(parent.measuredHeight - nextHeight) > 0.5 else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, abs(self.parent.measuredHeight - nextHeight) > 0.5 else { return }
+                self.parent.measuredHeight = nextHeight
+            }
+        }
+    }
+}
+
+private enum PurposeWebsiteIconLibrary {
+    private static var cache: [String: NSImage] = [:]
+
+    static func image(named name: String) -> NSImage? {
+        if let image = cache[name] { return image }
+        let url = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: "WebsiteIcons")
+            ?? Bundle.module.url(forResource: name, withExtension: "png")
+        guard let url, let image = NSImage(contentsOf: url) else { return nil }
+        cache[name] = image
+        return image
+    }
+}
+
 struct PurposeModeView: View {
     @EnvironmentObject private var model: IntentAppModel
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var speech = PurposeSpeechRecognizer()
     @State private var purpose = ""
-    @FocusState private var purposeFocused: Bool
+    @State private var purposeFocused = false
+    @State private var promptHeight: CGFloat = 44
 
     let onDismiss: () -> Void
 
@@ -289,17 +457,31 @@ struct PurposeModeView: View {
                         .foregroundStyle(GraphTheme.text(colorScheme))
                         .frame(maxWidth: 820)
 
-                    HStack(spacing: 12) {
+                    HStack(alignment: .bottom, spacing: 12) {
                         Image(systemName: "sparkles")
                             .font(.system(size: 16, weight: .medium))
                             .foregroundStyle(GraphTheme.editBlue)
                             .frame(width: 28)
+                            .frame(height: 40)
 
-                        TextField("Describe the one thing you came here to do", text: $purpose)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 17, weight: .medium))
-                            .focused($purposeFocused)
-                            .onSubmit(submit)
+                        ZStack(alignment: .topLeading) {
+                            if purpose.isEmpty {
+                                Text("Describe the one thing you came here to do")
+                                    .font(.system(size: 17, weight: .medium))
+                                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                                    .padding(.top, 11)
+                                    .allowsHitTesting(false)
+                            }
+                            PurposePromptEditor(
+                                text: $purpose,
+                                measuredHeight: $promptHeight,
+                                isFocused: $purposeFocused,
+                                intentions: model.intentions,
+                                colorScheme: colorScheme,
+                                onSubmit: submit
+                            )
+                            .frame(height: promptHeight)
+                        }
 
                         Button {
                             speech.toggle()
@@ -316,6 +498,7 @@ struct PurposeModeView: View {
                         }
                         .buttonStyle(.plain)
                         .help(speech.isListening ? "Stop listening" : "Speak your purpose")
+                        .frame(height: 40)
 
                         Button(action: submit) {
                             Group {
@@ -333,10 +516,11 @@ struct PurposeModeView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(cleanedPurpose.isEmpty || model.purposeModeIsResolving)
+                        .frame(height: 40)
                     }
                     .padding(.horizontal, 14)
-                    .frame(maxWidth: 820)
-                    .frame(height: 68)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 940)
                     .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
                     .shadow(color: Color.black.opacity(0.28), radius: 24, y: 10)
 
@@ -345,9 +529,9 @@ struct PurposeModeView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     } else {
                         HStack(spacing: 7) {
-                            example("Reply to messages")
-                            example("Work on data science")
-                            example("Write my assignment")
+                            example("Use Firefox with YouTube")
+                            example("Reply with Messages")
+                            example("Study with RemNote and Anki")
                         }
                         .transition(.opacity)
                     }
@@ -363,11 +547,11 @@ struct PurposeModeView: View {
                             .multilineTextAlignment(.center)
                     }
                 }
-                .frame(maxWidth: 900)
+                .frame(maxWidth: 1020)
 
                 Spacer()
 
-                Text("Intent checks your saved intentions first, then builds the smallest focused session needed.")
+                Text("Use * before a saved intention name. Otherwise, Intent builds the smallest focused session from the apps and websites you mention.")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.72))
                     .padding(.bottom, 28)
@@ -382,7 +566,18 @@ struct PurposeModeView: View {
         .onDisappear { speech.stop() }
         .onChange(of: speech.transcript) { transcript in
             guard speech.isListening || !transcript.isEmpty else { return }
-            purpose = transcript
+            purpose = PurposeLiveInterpreter.canonicalizedDisplayText(transcript)
+        }
+        .onChange(of: purpose) { value in
+            let canonical = PurposeLiveInterpreter.canonicalizedDisplayText(value)
+            if canonical != value {
+                purpose = canonical
+                return
+            }
+            if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !speech.isListening {
+                speech.resetTranscript()
+            }
+            model.purposeModeError = nil
         }
     }
 
@@ -391,7 +586,11 @@ struct PurposeModeView: View {
     }
 
     private var hasLiveRecognition: Bool {
-        !recognizedIntentions.isEmpty || !recognizedApps.isEmpty || !removedApps.isEmpty
+        !recognizedIntentions.isEmpty
+            || !recognizedApps.isEmpty
+            || !recognizedWebsites.isEmpty
+            || !removedApps.isEmpty
+            || !removedWebsites.isEmpty
     }
 
     private var liveInterpretation: PurposeLiveInterpretation {
@@ -405,26 +604,9 @@ struct PurposeModeView: View {
     }
 
     private var recognizedIntentions: [Intention] {
-        guard cleanedPurpose.count >= 2 else { return [] }
-        let excluded = Set(liveInterpretation.excludedIntentionIDs)
-        let directlyIncluded = liveInterpretation.includedIntentionIDs.compactMap { id in
+        liveInterpretation.includedIntentionIDs.compactMap { id in
             model.intentions.first { $0.id == id }
         }
-        let directIDs = Set(directlyIncluded.map(\.id))
-        let fuzzyMatches = model.intentions
-            .filter { !excluded.contains($0.id) && !directIDs.contains($0.id) }
-            .compactMap { intention -> (Intention, Double)? in
-                let score = recognitionScore(query: cleanedPurpose, candidate: intention.name)
-                return score >= 0.42 ? (intention, score) : nil
-            }
-            .sorted { lhs, rhs in
-                if lhs.1 == rhs.1 {
-                    return lhs.0.name.localizedCaseInsensitiveCompare(rhs.0.name) == .orderedAscending
-                }
-                return lhs.1 > rhs.1
-            }
-            .map(\.0)
-        return Array((directlyIncluded + fuzzyMatches).prefix(3))
     }
 
     private var recognizedApps: [InstalledApp] {
@@ -455,6 +637,21 @@ struct PurposeModeView: View {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    private var recognizedWebsites: [PurposeWebsiteSelection] {
+        liveInterpretation.includedWebsites
+    }
+
+    private var removedWebsites: [PurposeWebsiteSelection] {
+        liveInterpretation.excludedWebsites
+    }
+
+    private var recognitionAnimationKey: String {
+        let intentionIDs = recognizedIntentions.map(\.id)
+        let appIDs = recognizedApps.map(\.bundleIdentifier)
+        let websiteIDs = recognizedWebsites.map(\.id)
+        return (intentionIDs + appIDs + websiteIDs).joined(separator: "|")
+    }
+
     private var liveRecognitionPanel: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 6) {
@@ -467,16 +664,26 @@ struct PurposeModeView: View {
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }
 
-            HStack(spacing: 9) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 76, maximum: 148), spacing: 10)],
+                alignment: .leading,
+                spacing: 10
+            ) {
                 ForEach(recognizedIntentions) { intention in
                     recognizedIntentionCard(intention)
+                        .transition(.scale(scale: 0.76).combined(with: .opacity))
                 }
                 ForEach(recognizedApps) { app in
                     recognizedAppCard(app)
+                        .transition(.scale(scale: 0.76).combined(with: .opacity))
+                }
+                ForEach(recognizedWebsites) { website in
+                    recognizedWebsiteCard(website)
+                        .transition(.scale(scale: 0.76).combined(with: .opacity))
                 }
             }
 
-            if !removedApps.isEmpty {
+            if !removedApps.isEmpty || !removedWebsites.isEmpty {
                 HStack(spacing: 7) {
                     Image(systemName: "minus.circle.fill")
                         .foregroundStyle(Color.red.opacity(0.86))
@@ -490,14 +697,21 @@ struct PurposeModeView: View {
                             .strikethrough()
                             .foregroundStyle(GraphTheme.muted(colorScheme))
                     }
+                    ForEach(removedWebsites) { website in
+                        Text(website.name)
+                            .font(.system(size: 10, weight: .semibold))
+                            .strikethrough()
+                            .foregroundStyle(GraphTheme.muted(colorScheme))
+                    }
                 }
                 .transition(.opacity)
             }
         }
-        .padding(13)
-        .frame(maxWidth: 820, alignment: .leading)
+        .padding(18)
+        .frame(maxWidth: 940, minHeight: 124, alignment: .topLeading)
         .background(GraphTheme.surface(colorScheme).opacity(0.72), in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
+        .animation(.spring(response: 0.34, dampingFraction: 0.78), value: recognitionAnimationKey)
     }
 
     private func recognizedIntentionCard(_ intention: Intention) -> some View {
@@ -510,6 +724,8 @@ struct PurposeModeView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(intention.name)
                     .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.indigo)
+                    .underline()
                     .lineLimit(1)
                 Text("Saved intention")
                     .font(.system(size: 8, weight: .medium, design: .monospaced))
@@ -517,9 +733,9 @@ struct PurposeModeView: View {
             }
         }
         .padding(.horizontal, 9)
-        .frame(height: 42)
-        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.editBlue.opacity(0.35), lineWidth: 0.8))
+        .frame(minWidth: 132, minHeight: 62)
+        .background(Color.indigo.opacity(colorScheme == .dark ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.indigo.opacity(0.8), lineWidth: 1.2))
     }
 
     private func recognizedAppCard(_ app: InstalledApp) -> some View {
@@ -527,42 +743,41 @@ struct PurposeModeView: View {
             Image(nsImage: app.icon)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 25, height: 25)
+                .frame(width: 34, height: 34)
             Text(app.name)
                 .font(.system(size: 8, weight: .medium))
                 .lineLimit(1)
-                .frame(maxWidth: 55)
+                .frame(maxWidth: 76)
         }
-        .frame(width: 58, height: 46)
+        .frame(minWidth: 76, minHeight: 64)
         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.7))
         .help("Installed app: \(app.name)")
     }
 
-    private func recognitionScore(query: String, candidate: String) -> Double {
-        let queryText = normalized(query)
-        let candidateText = normalized(candidate)
-        guard !queryText.isEmpty, !candidateText.isEmpty else { return 0 }
-        if queryText == candidateText { return 1 }
-        if queryText.contains(candidateText) { return 0.98 }
-
-        let queryTokens = Set(queryText.split(separator: " ").map(String.init))
-        let candidateTokens = Set(candidateText.split(separator: " ").map(String.init))
-        let overlap = queryTokens.intersection(candidateTokens).count
-        guard overlap > 0 else {
-            let finalToken = queryText.split(separator: " ").last.map(String.init) ?? ""
-            return finalToken.count >= 3 && candidateTokens.contains(where: { $0.hasPrefix(finalToken) }) ? 0.55 : 0
+    private func recognizedWebsiteCard(_ website: PurposeWebsiteSelection) -> some View {
+        VStack(spacing: 4) {
+            if let resource = PurposeWebsiteCatalog.website(for: website.value)?.iconResource,
+               let image = PurposeWebsiteIconLibrary.image(named: resource) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 34, height: 34)
+            } else {
+                Image(systemName: "globe")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(GraphTheme.editBlue)
+                    .frame(width: 34, height: 34)
+            }
+            Text(website.name)
+                .font(.system(size: 8, weight: .medium))
+                .lineLimit(1)
+                .frame(maxWidth: 90)
         }
-        return Double(overlap) / Double(max(1, candidateTokens.count))
-    }
-
-    private func normalized(_ value: String) -> String {
-        value
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        .frame(minWidth: 82, minHeight: 64)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.editBlue.opacity(0.48), lineWidth: 0.9))
+        .help("Allowed website: \(website.value)")
     }
 
     private func example(_ title: String) -> some View {

@@ -35,8 +35,19 @@ struct PurposeMatcherSpec {
         let firefox = AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")
         let anki = AllowedApp(name: "Anki", bundleIdentifier: "net.ankiweb.dtop")
         let messages = AllowedApp(name: "Messages", bundleIdentifier: "com.apple.MobileSMS")
-        let apps = [firefox, anki, messages]
-        let study = intention(id: "study-live", name: "Study", apps: [firefox, anki])
+        let remNote = AllowedApp(name: "RemNote", bundleIdentifier: "io.remnote")
+        let apps = [firefox, anki, messages, remNote]
+        let study = intention(
+            id: "study-live",
+            name: "Study",
+            apps: [firefox, anki],
+            websites: [.init("github.com", browserBundleIdentifier: firefox.bundleIdentifier)]
+        )
+
+        let empty = PurposeLiveInterpreter.interpret("", apps: apps, intentions: [study])
+        expect(empty.includedAppBundleIdentifiers.isEmpty, "clearing text clears suggested apps")
+        expect(empty.includedWebsites.isEmpty, "clearing text clears suggested websites")
+        expect(empty.includedIntentionIDs.isEmpty, "clearing text clears suggested intentions")
 
         let removed = PurposeLiveInterpreter.interpret(
             "I want Firefox and Anki. Oops, remove Anki.",
@@ -76,15 +87,33 @@ struct PurposeMatcherSpec {
         expect(narrowed.limitsAppsToSelection, "narrowing is carried into session creation")
 
         let editedIntention = PurposeLiveInterpreter.interpret(
-            "Run Study, but remove Anki.",
+            "Run *Study, but remove Anki.",
             apps: apps,
             intentions: [study]
         )
-        expect(editedIntention.includedIntentionIDs == [study.id], "saved intention is understood live")
+        expect(editedIntention.includedIntentionIDs == [study.id], "starred intention is understood live")
         expect(
             editedIntention.includedAppBundleIdentifiers == [firefox.bundleIdentifier],
             "an app can be removed from a referenced intention"
         )
+        expect(
+            editedIntention.includedWebsites.map(\.value) == ["github.com"],
+            "a starred intention brings its allowed websites"
+        )
+
+        let unstarredIntention = PurposeLiveInterpreter.interpret(
+            "Run Study",
+            apps: apps,
+            intentions: [study]
+        )
+        expect(unstarredIntention.includedIntentionIDs.isEmpty, "unstarred intention names are not pinged")
+
+        let spokenStar = PurposeLiveInterpreter.interpret(
+            "Run astrix Study",
+            apps: apps,
+            intentions: [study]
+        )
+        expect(spokenStar.includedIntentionIDs == [study.id], "spoken asterisk pings an intention")
 
         let switchedCommand = PurposeLiveInterpreter.interpret(
             "Remove Anki, then use Firefox.",
@@ -101,9 +130,49 @@ struct PurposeMatcherSpec {
         )
         expect(explicitNegation.includedAppBundleIdentifiers == [firefox.bundleIdentifier], "do not add excludes the named app")
         expect(explicitNegation.excludedAppBundleIdentifiers == [anki.bundleIdentifier], "explicit negation is retained")
+
+        let browserAndWebsite = PurposeLiveInterpreter.interpret(
+            "Add Firefox with YouTube",
+            apps: apps,
+            intentions: []
+        )
+        expect(browserAndWebsite.includedAppBundleIdentifiers == [firefox.bundleIdentifier], "browser is recognized")
+        expect(browserAndWebsite.includedWebsites.map(\.value) == ["youtube.com"], "website is recognized")
+        expect(
+            browserAndWebsite.includedWebsites.first?.browserBundleIdentifier == firefox.bundleIdentifier,
+            "website is assigned to the mentioned browser"
+        )
+
+        let removedWebsite = PurposeLiveInterpreter.interpret(
+            "Add Firefox with YouTube. Actually remove YouTube.",
+            apps: apps,
+            intentions: []
+        )
+        expect(removedWebsite.includedAppBundleIdentifiers == [firefox.bundleIdentifier], "removing a site keeps its browser")
+        expect(removedWebsite.includedWebsites.isEmpty, "later website removal wins")
+        expect(removedWebsite.excludedWebsites.map(\.value) == ["youtube.com"], "removed website is explicit")
+
+        let websiteAddedBack = PurposeLiveInterpreter.interpret(
+            "Use Firefox with YouTube, remove YouTube, then add YouTube back.",
+            apps: apps,
+            intentions: []
+        )
+        expect(websiteAddedBack.includedWebsites.map(\.value) == ["youtube.com"], "website can be added back")
+
+        let speechAlias = PurposeLiveInterpreter.interpret(
+            "Use ram note",
+            apps: apps,
+            intentions: []
+        )
+        expect(speechAlias.includedAppBundleIdentifiers == [remNote.bundleIdentifier], "speech alias resolves RemNote")
     }
 
-    private static func intention(id: String, name: String, apps: [AllowedApp] = []) -> Intention {
+    private static func intention(
+        id: String,
+        name: String,
+        apps: [AllowedApp] = [],
+        websites: [AllowedWebsite] = []
+    ) -> Intention {
         Intention(
             id: id,
             name: name,
@@ -111,7 +180,7 @@ struct PurposeMatcherSpec {
             colorHex: "#FFFFFF",
             folder: "",
             allowedApps: apps,
-            allowedWebsites: [],
+            allowedWebsites: websites,
             startupActions: [],
             restrictions: .init()
         )
