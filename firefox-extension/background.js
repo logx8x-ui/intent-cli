@@ -19,6 +19,7 @@ let initialized = false;
 let freshBlankTabIds = new Set();
 let commandPort = null;
 let reconnectTimer = null;
+let synchronizingStartupTabs = false;
 
 function inactiveRules() {
   return {
@@ -239,34 +240,55 @@ function startupURLMatches(existingURL, requestedURL) {
   }
 }
 
-async function synchronizeStartupTabs() {
-  if (!rules.active || rules.startupWebsites.length === 0) return;
-
-  const tabs = await browser.tabs.query({});
-  if (tabs.length === 0) return;
-
-  const claimedTabIds = new Set();
-  let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
-  let firstStartupTab = null;
-
-  for (const startupURL of rules.startupWebsites) {
-    let tab = tabs.find((candidate) =>
-      !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
-    );
-    if (!tab) {
-      const staging = stagingTabs.shift();
-      tab = staging
-        ? await browser.tabs.update(staging.id, { url: startupURL, active: false })
-        : await browser.tabs.create({ url: startupURL, active: false });
+function uniqueStartupURLs(urls) {
+  const unique = [];
+  for (const url of urls) {
+    if (!unique.some((candidate) =>
+      startupURLMatches(candidate, url) && startupURLMatches(url, candidate)
+    )) {
+      unique.push(url);
     }
-    claimedTabIds.add(tab.id);
-    freshBlankTabIds.delete(tab.id);
-    firstStartupTab ||= tab;
   }
+  return unique;
+}
 
-  if (firstStartupTab) {
-    lastAllowedTabId = firstStartupTab.id;
-    await browser.tabs.update(firstStartupTab.id, { active: true });
+async function synchronizeStartupTabs() {
+  if (
+    synchronizingStartupTabs ||
+    !rules.active ||
+    rules.startupWebsites.length === 0
+  ) return;
+
+  synchronizingStartupTabs = true;
+  try {
+    const tabs = await browser.tabs.query({});
+    if (tabs.length === 0) return;
+
+    const claimedTabIds = new Set();
+    let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
+    let firstStartupTab = null;
+
+    for (const startupURL of uniqueStartupURLs(rules.startupWebsites)) {
+      let tab = tabs.find((candidate) =>
+        !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
+      );
+      if (!tab) {
+        const staging = stagingTabs.shift();
+        tab = staging
+          ? await browser.tabs.update(staging.id, { url: startupURL, active: false })
+          : await browser.tabs.create({ url: startupURL, active: false });
+      }
+      claimedTabIds.add(tab.id);
+      freshBlankTabIds.delete(tab.id);
+      firstStartupTab ||= tab;
+    }
+
+    if (firstStartupTab) {
+      lastAllowedTabId = firstStartupTab.id;
+      await browser.tabs.update(firstStartupTab.id, { active: true });
+    }
+  } finally {
+    synchronizingStartupTabs = false;
   }
 }
 

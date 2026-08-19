@@ -159,6 +159,13 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     async receiveNative(message) {
       for (const listener of nativeMessage.listeners) await listener(message);
       await settle();
+    },
+    async synchronizeStartupTabsConcurrently() {
+      await Promise.all([
+        context.synchronizeStartupTabs(),
+        context.synchronizeStartupTabs()
+      ]);
+      await settle();
     }
   };
 }
@@ -209,6 +216,27 @@ async function run() {
     startupWebsites: ["https://www.instagram.com/direct/inbox/"]
   });
   assert.equal(existingStartup.tabs.size, 1, "Chrome should not duplicate an open startup website");
+
+  const concurrentStartup = createHarness({
+    ...lockedRules,
+    startupWebsites: [
+      "https://www.instagram.com/direct/inbox/",
+      "https://instagram.com/direct/inbox"
+    ]
+  }, [
+    { id: 1, active: true, url: "https://example.com/" }
+  ]);
+  await concurrentStartup.settle();
+  concurrentStartup.tabs.clear();
+  concurrentStartup.tabs.set(1, { id: 1, active: true, url: "https://example.com/" });
+  await concurrentStartup.synchronizeStartupTabsConcurrently();
+  assert.equal(
+    Array.from(concurrentStartup.tabs.values()).filter((tab) =>
+      tab.url.includes("instagram.com/direct/inbox")
+    ).length,
+    1,
+    "Concurrent Chrome startup passes must create only one copy of the same website"
+  );
   const locked = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://youtube.com/" }

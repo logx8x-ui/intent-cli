@@ -137,6 +137,13 @@ function createHarness(activeRules, initialTabs, options = {}) {
         await Promise.resolve();
       }
     },
+    async synchronizeStartupTabsConcurrently() {
+      await Promise.all([
+        context.synchronizeStartupTabs(),
+        context.synchronizeStartupTabs()
+      ]);
+      await Promise.resolve();
+    },
     async activate(tabId) {
       setActiveTab(tabId);
       for (const listener of listeners.onActivated) {
@@ -215,6 +222,27 @@ async function run() {
   ]);
   await existingStartupHarness.refresh();
   assert.equal(existingStartupHarness.tabs.size, 1, "Firefox should not duplicate an open startup website");
+
+  const concurrentStartupHarness = createHarness({
+    ...startupRules,
+    startupWebsites: [
+      "https://www.instagram.com/direct/inbox/",
+      "https://instagram.com/direct/inbox"
+    ]
+  }, [
+    { id: 1, active: true, url: "https://example.com/" }
+  ]);
+  await concurrentStartupHarness.ready();
+  concurrentStartupHarness.tabs.clear();
+  concurrentStartupHarness.tabs.set(1, { id: 1, active: true, url: "https://example.com/" });
+  await concurrentStartupHarness.synchronizeStartupTabsConcurrently();
+  assert.equal(
+    Array.from(concurrentStartupHarness.tabs.values()).filter((tab) =>
+      tab.url.includes("instagram.com/direct/inbox")
+    ).length,
+    1,
+    "Concurrent Firefox startup passes must create only one copy of the same website"
+  );
 
   const activationHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
