@@ -391,12 +391,28 @@ struct PurposeModeView: View {
     }
 
     private var hasLiveRecognition: Bool {
-        !recognizedIntentions.isEmpty || !recognizedApps.isEmpty
+        !recognizedIntentions.isEmpty || !recognizedApps.isEmpty || !removedApps.isEmpty
+    }
+
+    private var liveInterpretation: PurposeLiveInterpretation {
+        PurposeLiveInterpreter.interpret(
+            cleanedPurpose,
+            apps: model.installedApps.map {
+                AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
+            },
+            intentions: model.intentions
+        )
     }
 
     private var recognizedIntentions: [Intention] {
         guard cleanedPurpose.count >= 2 else { return [] }
-        return model.intentions
+        let excluded = Set(liveInterpretation.excludedIntentionIDs)
+        let directlyIncluded = liveInterpretation.includedIntentionIDs.compactMap { id in
+            model.intentions.first { $0.id == id }
+        }
+        let directIDs = Set(directlyIncluded.map(\.id))
+        let fuzzyMatches = model.intentions
+            .filter { !excluded.contains($0.id) && !directIDs.contains($0.id) }
             .compactMap { intention -> (Intention, Double)? in
                 let score = recognitionScore(query: cleanedPurpose, candidate: intention.name)
                 return score >= 0.42 ? (intention, score) : nil
@@ -407,27 +423,36 @@ struct PurposeModeView: View {
                 }
                 return lhs.1 > rhs.1
             }
-            .prefix(3)
             .map(\.0)
+        return Array((directlyIncluded + fuzzyMatches).prefix(3))
     }
 
     private var recognizedApps: [InstalledApp] {
         guard cleanedPurpose.count >= 2 else { return [] }
+        let interpretation = liveInterpretation
+        let excludedIDs = Set(interpretation.excludedAppBundleIdentifiers)
         let intentionAppIDs = Set(recognizedIntentions.flatMap { $0.allowedApps.map(\.bundleIdentifier) })
-        let explicitlyMentioned = model.installedApps.filter { app in
-            appIsMentioned(app, in: cleanedPurpose)
-        }
-        let combinedIDs = intentionAppIDs.union(explicitlyMentioned.map(\.bundleIdentifier))
+        let combinedIDs = intentionAppIDs
+            .union(interpretation.includedAppBundleIdentifiers)
+            .subtracting(excludedIDs)
+        let explicitIDs = Set(interpretation.explicitlyIncludedAppBundleIdentifiers)
         return model.installedApps
             .filter { combinedIDs.contains($0.bundleIdentifier) }
             .sorted { lhs, rhs in
-                let lhsExplicit = appIsMentioned(lhs, in: cleanedPurpose)
-                let rhsExplicit = appIsMentioned(rhs, in: cleanedPurpose)
+                let lhsExplicit = explicitIDs.contains(lhs.bundleIdentifier)
+                let rhsExplicit = explicitIDs.contains(rhs.bundleIdentifier)
                 if lhsExplicit != rhsExplicit { return lhsExplicit }
                 return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
             }
             .prefix(8)
             .map { $0 }
+    }
+
+    private var removedApps: [InstalledApp] {
+        let removedIDs = Set(liveInterpretation.excludedAppBundleIdentifiers)
+        return model.installedApps
+            .filter { removedIDs.contains($0.bundleIdentifier) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     private var liveRecognitionPanel: some View {
@@ -449,6 +474,24 @@ struct PurposeModeView: View {
                 ForEach(recognizedApps) { app in
                     recognizedAppCard(app)
                 }
+            }
+
+            if !removedApps.isEmpty {
+                HStack(spacing: 7) {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundStyle(Color.red.opacity(0.86))
+                    Text("REMOVED")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                    ForEach(removedApps) { app in
+                        Text(app.name)
+                            .font(.system(size: 10, weight: .semibold))
+                            .strikethrough()
+                            .foregroundStyle(GraphTheme.muted(colorScheme))
+                    }
+                }
+                .transition(.opacity)
             }
         }
         .padding(13)
@@ -513,28 +556,6 @@ struct PurposeModeView: View {
         return Double(overlap) / Double(max(1, candidateTokens.count))
     }
 
-    private func appIsMentioned(_ app: InstalledApp, in query: String) -> Bool {
-        let queryText = normalized(query)
-        let name = normalized(app.name)
-        if name.count >= 3, queryText.contains(name) { return true }
-
-        let aliases: [String: [String]] = [
-            "com.apple.MobileSMS": ["imessage", "imessages", "messages"],
-            "com.apple.mail": ["mail", "email", "emails"],
-            "org.mozilla.firefox": ["firefox"],
-            "com.google.Chrome": ["chrome", "google chrome"],
-            "com.spotify.client": ["spotify"],
-            "com.apple.Notes": ["notes", "apple notes"],
-            "com.apple.reminders": ["reminders"]
-        ]
-        if aliases[app.bundleIdentifier, default: []].contains(where: { queryText.contains($0) }) {
-            return true
-        }
-
-        let finalToken = queryText.split(separator: " ").last.map(String.init) ?? ""
-        return finalToken.count >= 3 && name.split(separator: " ").contains { $0.hasPrefix(finalToken) }
-    }
-
     private func normalized(_ value: String) -> String {
         value
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
@@ -562,8 +583,9 @@ struct PurposeModeView: View {
         guard !cleanedPurpose.isEmpty, !model.purposeModeIsResolving else { return }
         speech.stop()
         let request = cleanedPurpose
+        let interpretation = liveInterpretation
         Task {
-            await model.startPurposeSession(for: request)
+            await model.startPurposeSession(for: request, liveInterpretation: interpretation)
         }
     }
 }

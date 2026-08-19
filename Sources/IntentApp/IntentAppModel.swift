@@ -243,7 +243,10 @@ final class IntentAppModel: ObservableObject {
         return imported.map(\.id)
     }
 
-    func startPurposeSession(for rawPurpose: String) async {
+    func startPurposeSession(
+        for rawPurpose: String,
+        liveInterpretation: PurposeLiveInterpretation? = nil
+    ) async {
         let purpose = rawPurpose.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !purpose.isEmpty else { return }
         guard !hasActiveSession else {
@@ -255,7 +258,8 @@ final class IntentAppModel: ObservableObject {
         purposeModeError = nil
         defer { purposeModeIsResolving = false }
 
-        if let existing = matchedIntention(for: purpose, minimumScore: 0.88) {
+        if let existing = matchedIntention(for: purpose, minimumScore: 0.88),
+           purposeInterpretation(liveInterpretation, isCompatibleWith: existing) {
             requestStart(existing)
             return
         }
@@ -267,11 +271,29 @@ final class IntentAppModel: ObservableObject {
             .map(\.name)
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: ", ")
+        let includedAppNames = liveInterpretation?.includedAppBundleIdentifiers.compactMap { identifier in
+            availableApps.first { $0.bundleIdentifier == identifier }?.name
+        } ?? []
+        let excludedAppNames = liveInterpretation?.excludedAppBundleIdentifiers.compactMap { identifier in
+            availableApps.first { $0.bundleIdentifier == identifier }?.name
+        } ?? []
+        let includedIntentionNames = liveInterpretation?.includedIntentionIDs.compactMap { id in
+            intentions.first { $0.id == id }?.name
+        } ?? []
+        let liveResolution = """
+        Final live interpretation after applying the person's corrections in order:
+        - Keep these apps: \(includedAppNames.isEmpty ? "No app was explicitly resolved" : includedAppNames.joined(separator: ", "))
+        - Never include these removed apps: \(excludedAppNames.isEmpty ? "None" : excludedAppNames.joined(separator: ", "))
+        - Referenced saved intentions: \(includedIntentionNames.isEmpty ? "None" : includedIntentionNames.joined(separator: ", "))
+        Later corrections override earlier words. Never re-add an app listed as removed.
+        """
         let description = """
         Start one immediate focused session for this purpose: \(purpose)
 
         Existing intention names: \(existingNames.isEmpty ? "None" : existingNames)
         If this is clearly the same task as an existing intention, use that exact existing name. Otherwise choose only the installed apps and narrow websites needed right now. Do not add friction, timers, cooldowns, or leisure mode unless the person explicitly requested them.
+
+        \(liveResolution)
         """
 
         do {
@@ -280,15 +302,30 @@ final class IntentAppModel: ObservableObject {
                 installedApps: availableApps,
                 mode: .single
             ).validated(against: availableApps)
-            guard let suggestion = plan.intentions.first else {
+            guard var suggestion = plan.intentions.first else {
                 purposeModeError = "Intent could not identify the apps needed for that purpose. Try naming the task or app more specifically."
                 return
+            }
+
+            if let liveInterpretation {
+                let included = liveInterpretation.includedAppBundleIdentifiers
+                let excluded = Set(liveInterpretation.excludedAppBundleIdentifiers)
+                if liveInterpretation.limitsAppsToSelection, !included.isEmpty {
+                    suggestion.appBundleIdentifiers = included
+                } else {
+                    for identifier in included where !suggestion.appBundleIdentifiers.contains(identifier) {
+                        suggestion.appBundleIdentifiers.append(identifier)
+                    }
+                }
+                suggestion.appBundleIdentifiers.removeAll { excluded.contains($0) }
+                suggestion.websites.removeAll { excluded.contains($0.browserBundleIdentifier) }
             }
 
             let suggestedPurpose = [suggestion.name, suggestion.purpose]
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
-            if let existing = matchedIntention(for: suggestedPurpose, minimumScore: 0.88) {
+            if let existing = matchedIntention(for: suggestedPurpose, minimumScore: 0.88),
+               purposeInterpretation(liveInterpretation, isCompatibleWith: existing) {
                 requestStart(existing)
                 return
             }
@@ -1230,6 +1267,30 @@ final class IntentAppModel: ObservableObject {
             return nil
         }
         return intentions.first { $0.id == match.intentionID }
+    }
+
+    private func purposeInterpretation(
+        _ interpretation: PurposeLiveInterpretation?,
+        isCompatibleWith intention: Intention
+    ) -> Bool {
+        guard let interpretation else { return true }
+
+        let existingApps = Set(intention.allowedApps.map(\.bundleIdentifier))
+        let excludedApps = Set(interpretation.excludedAppBundleIdentifiers)
+        guard existingApps.isDisjoint(with: excludedApps) else { return false }
+
+        let includedIntentions = Set(interpretation.includedIntentionIDs)
+        if !includedIntentions.isEmpty, !includedIntentions.contains(intention.id) {
+            return false
+        }
+
+        let explicitApps = Set(interpretation.explicitlyIncludedAppBundleIdentifiers)
+        guard explicitApps.isSubset(of: existingApps) else { return false }
+
+        if interpretation.limitsAppsToSelection {
+            return Set(interpretation.includedAppBundleIdentifiers) == existingApps
+        }
+        return true
     }
 
     private func makePurposeIntention(
