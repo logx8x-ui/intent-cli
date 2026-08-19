@@ -216,7 +216,8 @@ final class IntentRuntime {
 
         model.load()
         IntentUpdateManager.shared.checkForUpdates()
-        if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding") {
+        if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
+            || PurposeModePreference.isEnabled {
             overlayController.showOverlay(animated: false)
         }
     }

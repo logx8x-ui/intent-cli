@@ -10,6 +10,7 @@ let package = Package(
         .executable(name: "IntentApp", targets: ["IntentApp"]),
         .executable(name: "IntentNativeHost", targets: ["IntentNativeHost"]),
         .executable(name: "IntentCoreSpec", targets: ["IntentCoreSpec"]),
+        .executable(name: "PurposeMatcherSpec", targets: ["PurposeMatcherSpec"]),
         .library(name: "IntentCore", targets: ["IntentCore"]),
         .library(name: "IntentLock", targets: ["IntentLock"])
     ],
@@ -35,6 +36,10 @@ let package = Package(
         .executableTarget(
             name: "IntentCoreSpec",
             dependencies: ["IntentCore", "IntentLock"]
+        ),
+        .executableTarget(
+            name: "PurposeMatcherSpec",
+            dependencies: ["IntentCore"]
         )
     ]
 )

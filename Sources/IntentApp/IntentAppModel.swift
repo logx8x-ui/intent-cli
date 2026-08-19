@@ -30,6 +30,9 @@ final class IntentAppModel: ObservableObject {
     @Published var schedules: [IntentSchedule] = []
     @Published var sessionSwitchWarning: SessionSwitchWarning?
     @Published var shortcutWarning: String?
+    @Published var purposeModeIsResolving = false
+    @Published var purposeModeError: String?
+    @Published var pendingPurposeSessionSave: PurposeSessionSaveCandidate?
     @Published var requireManualFinishBeforeSwitching: Bool {
         didSet {
             UserDefaults.standard.set(requireManualFinishBeforeSwitching, forKey: Self.requireManualFinishKey)
@@ -50,6 +53,10 @@ final class IntentAppModel: ObservableObject {
     private var activeLock: FocusLock?
     private var zeroDriftIdleLock: FocusLock?
     private var activeSessionID: String?
+    private var activeSessionIntention: Intention?
+    private var purposeTemporaryIntention: Intention?
+    private var purposeStatedPrompt: String?
+    private var purposeUsageTracker: PurposeSessionUsageTracker?
     private var pendingZeroDriftStart: (intention: Intention, runtimeEndDate: Date?)?
     private var undoStack: [[Intention]] = []
     private var activeMoveUndoKeys: Set<String> = []
@@ -81,8 +88,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     var activeSessionCanFinishManually: Bool {
-        guard let activeSessionID,
-              let intention = intentions.first(where: { $0.id == activeSessionID }),
+        guard let intention = activeSessionIntention,
               intention.sessionLocksManualFinish,
               let activeSessionEndsAt,
               activeSessionEndsAt > Date() else {
@@ -233,6 +239,109 @@ final class IntentAppModel: ObservableObject {
         selectedID = imported.first?.id
         save()
         return imported.map(\.id)
+    }
+
+    func startPurposeSession(for rawPurpose: String) async {
+        let purpose = rawPurpose.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !purpose.isEmpty else { return }
+        guard !hasActiveSession else {
+            purposeModeError = "Finish the current intention before choosing a new purpose."
+            return
+        }
+
+        purposeModeIsResolving = true
+        purposeModeError = nil
+        defer { purposeModeIsResolving = false }
+
+        if let existing = matchedIntention(for: purpose, minimumScore: 0.88) {
+            requestStart(existing)
+            return
+        }
+
+        let availableApps = installedApps.map {
+            AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
+        }
+        let existingNames = intentions
+            .map(\.name)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: ", ")
+        let description = """
+        Start one immediate focused session for this purpose: \(purpose)
+
+        Existing intention names: \(existingNames.isEmpty ? "None" : existingNames)
+        If this is clearly the same task as an existing intention, use that exact existing name. Otherwise choose only the installed apps and narrow websites needed right now. Do not add friction, timers, cooldowns, or leisure mode unless the person explicitly requested them.
+        """
+
+        do {
+            let plan = try await IntentAIService().generate(
+                description: description,
+                installedApps: availableApps,
+                mode: .single
+            ).validated(against: availableApps)
+            guard let suggestion = plan.intentions.first else {
+                purposeModeError = "Intent could not identify the apps needed for that purpose. Try naming the task or app more specifically."
+                return
+            }
+
+            let suggestedPurpose = [suggestion.name, suggestion.purpose]
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            if let existing = matchedIntention(for: suggestedPurpose, minimumScore: 0.88) {
+                requestStart(existing)
+                return
+            }
+
+            let appsByIdentifier = Dictionary(
+                uniqueKeysWithValues: availableApps.map { ($0.bundleIdentifier, $0) }
+            )
+            guard let temporary = makePurposeIntention(
+                from: suggestion,
+                appsByIdentifier: appsByIdentifier
+            ) else {
+                purposeModeError = "Intent could not find a necessary installed app for that task. Try mentioning the app you want to use."
+                return
+            }
+
+            purposeTemporaryIntention = temporary
+            purposeStatedPrompt = purpose
+            requestStart(temporary)
+        } catch {
+            purposeModeError = error.localizedDescription
+        }
+    }
+
+    func savePurposeSessionCandidate() {
+        guard var intention = pendingPurposeSessionSave?.intention else { return }
+        let position = availableAIPosition(index: 0, occupied: intentions.map(\.graphPosition))
+        let deltaX = position.x - intention.graphPosition.x
+        let deltaY = position.y - intention.graphPosition.y
+        intention.graphPosition = position
+        intention.restrictionNodes = intention.restrictionNodes.map { node in
+            var moved = node
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+        intention.frictionNodes = intention.frictionNodes.map { node in
+            var moved = node
+            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
+            return moved
+        }
+
+        recordUndoSnapshot()
+        intentions.append(intention)
+        selectedID = intention.id
+        pendingPurposeSessionSave = nil
+        save()
+    }
+
+    func discardPurposeSessionCandidate() {
+        guard let intentionID = pendingPurposeSessionSave?.intention.id else { return }
+        try? cooldownStore.clear(intentionID: intentionID)
+        cooldownExpirations.removeValue(forKey: intentionID)
+        if selectedID == intentionID {
+            selectedID = intentions.first?.id
+        }
+        pendingPurposeSessionSave = nil
     }
 
     @discardableResult
@@ -622,6 +731,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func cancelFriction() {
+        clearPendingPurposeStart()
         pendingFriction = nil
         pendingStartIntention = nil
         pendingRuntimeEndDate = nil
@@ -644,6 +754,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func cancelEndTimeSelection() {
+        clearPendingPurposeStart()
         pendingEndTimeRequest = nil
         pendingFriction = nil
         pendingStartIntention = nil
@@ -804,8 +915,14 @@ final class IntentAppModel: ObservableObject {
         let lock = FocusLock(spec: lockSpec)
         activeLock = lock
         activeSessionID = intention.id
+        activeSessionIntention = intention
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
+        if purposeTemporaryIntention?.id == intention.id {
+            let tracker = PurposeSessionUsageTracker(intention: intention)
+            purposeUsageTracker = tracker
+            tracker.start()
+        }
         scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
         overlayPresenter?.hideOverlay(animated: true)
 
@@ -835,7 +952,11 @@ final class IntentAppModel: ObservableObject {
             try? ActiveBrowserRulesStore().clear()
             Task { @MainActor in
                 let replacement = self.pendingReplacementIntention
+                let wasPurposeSession = self.purposeTemporaryIntention?.id == intention.id
+                let purposeUsage = self.purposeUsageTracker?.stop()
+                let statedPurpose = self.purposeStatedPrompt
                 self.pendingReplacementIntention = nil
+                self.purposeUsageTracker = nil
                 self.sessionLimitTask?.cancel()
                 self.sessionLimitTask = nil
                 self.activeSessionEndsAt = nil
@@ -847,8 +968,23 @@ final class IntentAppModel: ObservableObject {
                 }
                 self.activeLock = nil
                 self.activeSessionID = nil
+                self.activeSessionIntention = nil
                 self.activeSessionName = nil
                 self.activeSessionIsLeisure = false
+                if failureMessage == nil,
+                   wasPurposeSession,
+                   let purposeUsage,
+                   let statedPurpose {
+                    self.pendingPurposeSessionSave = self.makePurposeSaveCandidate(
+                        from: intention,
+                        statedPurpose: statedPurpose,
+                        usage: purposeUsage
+                    )
+                }
+                if wasPurposeSession {
+                    self.purposeTemporaryIntention = nil
+                    self.purposeStatedPrompt = nil
+                }
                 self.overlayPresenter?.showOverlay(animated: true)
                 if let replacement {
                     self.requestStart(replacement)
@@ -1076,6 +1212,125 @@ final class IntentAppModel: ObservableObject {
                 undoStack.removeFirst(undoStack.count - 100)
             }
         }
+    }
+
+    private func matchedIntention(for purpose: String, minimumScore: Double) -> Intention? {
+        guard let match = PurposeIntentionMatcher.bestMatch(
+            for: purpose,
+            in: intentions,
+            minimumScore: minimumScore
+        ) else {
+            return nil
+        }
+        return intentions.first { $0.id == match.intentionID }
+    }
+
+    private func makePurposeIntention(
+        from suggestion: AIIntentionSuggestion,
+        appsByIdentifier: [String: AllowedApp]
+    ) -> Intention? {
+        let allowedApps = suggestion.appBundleIdentifiers.compactMap { appsByIdentifier[$0] }
+        guard !allowedApps.isEmpty else { return nil }
+
+        let position = GraphPoint.zero
+        let allowedWebsites = suggestion.websites.map {
+            AllowedWebsite($0.value, browserBundleIdentifier: $0.browserBundleIdentifier)
+        }
+        let restrictionNodes = suggestion.restrictions.enumerated().map { offset, restriction in
+            RestrictionNode(
+                kind: restriction.kind,
+                position: Self.aiConnectedNodePosition(
+                    center: position,
+                    index: offset,
+                    total: suggestion.restrictions.count,
+                    above: true
+                ),
+                excludedResourceIDs: restriction.resourceIDs,
+                durationMinutes: restriction.kind == .timer || restriction.kind == .coolDown
+                    ? max(1, restriction.durationMinutes)
+                    : nil,
+                showsRemainingTime: restriction.kind == .timer || restriction.kind == .coolDown
+                    ? true
+                    : nil,
+                locksSessionUntilTimerEnds: restriction.kind == .timer ? true : nil
+            )
+        }
+        let frictionNodes = suggestion.frictions.enumerated().map { offset, friction in
+            FrictionNode(
+                friction: friction.friction(intentionName: suggestion.name),
+                position: Self.aiConnectedNodePosition(
+                    center: position,
+                    index: offset,
+                    total: suggestion.frictions.count,
+                    above: false
+                )
+            )
+        }
+
+        return Intention(
+            name: suggestion.name,
+            icon: "sparkles",
+            colorHex: "#F5F5F7",
+            folder: "",
+            allowedApps: allowedApps,
+            allowedWebsites: allowedWebsites,
+            startupActions: [],
+            restrictions: .init(),
+            graphPosition: position,
+            restrictionNodes: restrictionNodes,
+            frictionNodes: frictionNodes,
+            isLeisure: false
+        )
+    }
+
+    private func makePurposeSaveCandidate(
+        from intention: Intention,
+        statedPurpose: String,
+        usage: PurposeSessionUsage
+    ) -> PurposeSessionSaveCandidate {
+        var usedAppIdentifiers = usage.appBundleIdentifiers
+        var usedWebsiteResourceIDs = usage.websiteResourceIDs
+
+        if usedAppIdentifiers.isEmpty {
+            usedAppIdentifiers = Set(intention.allowedApps.map(\.bundleIdentifier))
+        }
+        if usedWebsiteResourceIDs.isEmpty {
+            usedWebsiteResourceIDs = Set(intention.allowedWebsites.compactMap { website in
+                guard let browser = website.browserBundleIdentifier,
+                      usedAppIdentifiers.contains(browser) else {
+                    return nil
+                }
+                return website.resourceID
+            })
+        }
+
+        let usedWebsites = intention.allowedWebsites.filter {
+            usedWebsiteResourceIDs.contains($0.resourceID)
+        }
+        for website in usedWebsites {
+            if let browser = website.browserBundleIdentifier {
+                usedAppIdentifiers.insert(browser)
+            }
+        }
+
+        var saved = intention
+        saved.allowedApps = intention.allowedApps.filter {
+            usedAppIdentifiers.contains($0.bundleIdentifier)
+        }
+        saved.allowedWebsites = usedWebsites
+        return PurposeSessionSaveCandidate(
+            intention: saved,
+            statedPurpose: statedPurpose
+        )
+    }
+
+    private func clearPendingPurposeStart() {
+        guard let pendingStartIntention,
+              purposeTemporaryIntention?.id == pendingStartIntention.id else {
+            return
+        }
+        purposeTemporaryIntention = nil
+        purposeStatedPrompt = nil
     }
 
     private func availableAIPosition(index: Int, occupied: [GraphPoint]) -> GraphPoint {

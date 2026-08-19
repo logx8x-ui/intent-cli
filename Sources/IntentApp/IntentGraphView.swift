@@ -12,6 +12,7 @@ struct IntentGraphView: View {
     @AppStorage("intentBackgroundSelection") private var backgroundSelection = IntentBackgroundChoice.none.rawValue
     @AppStorage("intentDidCompleteOnboarding") private var didCompleteOnboarding = false
     @AppStorage("intentZeroDriftWarningSuppressed") private var zeroDriftWarningSuppressed = false
+    @AppStorage(PurposeModePreference.key) private var purposeModeEnabled = false
 
     @State private var editMode = false
     @State private var hoverSelectMode = false
@@ -154,6 +155,16 @@ struct IntentGraphView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
 
+                if purposeModeEnabled,
+                   didCompleteOnboarding,
+                   !model.hasActiveSession,
+                   model.pendingPurposeSessionSave == nil,
+                   !showQuickGuide {
+                    PurposeModeView(onDismiss: { model.hideOverlay() })
+                        .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                        .zIndex(900)
+                }
+
                 if showQuickGuide {
                     IntentQuickGuideView(
                         catalog: model.installedApps,
@@ -240,6 +251,11 @@ struct IntentGraphView: View {
         }
         .sheet(item: $model.pendingEndTimeRequest) { pending in
             EndTimeSheet(pending: pending)
+                .environmentObject(model)
+                .interactiveDismissDisabled()
+        }
+        .sheet(item: $model.pendingPurposeSessionSave) { candidate in
+            PurposeSessionSaveSheet(candidate: candidate)
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
@@ -887,6 +903,7 @@ struct IntentGraphView: View {
                     overlayShortcut: $overlayShortcut,
                     finishShortcut: $finishShortcut,
                     launchAtLogin: $launchAtLogin,
+                    purposeModeEnabled: $purposeModeEnabled,
                     onBackgroundChanged: { backgroundRevision += 1 },
                     onShowGuide: {
                         showSettings = false

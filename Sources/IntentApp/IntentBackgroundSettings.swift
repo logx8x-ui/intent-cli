@@ -66,6 +66,7 @@ struct IntentSettingsView: View {
     @Binding var overlayShortcut: OverlayShortcut
     @Binding var finishShortcut: OverlayShortcut
     @Binding var launchAtLogin: Bool
+    @Binding var purposeModeEnabled: Bool
     let onBackgroundChanged: () -> Void
     let onShowGuide: () -> Void
 
@@ -207,6 +208,10 @@ struct IntentSettingsView: View {
                 Toggle("Require finish before switching", isOn: $requireManualFinishBeforeSwitching)
                     .toggleStyle(.switch)
 
+                Text("When off, clicking another intention ends the current session and starts the new one.")
+                    .font(.caption2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
                 Toggle("Open Intent at login", isOn: $launchAtLogin)
                     .toggleStyle(.switch)
                     .onChange(of: launchAtLogin) { enabled in
@@ -215,7 +220,10 @@ struct IntentSettingsView: View {
                         }
                     }
 
-                Text("When off, clicking another intention ends the current session and starts the new one.")
+                Toggle("Purpose Mode", isOn: $purposeModeEnabled)
+                    .toggleStyle(.switch)
+
+                Text("When on, Intent asks what you came to do whenever it opens, then starts the closest saved intention or builds a temporary focused session with AI.")
                     .font(.caption2)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
             }

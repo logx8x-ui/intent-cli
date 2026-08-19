@@ -86,6 +86,10 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Intent uses the microphone only while you speak your purpose in Purpose Mode.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Intent turns your spoken purpose into text so it can start the right focused session.</string>
   <key>NSCalendarsUsageDescription</key>
   <string>Intent can show your calendars beside local schedules and optionally mirror linked Intent sessions. Calendar access is requested only when you choose Connect.</string>
   <key>NSCalendarsFullAccessUsageDescription</key>
