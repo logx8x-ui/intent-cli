@@ -113,6 +113,40 @@ public struct FocusSessionSpec {
         )
     }
 
+    public func deferringBrowserWebsiteStartupToGuard() -> FocusSessionSpec {
+        var activatedBrowsers = Set<String>()
+        let guardedStartupSteps = startupSteps.compactMap { step -> StartupStep? in
+            guard case .openURL(_, let bundleIdentifier) = step else {
+                return step
+            }
+            guard activatedBrowsers.insert(bundleIdentifier).inserted else {
+                return nil
+            }
+            return .openBundle(bundleIdentifier)
+        }
+
+        return FocusSessionSpec(
+            displayName: displayName,
+            startupSteps: guardedStartupSteps,
+            allowedBundleIdentifiers: allowedBundleIdentifiers,
+            fallbackBundleIdentifier: fallbackBundleIdentifier,
+            strictSingleApp: strictSingleApp,
+            blockAppSwitching: blockAppSwitching,
+            blockNewApps: blockNewApps,
+            keepFocused: keepFocused,
+            blockBrowserTabEscape: blockBrowserTabEscape,
+            blockFirefoxChromeClicks: blockFirefoxChromeClicks,
+            allowGoogleSearchTabs: allowGoogleSearchTabs,
+            spotifyPlaylistURI: spotifyPlaylistURI,
+            allowSpotifyForeground: allowSpotifyForeground,
+            finishShortcut: finishShortcut,
+            allowsManualFinish: allowsManualFinish,
+            closeSessionResourcesOnFinish: closeSessionResourcesOnFinish,
+            restorePreviousApplicationOnStop: restorePreviousApplicationOnStop,
+            allowedWebsitesByBrowser: allowedWebsitesByBrowser
+        )
+    }
+
     private static func make(for task: ShallowTask) -> FocusSessionSpec {
         switch task {
         case .imessages:

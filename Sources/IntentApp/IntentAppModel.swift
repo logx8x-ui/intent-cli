@@ -798,7 +798,10 @@ final class IntentAppModel: ObservableObject {
             return
         }
 
-        let lock = FocusLock(spec: spec)
+        // Browser Guard owns website-tab creation once its rules are active. The lock
+        // only activates each browser so two independent launch paths cannot race.
+        let lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
+        let lock = FocusLock(spec: lockSpec)
         activeLock = lock
         activeSessionID = intention.id
         activeSessionName = intention.name
