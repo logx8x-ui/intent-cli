@@ -5,6 +5,7 @@ import IntentLock
 
 @MainActor
 protocol IntentOverlayPresenting: AnyObject {
+    var isOverlayVisible: Bool { get }
     func showOverlay(animated: Bool)
     func hideOverlay(animated: Bool)
     func toggleOverlay()
@@ -33,6 +34,7 @@ final class IntentAppModel: ObservableObject {
     @Published var purposeModeIsResolving = false
     @Published var purposeModeError: String?
     @Published var pendingPurposeSessionSave: PurposeSessionSaveCandidate?
+    @Published private(set) var overlayPresentationID = UUID()
     @Published var requireManualFinishBeforeSwitching: Bool {
         didSet {
             UserDefaults.standard.set(requireManualFinishBeforeSwitching, forKey: Self.requireManualFinishKey)
@@ -794,6 +796,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func showOverlay() {
+        overlayPresentationID = UUID()
         overlayPresenter?.showOverlay(animated: true)
     }
 
@@ -811,7 +814,11 @@ final class IntentAppModel: ObservableObject {
             showOverlay()
             return
         }
-        overlayPresenter?.toggleOverlay()
+        if overlayPresenter?.isOverlayVisible == true {
+            overlayPresenter?.hideOverlay(animated: true)
+        } else {
+            showOverlay()
+        }
     }
 
     private func presentNextFriction() {

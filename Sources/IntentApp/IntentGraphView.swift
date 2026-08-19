@@ -33,6 +33,7 @@ struct IntentGraphView: View {
     @State private var showQuickGuide = false
     @State private var showZeroDriftWarning = false
     @State private var showZeroDriftTiming = false
+    @State private var purposeModeDismissed = false
     @State private var backgroundRevision = 0
     @State private var overlayShortcut = OverlayShortcutStore.load()
     @State private var finishShortcut = FinishShortcutStore.load()
@@ -100,6 +101,7 @@ struct IntentGraphView: View {
 
                 topBar(in: viewportSize)
                     .frame(maxHeight: .infinity, alignment: .top)
+                    .zIndex(950)
 
                 bottomControls(in: viewportSize)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -156,11 +158,12 @@ struct IntentGraphView: View {
                 .allowsHitTesting(false)
 
                 if purposeModeEnabled,
+                   !purposeModeDismissed,
                    didCompleteOnboarding,
                    !model.hasActiveSession,
                    model.pendingPurposeSessionSave == nil,
                    !showQuickGuide {
-                    PurposeModeView(onDismiss: { model.hideOverlay() })
+                    PurposeModeView(onDismiss: { purposeModeDismissed = true })
                         .transition(.opacity.combined(with: .scale(scale: 0.985)))
                         .zIndex(900)
                 }
@@ -240,6 +243,11 @@ struct IntentGraphView: View {
                     withAnimation(.easeOut(duration: 0.2)) {
                         model.sessionSwitchWarning = nil
                     }
+                }
+            }
+            .onChange(of: model.overlayPresentationID) { _ in
+                if purposeModeEnabled {
+                    purposeModeDismissed = false
                 }
             }
         }
@@ -435,6 +443,34 @@ struct IntentGraphView: View {
                         ? "Zero Drift is active\(model.zeroDriftStatusText.map { " for \($0)" } ?? "")"
                         : "Require an intention to be running at all times"
                 )
+
+                Button {
+                    purposeModeEnabled.toggle()
+                    purposeModeDismissed = !purposeModeEnabled
+                } label: {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(purposeModeEnabled ? Color.green : Color.red)
+                            .frame(width: 7, height: 7)
+                        Text("Purpose Mode: \(purposeModeEnabled ? "True" : "False")")
+                    }
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 11)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
+                    .background(
+                        (purposeModeEnabled ? Color.green : Color.red).opacity(0.08),
+                        in: Capsule()
+                    )
+                    .overlay(
+                        Capsule().stroke(
+                            purposeModeEnabled ? Color.green.opacity(0.9) : Color.red.opacity(0.9),
+                            lineWidth: 1
+                        )
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Ask what this computer session is for when Intent opens")
 
                 Button {
                     model.hideOverlay()
@@ -903,7 +939,6 @@ struct IntentGraphView: View {
                     overlayShortcut: $overlayShortcut,
                     finishShortcut: $finishShortcut,
                     launchAtLogin: $launchAtLogin,
-                    purposeModeEnabled: $purposeModeEnabled,
                     onBackgroundChanged: { backgroundRevision += 1 },
                     onShowGuide: {
                         showSettings = false
@@ -1072,6 +1107,13 @@ struct IntentGraphView: View {
     }
 
     private func handleKeyboard(_ key: GraphKeyboardKey, viewportSize: CGSize) {
+        if key == .dismissPurpose,
+           purposeModeEnabled,
+           !purposeModeDismissed {
+            purposeModeDismissed = true
+            return
+        }
+
         if showQuickGuide {
             if key == .escape {
                 didCompleteOnboarding = true
@@ -1088,6 +1130,8 @@ struct IntentGraphView: View {
         }
 
         switch key {
+        case .dismissPurpose:
+            return
         case .edit:
             guard !model.hasActiveSession else {
                 showStatus("Finish the active intention before editing")
@@ -1717,6 +1761,7 @@ private enum GraphSelection: Equatable {
 private enum GraphKeyboardKey {
     case edit
     case escape
+    case dismissPurpose
     case intention
     case restriction
     case friction
@@ -1862,6 +1907,10 @@ private struct GraphInputMonitor: NSViewRepresentable {
 
                     let editingText = Self.isEditingText(in: self.window)
                     let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+                    if event.keyCode == 7, modifiers == [.shift] {
+                        self.keyboardHandler?(.dismissPurpose)
+                        return nil
+                    }
                     if event.keyCode == 6,
                        modifiers.contains(.command),
                        !modifiers.contains(.control),

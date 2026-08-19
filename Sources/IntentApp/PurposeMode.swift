@@ -240,7 +240,7 @@ struct PurposeModeView: View {
 
     var body: some View {
         ZStack {
-            GraphTheme.background(colorScheme).opacity(0.86)
+            GraphTheme.background(colorScheme).opacity(0.9)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -250,51 +250,64 @@ struct PurposeModeView: View {
                         .tracking(1.2)
                         .foregroundStyle(GraphTheme.muted(colorScheme))
                     Spacer()
-                    Button("Not now", action: onDismiss)
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .medium))
+                    Button(action: onDismiss) {
+                        HStack(spacing: 7) {
+                            Text("⇧ X")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 7)
+                                .frame(height: 21)
+                                .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 6))
+                            Text("close")
+                        }
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(GraphTheme.muted(colorScheme))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 34)
                 .padding(.top, 28)
 
                 Spacer()
 
-                VStack(spacing: 18) {
-                    Image(systemName: "scope")
-                        .font(.system(size: 25, weight: .light))
-                        .foregroundStyle(GraphTheme.editBlue)
+                VStack(spacing: 22) {
+                    ZStack {
+                        Circle()
+                            .fill(GraphTheme.elevatedSurface(colorScheme))
+                            .frame(width: 58, height: 58)
+                        Circle()
+                            .stroke(GraphTheme.editBlue.opacity(0.65), lineWidth: 1)
+                            .frame(width: 58, height: 58)
+                        Image(systemName: "scope")
+                            .font(.system(size: 24, weight: .light))
+                            .foregroundStyle(GraphTheme.text(colorScheme))
+                    }
 
                     Text("What do you want to use your computer for?")
-                        .font(.system(size: 35, weight: .semibold))
+                        .font(.system(size: 38, weight: .semibold))
                         .multilineTextAlignment(.center)
                         .foregroundStyle(GraphTheme.text(colorScheme))
-                        .frame(maxWidth: 760)
+                        .frame(maxWidth: 820)
 
-                    Text("Say it naturally. Intent will reuse a matching intention or build a focused session for this task.")
-                        .font(.system(size: 13))
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                        .frame(maxWidth: 600)
-
-                    HStack(spacing: 7) {
-                        example("Reply to messages")
-                        example("Work on data science")
-                        example("Write my assignment")
-                    }
-                }
-
-                Spacer()
-
-                VStack(spacing: 10) {
                     HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(GraphTheme.editBlue)
+                            .frame(width: 28)
+
+                        TextField("Describe the one thing you came here to do", text: $purpose)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 17, weight: .medium))
+                            .focused($purposeFocused)
+                            .onSubmit(submit)
+
                         Button {
                             speech.toggle()
                         } label: {
                             Image(systemName: speech.isListening ? "waveform" : "mic.fill")
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(speech.isListening ? Color.white : GraphTheme.text(colorScheme))
-                                .frame(width: 42, height: 42)
+                                .frame(width: 40, height: 40)
                                 .background(
                                     speech.isListening ? GraphTheme.editBlue : GraphTheme.elevatedSurface(colorScheme),
                                     in: Circle()
@@ -303,12 +316,6 @@ struct PurposeModeView: View {
                         }
                         .buttonStyle(.plain)
                         .help(speech.isListening ? "Stop listening" : "Speak your purpose")
-
-                        TextField("What are you here to do?", text: $purpose)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 16, weight: .medium))
-                            .focused($purposeFocused)
-                            .onSubmit(submit)
 
                         Button(action: submit) {
                             Group {
@@ -327,10 +334,23 @@ struct PurposeModeView: View {
                         .buttonStyle(.plain)
                         .disabled(cleanedPurpose.isEmpty || model.purposeModeIsResolving)
                     }
-                    .padding(.horizontal, 10)
-                    .frame(maxWidth: 760)
-                    .frame(height: 62)
-                    .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 22)
+                    .padding(.horizontal, 14)
+                    .frame(maxWidth: 820)
+                    .frame(height: 68)
+                    .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
+                    .shadow(color: Color.black.opacity(0.28), radius: 24, y: 10)
+
+                    if hasLiveRecognition {
+                        liveRecognitionPanel
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    } else {
+                        HStack(spacing: 7) {
+                            example("Reply to messages")
+                            example("Work on data science")
+                            example("Write my assignment")
+                        }
+                        .transition(.opacity)
+                    }
 
                     if speech.isListening {
                         Text("Listening...")
@@ -343,9 +363,18 @@ struct PurposeModeView: View {
                             .multilineTextAlignment(.center)
                     }
                 }
-                .padding(.bottom, 52)
+                .frame(maxWidth: 900)
+
+                Spacer()
+
+                Text("Intent checks your saved intentions first, then builds the smallest focused session needed.")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.72))
+                    .padding(.bottom, 28)
             }
+            .padding(.top, 52)
         }
+        .animation(.easeOut(duration: 0.18), value: hasLiveRecognition)
         .onAppear {
             purposeFocused = true
             model.purposeModeError = nil
@@ -359,6 +388,160 @@ struct PurposeModeView: View {
 
     private var cleanedPurpose: String {
         purpose.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasLiveRecognition: Bool {
+        !recognizedIntentions.isEmpty || !recognizedApps.isEmpty
+    }
+
+    private var recognizedIntentions: [Intention] {
+        guard cleanedPurpose.count >= 2 else { return [] }
+        return model.intentions
+            .compactMap { intention -> (Intention, Double)? in
+                let score = recognitionScore(query: cleanedPurpose, candidate: intention.name)
+                return score >= 0.42 ? (intention, score) : nil
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return lhs.0.name.localizedCaseInsensitiveCompare(rhs.0.name) == .orderedAscending
+                }
+                return lhs.1 > rhs.1
+            }
+            .prefix(3)
+            .map(\.0)
+    }
+
+    private var recognizedApps: [InstalledApp] {
+        guard cleanedPurpose.count >= 2 else { return [] }
+        let intentionAppIDs = Set(recognizedIntentions.flatMap { $0.allowedApps.map(\.bundleIdentifier) })
+        let explicitlyMentioned = model.installedApps.filter { app in
+            appIsMentioned(app, in: cleanedPurpose)
+        }
+        let combinedIDs = intentionAppIDs.union(explicitlyMentioned.map(\.bundleIdentifier))
+        return model.installedApps
+            .filter { combinedIDs.contains($0.bundleIdentifier) }
+            .sorted { lhs, rhs in
+                let lhsExplicit = appIsMentioned(lhs, in: cleanedPurpose)
+                let rhsExplicit = appIsMentioned(rhs, in: cleanedPurpose)
+                if lhsExplicit != rhsExplicit { return lhsExplicit }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            .prefix(8)
+            .map { $0 }
+    }
+
+    private var liveRecognitionPanel: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+                Text("INTENT UNDERSTANDS")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(1)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+
+            HStack(spacing: 9) {
+                ForEach(recognizedIntentions) { intention in
+                    recognizedIntentionCard(intention)
+                }
+                ForEach(recognizedApps) { app in
+                    recognizedAppCard(app)
+                }
+            }
+        }
+        .padding(13)
+        .frame(maxWidth: 820, alignment: .leading)
+        .background(GraphTheme.surface(colorScheme).opacity(0.72), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
+    }
+
+    private func recognizedIntentionCard(_ intention: Intention) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: intention.icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(GraphTheme.editBlue)
+                .frame(width: 26, height: 26)
+                .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(intention.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Text("Saved intention")
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 42)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.editBlue.opacity(0.35), lineWidth: 0.8))
+    }
+
+    private func recognizedAppCard(_ app: InstalledApp) -> some View {
+        VStack(spacing: 3) {
+            Image(nsImage: app.icon)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 25, height: 25)
+            Text(app.name)
+                .font(.system(size: 8, weight: .medium))
+                .lineLimit(1)
+                .frame(maxWidth: 55)
+        }
+        .frame(width: 58, height: 46)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.7))
+        .help("Installed app: \(app.name)")
+    }
+
+    private func recognitionScore(query: String, candidate: String) -> Double {
+        let queryText = normalized(query)
+        let candidateText = normalized(candidate)
+        guard !queryText.isEmpty, !candidateText.isEmpty else { return 0 }
+        if queryText == candidateText { return 1 }
+        if queryText.contains(candidateText) { return 0.98 }
+
+        let queryTokens = Set(queryText.split(separator: " ").map(String.init))
+        let candidateTokens = Set(candidateText.split(separator: " ").map(String.init))
+        let overlap = queryTokens.intersection(candidateTokens).count
+        guard overlap > 0 else {
+            let finalToken = queryText.split(separator: " ").last.map(String.init) ?? ""
+            return finalToken.count >= 3 && candidateTokens.contains(where: { $0.hasPrefix(finalToken) }) ? 0.55 : 0
+        }
+        return Double(overlap) / Double(max(1, candidateTokens.count))
+    }
+
+    private func appIsMentioned(_ app: InstalledApp, in query: String) -> Bool {
+        let queryText = normalized(query)
+        let name = normalized(app.name)
+        if name.count >= 3, queryText.contains(name) { return true }
+
+        let aliases: [String: [String]] = [
+            "com.apple.MobileSMS": ["imessage", "imessages", "messages"],
+            "com.apple.mail": ["mail", "email", "emails"],
+            "org.mozilla.firefox": ["firefox"],
+            "com.google.Chrome": ["chrome", "google chrome"],
+            "com.spotify.client": ["spotify"],
+            "com.apple.Notes": ["notes", "apple notes"],
+            "com.apple.reminders": ["reminders"]
+        ]
+        if aliases[app.bundleIdentifier, default: []].contains(where: { queryText.contains($0) }) {
+            return true
+        }
+
+        let finalToken = queryText.split(separator: " ").last.map(String.init) ?? ""
+        return finalToken.count >= 3 && name.split(separator: " ").contains { $0.hasPrefix(finalToken) }
+    }
+
+    private func normalized(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func example(_ title: String) -> some View {

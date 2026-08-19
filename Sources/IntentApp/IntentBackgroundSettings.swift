@@ -66,7 +66,6 @@ struct IntentSettingsView: View {
     @Binding var overlayShortcut: OverlayShortcut
     @Binding var finishShortcut: OverlayShortcut
     @Binding var launchAtLogin: Bool
-    @Binding var purposeModeEnabled: Bool
     let onBackgroundChanged: () -> Void
     let onShowGuide: () -> Void
 
@@ -220,12 +219,6 @@ struct IntentSettingsView: View {
                         }
                     }
 
-                Toggle("Purpose Mode", isOn: $purposeModeEnabled)
-                    .toggleStyle(.switch)
-
-                Text("When on, Intent asks what you came to do whenever it opens, then starts the closest saved intention or builds a temporary focused session with AI.")
-                    .font(.caption2)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
             }
 
             Divider()

@@ -14,6 +14,10 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
 
+    var isOverlayVisible: Bool {
+        panel?.isVisible == true
+    }
+
     init(model: IntentAppModel, calendarSync: CalendarSyncManager) {
         self.model = model
         self.calendarSync = calendarSync
