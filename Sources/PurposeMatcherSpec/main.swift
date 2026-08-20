@@ -36,7 +36,8 @@ struct PurposeMatcherSpec {
         let anki = AllowedApp(name: "Anki", bundleIdentifier: "net.ankiweb.dtop")
         let messages = AllowedApp(name: "Messages", bundleIdentifier: "com.apple.MobileSMS")
         let remNote = AllowedApp(name: "RemNote", bundleIdentifier: "io.remnote")
-        let apps = [firefox, anki, messages, remNote]
+        let chatGPT = AllowedApp(name: "ChatGPT", bundleIdentifier: "com.openai.chat")
+        let apps = [firefox, anki, messages, remNote, chatGPT]
         let study = intention(
             id: "study-live",
             name: "Study",
@@ -142,6 +143,33 @@ struct PurposeMatcherSpec {
             browserAndWebsite.includedWebsites.first?.browserBundleIdentifier == firefox.bundleIdentifier,
             "website is assigned to the mentioned browser"
         )
+
+        let appWithoutBrowser = PurposeLiveInterpreter.interpret(
+            "Use ChatGPT",
+            apps: apps,
+            intentions: []
+        )
+        expect(appWithoutBrowser.includedAppBundleIdentifiers == [chatGPT.bundleIdentifier], "an app name resolves to the app")
+        expect(appWithoutBrowser.includedWebsites.isEmpty, "a site is not inferred without an explicit browser link")
+
+        let websiteOnBrowser = PurposeLiveInterpreter.interpret(
+            "Use ChatGPT on Firefox",
+            apps: apps,
+            intentions: []
+        )
+        expect(websiteOnBrowser.includedAppBundleIdentifiers == [firefox.bundleIdentifier], "a browser-linked site does not also add its app")
+        expect(websiteOnBrowser.includedWebsites.map(\.value) == ["chatgpt.com"], "the explicitly linked site is recognized")
+        expect(
+            websiteOnBrowser.includedWebsites.first?.browserBundleIdentifier == firefox.bundleIdentifier,
+            "the site keeps its explicit browser"
+        )
+
+        let unpairedWebsite = PurposeLiveInterpreter.interpret(
+            "Use YouTube",
+            apps: apps,
+            intentions: []
+        )
+        expect(unpairedWebsite.includedWebsites.isEmpty, "a standalone website name is not silently assigned to a browser")
 
         let removedWebsite = PurposeLiveInterpreter.interpret(
             "Add Firefox with YouTube. Actually remove YouTube.",

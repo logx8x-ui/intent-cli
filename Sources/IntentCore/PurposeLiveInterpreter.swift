@@ -121,6 +121,7 @@ public enum PurposeLiveInterpreter {
         let operation: Operation
         let narrowsSelection: Bool
         let fromPronoun: Bool
+        let browserBundleIdentifier: String?
     }
 
     public static func canonicalizedDisplayText(_ rawText: String) -> String {
@@ -129,6 +130,25 @@ public enum PurposeLiveInterpreter {
             with: "*",
             options: .regularExpression
         )
+    }
+
+    public static func speechVocabulary(apps: [AllowedApp], intentions: [Intention]) -> [String] {
+        var values = apps.map(\.name)
+        for app in apps {
+            values.append(contentsOf: knownAppAliases[app.bundleIdentifier, default: []])
+        }
+        for website in PurposeWebsiteCatalog.common {
+            values.append(website.name)
+            values.append(contentsOf: website.aliases)
+        }
+        values.append(contentsOf: intentions.map(\.name))
+        values.append(contentsOf: ["asterisk", "add back", "take away", "remove", "on Firefox", "on Chrome"])
+
+        var seen = Set<String>()
+        return values.filter { value in
+            let key = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            return !key.isEmpty && seen.insert(key).inserted
+        }
     }
 
     public static func interpret(
@@ -142,6 +162,7 @@ public enum PurposeLiveInterpreter {
         let aliases = makeAliases(apps: apps, intentions: intentions)
         var mentions = findMentions(in: words, aliases: aliases)
         mentions.append(contentsOf: fuzzyAppMentions(in: words, aliases: aliases, existing: mentions))
+        mentions = websiteQualifiedMentions(in: words, mentions: mentions, apps: apps)
         mentions.append(contentsOf: pronounMentions(in: words, existing: mentions))
         mentions.sort {
             if $0.start == $1.start {
@@ -238,21 +259,13 @@ public enum PurposeLiveInterpreter {
         }
 
         let appsByIdentifier = Dictionary(uniqueKeysWithValues: apps.map { ($0.bundleIdentifier, $0) })
-        let includedBrowserIDs = includedApps.filter { appsByIdentifier[$0]?.isBrowser == true }
         for value in explicitlyIncludedWebsiteValues {
             guard let known = PurposeWebsiteCatalog.website(for: value) else { continue }
             let siteMention = mentions.last { $0.kind == .website && $0.id == value && $0.operation == .include }
-            let precedingBrowser = mentions.last { mention in
-                guard mention.kind == .app,
-                      mention.operation == .include,
-                      let siteMention,
-                      mention.start <= siteMention.start else { return false }
-                return includedBrowserIDs.contains(mention.id)
-            }?.id
             let selection = PurposeWebsiteSelection(
                 name: known.name,
                 value: known.value,
-                browserBundleIdentifier: precedingBrowser ?? includedBrowserIDs.first
+                browserBundleIdentifier: siteMention?.browserBundleIdentifier
             )
             if websiteByValue[value] == nil { includedWebsiteValues.append(value) }
             websiteByValue[value] = selection
@@ -268,7 +281,12 @@ public enum PurposeLiveInterpreter {
 
         let excludedWebsites = excludedWebsiteValues.compactMap { value -> PurposeWebsiteSelection? in
             guard let known = PurposeWebsiteCatalog.website(for: value) else { return nil }
-            return PurposeWebsiteSelection(name: known.name, value: known.value)
+            let mention = mentions.last { $0.kind == .website && $0.id == value }
+            return PurposeWebsiteSelection(
+                name: known.name,
+                value: known.value,
+                browserBundleIdentifier: mention?.browserBundleIdentifier
+            )
         }
 
         return PurposeLiveInterpretation(
@@ -324,7 +342,8 @@ public enum PurposeLiveInterpreter {
                     end: end,
                     operation: operation,
                     narrowsSelection: operation == .include && hasNarrowingWord(before: start, in: words),
-                    fromPronoun: false
+                    fromPronoun: false,
+                    browserBundleIdentifier: nil
                 ))
             }
         }
@@ -368,7 +387,8 @@ public enum PurposeLiveInterpreter {
                         end: end,
                         operation: operation,
                         narrowsSelection: operation == .include && hasNarrowingWord(before: start, in: words),
-                        fromPronoun: false
+                        fromPronoun: false,
+                        browserBundleIdentifier: nil
                     ))
                 }
             }
@@ -392,10 +412,81 @@ public enum PurposeLiveInterpreter {
                 end: index + 1,
                 operation: operation,
                 narrowsSelection: false,
-                fromPronoun: true
+                fromPronoun: true,
+                browserBundleIdentifier: previous.browserBundleIdentifier
             ))
         }
         return additions
+    }
+
+    private static func websiteQualifiedMentions(
+        in words: [String],
+        mentions: [Mention],
+        apps: [AllowedApp]
+    ) -> [Mention] {
+        let browserIDs = Set(apps.filter(\.isBrowser).map(\.bundleIdentifier))
+        let browserMentions = mentions.filter {
+            $0.kind == .app && browserIDs.contains($0.id) && $0.operation == .include
+        }
+        var rememberedBrowsers: [String: String] = [:]
+        var qualifiedSites: [Mention] = []
+
+        for mention in mentions.filter({ $0.kind == .website }).sorted(by: { $0.start < $1.start }) {
+            let explicitBrowser = explicitlyLinkedBrowser(
+                to: mention,
+                browserMentions: browserMentions,
+                words: words
+            )
+            let browser = explicitBrowser ?? rememberedBrowsers[mention.id]
+            guard let browser else { continue }
+            rememberedBrowsers[mention.id] = browser
+            qualifiedSites.append(Mention(
+                id: mention.id,
+                kind: mention.kind,
+                start: mention.start,
+                end: mention.end,
+                operation: mention.operation,
+                narrowsSelection: mention.narrowsSelection,
+                fromPronoun: mention.fromPronoun,
+                browserBundleIdentifier: browser
+            ))
+        }
+
+        let qualifiedRanges = qualifiedSites.map { ($0.start, $0.end) }
+        let nonWebsiteMentions = mentions.filter { mention in
+            guard mention.kind != .website else { return false }
+            guard mention.kind == .app, !browserIDs.contains(mention.id) else { return true }
+            return !qualifiedRanges.contains { start, end in
+                max(start, mention.start) < min(end, mention.end)
+            }
+        }
+        return nonWebsiteMentions + qualifiedSites
+    }
+
+    private static func explicitlyLinkedBrowser(
+        to website: Mention,
+        browserMentions: [Mention],
+        words: [String]
+    ) -> String? {
+        let connectors = Set(["with", "on", "in", "through", "using", "via", "inside", "browser", "website", "site"])
+        return browserMentions
+            .compactMap { browser -> (id: String, distance: Int)? in
+                let bridge: ArraySlice<String>
+                let distance: Int
+                if browser.end <= website.start {
+                    bridge = words[browser.end..<website.start]
+                    distance = website.start - browser.end
+                } else if website.end <= browser.start {
+                    bridge = words[website.end..<browser.start]
+                    distance = browser.start - website.end
+                } else {
+                    return nil
+                }
+                guard distance <= 6, bridge.contains(where: connectors.contains) else { return nil }
+                return (browser.id, distance)
+            }
+            .min { $0.distance < $1.distance }?
+            .id
     }
 
     private static func operation(before start: Int, in words: [String]) -> Operation {

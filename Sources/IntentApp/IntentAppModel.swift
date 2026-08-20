@@ -311,9 +311,13 @@ final class IntentAppModel: ObservableObject {
                 let included = liveInterpretation.includedAppBundleIdentifiers
                 let excluded = Set(liveInterpretation.excludedAppBundleIdentifiers)
                 let hasExplicitIntention = !liveInterpretation.includedIntentionIDs.isEmpty
+                let hasExplicitAppSelection = !liveInterpretation.explicitlyIncludedAppBundleIdentifiers.isEmpty
                 let hasExplicitAppCorrection = liveInterpretation.usedCorrection
                     && (!liveInterpretation.explicitlyIncludedAppBundleIdentifiers.isEmpty || !excluded.isEmpty)
-                if (liveInterpretation.limitsAppsToSelection || hasExplicitAppCorrection || hasExplicitIntention),
+                if (liveInterpretation.limitsAppsToSelection
+                    || hasExplicitAppSelection
+                    || hasExplicitAppCorrection
+                    || hasExplicitIntention),
                    !included.isEmpty {
                     suggestion.appBundleIdentifiers = included
                 } else {
@@ -325,9 +329,14 @@ final class IntentAppModel: ObservableObject {
                 suggestion.websites.removeAll { excluded.contains($0.browserBundleIdentifier) }
 
                 let excludedWebsiteValues = Set(liveInterpretation.excludedWebsites.map(\.value))
+                let hasExplicitWebsiteSelection = !liveInterpretation.explicitlyIncludedWebsiteValues.isEmpty
                 let hasExplicitWebsiteCorrection = liveInterpretation.usedCorrection
                     && (!liveInterpretation.explicitlyIncludedWebsiteValues.isEmpty || !excludedWebsiteValues.isEmpty)
-                if liveInterpretation.limitsWebsitesToSelection || hasExplicitWebsiteCorrection || hasExplicitIntention {
+                if liveInterpretation.limitsWebsitesToSelection
+                    || hasExplicitWebsiteSelection
+                    || hasExplicitWebsiteCorrection
+                    || hasExplicitIntention
+                    || (hasExplicitAppSelection && liveInterpretation.includedWebsites.isEmpty) {
                     suggestion.websites.removeAll()
                 }
 

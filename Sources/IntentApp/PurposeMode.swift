@@ -119,11 +119,11 @@ final class PurposeSpeechRecognizer: ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var hasInstalledTap = false
 
-    func toggle() {
+    func toggle(contextualStrings: [String] = []) {
         if isListening {
             stop()
         } else {
-            Task { await beginListening() }
+            Task { await beginListening(contextualStrings: contextualStrings) }
         }
     }
 
@@ -146,7 +146,7 @@ final class PurposeSpeechRecognizer: ObservableObject {
         transcript = ""
     }
 
-    private func beginListening() async {
+    private func beginListening(contextualStrings: [String]) async {
         stop()
         errorMessage = nil
 
@@ -165,6 +165,8 @@ final class PurposeSpeechRecognizer: ObservableObject {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        request.taskHint = .search
+        request.contextualStrings = Array(contextualStrings.prefix(100))
         recognitionRequest = request
 
         let inputNode = audioEngine.inputNode
@@ -298,6 +300,12 @@ private struct PurposePromptEditor: NSViewRepresentable {
 
         var parent: PurposePromptEditor
         var isApplyingUpdate = false
+        private var lastStyledText = ""
+        private var lastStyleSignature = ""
+        private var lastStyleWasDark = false
+        private var expressions: [String: NSRegularExpression] = [:]
+        private var lastMeasuredText = ""
+        private var lastMeasuredWidth: CGFloat = 0
 
         init(parent: PurposePromptEditor) {
             self.parent = parent
@@ -330,8 +338,18 @@ private struct PurposePromptEditor: NSViewRepresentable {
         }
 
         func apply(to textView: NSTextView) {
+            let styleSignature = parent.intentions
+                .map { "\($0.id):\($0.name)" }
+                .joined(separator: "|")
+            let isDark = parent.colorScheme == .dark
+            guard textView.string != lastStyledText
+                || styleSignature != lastStyleSignature
+                || isDark != lastStyleWasDark else {
+                return
+            }
+
             let selectedRanges = textView.selectedRanges
-            let baseColor = parent.colorScheme == .dark
+            let baseColor = isDark
                 ? NSColor(calibratedWhite: 0.96, alpha: 1)
                 : NSColor(calibratedWhite: 0.08, alpha: 1)
             let baseAttributes: [NSAttributedString.Key: Any] = [
@@ -344,36 +362,55 @@ private struct PurposePromptEditor: NSViewRepresentable {
             storage.beginEditing()
             storage.setAttributes(baseAttributes, range: NSRange(location: 0, length: storage.length))
 
-            let source = textView.string as NSString
-            for intention in parent.intentions.sorted(by: { $0.name.count > $1.name.count }) {
-                let escapedName = NSRegularExpression.escapedPattern(for: intention.name)
-                let pattern = "(?i)\\*(?:\\s+(?:the|intention|called|named))*\\s+(\(escapedName))(?=$|[^A-Za-z0-9])"
-                guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
-                for match in expression.matches(in: textView.string, range: NSRange(location: 0, length: source.length)) {
-                    let nameRange = match.range(at: 1)
-                    guard nameRange.location != NSNotFound else { continue }
-                    storage.addAttributes([
-                        .foregroundColor: NSColor.systemIndigo,
-                        .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
-                        .underlineStyle: NSUnderlineStyle.single.rawValue,
-                        .underlineColor: NSColor.systemIndigo
-                    ], range: nameRange)
+            if textView.string.contains("*") {
+                let source = textView.string as NSString
+                let lowercaseText = textView.string.lowercased()
+                for intention in parent.intentions.sorted(by: { $0.name.count > $1.name.count })
+                    where lowercaseText.contains(intention.name.lowercased()) {
+                    let expression: NSRegularExpression?
+                    if let cached = expressions[intention.name] {
+                        expression = cached
+                    } else {
+                        let escapedName = NSRegularExpression.escapedPattern(for: intention.name)
+                        let pattern = "(?i)\\*(?:\\s+(?:the|intention|called|named))*\\s+(\(escapedName))(?=$|[^A-Za-z0-9])"
+                        expression = try? NSRegularExpression(pattern: pattern)
+                        expressions[intention.name] = expression
+                    }
+                    guard let expression else { continue }
+                    for match in expression.matches(in: textView.string, range: NSRange(location: 0, length: source.length)) {
+                        let nameRange = match.range(at: 1)
+                        guard nameRange.location != NSNotFound else { continue }
+                        storage.addAttributes([
+                            .foregroundColor: NSColor.systemIndigo,
+                            .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+                            .underlineStyle: NSUnderlineStyle.single.rawValue,
+                            .underlineColor: NSColor.systemIndigo
+                        ], range: nameRange)
+                    }
                 }
             }
             storage.endEditing()
             textView.typingAttributes = baseAttributes
             textView.selectedRanges = selectedRanges
             isApplyingUpdate = false
+            lastStyledText = textView.string
+            lastStyleSignature = styleSignature
+            lastStyleWasDark = isDark
         }
 
         func updateHeight(for textView: NSTextView, in scrollView: NSScrollView) {
             guard let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return }
             let availableWidth = max(scrollView.contentSize.width, 280)
+            guard textView.string != lastMeasuredText || abs(availableWidth - lastMeasuredWidth) > 0.5 else {
+                return
+            }
             textContainer.containerSize = NSSize(width: availableWidth, height: CGFloat.greatestFiniteMagnitude)
             layoutManager.ensureLayout(for: textContainer)
             let usedHeight = layoutManager.usedRect(for: textContainer).height + textView.textContainerInset.height * 2
             let nextHeight = min(max(Self.minimumHeight, ceil(usedHeight)), Self.maximumHeight)
+            lastMeasuredText = textView.string
+            lastMeasuredWidth = availableWidth
             guard abs(parent.measuredHeight - nextHeight) > 0.5 else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, abs(self.parent.measuredHeight - nextHeight) > 0.5 else { return }
@@ -403,6 +440,8 @@ struct PurposeModeView: View {
     @State private var purpose = ""
     @State private var purposeFocused = false
     @State private var promptHeight: CGFloat = 44
+    @State private var liveInterpretation = PurposeLiveInterpretation()
+    @State private var interpretationTask: Task<Void, Never>?
 
     let onDismiss: () -> Void
 
@@ -484,7 +523,7 @@ struct PurposeModeView: View {
                         }
 
                         Button {
-                            speech.toggle()
+                            speech.toggle(contextualStrings: speechVocabulary)
                         } label: {
                             Image(systemName: speech.isListening ? "waveform" : "mic.fill")
                                 .font(.system(size: 16, weight: .semibold))
@@ -558,12 +597,15 @@ struct PurposeModeView: View {
             }
             .padding(.top, 52)
         }
-        .animation(.easeOut(duration: 0.18), value: hasLiveRecognition)
         .onAppear {
             purposeFocused = true
             model.purposeModeError = nil
+            scheduleInterpretation(for: purpose, immediately: true)
         }
-        .onDisappear { speech.stop() }
+        .onDisappear {
+            speech.stop()
+            interpretationTask?.cancel()
+        }
         .onChange(of: speech.transcript) { transcript in
             guard speech.isListening || !transcript.isEmpty else { return }
             purpose = PurposeLiveInterpreter.canonicalizedDisplayText(transcript)
@@ -578,6 +620,13 @@ struct PurposeModeView: View {
                 speech.resetTranscript()
             }
             model.purposeModeError = nil
+            scheduleInterpretation(for: value)
+        }
+        .onChange(of: model.installedApps.map(\.bundleIdentifier)) { _ in
+            scheduleInterpretation(for: purpose, immediately: true)
+        }
+        .onChange(of: model.intentions.map { "\($0.id):\($0.name)" }) { _ in
+            scheduleInterpretation(for: purpose, immediately: true)
         }
     }
 
@@ -593,14 +642,14 @@ struct PurposeModeView: View {
             || !removedWebsites.isEmpty
     }
 
-    private var liveInterpretation: PurposeLiveInterpretation {
-        PurposeLiveInterpreter.interpret(
-            cleanedPurpose,
-            apps: model.installedApps.map {
-                AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
-            },
-            intentions: model.intentions
-        )
+    private var availableApps: [AllowedApp] {
+        model.installedApps.map {
+            AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
+        }
+    }
+
+    private var speechVocabulary: [String] {
+        PurposeLiveInterpreter.speechVocabulary(apps: availableApps, intentions: model.intentions)
     }
 
     private var recognizedIntentions: [Intention] {
@@ -653,21 +702,26 @@ struct PurposeModeView: View {
     }
 
     private var liveRecognitionPanel: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
                 Circle()
                     .fill(Color.green)
-                    .frame(width: 6, height: 6)
+                    .frame(width: 7, height: 7)
                 Text("INTENT UNDERSTANDS")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .tracking(1)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
+                Spacer()
+                Text("\(recognizedIntentions.count + recognizedApps.count + recognizedWebsites.count) READY")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.8))
             }
 
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 76, maximum: 148), spacing: 10)],
+                columns: [GridItem(.adaptive(minimum: 220, maximum: 300), spacing: 12)],
                 alignment: .leading,
-                spacing: 10
+                spacing: 12
             ) {
                 ForEach(recognizedIntentions) { intention in
                     recognizedIntentionCard(intention)
@@ -707,77 +761,116 @@ struct PurposeModeView: View {
                 .transition(.opacity)
             }
         }
-        .padding(18)
-        .frame(maxWidth: 940, minHeight: 124, alignment: .topLeading)
-        .background(GraphTheme.surface(colorScheme).opacity(0.72), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
-        .animation(.spring(response: 0.34, dampingFraction: 0.78), value: recognitionAnimationKey)
+        .padding(20)
+        .frame(maxWidth: 980, minHeight: 166, alignment: .topLeading)
+        .background(GraphTheme.surface(colorScheme).opacity(0.76), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
+        .animation(.spring(response: 0.28, dampingFraction: 0.84), value: recognitionAnimationKey)
     }
 
     private func recognizedIntentionCard(_ intention: Intention) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 14) {
             Image(systemName: intention.icon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 24, weight: .semibold))
                 .foregroundStyle(GraphTheme.editBlue)
-                .frame(width: 26, height: 26)
-                .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 1) {
+                .frame(width: 54, height: 54)
+                .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 13))
+            VStack(alignment: .leading, spacing: 5) {
+                Text("SAVED INTENTION")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
                 Text(intention.name)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Color.indigo)
                     .underline()
                     .lineLimit(1)
-                Text("Saved intention")
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
             }
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 9)
-        .frame(minWidth: 132, minHeight: 62)
-        .background(Color.indigo.opacity(colorScheme == .dark ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.indigo.opacity(0.8), lineWidth: 1.2))
+        .padding(.horizontal, 14)
+        .frame(minWidth: 220, minHeight: 92)
+        .background(Color.indigo.opacity(colorScheme == .dark ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.indigo.opacity(0.8), lineWidth: 1.2))
     }
 
     private func recognizedAppCard(_ app: InstalledApp) -> some View {
-        VStack(spacing: 3) {
+        HStack(spacing: 14) {
             Image(nsImage: app.icon)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 34, height: 34)
-            Text(app.name)
-                .font(.system(size: 8, weight: .medium))
-                .lineLimit(1)
-                .frame(maxWidth: 76)
+                .frame(width: 58, height: 58)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("APPLICATION")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Text(app.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(GraphTheme.text(colorScheme))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
         }
-        .frame(minWidth: 76, minHeight: 64)
-        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.7))
+        .padding(.horizontal, 14)
+        .frame(minWidth: 220, minHeight: 92)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
         .help("Installed app: \(app.name)")
     }
 
     private func recognizedWebsiteCard(_ website: PurposeWebsiteSelection) -> some View {
-        VStack(spacing: 4) {
+        HStack(spacing: 12) {
             if let resource = PurposeWebsiteCatalog.website(for: website.value)?.iconResource,
                let image = PurposeWebsiteIconLibrary.image(named: resource) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 34, height: 34)
+                    .frame(width: 54, height: 54)
             } else {
                 Image(systemName: "globe")
-                    .font(.system(size: 27, weight: .medium))
+                    .font(.system(size: 34, weight: .medium))
                     .foregroundStyle(GraphTheme.editBlue)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 54, height: 54)
             }
-            Text(website.name)
-                .font(.system(size: 8, weight: .medium))
-                .lineLimit(1)
-                .frame(maxWidth: 90)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("WEBSITE")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Text(website.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(GraphTheme.text(colorScheme))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 9, weight: .semibold))
+                    if let browser = browserApp(for: website) {
+                        Image(nsImage: browser.icon)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 18, height: 18)
+                        Text("via \(browser.name)")
+                    } else {
+                        Text("browser required")
+                    }
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(GraphTheme.editBlue)
+            }
+            Spacer(minLength: 0)
         }
-        .frame(minWidth: 82, minHeight: 64)
-        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(GraphTheme.editBlue.opacity(0.48), lineWidth: 0.9))
-        .help("Allowed website: \(website.value)")
+        .padding(.horizontal, 14)
+        .frame(minWidth: 240, minHeight: 92)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(GraphTheme.editBlue.opacity(0.62), lineWidth: 1))
+        .help("Allowed website: \(website.value) via \(browserApp(for: website)?.name ?? "browser")")
+    }
+
+    private func browserApp(for website: PurposeWebsiteSelection) -> InstalledApp? {
+        guard let browserBundleIdentifier = website.browserBundleIdentifier else { return nil }
+        return model.installedApps.first { $0.bundleIdentifier == browserBundleIdentifier }
     }
 
     private func example(_ title: String) -> some View {
@@ -798,9 +891,38 @@ struct PurposeModeView: View {
         guard !cleanedPurpose.isEmpty, !model.purposeModeIsResolving else { return }
         speech.stop()
         let request = cleanedPurpose
-        let interpretation = liveInterpretation
+        interpretationTask?.cancel()
+        let interpretation = PurposeLiveInterpreter.interpret(
+            request,
+            apps: availableApps,
+            intentions: model.intentions
+        )
+        liveInterpretation = interpretation
         Task {
             await model.startPurposeSession(for: request, liveInterpretation: interpretation)
+        }
+    }
+
+    private func scheduleInterpretation(for text: String, immediately: Bool = false) {
+        interpretationTask?.cancel()
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            liveInterpretation = PurposeLiveInterpretation()
+            return
+        }
+
+        let apps = availableApps
+        let intentions = model.intentions
+        interpretationTask = Task { @MainActor in
+            if !immediately {
+                try? await Task.sleep(nanoseconds: 28_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            liveInterpretation = PurposeLiveInterpreter.interpret(
+                cleaned,
+                apps: apps,
+                intentions: intentions
+            )
         }
     }
 }
