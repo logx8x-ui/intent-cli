@@ -148,6 +148,7 @@ final class PurposeSpeechRecognizer: ObservableObject {
 
     private func beginListening(contextualStrings: [String]) async {
         stop()
+        transcript = ""
         errorMessage = nil
 
         guard await requestSpeechPermission() else {
@@ -484,6 +485,7 @@ struct PurposeModeView: View {
     @State private var interpretationTask: Task<Void, Never>?
     @State private var autocompleteSelection = 0
     @State private var autocompleteDismissed = false
+    @State private var lastSpeechTranscript = ""
 
     let onDismiss: () -> Void
 
@@ -569,9 +571,7 @@ struct PurposeModeView: View {
                             .frame(height: promptHeight)
                         }
 
-                        Button {
-                            speech.toggle(contextualStrings: speechVocabulary)
-                        } label: {
+                        Button(action: toggleSpeech) {
                             Image(systemName: speech.isListening ? "waveform" : "mic.fill")
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(speech.isListening ? Color.white : GraphTheme.text(colorScheme))
@@ -615,7 +615,10 @@ struct PurposeModeView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
-                    if hasLiveRecognition {
+                    if let clarificationPrompt {
+                        clarificationCard(clarificationPrompt)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    } else if hasLiveRecognition {
                         liveRecognitionPanel
                             .transition(.move(edge: .top).combined(with: .opacity))
                     } else {
@@ -659,8 +662,20 @@ struct PurposeModeView: View {
             interpretationTask?.cancel()
         }
         .onChange(of: speech.transcript) { transcript in
-            guard speech.isListening || !transcript.isEmpty else { return }
-            purpose = PurposeLiveInterpreter.canonicalizedDisplayText(transcript, apps: availableApps)
+            guard !transcript.isEmpty else {
+                lastSpeechTranscript = ""
+                return
+            }
+            let appended = PurposeLiveInterpreter.incrementalSpeechAppend(
+                previous: lastSpeechTranscript,
+                current: transcript
+            )
+            lastSpeechTranscript = transcript
+            guard !appended.isEmpty else { return }
+            purpose = PurposeLiveInterpreter.canonicalizedDisplayText(
+                appendingSpeech(appended, to: purpose),
+                apps: availableApps
+            )
         }
         .onChange(of: purpose) { value in
             autocompleteDismissed = false
@@ -694,6 +709,14 @@ struct PurposeModeView: View {
             || !recognizedWebsites.isEmpty
             || !removedApps.isEmpty
             || !removedWebsites.isEmpty
+            || !conflictingIntentions.isEmpty
+    }
+
+    private var clarificationPrompt: String? {
+        PurposeLiveInterpreter.clarificationPrompt(
+            for: cleanedPurpose,
+            interpretation: liveInterpretation
+        )
     }
 
     private var availableApps: [AllowedApp] {
@@ -785,6 +808,7 @@ struct PurposeModeView: View {
 
     private var recognizedApps: [InstalledApp] {
         guard cleanedPurpose.count >= 2 else { return [] }
+        guard recognizedIntentions.isEmpty else { return [] }
         let interpretation = liveInterpretation
         let excludedIDs = Set(interpretation.excludedAppBundleIdentifiers)
         let intentionAppIDs = Set(recognizedIntentions.flatMap { $0.allowedApps.map(\.bundleIdentifier) })
@@ -805,6 +829,7 @@ struct PurposeModeView: View {
     }
 
     private var removedApps: [InstalledApp] {
+        guard recognizedIntentions.isEmpty else { return [] }
         let removedIDs = Set(liveInterpretation.excludedAppBundleIdentifiers)
         return model.installedApps
             .filter { removedIDs.contains($0.bundleIdentifier) }
@@ -812,18 +837,25 @@ struct PurposeModeView: View {
     }
 
     private var recognizedWebsites: [PurposeWebsiteSelection] {
-        liveInterpretation.includedWebsites
+        recognizedIntentions.isEmpty ? liveInterpretation.includedWebsites : []
     }
 
     private var removedWebsites: [PurposeWebsiteSelection] {
-        liveInterpretation.excludedWebsites
+        recognizedIntentions.isEmpty ? liveInterpretation.excludedWebsites : []
+    }
+
+    private var conflictingIntentions: [Intention] {
+        liveInterpretation.conflictingIntentionIDs.compactMap { id in
+            model.intentions.first { $0.id == id }
+        }
     }
 
     private var recognitionAnimationKey: String {
         let intentionIDs = recognizedIntentions.map(\.id)
         let appIDs = recognizedApps.map(\.bundleIdentifier)
         let websiteIDs = recognizedWebsites.map(\.id)
-        return (intentionIDs + appIDs + websiteIDs).joined(separator: "|")
+        let conflictIDs = conflictingIntentions.map(\.id)
+        return (intentionIDs + appIDs + websiteIDs + conflictIDs).joined(separator: "|")
     }
 
     private var liveRecognitionPanel: some View {
@@ -841,6 +873,25 @@ struct PurposeModeView: View {
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .tracking(0.8)
                     .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.8))
+            }
+
+            if !conflictingIntentions.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text("ONE INTENTION AT A TIME")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                    Text("Remove *\(conflictingIntentions[0].name) to continue.")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(Color.red)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 42)
+                .background(Color.red.opacity(colorScheme == .dark ? 0.13 : 0.08), in: RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.red.opacity(0.62), lineWidth: 1))
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             LazyVGrid(
@@ -895,11 +946,17 @@ struct PurposeModeView: View {
 
     private func recognizedIntentionCard(_ intention: Intention) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: intention.icon)
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(GraphTheme.editBlue)
-                .frame(width: 54, height: 54)
-                .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 13))
+            PurposeIntentionArtworkPreview(
+                intention: intention,
+                installedApps: model.installedApps,
+                colorScheme: colorScheme
+            )
+            .frame(width: 76, height: 76)
+            .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .stroke(Color.indigo.opacity(0.72), lineWidth: 1)
+            )
             VStack(alignment: .leading, spacing: 5) {
                 Text("SAVED INTENTION")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -914,9 +971,31 @@ struct PurposeModeView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
-        .frame(minWidth: 220, minHeight: 92)
+        .frame(minWidth: 300, minHeight: 108)
         .background(Color.indigo.opacity(colorScheme == .dark ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 15))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.indigo.opacity(0.8), lineWidth: 1.2))
+    }
+
+    private func clarificationCard(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(GraphTheme.editBlue)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("ONE QUICK QUESTION")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Text(message)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(GraphTheme.text(colorScheme))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: 720, alignment: .leading)
+        .background(GraphTheme.surface(colorScheme).opacity(0.82), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(GraphTheme.editBlue.opacity(0.58), lineWidth: 1))
     }
 
     private func recognizedAppCard(_ app: InstalledApp) -> some View {
@@ -1024,6 +1103,15 @@ struct PurposeModeView: View {
 
     private func submit() {
         guard !cleanedPurpose.isEmpty, !model.purposeModeIsResolving else { return }
+        if !conflictingIntentions.isEmpty {
+            model.purposeModeError = "Intent can run one saved intention at a time. Remove the extra starred intention first."
+            return
+        }
+        if let clarificationPrompt {
+            model.purposeModeError = clarificationPrompt
+            purposeFocused = true
+            return
+        }
         speech.stop()
         let request = cleanedPurpose
         interpretationTask?.cancel()
@@ -1059,6 +1147,89 @@ struct PurposeModeView: View {
                 intentions: intentions
             )
         }
+    }
+
+    private func toggleSpeech() {
+        if !speech.isListening {
+            lastSpeechTranscript = ""
+            speech.resetTranscript()
+        }
+        speech.toggle(contextualStrings: speechVocabulary)
+    }
+
+    private func appendingSpeech(_ appended: String, to existing: String) -> String {
+        var addition = appended.trimmingCharacters(in: .whitespacesAndNewlines)
+        if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let leadingConnectors = ["and ", "plus ", "also ", "then "]
+            if let connector = leadingConnectors.first(where: { addition.lowercased().hasPrefix($0) }) {
+                addition.removeFirst(connector.count)
+            }
+            return addition
+        }
+        guard !addition.isEmpty else { return existing }
+        let separator = existing.last?.isWhitespace == true ? "" : " "
+        return existing + separator + addition
+    }
+}
+
+private struct PurposeIntentionArtworkPreview: View {
+    let intention: Intention
+    let installedApps: [InstalledApp]
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        Group {
+            if intention.usesCustomIcon,
+               let data = intention.customIconData,
+               let image = NSImage(data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if appIcons.isEmpty {
+                ZStack {
+                    GraphTheme.elevatedSurface(colorScheme)
+                    Image(systemName: intention.icon)
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(GraphTheme.editBlue)
+                }
+            } else if appIcons.count == 1 {
+                appImage(appIcons[0])
+            } else if appIcons.count == 2 {
+                HStack(spacing: 1) {
+                    appImage(appIcons[0])
+                    appImage(appIcons[1])
+                }
+            } else {
+                VStack(spacing: 1) {
+                    HStack(spacing: 1) {
+                        appImage(appIcons[0])
+                        appImage(appIcons[1])
+                    }
+                    HStack(spacing: 1) {
+                        appImage(appIcons[2])
+                        if appIcons.count > 3 {
+                            appImage(appIcons[3])
+                        } else {
+                            GraphTheme.elevatedSurface(colorScheme)
+                        }
+                    }
+                }
+            }
+        }
+        .background(GraphTheme.elevatedSurface(colorScheme))
+    }
+
+    private var appIcons: [NSImage] {
+        intention.allowedApps.prefix(4).compactMap { allowed in
+            installedApps.first { $0.bundleIdentifier == allowed.bundleIdentifier }?.icon
+        }
+    }
+
+    private func appImage(_ image: NSImage) -> some View {
+        Image(nsImage: image)
+            .resizable()
+            .scaledToFill()
+            .clipped()
     }
 }
 

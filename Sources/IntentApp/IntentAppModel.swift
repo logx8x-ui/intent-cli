@@ -258,9 +258,14 @@ final class IntentAppModel: ObservableObject {
         purposeModeError = nil
         defer { purposeModeIsResolving = false }
 
-        if let explicitIntentionID = liveInterpretation?.includedIntentionIDs.last,
-           let existing = intentions.first(where: { $0.id == explicitIntentionID }),
-           purposeInterpretation(liveInterpretation, isCompatibleWith: existing) {
+        if let conflict = liveInterpretation?.conflictingIntentionIDs.first,
+           let conflictingIntention = intentions.first(where: { $0.id == conflict }) {
+            purposeModeError = "Intent can run one saved intention at a time. Remove *\(conflictingIntention.name) first."
+            return
+        }
+
+        if let explicitIntentionID = liveInterpretation?.includedIntentionIDs.first,
+           let existing = intentions.first(where: { $0.id == explicitIntentionID }) {
             requestStart(existing)
             return
         }

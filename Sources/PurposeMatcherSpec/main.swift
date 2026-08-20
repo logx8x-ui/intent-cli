@@ -44,6 +44,11 @@ struct PurposeMatcherSpec {
             apps: [firefox, anki],
             websites: [.init("github.com", browserBundleIdentifier: firefox.bundleIdentifier)]
         )
+        let messagesIntention = intention(
+            id: "messages-live",
+            name: "Reply to messages",
+            apps: [messages]
+        )
 
         let empty = PurposeLiveInterpreter.interpret("", apps: apps, intentions: [study])
         expect(empty.includedAppBundleIdentifiers.isEmpty, "clearing text clears suggested apps")
@@ -94,12 +99,38 @@ struct PurposeMatcherSpec {
         )
         expect(editedIntention.includedIntentionIDs == [study.id], "starred intention is understood live")
         expect(
-            editedIntention.includedAppBundleIdentifiers == [firefox.bundleIdentifier],
-            "an app can be removed from a referenced intention"
+            editedIntention.includedAppBundleIdentifiers == [firefox.bundleIdentifier, anki.bundleIdentifier],
+            "a starred intention remains an exact saved session"
         )
         expect(
             editedIntention.includedWebsites.map(\.value) == ["github.com"],
             "a starred intention brings its allowed websites"
+        )
+
+        let exclusiveIntention = PurposeLiveInterpreter.interpret(
+            "Run *Study with Messages and Instagram on Firefox",
+            apps: apps,
+            intentions: [study, messagesIntention]
+        )
+        expect(exclusiveIntention.includedIntentionIDs == [study.id], "the first starred intention is authoritative")
+        expect(
+            exclusiveIntention.includedAppBundleIdentifiers == [firefox.bundleIdentifier, anki.bundleIdentifier],
+            "loose app mentions cannot expand a starred intention"
+        )
+        expect(
+            exclusiveIntention.includedWebsites.map(\.value) == ["github.com"],
+            "loose website mentions cannot expand a starred intention"
+        )
+
+        let conflictingIntentions = PurposeLiveInterpreter.interpret(
+            "Run *Study and *Reply to messages",
+            apps: apps,
+            intentions: [study, messagesIntention]
+        )
+        expect(conflictingIntentions.includedIntentionIDs == [study.id], "only one intention remains runnable")
+        expect(
+            conflictingIntentions.conflictingIntentionIDs == [messagesIntention.id],
+            "a second starred intention is reported as a conflict"
         )
 
         let unstarredIntention = PurposeLiveInterpreter.interpret(
@@ -178,6 +209,28 @@ struct PurposeMatcherSpec {
             "the grouped display remains fully interpretable"
         )
 
+        let chrome = AllowedApp(name: "Google Chrome", bundleIdentifier: "com.google.Chrome")
+        let multipleBrowsers = PurposeLiveInterpreter.interpret(
+            "Use Firefox with YouTube and Instagram, then Google Chrome with Gmail",
+            apps: apps + [chrome],
+            intentions: []
+        )
+        expect(
+            multipleBrowsers.includedWebsites.first(where: { $0.value == "youtube.com" })?.browserBundleIdentifier
+                == firefox.bundleIdentifier,
+            "YouTube stays attached to Firefox"
+        )
+        expect(
+            multipleBrowsers.includedWebsites.first(where: { $0.value == "instagram.com" })?.browserBundleIdentifier
+                == firefox.bundleIdentifier,
+            "Instagram stays attached to Firefox"
+        )
+        expect(
+            multipleBrowsers.includedWebsites.first(where: { $0.value == "mail.google.com" })?.browserBundleIdentifier
+                == chrome.bundleIdentifier,
+            "Gmail attaches to the later Chrome mention"
+        )
+
         let autocomplete = PurposeLiveInterpreter.intentionAutocompleteCandidates(
             for: "Run *Stu",
             intentions: [study]
@@ -232,12 +285,70 @@ struct PurposeMatcherSpec {
         )
         expect(websiteAddedBack.includedWebsites.map(\.value) == ["youtube.com"], "website can be added back")
 
+        let changedBrowserWebsite = PurposeLiveInterpreter.interpret(
+            "Use Firefox with YouTube, remove YouTube, then add Instagram.",
+            apps: apps,
+            intentions: []
+        )
+        expect(
+            changedBrowserWebsite.includedWebsites.map(\.value) == ["instagram.com"],
+            "a corrected website keeps the established browser workspace"
+        )
+        expect(
+            changedBrowserWebsite.includedWebsites.first?.browserBundleIdentifier == firefox.bundleIdentifier,
+            "a corrected website remains attached to Firefox"
+        )
+
+        let explicitDesktopApp = PurposeLiveInterpreter.interpret(
+            "Use Firefox with YouTube, then add the ChatGPT app",
+            apps: apps,
+            intentions: []
+        )
+        expect(
+            explicitDesktopApp.includedAppBundleIdentifiers.contains(chatGPT.bundleIdentifier),
+            "an explicit app request remains an application after a browser workspace"
+        )
+        expect(
+            !explicitDesktopApp.includedWebsites.contains(where: { $0.value == "chatgpt.com" }),
+            "an explicit app request is not converted into a website"
+        )
+
         let speechAlias = PurposeLiveInterpreter.interpret(
             "Use ram note",
             apps: apps,
             intentions: []
         )
         expect(speechAlias.includedAppBundleIdentifiers == [remNote.bundleIdentifier], "speech alias resolves RemNote")
+
+        let vagueStudy = PurposeLiveInterpreter.interpret(
+            "I want to study",
+            apps: apps,
+            intentions: [study]
+        )
+        expect(
+            PurposeLiveInterpreter.clarificationPrompt(for: "I want to study", interpretation: vagueStudy)
+                == "Okay, awesome. What apps or websites do you want to use to study?",
+            "vague study requests ask for the resources needed"
+        )
+        expect(
+            PurposeLiveInterpreter.clarificationPrompt(for: "Study with Anki", interpretation: editedIntention) == nil,
+            "resolved requests do not ask a follow-up"
+        )
+
+        expect(
+            PurposeLiveInterpreter.incrementalSpeechAppend(
+                previous: "Use Firefox",
+                current: "Use Firefox and Anki"
+            ) == "and Anki",
+            "speech updates append only newly recognized words"
+        )
+        expect(
+            PurposeLiveInterpreter.incrementalSpeechAppend(
+                previous: "Use Firefox and Anki",
+                current: "Use Firefox"
+            ).isEmpty,
+            "shorter recognition revisions never restore deleted text"
+        )
     }
 
     private static func intention(

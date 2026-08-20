@@ -70,6 +70,7 @@ public struct PurposeLiveInterpretation: Equatable {
     public var explicitlyIncludedWebsiteValues: [String]
     public var includedIntentionIDs: [String]
     public var excludedIntentionIDs: [String]
+    public var conflictingIntentionIDs: [String]
     public var usedCorrection: Bool
     public var limitsAppsToSelection: Bool
     public var limitsWebsitesToSelection: Bool
@@ -83,6 +84,7 @@ public struct PurposeLiveInterpretation: Equatable {
         explicitlyIncludedWebsiteValues: [String] = [],
         includedIntentionIDs: [String] = [],
         excludedIntentionIDs: [String] = [],
+        conflictingIntentionIDs: [String] = [],
         usedCorrection: Bool = false,
         limitsAppsToSelection: Bool = false,
         limitsWebsitesToSelection: Bool = false
@@ -95,6 +97,7 @@ public struct PurposeLiveInterpretation: Equatable {
         self.explicitlyIncludedWebsiteValues = explicitlyIncludedWebsiteValues
         self.includedIntentionIDs = includedIntentionIDs
         self.excludedIntentionIDs = excludedIntentionIDs
+        self.conflictingIntentionIDs = conflictingIntentionIDs
         self.usedCorrection = usedCorrection
         self.limitsAppsToSelection = limitsAppsToSelection
         self.limitsWebsitesToSelection = limitsWebsitesToSelection
@@ -192,6 +195,54 @@ public enum PurposeLiveInterpreter {
         }
     }
 
+    public static func clarificationPrompt(
+        for rawText: String,
+        interpretation: PurposeLiveInterpretation
+    ) -> String? {
+        let words = normalizedWords(rawText)
+        guard words.count >= 2,
+              interpretation.includedIntentionIDs.isEmpty,
+              interpretation.includedAppBundleIdentifiers.isEmpty,
+              interpretation.includedWebsites.isEmpty else {
+            return nil
+        }
+
+        if words.contains(where: { ["study", "studying", "revise", "revision"].contains($0) }) {
+            return "Okay, awesome. What apps or websites do you want to use to study?"
+        }
+        if words.contains(where: { ["work", "working", "assignment", "project"].contains($0) }) {
+            return "What apps or websites do you need for that work?"
+        }
+        if words.contains(where: { ["play", "game", "games", "gaming"].contains($0) }) {
+            return "What game or apps do you want to use?"
+        }
+        if words.contains(where: { ["reply", "message", "messages", "email", "emails"].contains($0) }) {
+            return "Which messaging or email apps do you want to use?"
+        }
+        if words.contains(where: { ["research", "write", "writing", "plan", "planning", "relax"].contains($0) }) {
+            return "What apps or websites do you need for that?"
+        }
+        return nil
+    }
+
+    public static func incrementalSpeechAppend(previous: String, current: String) -> String {
+        let previousWords = previous.split(whereSeparator: \.isWhitespace).map(String.init)
+        let currentWords = current.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard currentWords.count > previousWords.count else { return "" }
+
+        var commonPrefix = 0
+        while commonPrefix < min(previousWords.count, currentWords.count),
+              folded(previousWords[commonPrefix]) == folded(currentWords[commonPrefix]) {
+            commonPrefix += 1
+        }
+
+        // Speech recognition revises earlier partial words frequently. Only append words
+        // that are genuinely new so manual deletions are never restored by a later partial.
+        let appendStart = max(previousWords.count, commonPrefix)
+        guard appendStart < currentWords.count else { return "" }
+        return currentWords[appendStart...].joined(separator: " ")
+    }
+
     public static func interpret(
         _ rawText: String,
         apps: [AllowedApp],
@@ -255,9 +306,32 @@ public enum PurposeLiveInterpreter {
             }
         }
 
-        let includedIntentions = intentionOrder.filter { intentionOperations[$0] == .include }
+        let activeIntentions = intentionOrder.filter { intentionOperations[$0] == .include }
+        let includedIntentions = Array(activeIntentions.prefix(1))
+        let conflictingIntentions = Array(activeIntentions.dropFirst())
         let excludedIntentions = intentionOrder.filter { intentionOperations[$0] == .exclude }
         let intentionsByID = Dictionary(uniqueKeysWithValues: intentions.map { ($0.id, $0) })
+
+        // A starred saved intention is an exact session reference. It cannot be combined
+        // with loose app or website mentions, and only one can be active at a time.
+        if let intentionID = includedIntentions.first, let intention = intentionsByID[intentionID] {
+            let websites = intention.allowedWebsites.map { website in
+                let known = PurposeWebsiteCatalog.website(for: website.value)
+                return PurposeWebsiteSelection(
+                    name: known?.name ?? website.displayName.capitalized,
+                    value: website.value,
+                    browserBundleIdentifier: website.browserBundleIdentifier
+                )
+            }
+            return PurposeLiveInterpretation(
+                includedAppBundleIdentifiers: intention.allowedApps.map(\.bundleIdentifier),
+                includedWebsites: websites,
+                includedIntentionIDs: [intentionID],
+                excludedIntentionIDs: excludedIntentions,
+                conflictingIntentionIDs: conflictingIntentions,
+                usedCorrection: usedCorrection
+            )
+        }
 
         var includedApps: [String] = []
         for intentionID in includedIntentions {
@@ -339,6 +413,7 @@ public enum PurposeLiveInterpreter {
             explicitlyIncludedWebsiteValues: explicitlyIncludedWebsiteValues,
             includedIntentionIDs: includedIntentions,
             excludedIntentionIDs: excludedIntentions,
+            conflictingIntentionIDs: conflictingIntentions,
             usedCorrection: usedCorrection,
             limitsAppsToSelection: limitsAppsToSelection,
             limitsWebsitesToSelection: limitsWebsitesToSelection
@@ -475,6 +550,12 @@ public enum PurposeLiveInterpreter {
         var lastQualifiedWebsiteEnd: Int?
 
         for mention in mentions.filter({ $0.kind == .website }).sorted(by: { $0.start < $1.start }) {
+            let appQualifierRange = mention.end..<min(words.count, mention.end + 3)
+            let explicitlyRequestsApp = words[appQualifierRange].contains(where: {
+                ["app", "application", "desktop"].contains($0)
+            })
+            if explicitlyRequestsApp { continue }
+
             let explicitBrowser = explicitlyLinkedBrowser(
                 to: mention,
                 browserMentions: browserMentions,
@@ -494,7 +575,20 @@ public enum PurposeLiveInterpreter {
             } else {
                 chainedBrowser = nil
             }
-            let browser = explicitBrowser ?? adjacentBrowser ?? chainedBrowser ?? rememberedBrowsers[mention.id]
+            let browserMentionedSinceLastWebsite: Bool
+            if let lastQualifiedWebsiteEnd {
+                browserMentionedSinceLastWebsite = browserMentions.contains {
+                    $0.start >= lastQualifiedWebsiteEnd && $0.start < mention.start
+                }
+            } else {
+                browserMentionedSinceLastWebsite = false
+            }
+            let continuingBrowser = browserMentionedSinceLastWebsite ? nil : lastQualifiedBrowser
+            let browser = explicitBrowser
+                ?? adjacentBrowser
+                ?? chainedBrowser
+                ?? rememberedBrowsers[mention.id]
+                ?? continuingBrowser
             guard let browser else { continue }
             rememberedBrowsers[mention.id] = browser
             lastQualifiedBrowser = browser
