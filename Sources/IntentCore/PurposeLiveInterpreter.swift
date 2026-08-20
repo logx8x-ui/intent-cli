@@ -52,12 +52,72 @@ public enum PurposeWebsiteCatalog {
         .init(name: "Canva", value: "canva.com"),
         .init(name: "Figma", value: "figma.com"),
         .init(name: "Gemini", value: "gemini.google.com"),
-        .init(name: "Wikipedia", value: "wikipedia.org")
+        .init(name: "Wikipedia", value: "wikipedia.org", aliases: ["wiki", "wikipedia website"]),
+        .init(
+            name: "OASIS",
+            value: "oasis.curtin.edu.au",
+            aliases: [
+                "oasis student portal", "curtin oasis", "oasis curtin",
+                "curtin student portal", "oasis portal", "oasis for curtin"
+            ]
+        )
     ]
 
-    public static func website(for value: String) -> PurposeKnownWebsite? {
+    public static func website(
+        for value: String,
+        in websites: [PurposeKnownWebsite] = common
+    ) -> PurposeKnownWebsite? {
         let normalized = AllowedWebsite.normalized(value)
-        return common.first { $0.value == normalized }
+        return websites.first { $0.value == normalized }
+    }
+
+    public static func combined(
+        additional: [PurposeKnownWebsite] = [],
+        intentions: [Intention] = []
+    ) -> [PurposeKnownWebsite] {
+        var result: [PurposeKnownWebsite] = []
+        var indexByDomain: [String: Int] = [:]
+
+        func append(_ website: PurposeKnownWebsite) {
+            let key = domainKey(website.value)
+            if let index = indexByDomain[key] {
+                let existing = result[index]
+                var aliases = existing.aliases + website.aliases + [website.name]
+                var seen = Set<String>()
+                aliases = aliases.filter {
+                    let folded = $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                        .lowercased()
+                    return !folded.isEmpty && seen.insert(folded).inserted
+                }
+                result[index] = PurposeKnownWebsite(
+                    name: existing.name,
+                    value: existing.value,
+                    aliases: aliases,
+                    iconResource: existing.iconResource ?? website.iconResource
+                )
+                return
+            }
+            indexByDomain[key] = result.count
+            result.append(website)
+        }
+
+        common.forEach(append)
+        for intention in intentions {
+            for website in intention.allowedWebsites {
+                append(PurposeKnownWebsite(
+                    name: website.displayName.capitalized,
+                    value: website.value,
+                    aliases: [website.displayName]
+                ))
+            }
+        }
+        additional.forEach(append)
+        return result
+    }
+
+    private static func domainKey(_ value: String) -> String {
+        let normalized = AllowedWebsite.normalized(value)
+        return normalized.components(separatedBy: "/").first ?? normalized
     }
 }
 
@@ -127,14 +187,22 @@ public enum PurposeLiveInterpreter {
         let browserBundleIdentifier: String?
     }
 
-    public static func canonicalizedDisplayText(_ rawText: String, apps: [AllowedApp] = []) -> String {
+    public static func canonicalizedDisplayText(
+        _ rawText: String,
+        apps: [AllowedApp] = [],
+        knownWebsites: [PurposeKnownWebsite] = []
+    ) -> String {
         let normalizedMarker = rawText.replacingOccurrences(
             of: #"(?i)\b(?:asterisk|asterix|astrix|astrics|asterics|astericks?)\b"#,
             with: "*",
             options: .regularExpression
         )
         guard !apps.isEmpty else { return normalizedMarker }
-        return canonicalizedBrowserGroups(in: normalizedMarker, apps: apps)
+        return canonicalizedBrowserGroups(
+            in: normalizedMarker,
+            apps: apps,
+            websites: PurposeWebsiteCatalog.combined(additional: knownWebsites)
+        )
     }
 
     public static func intentionAutocompleteCandidates(
@@ -176,12 +244,16 @@ public enum PurposeLiveInterpreter {
             .filter { seen.insert(folded($0)).inserted }
     }
 
-    public static func speechVocabulary(apps: [AllowedApp], intentions: [Intention]) -> [String] {
+    public static func speechVocabulary(
+        apps: [AllowedApp],
+        intentions: [Intention],
+        knownWebsites: [PurposeKnownWebsite] = []
+    ) -> [String] {
         var values = apps.map(\.name)
         for app in apps {
             values.append(contentsOf: knownAppAliases[app.bundleIdentifier, default: []])
         }
-        for website in PurposeWebsiteCatalog.common {
+        for website in PurposeWebsiteCatalog.combined(additional: knownWebsites, intentions: intentions) {
             values.append(website.name)
             values.append(contentsOf: website.aliases)
         }
@@ -246,12 +318,17 @@ public enum PurposeLiveInterpreter {
     public static func interpret(
         _ rawText: String,
         apps: [AllowedApp],
-        intentions: [Intention]
+        intentions: [Intention],
+        knownWebsites: [PurposeKnownWebsite] = []
     ) -> PurposeLiveInterpretation {
         let words = normalizedWordsPreservingMarker(rawText)
         guard !words.isEmpty else { return PurposeLiveInterpretation() }
 
-        let aliases = makeAliases(apps: apps, intentions: intentions)
+        let websites = PurposeWebsiteCatalog.combined(
+            additional: knownWebsites,
+            intentions: intentions
+        )
+        let aliases = makeAliases(apps: apps, intentions: intentions, websites: websites)
         var mentions = findMentions(in: words, aliases: aliases)
         mentions.append(contentsOf: fuzzyAppMentions(in: words, aliases: aliases, existing: mentions))
         mentions = websiteQualifiedMentions(in: words, mentions: mentions, apps: apps)
@@ -316,7 +393,7 @@ public enum PurposeLiveInterpreter {
         // with loose app or website mentions, and only one can be active at a time.
         if let intentionID = includedIntentions.first, let intention = intentionsByID[intentionID] {
             let websites = intention.allowedWebsites.map { website in
-                let known = PurposeWebsiteCatalog.website(for: website.value)
+                let known = PurposeWebsiteCatalog.website(for: website.value, in: websites)
                 return PurposeWebsiteSelection(
                     name: known?.name ?? website.displayName.capitalized,
                     value: website.value,
@@ -355,7 +432,7 @@ public enum PurposeLiveInterpreter {
         var websiteByValue: [String: PurposeWebsiteSelection] = [:]
         for intentionID in includedIntentions {
             for website in intentionsByID[intentionID]?.allowedWebsites ?? [] {
-                let known = PurposeWebsiteCatalog.website(for: website.value)
+                let known = PurposeWebsiteCatalog.website(for: website.value, in: websites)
                 let selection = PurposeWebsiteSelection(
                     name: known?.name ?? website.displayName.capitalized,
                     value: website.value,
@@ -375,7 +452,7 @@ public enum PurposeLiveInterpreter {
 
         let appsByIdentifier = Dictionary(uniqueKeysWithValues: apps.map { ($0.bundleIdentifier, $0) })
         for value in explicitlyIncludedWebsiteValues {
-            guard let known = PurposeWebsiteCatalog.website(for: value) else { continue }
+            guard let known = PurposeWebsiteCatalog.website(for: value, in: websites) else { continue }
             let siteMention = mentions.last { $0.kind == .website && $0.id == value && $0.operation == .include }
             let selection = PurposeWebsiteSelection(
                 name: known.name,
@@ -395,7 +472,7 @@ public enum PurposeLiveInterpreter {
         }
 
         let excludedWebsites = excludedWebsiteValues.compactMap { value -> PurposeWebsiteSelection? in
-            guard let known = PurposeWebsiteCatalog.website(for: value) else { return nil }
+            guard let known = PurposeWebsiteCatalog.website(for: value, in: websites) else { return nil }
             let mention = mentions.last { $0.kind == .website && $0.id == value }
             return PurposeWebsiteSelection(
                 name: known.name,
@@ -420,7 +497,11 @@ public enum PurposeLiveInterpreter {
         )
     }
 
-    private static func makeAliases(apps: [AllowedApp], intentions: [Intention]) -> [Alias] {
+    private static func makeAliases(
+        apps: [AllowedApp],
+        intentions: [Intention],
+        websites: [PurposeKnownWebsite]
+    ) -> [Alias] {
         var aliases: [Alias] = []
         for app in apps {
             var values = [app.name]
@@ -430,7 +511,7 @@ public enum PurposeLiveInterpreter {
                 if !words.isEmpty { aliases.append(Alias(id: app.bundleIdentifier, kind: .app, words: words)) }
             }
         }
-        for website in PurposeWebsiteCatalog.common {
+        for website in websites {
             for value in [website.name] + website.aliases {
                 let words = normalizedWords(value)
                 if !words.isEmpty { aliases.append(Alias(id: website.value, kind: .website, words: words)) }
@@ -621,21 +702,27 @@ public enum PurposeLiveInterpreter {
         browserMentions: [Mention],
         words: [String]
     ) -> String? {
-        let connectors = Set(["with", "on", "in", "through", "using", "via", "inside", "browser", "website", "site"])
+        let connectors = Set([
+            "with", "on", "in", "through", "using", "via", "inside", "browser", "website", "site",
+            "and", "plus", "then", "for", "open", "access", "visit", "need", "also"
+        ])
+        let preceding = browserMentions
+            .compactMap { browser -> (id: String, distance: Int)? in
+                guard browser.end <= website.start else { return nil }
+                let bridge = words[browser.end..<website.start]
+                let distance = website.start - browser.end
+                guard distance <= 10, bridge.contains(where: connectors.contains) else { return nil }
+                return (browser.id, distance)
+            }
+            .min { $0.distance < $1.distance }
+        if let preceding { return preceding.id }
+
         return browserMentions
             .compactMap { browser -> (id: String, distance: Int)? in
-                let bridge: ArraySlice<String>
-                let distance: Int
-                if browser.end <= website.start {
-                    bridge = words[browser.end..<website.start]
-                    distance = website.start - browser.end
-                } else if website.end <= browser.start {
-                    bridge = words[website.end..<browser.start]
-                    distance = browser.start - website.end
-                } else {
-                    return nil
-                }
-                guard distance <= 6, bridge.contains(where: connectors.contains) else { return nil }
+                guard website.end <= browser.start else { return nil }
+                let bridge = words[website.end..<browser.start]
+                let distance = browser.start - website.end
+                guard distance <= 10, bridge.contains(where: connectors.contains) else { return nil }
                 return (browser.id, distance)
             }
             .min { $0.distance < $1.distance }?
@@ -688,8 +775,12 @@ public enum PurposeLiveInterpreter {
     }
 
     private static func normalizedWordsPreservingMarker(_ value: String) -> [String] {
-        let canonical = canonicalizedDisplayText(value).replacingOccurrences(of: "*", with: " \(markerToken) ")
-        return normalizedWords(canonical)
+        let normalizedMarker = value.replacingOccurrences(
+            of: #"(?i)\b(?:asterisk|asterix|astrix|astrics|asterics|astericks?)\b"#,
+            with: "*",
+            options: .regularExpression
+        )
+        return normalizedWords(normalizedMarker.replacingOccurrences(of: "*", with: " \(markerToken) "))
     }
 
     private static func normalizedWords(_ value: String) -> [String] {
@@ -711,10 +802,13 @@ public enum PurposeLiveInterpreter {
         return suffix.trimmingCharacters(in: .whitespaces)
     }
 
-    private static func canonicalizedBrowserGroups(in value: String, apps: [AllowedApp]) -> String {
+    private static func canonicalizedBrowserGroups(
+        in value: String,
+        apps: [AllowedApp],
+        websites: [PurposeKnownWebsite]
+    ) -> String {
         var result = value
-        let sites = PurposeWebsiteCatalog.common
-        let siteAliases = sites.flatMap { site in ([site.name] + site.aliases).map { ($0, site) } }
+        let siteAliases = websites.flatMap { site in ([site.name] + site.aliases).map { ($0, site) } }
             .sorted { $0.0.count > $1.0.count }
         let sitePattern = siteAliases
             .map { NSRegularExpression.escapedPattern(for: $0.0) }
@@ -730,7 +824,7 @@ public enum PurposeLiveInterpreter {
             guard !browserPattern.isEmpty else { continue }
             let listPattern = "(?:\(sitePattern))(?:\\s*(?:,|and|plus|with)\\s*(?:\(sitePattern)))*"
             let patterns = [
-                "(?i)\\b(?:\(browserPattern))\\b\\s*(?:with|using|via|for)\\s*(\(listPattern))",
+                "(?i)\\b(?:\(browserPattern))\\b\\s*(?:with|using|via|for|and|plus)\\s*(?:the\\s+)?(\(listPattern))",
                 "(?i)\\b(?:\(browserPattern))\\b\\s*\\(([^)]*)\\)\\s*(?:and|plus|with)\\s*(\(listPattern))"
             ]
 

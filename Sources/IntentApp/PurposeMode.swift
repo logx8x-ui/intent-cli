@@ -486,6 +486,7 @@ struct PurposeModeView: View {
     @State private var autocompleteSelection = 0
     @State private var autocompleteDismissed = false
     @State private var lastSpeechTranscript = ""
+    @State private var learnedWebsites: [PurposeKnownWebsite] = []
 
     let onDismiss: () -> Void
 
@@ -653,6 +654,7 @@ struct PurposeModeView: View {
             .padding(.top, 52)
         }
         .onAppear {
+            learnedWebsites = PurposeWebsiteHistoryStore.frequentKnownWebsites()
             purposeFocused = true
             model.purposeModeError = nil
             scheduleInterpretation(for: purpose, immediately: true)
@@ -674,13 +676,18 @@ struct PurposeModeView: View {
             guard !appended.isEmpty else { return }
             purpose = PurposeLiveInterpreter.canonicalizedDisplayText(
                 appendingSpeech(appended, to: purpose),
-                apps: availableApps
+                apps: availableApps,
+                knownWebsites: knownWebsiteCatalog
             )
         }
         .onChange(of: purpose) { value in
             autocompleteDismissed = false
             autocompleteSelection = 0
-            let canonical = PurposeLiveInterpreter.canonicalizedDisplayText(value, apps: availableApps)
+            let canonical = PurposeLiveInterpreter.canonicalizedDisplayText(
+                value,
+                apps: availableApps,
+                knownWebsites: knownWebsiteCatalog
+            )
             if canonical != value {
                 purpose = canonical
                 return
@@ -726,7 +733,18 @@ struct PurposeModeView: View {
     }
 
     private var speechVocabulary: [String] {
-        PurposeLiveInterpreter.speechVocabulary(apps: availableApps, intentions: model.intentions)
+        PurposeLiveInterpreter.speechVocabulary(
+            apps: availableApps,
+            intentions: model.intentions,
+            knownWebsites: learnedWebsites
+        )
+    }
+
+    private var knownWebsiteCatalog: [PurposeKnownWebsite] {
+        PurposeWebsiteCatalog.combined(
+            additional: learnedWebsites,
+            intentions: model.intentions
+        )
     }
 
     private var intentionAutocompleteCandidates: [Intention] {
@@ -858,6 +876,15 @@ struct PurposeModeView: View {
         return (intentionIDs + appIDs + websiteIDs + conflictIDs).joined(separator: "|")
     }
 
+    private var recognitionColumns: [GridItem] {
+        let cardCount = recognizedIntentions.count + recognizedApps.count
+        let columnCount = max(1, min(3, cardCount))
+        return Array(
+            repeating: GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 12),
+            count: columnCount
+        )
+    }
+
     private var liveRecognitionPanel: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
@@ -895,7 +922,7 @@ struct PurposeModeView: View {
             }
 
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 220, maximum: 300), spacing: 12)],
+                columns: recognitionColumns,
                 alignment: .leading,
                 spacing: 12
             ) {
@@ -971,7 +998,7 @@ struct PurposeModeView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
-        .frame(minWidth: 300, minHeight: 108)
+        .frame(maxWidth: .infinity, minHeight: 108)
         .background(Color.indigo.opacity(colorScheme == .dark ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 15))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.indigo.opacity(0.8), lineWidth: 1.2))
     }
@@ -1017,7 +1044,7 @@ struct PurposeModeView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
-        .frame(minWidth: 220, minHeight: 92)
+        .frame(maxWidth: .infinity, minHeight: 92)
         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 15))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(GraphTheme.stroke(colorScheme), lineWidth: 0.8))
         .help("Installed app: \(app.name)")
@@ -1040,6 +1067,8 @@ struct PurposeModeView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.green)
                         .underline()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "link")
@@ -1055,10 +1084,11 @@ struct PurposeModeView: View {
                             Text(website.name)
                                 .font(.system(size: 11, weight: .semibold))
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.76)
                         }
                         .foregroundStyle(GraphTheme.text(colorScheme))
                         .padding(.horizontal, 9)
-                        .frame(height: 32)
+                        .frame(maxWidth: .infinity, minHeight: 32)
                         .background(Color.green.opacity(colorScheme == .dark ? 0.11 : 0.07), in: Capsule())
                         .overlay(Capsule().stroke(Color.green.opacity(0.42), lineWidth: 0.8))
                     }
@@ -1066,7 +1096,7 @@ struct PurposeModeView: View {
             }
         }
         .padding(14)
-        .frame(minWidth: 280, minHeight: websites.isEmpty ? 92 : 132)
+        .frame(maxWidth: .infinity, minHeight: websites.isEmpty ? 92 : 132)
         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 15))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.green.opacity(0.62), lineWidth: 1))
         .help(websites.isEmpty ? browser.name : "\(browser.name) with \(websites.map(\.name).joined(separator: ", "))")
@@ -1074,7 +1104,7 @@ struct PurposeModeView: View {
 
     @ViewBuilder
     private func websiteIcon(_ website: PurposeWebsiteSelection) -> some View {
-        if let resource = PurposeWebsiteCatalog.website(for: website.value)?.iconResource,
+        if let resource = PurposeWebsiteCatalog.website(for: website.value, in: knownWebsiteCatalog)?.iconResource,
            let image = PurposeWebsiteIconLibrary.image(named: resource) {
             Image(nsImage: image)
                 .resizable()
@@ -1118,7 +1148,8 @@ struct PurposeModeView: View {
         let interpretation = PurposeLiveInterpreter.interpret(
             request,
             apps: availableApps,
-            intentions: model.intentions
+            intentions: model.intentions,
+            knownWebsites: learnedWebsites
         )
         liveInterpretation = interpretation
         Task {
@@ -1144,7 +1175,8 @@ struct PurposeModeView: View {
             liveInterpretation = PurposeLiveInterpreter.interpret(
                 cleaned,
                 apps: apps,
-                intentions: intentions
+                intentions: intentions,
+                knownWebsites: learnedWebsites
             )
         }
     }

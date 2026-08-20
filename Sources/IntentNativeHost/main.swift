@@ -41,6 +41,8 @@ struct HostRequest: Codable {
     var enabled: Bool?
     var browserBundleIdentifier: String?
     var tabs: [HostTab]?
+    var url: String?
+    var title: String?
 }
 
 struct HostResponse: Codable {
@@ -85,6 +87,13 @@ while let requestData = readMessage() {
             }
         )
         try? BrowserTabSnapshotStore(browserBundleIdentifier: browserBundleIdentifier).write(snapshot)
+    }
+
+    if request?.type == "recordWebsiteVisit", let url = request?.url {
+        try? PurposeWebsiteHistoryStore(browserBundleIdentifier: browserBundleIdentifier).record(
+            urlString: url,
+            title: request?.title ?? ""
+        )
     }
 
     let fileURL = ActiveBrowserRulesStore.defaultFileURL()

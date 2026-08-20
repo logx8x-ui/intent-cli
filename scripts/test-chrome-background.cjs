@@ -332,6 +332,20 @@ async function run() {
   assert.equal(disabled.storage.guardEnabled, true, "The toolbar toggle must persist in chrome.storage.local");
   assert.equal(disabled.nativeMessages.every((message) => message.browserBundleIdentifier === "com.google.Chrome"), true, "Chrome must identify itself to the native host");
 
+  const learning = createHarness({ ...lockedRules, active: false }, [
+    { id: 9, active: true, title: "Wikipedia, the free encyclopedia", url: "https://en.wikipedia.org/wiki/Intent" }
+  ]);
+  await learning.settle();
+  assert.equal(
+    learning.nativeMessages.some((message) =>
+      message?.type === "recordWebsiteVisit" &&
+      message.url === "https://en.wikipedia.org" &&
+      message.title === "Wikipedia, the free encyclopedia"
+    ),
+    true,
+    "Chrome should teach Intent a local domain and readable title without sending page paths"
+  );
+
   const contentSource = fs.readFileSync(path.join(root, "chrome-extension/content-guard.js"), "utf8");
   const documentListeners = {};
   const contentRuntimeMessage = event();

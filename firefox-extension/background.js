@@ -4,6 +4,7 @@ const RULE_REFRESH_MS = 1000;
 const TAB_SNAPSHOT_MS = 120;
 const RECONNECT_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
+const SITE_RECORD_THROTTLE_MS = 30000;
 
 const {
   isAllowedURL,
@@ -20,6 +21,7 @@ let freshBlankTabIds = new Set();
 let commandPort = null;
 let reconnectTimer = null;
 let synchronizingStartupTabs = false;
+const recentlyRecordedSites = new Map();
 
 function inactiveRules() {
   return {
@@ -52,6 +54,7 @@ async function ensureInitialized() {
   initialized = true;
   connectCommandPort();
   await notifyNativeGuardState();
+  browser.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
 }
 
 function connectCommandPort() {
@@ -94,6 +97,36 @@ function postCommandPort(message) {
     scheduleCommandReconnect();
     return false;
   }
+}
+
+async function recordWebsiteVisit(tab) {
+  if (!guardEnabled || !tab?.url) return;
+  let parsed;
+  try {
+    parsed = new URL(tab.url);
+  } catch (_) {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!host || host === "localhost" || host === "127.0.0.1" || host === "::1") return;
+  const now = Date.now();
+  if (now - (recentlyRecordedSites.get(host) || 0) < SITE_RECORD_THROTTLE_MS) return;
+  recentlyRecordedSites.set(host, now);
+
+  const message = {
+    type: "recordWebsiteVisit",
+    url: `https://${host}`,
+    title: tab.title || host
+  };
+  if (postCommandPort(message)) return;
+  if (typeof browser.runtime.connectNative === "function") return;
+  try {
+    await browser.runtime.sendNativeMessage(HOST_NAME, {
+      ...message,
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
+    });
+  } catch (_) {}
 }
 
 async function handleRequestedTab(message) {
@@ -392,12 +425,12 @@ browser.runtime.onMessage.addListener((message) => {
 });
 
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  await recordWebsiteVisit(tab);
   await refreshRules();
   if (!rules.active) {
     return;
   }
-
-  const tab = await browser.tabs.get(tabId).catch(() => null);
   if (!tab || !tab.url) {
     return;
   }
@@ -424,6 +457,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
+  await recordWebsiteVisit(tab);
   await refreshRules();
   if (!rules.active || !tab.url) {
     return;

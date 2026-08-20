@@ -28,7 +28,24 @@ struct PurposeMatcherSpec {
         expect(generatedMatch?.intentionID == study.id, "AI wording resolves to a saved intention")
 
         testLiveCorrections()
+        testWebsiteHistory()
         print("PurposeMatcherSpec passed")
+    }
+
+    private static func testWebsiteHistory() {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("intent-purpose-websites-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = PurposeWebsiteHistoryStore(fileURL: fileURL)
+        try? store.record(
+            urlString: "https://oasis.curtin.edu.au/student?private=query",
+            title: "OASIS | Curtin University"
+        )
+        let entries = store.loadEntries()
+        expect(entries.count == 1, "website history stores one normalized local entry")
+        expect(entries.first?.value == "oasis.curtin.edu.au", "website history never stores paths or query strings")
+        expect(entries.first?.name == "OASIS", "website history keeps a readable website name")
+        expect(entries.first?.aliases.contains("oasis curtin") == true, "website history learns useful domain aliases")
     }
 
     private static func testLiveCorrections() {
@@ -297,6 +314,56 @@ struct PurposeMatcherSpec {
         expect(
             changedBrowserWebsite.includedWebsites.first?.browserBundleIdentifier == firefox.bundleIdentifier,
             "a corrected website remains attached to Firefox"
+        )
+
+        let wikipedia = PurposeLiveInterpreter.interpret(
+            "Use Firefox and Wikipedia",
+            apps: apps,
+            intentions: []
+        )
+        expect(wikipedia.includedWebsites.map(\.value) == ["wikipedia.org"], "Wikipedia is recognized after a browser")
+        expect(
+            wikipedia.includedWebsites.first?.browserBundleIdentifier == firefox.bundleIdentifier,
+            "Wikipedia attaches to the preceding browser"
+        )
+
+        let oasis = PurposeLiveInterpreter.interpret(
+            "Use Firefox for the OASIS student portal for Curtin",
+            apps: apps,
+            intentions: []
+        )
+        expect(oasis.includedWebsites.map(\.value) == ["oasis.curtin.edu.au"], "Curtin OASIS speech is recognized")
+
+        let learnedPortal = PurposeKnownWebsite(
+            name: "Student Hub",
+            value: "students.example.edu",
+            aliases: ["student portal", "university student hub"]
+        )
+        let learnedWebsite = PurposeLiveInterpreter.interpret(
+            "Use Firefox and the student portal",
+            apps: apps,
+            intentions: [],
+            knownWebsites: [learnedPortal]
+        )
+        expect(
+            learnedWebsite.includedWebsites.map(\.value) == ["students.example.edu"],
+            "locally learned website aliases participate in live recognition"
+        )
+
+        let savedPortalIntention = intention(
+            id: "portal",
+            name: "Portal",
+            apps: [firefox],
+            websites: [.init("portal.example.edu", browserBundleIdentifier: firefox.bundleIdentifier)]
+        )
+        let savedPortal = PurposeLiveInterpreter.interpret(
+            "Use Firefox and portal",
+            apps: apps,
+            intentions: [savedPortalIntention]
+        )
+        expect(
+            savedPortal.includedWebsites.map(\.value) == ["portal.example.edu"],
+            "websites already saved in intentions become recognizable vocabulary"
         )
 
         let explicitDesktopApp = PurposeLiveInterpreter.interpret(

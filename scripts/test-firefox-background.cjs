@@ -377,6 +377,20 @@ async function run() {
     true,
     "Popup toggle should notify the native host"
   );
+
+  const learningHarness = createHarness({ ...lockedRules, active: false }, [
+    { id: 9, active: true, title: "OASIS | Curtin University", url: "https://oasis.curtin.edu.au/student" }
+  ]);
+  await learningHarness.ready();
+  assert.equal(
+    learningHarness.nativeMessages.some((message) =>
+      message?.type === "recordWebsiteVisit" &&
+      message.url === "https://oasis.curtin.edu.au" &&
+      message.title === "OASIS | Curtin University"
+    ),
+    true,
+    "Firefox should teach Intent a local domain and readable title without sending page paths"
+  );
 }
 
 run()

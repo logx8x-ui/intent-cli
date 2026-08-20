@@ -7,6 +7,7 @@ const TAB_SNAPSHOT_MS = 120;
 const RECONNECT_MS = 1000;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
+const SITE_RECORD_THROTTLE_MS = 30000;
 
 const { normalizeRule, isAllowedURL, isSearchStagingURL } = IntentBrowserRules;
 
@@ -23,6 +24,7 @@ let dnrFingerprint = "";
 const lastAllowedURLByTab = new Map();
 const pendingRuleRequests = new Set();
 let synchronizingStartupTabs = false;
+const recentlyRecordedSites = new Map();
 
 function inactiveRules() {
   return {
@@ -50,6 +52,7 @@ async function ensureInitialized() {
   }
   initialized = true;
   connectNativeHost();
+  chrome.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
 }
 
 function connectNativeHost() {
@@ -94,6 +97,27 @@ function postNative(message) {
     scheduleReconnect();
     return false;
   }
+}
+
+function recordWebsiteVisit(tab) {
+  if (!guardEnabled || !tab?.url) return;
+  let parsed;
+  try {
+    parsed = new URL(tab.url);
+  } catch (_) {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!host || host === "localhost" || host === "127.0.0.1" || host === "::1") return;
+  const now = Date.now();
+  if (now - (recentlyRecordedSites.get(host) || 0) < SITE_RECORD_THROTTLE_MS) return;
+  recentlyRecordedSites.set(host, now);
+  postNative({
+    type: "recordWebsiteVisit",
+    url: `https://${host}`,
+    title: tab.title || host
+  });
 }
 
 function requestRules() {
@@ -416,9 +440,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  recordWebsiteVisit(tab);
   await refreshRules();
   if (!rules.active) return;
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab?.url) return;
   if (isRuntimeAllowedTab(tab)) {
     if (isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tabId, tab.url);
@@ -430,6 +455,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === "complete") recordWebsiteVisit(tab);
   await refreshRules();
   if (!rules.active || (!changeInfo.url && changeInfo.status !== "complete") || !tab.url) return;
 
