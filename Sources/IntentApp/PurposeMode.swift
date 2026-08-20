@@ -240,7 +240,12 @@ private struct PurposePromptEditor: NSViewRepresentable {
     @Binding var measuredHeight: CGFloat
     @Binding var isFocused: Bool
     let intentions: [Intention]
+    let apps: [AllowedApp]
+    let hasAutocomplete: Bool
     let colorScheme: ColorScheme
+    let onMoveAutocomplete: (Int) -> Void
+    let onAcceptAutocomplete: () -> Void
+    let onDismissAutocomplete: () -> Void
     let onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -330,6 +335,25 @@ private struct PurposePromptEditor: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if parent.hasAutocomplete {
+                if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                    parent.onMoveAutocomplete(-1)
+                    return true
+                }
+                if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                    parent.onMoveAutocomplete(1)
+                    return true
+                }
+                if commandSelector == #selector(NSResponder.insertTab(_:))
+                    || commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                    parent.onAcceptAutocomplete()
+                    return true
+                }
+                if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                    parent.onDismissAutocomplete()
+                    return true
+                }
+            }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 parent.onSubmit()
                 return true
@@ -340,7 +364,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
         func apply(to textView: NSTextView) {
             let styleSignature = parent.intentions
                 .map { "\($0.id):\($0.name)" }
-                .joined(separator: "|")
+                .joined(separator: "|") + "|" + PurposeLiveInterpreter.browserDisplayAliases(apps: parent.apps).joined(separator: "|")
             let isDark = parent.colorScheme == .dark
             guard textView.string != lastStyledText
                 || styleSignature != lastStyleSignature
@@ -362,6 +386,22 @@ private struct PurposePromptEditor: NSViewRepresentable {
             storage.beginEditing()
             storage.setAttributes(baseAttributes, range: NSRange(location: 0, length: storage.length))
 
+            for alias in PurposeLiveInterpreter.browserDisplayAliases(apps: parent.apps) {
+                let escaped = NSRegularExpression.escapedPattern(for: alias)
+                let key = "browser:\(alias)"
+                let expression = expressions[key] ?? (try? NSRegularExpression(pattern: "(?i)\\b\(escaped)\\b"))
+                expressions[key] = expression
+                guard let expression else { continue }
+                for match in expression.matches(in: textView.string, range: NSRange(location: 0, length: storage.length)) {
+                    storage.addAttributes([
+                        .foregroundColor: NSColor.systemGreen,
+                        .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .underlineColor: NSColor.systemGreen
+                    ], range: match.range)
+                }
+            }
+
             if textView.string.contains("*") {
                 let source = textView.string as NSString
                 let lowercaseText = textView.string.lowercased()
@@ -381,10 +421,10 @@ private struct PurposePromptEditor: NSViewRepresentable {
                         let nameRange = match.range(at: 1)
                         guard nameRange.location != NSNotFound else { continue }
                         storage.addAttributes([
-                            .foregroundColor: NSColor.systemIndigo,
+                            .foregroundColor: NSColor(calibratedRed: 0.20, green: 0.48, blue: 0.98, alpha: 1),
                             .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
                             .underlineStyle: NSUnderlineStyle.single.rawValue,
-                            .underlineColor: NSColor.systemIndigo
+                            .underlineColor: NSColor(calibratedRed: 0.20, green: 0.48, blue: 0.98, alpha: 1)
                         ], range: nameRange)
                     }
                 }
@@ -442,6 +482,8 @@ struct PurposeModeView: View {
     @State private var promptHeight: CGFloat = 44
     @State private var liveInterpretation = PurposeLiveInterpretation()
     @State private var interpretationTask: Task<Void, Never>?
+    @State private var autocompleteSelection = 0
+    @State private var autocompleteDismissed = false
 
     let onDismiss: () -> Void
 
@@ -516,7 +558,12 @@ struct PurposeModeView: View {
                                 measuredHeight: $promptHeight,
                                 isFocused: $purposeFocused,
                                 intentions: model.intentions,
+                                apps: availableApps,
+                                hasAutocomplete: !intentionAutocompleteCandidates.isEmpty,
                                 colorScheme: colorScheme,
+                                onMoveAutocomplete: moveAutocomplete,
+                                onAcceptAutocomplete: acceptAutocomplete,
+                                onDismissAutocomplete: { autocompleteDismissed = true },
                                 onSubmit: submit
                             )
                             .frame(height: promptHeight)
@@ -563,6 +610,11 @@ struct PurposeModeView: View {
                     .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
                     .shadow(color: Color.black.opacity(0.28), radius: 24, y: 10)
 
+                    if !intentionAutocompleteCandidates.isEmpty {
+                        intentionAutocompleteMenu
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     if hasLiveRecognition {
                         liveRecognitionPanel
                             .transition(.move(edge: .top).combined(with: .opacity))
@@ -608,10 +660,12 @@ struct PurposeModeView: View {
         }
         .onChange(of: speech.transcript) { transcript in
             guard speech.isListening || !transcript.isEmpty else { return }
-            purpose = PurposeLiveInterpreter.canonicalizedDisplayText(transcript)
+            purpose = PurposeLiveInterpreter.canonicalizedDisplayText(transcript, apps: availableApps)
         }
         .onChange(of: purpose) { value in
-            let canonical = PurposeLiveInterpreter.canonicalizedDisplayText(value)
+            autocompleteDismissed = false
+            autocompleteSelection = 0
+            let canonical = PurposeLiveInterpreter.canonicalizedDisplayText(value, apps: availableApps)
             if canonical != value {
                 purpose = canonical
                 return
@@ -650,6 +704,77 @@ struct PurposeModeView: View {
 
     private var speechVocabulary: [String] {
         PurposeLiveInterpreter.speechVocabulary(apps: availableApps, intentions: model.intentions)
+    }
+
+    private var intentionAutocompleteCandidates: [Intention] {
+        guard !autocompleteDismissed else { return [] }
+        return PurposeLiveInterpreter.intentionAutocompleteCandidates(
+            for: purpose,
+            intentions: model.intentions
+        )
+    }
+
+    private var intentionAutocompleteMenu: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("SAVED INTENTIONS")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                Spacer()
+                Text("↑↓  TAB")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.72))
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+
+            ForEach(Array(intentionAutocompleteCandidates.enumerated()), id: \.element.id) { index, intention in
+                Button {
+                    autocompleteSelection = index
+                    acceptAutocomplete()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: intention.icon)
+                            .frame(width: 24)
+                        Text(intention.name)
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                    }
+                    .foregroundStyle(index == autocompleteSelection ? Color.white : GraphTheme.text(colorScheme))
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .background(
+                        index == autocompleteSelection ? GraphTheme.editBlue : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 9)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: 620)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(GraphTheme.editBlue.opacity(0.6), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.24), radius: 16, y: 8)
+    }
+
+    private func moveAutocomplete(_ delta: Int) {
+        let count = intentionAutocompleteCandidates.count
+        guard count > 0 else { return }
+        autocompleteSelection = (autocompleteSelection + delta + count) % count
+    }
+
+    private func acceptAutocomplete() {
+        let candidates = intentionAutocompleteCandidates
+        guard candidates.indices.contains(autocompleteSelection) else { return }
+        purpose = PurposeLiveInterpreter.completingIntentionMention(
+            in: purpose,
+            with: candidates[autocompleteSelection]
+        )
+        autocompleteDismissed = true
+        purposeFocused = true
     }
 
     private var recognizedIntentions: [Intention] {
@@ -727,12 +852,12 @@ struct PurposeModeView: View {
                     recognizedIntentionCard(intention)
                         .transition(.scale(scale: 0.76).combined(with: .opacity))
                 }
-                ForEach(recognizedApps) { app in
+                ForEach(recognizedApps.filter { !BrowserApplication.isBrowser($0.bundleIdentifier) }) { app in
                     recognizedAppCard(app)
                         .transition(.scale(scale: 0.76).combined(with: .opacity))
                 }
-                ForEach(recognizedWebsites) { website in
-                    recognizedWebsiteCard(website)
+                ForEach(recognizedApps.filter { BrowserApplication.isBrowser($0.bundleIdentifier) }) { browser in
+                    recognizedBrowserGroupCard(browser)
                         .transition(.scale(scale: 0.76).combined(with: .opacity))
                 }
             }
@@ -819,58 +944,68 @@ struct PurposeModeView: View {
         .help("Installed app: \(app.name)")
     }
 
-    private func recognizedWebsiteCard(_ website: PurposeWebsiteSelection) -> some View {
-        HStack(spacing: 12) {
-            if let resource = PurposeWebsiteCatalog.website(for: website.value)?.iconResource,
-               let image = PurposeWebsiteIconLibrary.image(named: resource) {
-                Image(nsImage: image)
+    private func recognizedBrowserGroupCard(_ browser: InstalledApp) -> some View {
+        let websites = recognizedWebsites.filter { $0.browserBundleIdentifier == browser.bundleIdentifier }
+        return VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 12) {
+                Image(nsImage: browser.icon)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 54, height: 54)
-            } else {
-                Image(systemName: "globe")
-                    .font(.system(size: 34, weight: .medium))
-                    .foregroundStyle(GraphTheme.editBlue)
-                    .frame(width: 54, height: 54)
+                    .frame(width: 52, height: 52)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("BROWSER WORKSPACE")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundStyle(Color.green)
+                    Text(browser.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.green)
+                        .underline()
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "link")
+                    .foregroundStyle(Color.green.opacity(0.8))
             }
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("WEBSITE")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .tracking(0.8)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-                Text(website.name)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(GraphTheme.text(colorScheme))
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.system(size: 9, weight: .semibold))
-                    if let browser = browserApp(for: website) {
-                        Image(nsImage: browser.icon)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 18, height: 18)
-                        Text("via \(browser.name)")
-                    } else {
-                        Text("browser required")
+            if !websites.isEmpty {
+                Divider().overlay(Color.green.opacity(0.28))
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 118), spacing: 8)], alignment: .leading, spacing: 8) {
+                    ForEach(websites) { website in
+                        HStack(spacing: 7) {
+                            websiteIcon(website)
+                            Text(website.name)
+                                .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(GraphTheme.text(colorScheme))
+                        .padding(.horizontal, 9)
+                        .frame(height: 32)
+                        .background(Color.green.opacity(colorScheme == .dark ? 0.11 : 0.07), in: Capsule())
+                        .overlay(Capsule().stroke(Color.green.opacity(0.42), lineWidth: 0.8))
                     }
                 }
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(GraphTheme.editBlue)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
-        .frame(minWidth: 240, minHeight: 92)
+        .padding(14)
+        .frame(minWidth: 280, minHeight: websites.isEmpty ? 92 : 132)
         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 15))
-        .overlay(RoundedRectangle(cornerRadius: 15).stroke(GraphTheme.editBlue.opacity(0.62), lineWidth: 1))
-        .help("Allowed website: \(website.value) via \(browserApp(for: website)?.name ?? "browser")")
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.green.opacity(0.62), lineWidth: 1))
+        .help(websites.isEmpty ? browser.name : "\(browser.name) with \(websites.map(\.name).joined(separator: ", "))")
     }
 
-    private func browserApp(for website: PurposeWebsiteSelection) -> InstalledApp? {
-        guard let browserBundleIdentifier = website.browserBundleIdentifier else { return nil }
-        return model.installedApps.first { $0.bundleIdentifier == browserBundleIdentifier }
+    @ViewBuilder
+    private func websiteIcon(_ website: PurposeWebsiteSelection) -> some View {
+        if let resource = PurposeWebsiteCatalog.website(for: website.value)?.iconResource,
+           let image = PurposeWebsiteIconLibrary.image(named: resource) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18, height: 18)
+        } else {
+            Image(systemName: "globe")
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 18, height: 18)
+        }
     }
 
     private func example(_ title: String) -> some View {

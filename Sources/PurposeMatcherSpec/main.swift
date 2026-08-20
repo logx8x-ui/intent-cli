@@ -144,6 +144,51 @@ struct PurposeMatcherSpec {
             "website is assigned to the mentioned browser"
         )
 
+        let multipleBrowserWebsites = PurposeLiveInterpreter.interpret(
+            "I want to use Firefox with YouTube and Instagram",
+            apps: apps,
+            intentions: []
+        )
+        expect(
+            multipleBrowserWebsites.includedWebsites.map(\.value) == ["youtube.com", "instagram.com"],
+            "multiple websites remain attached to the preceding browser"
+        )
+        expect(
+            multipleBrowserWebsites.includedWebsites.allSatisfy {
+                $0.browserBundleIdentifier == firefox.bundleIdentifier
+            },
+            "all websites in a browser phrase share that browser"
+        )
+
+        let canonicalBrowserGroup = PurposeLiveInterpreter.canonicalizedDisplayText(
+            "I want to use firefox with youtube and instagram",
+            apps: apps
+        )
+        expect(
+            canonicalBrowserGroup == "I want to use Firefox(YouTube, Instagram)",
+            "browser website phrases become a clear grouped display"
+        )
+        let groupedInterpretation = PurposeLiveInterpreter.interpret(
+            canonicalBrowserGroup,
+            apps: apps,
+            intentions: []
+        )
+        expect(
+            groupedInterpretation.includedWebsites.map(\.value) == ["youtube.com", "instagram.com"],
+            "the grouped display remains fully interpretable"
+        )
+
+        let autocomplete = PurposeLiveInterpreter.intentionAutocompleteCandidates(
+            for: "Run *Stu",
+            intentions: [study]
+        )
+        expect(autocomplete.map(\.id) == [study.id], "asterisk autocomplete finds a partial intention")
+        let completedMention = PurposeLiveInterpreter.completingIntentionMention(in: "Run *Stu", with: study)
+        expect(
+            completedMention == "Run * Study",
+            "accepting autocomplete inserts the complete starred intention"
+        )
+
         let appWithoutBrowser = PurposeLiveInterpreter.interpret(
             "Use ChatGPT",
             apps: apps,

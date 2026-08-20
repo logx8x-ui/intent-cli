@@ -124,12 +124,53 @@ public enum PurposeLiveInterpreter {
         let browserBundleIdentifier: String?
     }
 
-    public static func canonicalizedDisplayText(_ rawText: String) -> String {
-        rawText.replacingOccurrences(
+    public static func canonicalizedDisplayText(_ rawText: String, apps: [AllowedApp] = []) -> String {
+        let normalizedMarker = rawText.replacingOccurrences(
             of: #"(?i)\b(?:asterisk|asterix|astrix|astrics|asterics|astericks?)\b"#,
             with: "*",
             options: .regularExpression
         )
+        guard !apps.isEmpty else { return normalizedMarker }
+        return canonicalizedBrowserGroups(in: normalizedMarker, apps: apps)
+    }
+
+    public static func intentionAutocompleteCandidates(
+        for rawText: String,
+        intentions: [Intention],
+        limit: Int = 6
+    ) -> [Intention] {
+        guard let query = activeIntentionMentionQuery(in: rawText) else { return [] }
+        let foldedQuery = folded(query)
+        if intentions.contains(where: { folded($0.name) == foldedQuery }) { return [] }
+        return intentions
+            .filter { intention in
+                let name = folded(intention.name)
+                return foldedQuery.isEmpty || name.hasPrefix(foldedQuery)
+                    || name.split(separator: " ").contains(where: { $0.hasPrefix(foldedQuery) })
+            }
+            .sorted { lhs, rhs in
+                lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            .prefix(max(0, limit))
+            .map { $0 }
+    }
+
+    public static func completingIntentionMention(in rawText: String, with intention: Intention) -> String {
+        guard let marker = rawText.lastIndex(of: "*"),
+              activeIntentionMentionQuery(in: rawText) != nil else { return rawText }
+        return String(rawText[..<marker]) + "* \(intention.name)"
+    }
+
+    public static func browserDisplayAliases(apps: [AllowedApp]) -> [String] {
+        var values: [String] = []
+        for app in apps where app.isBrowser {
+            values.append(app.name)
+            values.append(contentsOf: knownAppAliases[app.bundleIdentifier, default: []])
+        }
+        var seen = Set<String>()
+        return values
+            .sorted { $0.count > $1.count }
+            .filter { seen.insert(folded($0)).inserted }
     }
 
     public static func speechVocabulary(apps: [AllowedApp], intentions: [Intention]) -> [String] {
@@ -430,6 +471,8 @@ public enum PurposeLiveInterpreter {
         }
         var rememberedBrowsers: [String: String] = [:]
         var qualifiedSites: [Mention] = []
+        var lastQualifiedBrowser: String?
+        var lastQualifiedWebsiteEnd: Int?
 
         for mention in mentions.filter({ $0.kind == .website }).sorted(by: { $0.start < $1.start }) {
             let explicitBrowser = explicitlyLinkedBrowser(
@@ -437,9 +480,25 @@ public enum PurposeLiveInterpreter {
                 browserMentions: browserMentions,
                 words: words
             )
-            let browser = explicitBrowser ?? rememberedBrowsers[mention.id]
+            let adjacentBrowser = browserMentions
+                .filter { $0.end == mention.start }
+                .max { $0.start < $1.start }?
+                .id
+            let chainedBrowser: String?
+            if let lastQualifiedBrowser, let lastQualifiedWebsiteEnd,
+               lastQualifiedWebsiteEnd <= mention.start,
+               words[lastQualifiedWebsiteEnd..<mention.start].allSatisfy({
+                   ["and", "plus", "with", "also"].contains($0)
+               }) {
+                chainedBrowser = lastQualifiedBrowser
+            } else {
+                chainedBrowser = nil
+            }
+            let browser = explicitBrowser ?? adjacentBrowser ?? chainedBrowser ?? rememberedBrowsers[mention.id]
             guard let browser else { continue }
             rememberedBrowsers[mention.id] = browser
+            lastQualifiedBrowser = browser
+            lastQualifiedWebsiteEnd = mention.end
             qualifiedSites.append(Mention(
                 id: mention.id,
                 kind: mention.kind,
@@ -548,6 +607,84 @@ public enum PurposeLiveInterpreter {
         return folded
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
+    }
+
+    private static func activeIntentionMentionQuery(in value: String) -> String? {
+        guard let marker = value.lastIndex(of: "*") else { return nil }
+        let suffix = String(value[value.index(after: marker)...])
+        let terminators = CharacterSet(charactersIn: "\n.,;:!?()[]{}")
+        guard suffix.rangeOfCharacter(from: terminators) == nil else { return nil }
+        return suffix.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func canonicalizedBrowserGroups(in value: String, apps: [AllowedApp]) -> String {
+        var result = value
+        let sites = PurposeWebsiteCatalog.common
+        let siteAliases = sites.flatMap { site in ([site.name] + site.aliases).map { ($0, site) } }
+            .sorted { $0.0.count > $1.0.count }
+        let sitePattern = siteAliases
+            .map { NSRegularExpression.escapedPattern(for: $0.0) }
+            .joined(separator: "|")
+        guard !sitePattern.isEmpty else { return result }
+
+        for app in apps.filter(\.isBrowser) {
+            let aliases = ([app.name] + knownAppAliases[app.bundleIdentifier, default: []])
+                .sorted { $0.count > $1.count }
+            let browserPattern = aliases
+                .map(NSRegularExpression.escapedPattern(for:))
+                .joined(separator: "|")
+            guard !browserPattern.isEmpty else { continue }
+            let listPattern = "(?:\(sitePattern))(?:\\s*(?:,|and|plus|with)\\s*(?:\(sitePattern)))*"
+            let patterns = [
+                "(?i)\\b(?:\(browserPattern))\\b\\s*(?:with|using|via|for)\\s*(\(listPattern))",
+                "(?i)\\b(?:\(browserPattern))\\b\\s*\\(([^)]*)\\)\\s*(?:and|plus|with)\\s*(\(listPattern))"
+            ]
+
+            for (patternIndex, pattern) in patterns.enumerated() {
+                guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+                let matches = expression.matches(
+                    in: result,
+                    range: NSRange(result.startIndex..., in: result)
+                )
+                for match in matches.reversed() {
+                    let source = result as NSString
+                    var siteText = source.substring(with: match.range(at: 1))
+                    if patternIndex == 1, match.numberOfRanges > 2 {
+                        siteText += " " + source.substring(with: match.range(at: 2))
+                    }
+                    let matchedSites = orderedSites(in: siteText, aliases: siteAliases)
+                    guard !matchedSites.isEmpty else { continue }
+                    let replacement = "\(app.name)(\(matchedSites.map(\.name).joined(separator: ", ")))"
+                    guard let swiftRange = Range(match.range, in: result) else { continue }
+                    result.replaceSubrange(swiftRange, with: replacement)
+                }
+            }
+        }
+        return result
+    }
+
+    private static func orderedSites(
+        in text: String,
+        aliases: [(String, PurposeKnownWebsite)]
+    ) -> [PurposeKnownWebsite] {
+        var matches: [(location: Int, site: PurposeKnownWebsite)] = []
+        for (alias, site) in aliases {
+            let pattern = "(?i)\\b\(NSRegularExpression.escapedPattern(for: alias))\\b"
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(
+                    in: text,
+                    range: NSRange(text.startIndex..., in: text)
+                  ) else { continue }
+            matches.append((match.range.location, site))
+        }
+        var seen = Set<String>()
+        return matches.sorted { $0.location < $1.location }.compactMap { match in
+            seen.insert(match.site.value).inserted ? match.site : nil
+        }
+    }
+
+    private static func folded(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
     }
 
     private static func levenshteinDistance(_ lhs: String, _ rhs: String) -> Int {
