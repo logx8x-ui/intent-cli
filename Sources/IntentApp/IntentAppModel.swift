@@ -109,7 +109,11 @@ final class IntentAppModel: ObservableObject {
             selectedID = selectedID ?? intentions.first?.id
             undoStack.removeAll()
             activeMoveUndoKeys.removeAll()
-            try store.save(intentions)
+            do {
+                try store.save(intentions)
+            } catch {
+                errorMessage = "Intentions loaded, but the latest layout could not be saved: \(error)"
+            }
         } catch {
             errorMessage = "Could not load intentions: \(error)"
             intentions = []
@@ -1008,16 +1012,23 @@ final class IntentAppModel: ObservableObject {
 
         Thread.detachNewThread {
             let renewalTimer: DispatchSourceTimer?
+            let renewalQueue: DispatchQueue?
             if let rules {
-                let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+                let queue = DispatchQueue(
+                    label: "dev.loganmondi.intent.browser-rules.\(UUID().uuidString)",
+                    qos: .utility
+                )
+                let timer = DispatchSource.makeTimerSource(queue: queue)
                 timer.schedule(deadline: .now() + 1, repeating: 1)
                 timer.setEventHandler {
                     try? ActiveBrowserRulesStore().write(rules.refreshed())
                 }
                 timer.resume()
                 renewalTimer = timer
+                renewalQueue = queue
             } else {
                 renewalTimer = nil
+                renewalQueue = nil
             }
 
             let failureMessage: String?
@@ -1029,6 +1040,7 @@ final class IntentAppModel: ObservableObject {
             }
 
             renewalTimer?.cancel()
+            renewalQueue?.sync {}
             try? ActiveBrowserRulesStore().clear()
             Task { @MainActor in
                 let replacement = self.pendingReplacementIntention

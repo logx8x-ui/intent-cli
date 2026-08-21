@@ -2,30 +2,49 @@ import Foundation
 
 public final class IntentionStore {
     public let fileURL: URL
+    public private(set) var didRecoverFromBackup = false
+
+    private var recoveryFileURL: URL {
+        fileURL.deletingPathExtension().appendingPathExtension("last-good.json")
+    }
 
     public init(fileURL: URL = IntentionStore.defaultFileURL()) {
         self.fileURL = fileURL
     }
 
     public func load() throws -> [Intention] {
+        didRecoverFromBackup = false
+
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             let emptyDesktop: [Intention] = []
             try save(emptyDesktop)
             return emptyDesktop
         }
 
-        let data = try Data(contentsOf: fileURL)
-        if data.range(of: Data("\"graphPosition\"".utf8)) == nil {
-            let backupURL = fileURL.deletingPathExtension().appendingPathExtension("pre-graph-backup.json")
-            if !FileManager.default.fileExists(atPath: backupURL.path) {
-                try? FileManager.default.copyItem(at: fileURL, to: backupURL)
+        do {
+            let data = try Data(contentsOf: fileURL)
+            if data.range(of: Data("\"graphPosition\"".utf8)) == nil {
+                let backupURL = fileURL.deletingPathExtension().appendingPathExtension("pre-graph-backup.json")
+                if !FileManager.default.fileExists(atPath: backupURL.path) {
+                    try? FileManager.default.copyItem(at: fileURL, to: backupURL)
+                }
+            }
+            return try decode(data)
+        } catch let primaryError {
+            guard FileManager.default.fileExists(atPath: recoveryFileURL.path) else {
+                throw primaryError
+            }
+
+            do {
+                let recoveryData = try Data(contentsOf: recoveryFileURL)
+                let recoveredIntentions = try decode(recoveryData)
+                try recoveryData.write(to: fileURL, options: [.atomic])
+                didRecoverFromBackup = true
+                return recoveredIntentions
+            } catch {
+                throw primaryError
             }
         }
-        var intentions = try JSONDecoder().decode([Intention].self, from: data)
-        if intentions.contains(where: { $0.graphModelVersion < 3 }) {
-            GraphLayoutMigration.arrangeLegacyCollisions(&intentions)
-        }
-        return intentions
     }
 
     public func save(_ intentions: [Intention]) throws {
@@ -37,6 +56,15 @@ public final class IntentionStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(intentions)
         try data.write(to: fileURL, options: [.atomic])
+        try? data.write(to: recoveryFileURL, options: [.atomic])
+    }
+
+    private func decode(_ data: Data) throws -> [Intention] {
+        var intentions = try JSONDecoder().decode([Intention].self, from: data)
+        if intentions.contains(where: { $0.graphModelVersion < 3 }) {
+            GraphLayoutMigration.arrangeLegacyCollisions(&intentions)
+        }
+        return intentions
     }
 
     public static func defaultFileURL() -> URL {

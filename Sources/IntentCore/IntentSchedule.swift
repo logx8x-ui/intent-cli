@@ -111,14 +111,24 @@ public struct IntentSchedule: Identifiable, Codable, Equatable {
     public func triggerKeyIfDue(at date: Date, calendar: Calendar = .current) -> String? {
         guard occurs(on: date, calendar: calendar) else { return nil }
         let scheduledTime = calendar.dateComponents([.hour, .minute], from: scheduledAt)
-        let currentTime = calendar.dateComponents([.hour, .minute], from: date)
-        guard scheduledTime.hour == currentTime.hour,
-              scheduledTime.minute == currentTime.minute else {
+        var occurrenceComponents = calendar.dateComponents([.year, .month, .day], from: date)
+        occurrenceComponents.hour = scheduledTime.hour
+        occurrenceComponents.minute = scheduledTime.minute
+        occurrenceComponents.second = 0
+        guard let occurrence = calendar.date(from: occurrenceComponents) else {
             return nil
         }
 
-        let day = calendar.dateComponents([.year, .month, .day], from: date)
-        let key = [day.year, day.month, day.day, currentTime.hour, currentTime.minute]
+        let delay = date.timeIntervalSince(occurrence)
+        guard delay >= 0, delay < 90 else { return nil }
+
+        let key = [
+            occurrenceComponents.year,
+            occurrenceComponents.month,
+            occurrenceComponents.day,
+            occurrenceComponents.hour,
+            occurrenceComponents.minute
+        ]
             .map { String($0 ?? 0) }
             .joined(separator: "-")
         return "\(id):\(key)"
@@ -150,18 +160,42 @@ public struct IntentSchedule: Identifiable, Codable, Equatable {
 
 public final class IntentScheduleStore {
     public let fileURL: URL
+    public private(set) var didRecoverFromBackup = false
+
+    private var recoveryFileURL: URL {
+        fileURL.deletingPathExtension().appendingPathExtension("last-good.json")
+    }
 
     public init(fileURL: URL = IntentScheduleStore.defaultFileURL()) {
         self.fileURL = fileURL
     }
 
     public func load() throws -> [IntentSchedule] {
+        didRecoverFromBackup = false
+
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             try save([])
             return []
         }
-        let data = try Data(contentsOf: fileURL)
-        return try JSONDecoder().decode([IntentSchedule].self, from: data)
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            return try JSONDecoder().decode([IntentSchedule].self, from: data)
+        } catch let primaryError {
+            guard FileManager.default.fileExists(atPath: recoveryFileURL.path) else {
+                throw primaryError
+            }
+
+            do {
+                let recoveryData = try Data(contentsOf: recoveryFileURL)
+                let recoveredSchedules = try JSONDecoder().decode([IntentSchedule].self, from: recoveryData)
+                try recoveryData.write(to: fileURL, options: [.atomic])
+                didRecoverFromBackup = true
+                return recoveredSchedules
+            } catch {
+                throw primaryError
+            }
+        }
     }
 
     public func save(_ schedules: [IntentSchedule]) throws {
@@ -171,7 +205,9 @@ public final class IntentScheduleStore {
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(schedules).write(to: fileURL, options: .atomic)
+        let data = try encoder.encode(schedules)
+        try data.write(to: fileURL, options: .atomic)
+        try? data.write(to: recoveryFileURL, options: .atomic)
     }
 
     public static func defaultFileURL() -> URL {

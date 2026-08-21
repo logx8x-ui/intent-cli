@@ -87,8 +87,6 @@ final class KeychainTokenStore: SecureTokenStoring {
 
     private func noninteractive(_ query: [String: Any]) -> [String: Any] {
         var query = query
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
-
         let context = LAContext()
         context.interactionNotAllowed = true
         query[kSecUseAuthenticationContext as String] = context

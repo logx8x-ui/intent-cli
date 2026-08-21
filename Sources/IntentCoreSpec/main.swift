@@ -786,6 +786,12 @@ do {
     let loadedIntentions = try intentionStore.load()
     try expect(loadedIntentions == intentions, "IntentionStore should round-trip intentions")
 
+    try Data("not valid intention JSON".utf8).write(to: intentionStore.fileURL, options: [.atomic])
+    let recoveringIntentionStore = IntentionStore(fileURL: intentionStore.fileURL)
+    let recoveredIntentions = try recoveringIntentionStore.load()
+    try expect(recoveredIntentions == intentions, "IntentionStore should recover from its last-good backup")
+    try expect(recoveringIntentionStore.didRecoverFromBackup, "IntentionStore should report backup recovery")
+
     var scheduleCalendar = Calendar(identifier: .gregorian)
     scheduleCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
     let scheduleDate = scheduleCalendar.date(from: DateComponents(
@@ -824,11 +830,23 @@ do {
         loadedSchedules == [onceSchedule, dailySchedule, weeklySchedule],
         "IntentScheduleStore should round-trip schedules"
     )
+    try Data("not valid schedule JSON".utf8).write(to: scheduleStore.fileURL, options: [.atomic])
+    let recoveringScheduleStore = IntentScheduleStore(fileURL: scheduleStore.fileURL)
+    let recoveredSchedules = try recoveringScheduleStore.load()
+    try expect(
+        recoveredSchedules == [onceSchedule, dailySchedule, weeklySchedule],
+        "IntentScheduleStore should recover from its last-good backup"
+    )
+    try expect(recoveringScheduleStore.didRecoverFromBackup, "IntentScheduleStore should report backup recovery")
     try expect(onceSchedule.occurs(on: scheduleDate, calendar: scheduleCalendar), "A once schedule should occur on its saved date")
     try expect(onceSchedule.triggerKeyIfDue(at: scheduleDate, calendar: scheduleCalendar) != nil, "A schedule should become due at its saved minute")
     try expect(
-        onceSchedule.triggerKeyIfDue(at: scheduleDate.addingTimeInterval(60), calendar: scheduleCalendar) == nil,
-        "A once schedule should not trigger at a different minute"
+        onceSchedule.triggerKeyIfDue(at: scheduleDate.addingTimeInterval(89), calendar: scheduleCalendar) != nil,
+        "A schedule should survive a brief polling or wake delay"
+    )
+    try expect(
+        onceSchedule.triggerKeyIfDue(at: scheduleDate.addingTimeInterval(90), calendar: scheduleCalendar) == nil,
+        "A schedule should not launch after its catch-up window"
     )
     let nextDay = scheduleCalendar.date(byAdding: .day, value: 1, to: scheduleDate)!
     try expect(dailySchedule.occurs(on: nextDay, calendar: scheduleCalendar), "A daily schedule should occur the next day")

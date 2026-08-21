@@ -118,7 +118,7 @@ final class IntentUpdateManager: ObservableObject {
         Task {
             do {
                 let root = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("IntentUpdate-(UUID().uuidString)", isDirectory: true)
+                    .appendingPathComponent("IntentUpdate-\(UUID().uuidString)", isDirectory: true)
                 let diskImage = root.appendingPathComponent("Intent.dmg")
                 let manifestFile = root.appendingPathComponent("release-manifest.json")
                 let mountPoint = root.appendingPathComponent("mounted", isDirectory: true)
@@ -146,7 +146,7 @@ final class IntentUpdateManager: ObservableObject {
                 }
                 try verify(package: package, teamID: manifest.teamID)
 
-                try launchInstaller(package: package, mountPoint: mountPoint)
+                try launchInstaller(package: package, mountPoint: mountPoint, root: root)
             } catch {
                 errorMessage = error.localizedDescription
                 isInstalling = false
@@ -221,11 +221,12 @@ final class IntentUpdateManager: ObservableObject {
         }
     }
 
-    private func launchInstaller(package: URL, mountPoint: URL) throws {
+    private func launchInstaller(package: URL, mountPoint: URL, root: URL) throws {
         let command = [
             "/usr/sbin/installer -pkg (shellQuote(package.path)) -target /",
             "status=$?",
             "/usr/bin/hdiutil detach (shellQuote(mountPoint.path)) -force >/dev/null 2>&1 || true",
+            "/bin/rm -rf (shellQuote(root.path))",
             "exit $status"
         ].joined(separator: "; ")
 
@@ -239,12 +240,31 @@ final class IntentUpdateManager: ObservableObject {
         ]
         process.terminationHandler = { process in
             guard process.terminationStatus != 0 else { return }
+            Self.cleanupUpdateFiles(mountPoint: mountPoint, root: root)
             Task { @MainActor in
                 IntentUpdateManager.shared.isInstalling = false
                 IntentUpdateManager.shared.errorMessage = "The Intent update was cancelled or could not be installed."
             }
         }
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            Self.cleanupUpdateFiles(mountPoint: mountPoint, root: root)
+            throw error
+        }
+    }
+
+    nonisolated private static func cleanupUpdateFiles(mountPoint: URL, root: URL) {
+        let detach = Process()
+        detach.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        detach.arguments = ["detach", mountPoint.path, "-force"]
+        detach.standardOutput = FileHandle.nullDevice
+        detach.standardError = FileHandle.nullDevice
+        do {
+            try detach.run()
+            detach.waitUntilExit()
+        } catch {}
+        try? FileManager.default.removeItem(at: root)
     }
 
     private func shellQuote(_ value: String) -> String {
