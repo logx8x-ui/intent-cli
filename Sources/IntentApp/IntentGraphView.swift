@@ -5,6 +5,7 @@ import IntentCore
 struct IntentGraphView: View {
     @EnvironmentObject private var model: IntentAppModel
     @EnvironmentObject private var calendarSync: CalendarSyncManager
+    @EnvironmentObject private var accountManager: IntentAccountManager
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var updateManager = IntentUpdateManager.shared
     @AppStorage("intentAppearance") private var appearance = "dark"
@@ -137,6 +138,14 @@ struct IntentGraphView: View {
                         .padding(.top, 72)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                if accountManager.phase == .loading
+                    || accountManager.phase == .choosing
+                    || accountManager.isPresentingAccount {
+                    IntentAccountGate()
+                        .environmentObject(accountManager)
+                        .zIndex(2_000)
                 }
 
                 GraphInputMonitor(
@@ -939,12 +948,16 @@ struct IntentGraphView: View {
                     overlayShortcut: $overlayShortcut,
                     finishShortcut: $finishShortcut,
                     launchAtLogin: $launchAtLogin,
-                    onBackgroundChanged: { backgroundRevision += 1 },
+                    onBackgroundChanged: {
+                        backgroundRevision += 1
+                        accountManager.customBackgroundDidChange()
+                    },
                     onShowGuide: {
                         showSettings = false
                         showQuickGuide = true
                     }
                 )
+                .environmentObject(accountManager)
             }
 
             if currentPage == .desktop {
@@ -952,6 +965,13 @@ struct IntentGraphView: View {
             }
         }
         .padding(18)
+        .onChange(of: accountManager.workspaceRevision) { _ in
+            backgroundRevision += 1
+            overlayShortcut = OverlayShortcutStore.load()
+            finishShortcut = FinishShortcutStore.load()
+            selection = nil
+            selectedIntentionIDs.removeAll()
+        }
     }
 
     private func updateControl(_ release: IntentGitHubRelease) -> some View {

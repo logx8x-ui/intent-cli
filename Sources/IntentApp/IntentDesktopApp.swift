@@ -25,6 +25,13 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where IntentRuntime.shared.accountManager.handleAuthCallback(url) {
+            IntentRuntime.shared.model.showOverlay()
+            return
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let model = IntentRuntime.shared.model
         guard model.isZeroDriftActive else { return .terminateNow }
@@ -165,6 +172,7 @@ final class IntentRuntime {
 
     let model: IntentAppModel
     let calendarSync: CalendarSyncManager
+    let accountManager: IntentAccountManager
     private let overlayController: OverlayWindowController
     private var hotKeyManager: GlobalHotKeyManager?
     private var showOverlayObserver: NSObjectProtocol?
@@ -174,13 +182,23 @@ final class IntentRuntime {
     init() {
         let model = IntentAppModel()
         let calendarSync = CalendarSyncManager(model: model)
+        let accountManager = IntentAccountManager()
         calendarSync.attach(model: model)
-        let controller = OverlayWindowController(model: model, calendarSync: calendarSync)
+        accountManager.attach(model: model)
+        let controller = OverlayWindowController(
+            model: model,
+            calendarSync: calendarSync,
+            accountManager: accountManager
+        )
         model.overlayPresenter = controller
 
         self.model = model
         self.calendarSync = calendarSync
+        self.accountManager = accountManager
         overlayController = controller
+        accountManager.onPortablePreferencesApplied = { [weak self] in
+            self?.reloadPortablePreferences()
+        }
     }
 
     func start() {
@@ -211,12 +229,15 @@ final class IntentRuntime {
         ) { _ in
             Task { @MainActor in
                 IntentRuntime.shared.calendarSync.appBecameActive()
+                IntentRuntime.shared.accountManager.appBecameActive()
             }
         }
 
         model.load()
+        Task { await accountManager.start() }
         IntentUpdateManager.shared.checkForUpdates()
         if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
+            || !UserDefaults.standard.bool(forKey: "intentAccountChoiceMade")
             || PurposeModePreference.isEnabled {
             overlayController.showOverlay(animated: false)
         }
@@ -257,6 +278,15 @@ final class IntentRuntime {
 
     func updateLaunchAtLogin(_ enabled: Bool) -> String? {
         LaunchAtLoginController.setEnabled(enabled)
+    }
+
+    private func reloadPortablePreferences() {
+        let shortcut = OverlayShortcutStore.load()
+        guard let hotKeyManager else { return }
+        let status = hotKeyManager.update(to: shortcut)
+        model.shortcutWarning = status == noErr
+            ? nil
+            : "Synced shortcut unavailable on this Mac. Choose another shortcut in Settings."
     }
 }
 

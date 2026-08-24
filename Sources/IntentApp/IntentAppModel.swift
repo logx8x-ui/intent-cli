@@ -42,9 +42,11 @@ final class IntentAppModel: ObservableObject {
     }
 
     weak var overlayPresenter: IntentOverlayPresenting?
+    var onWorkspaceChanged: (() -> Void)?
 
-    private let store = IntentionStore()
-    private let scheduleStore = IntentScheduleStore()
+    private(set) var profileDirectory = IntentProfilePaths.guestDirectory()
+    private var store = IntentionStore()
+    private var scheduleStore = IntentScheduleStore()
     private let cooldownStore = IntentionCooldownStore()
     private let zeroDriftStore = ZeroDriftStateStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
@@ -135,6 +137,33 @@ final class IntentAppModel: ObservableObject {
         startScheduleTimer()
     }
 
+    func switchProfile(to directory: URL) {
+        guard !hasActiveSession else {
+            errorMessage = "Finish the active intention before switching accounts."
+            return
+        }
+        profileDirectory = directory
+        store = IntentionStore(fileURL: IntentProfilePaths.intentionsURL(in: directory))
+        scheduleStore = IntentScheduleStore(fileURL: IntentProfilePaths.schedulesURL(in: directory))
+        selectedID = nil
+        load()
+    }
+
+    func replaceWorkspace(intentions newIntentions: [Intention], schedules newSchedules: [IntentSchedule]) {
+        guard !hasActiveSession else { return }
+        intentions = newIntentions
+        schedules = newSchedules
+        selectedID = intentions.first?.id
+        undoStack.removeAll()
+        activeMoveUndoKeys.removeAll()
+        do {
+            try store.save(intentions)
+            try scheduleStore.save(schedules)
+        } catch {
+            errorMessage = "Could not save the synced workspace: \(error)"
+        }
+    }
+
     func save() {
         guard !hasActiveSession else { return }
         do {
@@ -142,6 +171,7 @@ final class IntentAppModel: ObservableObject {
                 !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
             try store.save(namedIntentions)
+            onWorkspaceChanged?()
         } catch {
             errorMessage = "Could not save intentions: \(error)"
         }
@@ -1253,6 +1283,7 @@ final class IntentAppModel: ObservableObject {
     func saveSchedules() {
         do {
             try scheduleStore.save(schedules)
+            onWorkspaceChanged?()
         } catch {
             errorMessage = "Could not save schedules: \(error)"
         }

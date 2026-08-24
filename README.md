@@ -55,6 +55,11 @@ Firefox removes temporary add-ons after a restart. A permanent Mozilla Add-ons l
 
 New installs open to a blank canvas with **Welcome to my desktop** and a short guide.
 
+On first launch, choose **Continue as guest**, **Continue with Google**, or use
+an email and password. Guest mode includes the full Intent experience and saves
+only on that Mac. An account keeps each device on the same private workspace;
+a brand-new account always starts with zero intentions. See [Intent Accounts](docs/ACCOUNTS.md).
+
 - Click an intention to run it.
 - Press `~` to show or hide Intent, or change that shortcut in Settings.
 - Press `Tab` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
@@ -116,7 +121,8 @@ curl -fsSL https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/uninstall
 Add `--delete-data` when running a downloaded copy of `uninstall.sh` to also
 remove the local data under `~/.intent`.
 
-Intent is a personal focus tool, not security software. See [Privacy](PRIVACY.md) for its local-only data behavior.
+Intent is a personal focus tool, not security software. See [Privacy](PRIVACY.md)
+for its local-first storage and optional account-sync behavior.
 
 ## OpenAI Build Week
 

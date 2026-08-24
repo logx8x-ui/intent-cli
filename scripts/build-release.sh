@@ -77,6 +77,9 @@ lipo -create \
   "$X86_BUILD/x86_64-apple-macosx/release/IntentNativeHost" \
   -output "$SUPPORT_DIR/IntentNativeHost"
 cp -R "$ARM_BUILD/arm64-apple-macosx/release/Intent_IntentApp.bundle" "$APP/Contents/Resources/Intent_IntentApp.bundle"
+"$ROOT/scripts/configure-supabase-bundle.sh" \
+  "$APP/Contents/Resources/Intent_IntentApp.bundle" \
+  "$([[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]] && echo 0 || echo 1)"
 chmod +x "$APP/Contents/MacOS/IntentApp" "$SUPPORT_DIR/Intent" "$SUPPORT_DIR/IntentNativeHost"
 
 cp "$ROOT/Assets/Intent.icns" "$APP/Contents/Resources/Intent.icns"
@@ -115,6 +118,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
   <key>CFBundleIconFile</key><string>Intent</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>dev.loganmondi.intent.auth</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>intent</string></array>
+    </dict>
+  </array>
   <key>LSMinimumSystemVersion</key><string>${MINIMUM_MACOS}</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

@@ -49,6 +49,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 atomic_install_executable "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
 /usr/bin/ditto "$ROOT/.build/release/Intent_IntentApp.bundle" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle"
+"$ROOT/scripts/configure-supabase-bundle.sh" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle" 0
 cp "$ROOT/Assets/Intent.icns" "$APP_BUNDLE/Contents/Resources/Intent.icns"
 if [[ -n "$GOOGLE_CLIENT_SECRET" ]]; then
   GOOGLE_CONFIG="$APP_BUNDLE/Contents/Resources/GoogleCalendarConfig.plist"
@@ -74,6 +75,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>APPL</string>
   <key>CFBundleIconFile</key>
   <string>Intent</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>dev.loganmondi.intent.auth</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>intent</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleShortVersionString</key>
   <string>0.9.1</string>
   <key>CFBundleVersion</key>

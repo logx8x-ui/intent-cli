@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import IntentCore
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -79,7 +80,8 @@ struct IntentSettingsView: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Image(systemName: "gearshape")
                 Text("Settings")
@@ -223,13 +225,19 @@ struct IntentSettingsView: View {
 
             Divider()
 
+            IntentAccountSettingsSection()
+
+            Divider()
+
             Button(action: onShowGuide) {
                 Label("Show quick guide", systemImage: "questionmark.circle")
             }
             .buttonStyle(.plain)
+            }
+            .padding(18)
         }
-        .padding(18)
         .frame(width: 390)
+        .frame(maxHeight: 720)
         .background(GraphTheme.background(colorScheme).opacity(0.94))
     }
 
@@ -491,12 +499,16 @@ private struct ShortcutKeyMonitor: NSViewRepresentable {
 
 enum IntentBackgroundStore {
     private static let imageCache = NSCache<NSString, NSImage>()
+    private(set) static var profileDirectory = IntentProfilePaths.guestDirectory()
 
-    static let customImageURL = FileManager.default
-        .homeDirectoryForCurrentUser
-        .appendingPathComponent(".intent", isDirectory: true)
-        .appendingPathComponent("backgrounds", isDirectory: true)
-        .appendingPathComponent("custom-background.png")
+    static var customImageURL: URL {
+        IntentProfilePaths.customBackgroundURL(in: profileDirectory)
+    }
+
+    static func useProfileDirectory(_ directory: URL) {
+        profileDirectory = directory
+        imageCache.removeAllObjects()
+    }
 
     static var customImageExists: Bool {
         FileManager.default.fileExists(atPath: customImageURL.path)

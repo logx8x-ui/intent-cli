@@ -10,9 +10,22 @@ let package = Package(
         .executable(name: "IntentApp", targets: ["IntentApp"]),
         .executable(name: "IntentNativeHost", targets: ["IntentNativeHost"]),
         .executable(name: "IntentCoreSpec", targets: ["IntentCoreSpec"]),
+        .executable(name: "IntentAccountSpec", targets: ["IntentAccountSpec"]),
         .executable(name: "PurposeMatcherSpec", targets: ["PurposeMatcherSpec"]),
         .library(name: "IntentCore", targets: ["IntentCore"]),
         .library(name: "IntentLock", targets: ["IntentLock"])
+    ],
+    dependencies: [
+        .package(
+            url: "https://github.com/supabase/supabase-swift.git",
+            exact: "2.49.0"
+        ),
+        // Supabase 2.49 supports Swift 5.10, but its open dependency range can
+        // otherwise resolve to a Swift 6-only IssueReporting release.
+        .package(
+            url: "https://github.com/pointfreeco/xctest-dynamic-overlay.git",
+            exact: "1.7.0"
+        )
     ],
     targets: [
         .target(name: "IntentCore"),
@@ -26,7 +39,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "IntentApp",
-            dependencies: ["IntentCore", "IntentLock"],
+            dependencies: [
+                "IntentCore",
+                "IntentLock",
+                .product(name: "Supabase", package: "supabase-swift")
+            ],
             resources: [.process("Resources")]
         ),
         .executableTarget(
@@ -36,6 +53,13 @@ let package = Package(
         .executableTarget(
             name: "IntentCoreSpec",
             dependencies: ["IntentCore", "IntentLock"]
+        ),
+        .executableTarget(
+            name: "IntentAccountSpec",
+            dependencies: [
+                "IntentCore",
+                .product(name: "XCTestDynamicOverlay", package: "xctest-dynamic-overlay")
+            ]
         ),
         .executableTarget(
             name: "PurposeMatcherSpec",

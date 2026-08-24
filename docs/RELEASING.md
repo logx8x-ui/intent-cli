@@ -11,10 +11,15 @@ notarized by Apple. Unsigned local builds must never be uploaded as `Intent.dmg`
 - `APPLE_NOTARY_KEY_ID`
 - `APPLE_NOTARY_ISSUER_ID`
 - `APPLE_NOTARY_PRIVATE_KEY_BASE64`
+- `INTENT_SUPABASE_URL`
+- `INTENT_SUPABASE_PUBLISHABLE_KEY`
 
 The two certificate secrets are base64-encoded `.p12` exports. The notary private
-key is the base64-encoded App Store Connect API `.p8` file. Secrets must never be
-committed to this repository.
+key is the base64-encoded App Store Connect API `.p8` file. Supabase's publishable
+client key is intentionally safe to ship in a client app because Row Level
+Security protects user data, but it is still injected by the release workflow
+to keep environment configuration out of source. Secrets must never be committed
+to this repository; a service-role key must never be supplied to the app build.
 
 ## Publish
 
