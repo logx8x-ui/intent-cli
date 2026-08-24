@@ -22,6 +22,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const updates = [];
   const removals = [];
   const nativeMessages = [];
+  const intervals = [];
   const storage = {
     guardEnabled: options.guardEnabled !== false
   };
@@ -102,7 +103,10 @@ function createHarness(activeRules, initialTabs, options = {}) {
     browser,
     IntentBrowserRules: helpers,
     URL,
-    setInterval: () => 0,
+    setInterval: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
     setTimeout: (fn) => {
       Promise.resolve().then(fn);
       return 0;
@@ -117,6 +121,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
     updates,
     removals,
     nativeMessages,
+    intervals,
     storage,
     async message(message) {
       let response;
@@ -127,6 +132,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
       return response;
     },
     async ready() {
+      await context.refreshRules();
       for (let index = 0; index < 12; index += 1) {
         await Promise.resolve();
       }
@@ -209,6 +215,11 @@ async function run() {
   const startupHarness = createHarness(startupRules, [
     { id: 1, active: true, url: "about:blank" }
   ]);
+  assert.deepEqual(
+    startupHarness.intervals.map(({ delay }) => delay),
+    [2000],
+    "Firefox should keep only one low-frequency native heartbeat while idle"
+  );
   await startupHarness.refresh();
   assert.equal(
     startupHarness.tabs.get(1).url,
@@ -248,8 +259,17 @@ async function run() {
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://www.youtube.com/" }
   ]);
+  await activationHarness.ready();
+  const firefoxRuleRequestsBeforeActivation = activationHarness.nativeMessages.filter(
+    (message) => message?.type === "getRules"
+  ).length;
   await activationHarness.activate(2);
   assert.equal(activationHarness.tabs.get(1).active, true, "Unallowed tab activation should return to the allowed tab");
+  assert.equal(
+    activationHarness.nativeMessages.filter((message) => message?.type === "getRules").length,
+    firefoxRuleRequestsBeforeActivation,
+    "Firefox tab events should enforce cached rules without polling the native host"
+  );
 
   const allowedActivationHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
@@ -280,6 +300,7 @@ async function run() {
   const strictNewTabHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
   ]);
+  await strictNewTabHarness.ready();
   await strictNewTabHarness.create({ id: 3, active: true, url: "about:newtab" });
   assert.equal(strictNewTabHarness.tabs.has(3), true, "New tabs should always be creatable");
   await strictNewTabHarness.update(3, { url: "https://www.instagram.com/direct/inbox/" });
@@ -290,6 +311,7 @@ async function run() {
   const strictSearchHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
   ]);
+  await strictSearchHarness.ready();
   await strictSearchHarness.create({ id: 3, active: true, url: "about:newtab" });
   await strictSearchHarness.update(3, { url: "https://www.google.com/search?q=intent" });
   await strictSearchHarness.ready();

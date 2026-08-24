@@ -7,6 +7,7 @@
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs",
     "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
     "test:extensions": "npm run test:firefox && npm run test:chrome",
+    "test:native-host": "swift build -c release --product IntentNativeHost && node scripts/test-native-host.cjs && node scripts/test-native-host-performance.cjs",
     "test:ai": "npm --prefix services/intent-ai test",
     "ai:dev": "npm --prefix services/intent-ai run dev",
     "ai:deploy": "npm --prefix services/intent-ai run deploy",

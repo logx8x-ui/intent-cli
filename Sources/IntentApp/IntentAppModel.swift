@@ -1019,7 +1019,7 @@ final class IntentAppModel: ObservableObject {
                     qos: .utility
                 )
                 let timer = DispatchSource.makeTimerSource(queue: queue)
-                timer.schedule(deadline: .now() + 1, repeating: 1)
+                timer.schedule(deadline: .now() + 2, repeating: 2)
                 timer.setEventHandler {
                     try? ActiveBrowserRulesStore().write(rules.refreshed())
                 }

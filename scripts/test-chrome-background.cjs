@@ -21,6 +21,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const dynamicUpdates = [];
   const removedTabs = [];
   const focusedWindows = [];
+  const intervals = [];
   let dynamicRules = [];
 
   const runtimeMessage = event();
@@ -106,7 +107,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     IntentBrowserRules: helpers,
     URL,
     importScripts: () => {},
-    setInterval: () => 0,
+    setInterval: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
     setTimeout: (callback) => { Promise.resolve().then(callback); return 0; },
     clearTimeout: () => {}
   };
@@ -117,7 +121,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   }
 
   return {
-    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows,
+    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows, intervals,
     get dynamicRules() { return dynamicRules; },
     settle,
     async activate(id) {
@@ -176,6 +180,11 @@ async function run() {
   ]);
   await idle.settle();
   assert.equal(idle.dynamicRules.length, 0, "Listening mode must not block anything while Intent is idle");
+  assert.deepEqual(
+    idle.intervals.map(({ delay }) => delay),
+    [2000],
+    "Chrome should keep only one low-frequency native heartbeat while idle"
+  );
 
   const lockedRules = {
     active: true,
@@ -244,8 +253,16 @@ async function run() {
   await locked.settle();
   assert.equal(locked.dynamicRules.some((rule) => rule.action.type === "block"), true, "Active rules need a main-frame block rule");
   assert.equal(locked.dynamicRules.some((rule) => rule.action.type === "allow"), true, "Allowed sites need a higher-priority allow rule");
+  const chromeRuleRequestsBeforeActivation = locked.nativeMessages.filter(
+    (message) => message?.type === "getRules"
+  ).length;
   await locked.activate(2);
   assert.equal(locked.tabs.get(1).active, true, "Unallowed tab activation should return to Instagram");
+  assert.equal(
+    locked.nativeMessages.filter((message) => message?.type === "getRules").length,
+    chromeRuleRequestsBeforeActivation,
+    "Chrome tab events should enforce cached rules without polling the native host"
+  );
 
   const allowed = createHarness(lockedRules, [
     { id: 1, windowId: 7, index: 0, active: true, url: "https://instagram.com/direct/inbox/" },

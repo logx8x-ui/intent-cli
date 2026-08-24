@@ -2,9 +2,10 @@ importScripts("rule-helpers.js");
 
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
-const RULE_REFRESH_MS = 1000;
-const TAB_SNAPSHOT_MS = 120;
 const RECONNECT_MS = 1000;
+const MAX_RECONNECT_MS = 30000;
+const HEARTBEAT_MS = 2000;
+const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
 const SITE_RECORD_THROTTLE_MS = 30000;
@@ -16,6 +17,7 @@ let guardEnabled = true;
 let initialized = false;
 let nativePort = null;
 let reconnectTimer = null;
+let reconnectDelayMs = RECONNECT_MS;
 let lastAllowedTabId = null;
 let enforcing = false;
 let freshBlankTabIds = new Set();
@@ -24,6 +26,10 @@ let dnrFingerprint = "";
 const lastAllowedURLByTab = new Map();
 const pendingRuleRequests = new Set();
 let synchronizingStartupTabs = false;
+let ruleRefreshPromise = null;
+let snapshotTimer = null;
+let snapshotForcePending = false;
+let lastSnapshotFingerprint = null;
 const recentlyRecordedSites = new Map();
 
 function inactiveRules() {
@@ -61,12 +67,14 @@ function connectNativeHost() {
     const port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
     port.onMessage.addListener((message) => {
+      reconnectDelayMs = RECONNECT_MS;
       if (message?.tabCommand) handleRequestedTab(message.tabCommand);
       applyNativeRules(message);
     });
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) return;
       nativePort = null;
+      settleRuleRequests();
       applyNativeRules(inactiveRules());
       scheduleReconnect();
     });
@@ -81,10 +89,12 @@ function connectNativeHost() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
+  const delay = reconnectDelayMs;
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_MS);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectNativeHost();
-  }, RECONNECT_MS);
+  }, delay);
 }
 
 function postNative(message) {
@@ -129,18 +139,29 @@ async function refreshRules() {
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
 
-  await new Promise((resolve) => {
+  if (ruleRefreshPromise) return ruleRefreshPromise;
+  ruleRefreshPromise = new Promise((resolve) => {
     pendingRuleRequests.add(resolve);
     if (!postNative({ type: "getRules" })) {
       pendingRuleRequests.delete(resolve);
       resolve();
     }
   });
+  try {
+    await ruleRefreshPromise;
+  } finally {
+    ruleRefreshPromise = null;
+  }
 }
 
 function settleRuleRequests() {
   for (const resolve of pendingRuleRequests) resolve();
   pendingRuleRequests.clear();
+}
+
+function sendHeartbeat() {
+  if (!nativePort) connectNativeHost();
+  postNative({ type: "heartbeat" });
 }
 
 async function handleRequestedTab(message) {
@@ -157,23 +178,41 @@ async function handleRequestedTab(message) {
   await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
 }
 
-async function publishTabSnapshot() {
+function scheduleTabSnapshot(force = false) {
+  snapshotForcePending ||= force;
+  if (snapshotTimer) return;
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    const shouldForce = snapshotForcePending;
+    snapshotForcePending = false;
+    publishTabSnapshot(shouldForce);
+  }, TAB_SNAPSHOT_DEBOUNCE_MS);
+}
+
+async function publishTabSnapshot(force = false) {
   await ensureInitialized();
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
   const tabs = rules.active ? await chrome.tabs.query({}) : [];
+  const snapshotTabs = tabs
+    .filter((tab) => isRuntimeAllowedTab(tab))
+    .map((tab) => ({
+      id: tab.id,
+      windowID: tab.windowId,
+      index: tab.index,
+      title: tab.title || tab.url || "New Tab",
+      url: tab.url || "",
+      active: Boolean(tab.active)
+    }))
+    .sort((left, right) =>
+      (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id)
+    );
+  const snapshotFingerprint = JSON.stringify(snapshotTabs);
+  if (!force && snapshotFingerprint === lastSnapshotFingerprint) return;
+  lastSnapshotFingerprint = snapshotFingerprint;
   postNative({
     type: "tabsSnapshot",
-    tabs: tabs
-      .filter((tab) => isRuntimeAllowedTab(tab))
-      .map((tab) => ({
-        id: tab.id,
-        windowID: tab.windowId,
-        index: tab.index,
-        title: tab.title || tab.url || "New Tab",
-        url: tab.url || "",
-        active: Boolean(tab.active)
-      }))
+    tabs: snapshotTabs
   });
 }
 
@@ -210,7 +249,7 @@ async function applyNativeRules(nativeRules) {
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
   }
-  await publishTabSnapshot();
+  scheduleTabSnapshot(true);
 }
 
 function escapeRegex(value) {
@@ -442,7 +481,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   recordWebsiteVisit(tab);
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active) return;
   if (!tab?.url) return;
   if (isRuntimeAllowedTab(tab)) {
@@ -451,12 +490,12 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   } else if (rules.blockTabSwitching) {
     await returnToAllowedTab();
   }
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.url || changeInfo.status === "complete") recordWebsiteVisit(tab);
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active || (!changeInfo.url && changeInfo.status !== "complete") || !tab.url) return;
 
   if (
@@ -481,11 +520,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   } else if (rules.blockNavigation) {
     await recoverBlockedNavigation(tabId);
   }
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active) return;
   if (!tab.url || isSearchStagingURL(tab.url)) {
     const tabs = await chrome.tabs.query({});
@@ -513,7 +552,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     await chrome.tabs.remove(tab.id).catch(() => {});
     await returnToAllowedTab();
   }, NEW_TAB_GRACE_MS);
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -521,12 +560,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   lastAllowedURLByTab.delete(tabId);
   if (lastAllowedTabId === tabId) lastAllowedTabId = null;
   if (rules.active) setTimeout(returnToAllowedTab, 0);
-  setTimeout(publishTabSnapshot, 0);
+  scheduleTabSnapshot();
 });
 
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0 || details.tabId < 0) return;
-  refreshRules().then(async () => {
+  Promise.resolve().then(async () => {
     if (!rules.active || !rules.blockNavigation) return;
     if (
       freshBlankTabIds.has(details.tabId) &&
@@ -549,7 +588,6 @@ chrome.runtime.onStartup.addListener(ensureInitialized);
 chrome.runtime.onInstalled.addListener(ensureInitialized);
 ensureInitialized().then(async () => {
   await updateNetworkRules();
-  requestRules();
+  scheduleTabSnapshot(true);
 });
-setInterval(requestRules, RULE_REFRESH_MS);
-setInterval(publishTabSnapshot, TAB_SNAPSHOT_MS);
+setInterval(sendHeartbeat, HEARTBEAT_MS);

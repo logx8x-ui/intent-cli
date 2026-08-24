@@ -1,8 +1,9 @@
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "org.mozilla.firefox";
-const RULE_REFRESH_MS = 1000;
-const TAB_SNAPSHOT_MS = 120;
 const RECONNECT_MS = 1000;
+const MAX_RECONNECT_MS = 30000;
+const HEARTBEAT_MS = 2000;
+const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
 
@@ -20,7 +21,13 @@ let initialized = false;
 let freshBlankTabIds = new Set();
 let commandPort = null;
 let reconnectTimer = null;
+let reconnectDelayMs = RECONNECT_MS;
 let synchronizingStartupTabs = false;
+let snapshotTimer = null;
+let snapshotForcePending = false;
+let lastSnapshotFingerprint = null;
+let pendingRuleRefresh = null;
+let resolvePendingRuleRefresh = null;
 const recentlyRecordedSites = new Map();
 
 function inactiveRules() {
@@ -64,12 +71,15 @@ function connectCommandPort() {
     const port = browser.runtime.connectNative(HOST_NAME);
     commandPort = port;
     port.onMessage.addListener(async (message) => {
+      reconnectDelayMs = RECONNECT_MS;
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
       await applyNativeRules(message);
+      settlePendingRuleRefresh();
     });
     port.onDisconnect.addListener(() => {
       if (commandPort !== port) return;
       commandPort = null;
+      settlePendingRuleRefresh();
       scheduleCommandReconnect();
     });
     postCommandPort({ type: "getRules" });
@@ -81,10 +91,12 @@ function connectCommandPort() {
 
 function scheduleCommandReconnect() {
   if (reconnectTimer) return;
+  const delay = reconnectDelayMs;
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_MS);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectCommandPort();
-  }, RECONNECT_MS);
+  }, delay);
 }
 
 function postCommandPort(message) {
@@ -143,13 +155,22 @@ async function handleRequestedTab(message) {
   await browser.tabs.update(tab.id, { active: true }).catch(() => {});
 }
 
-async function publishTabSnapshot() {
+function scheduleTabSnapshot(force = false) {
+  snapshotForcePending ||= force;
+  if (snapshotTimer !== null) return;
+  snapshotTimer = setTimeout(() => {
+    const shouldForce = snapshotForcePending;
+    snapshotTimer = null;
+    snapshotForcePending = false;
+    publishTabSnapshot(shouldForce);
+  }, TAB_SNAPSHOT_DEBOUNCE_MS);
+}
+
+async function publishTabSnapshot(force = false) {
   if (!commandPort) connectCommandPort();
   if (!commandPort) return;
   const tabs = rules.active ? await browser.tabs.query({}) : [];
-  postCommandPort({
-    type: "tabsSnapshot",
-    tabs: tabs
+  const snapshotTabs = tabs
       .filter((tab) => isRuntimeAllowedTab(tab))
       .map((tab) => ({
         id: tab.id,
@@ -159,7 +180,12 @@ async function publishTabSnapshot() {
         url: tab.url || "",
         active: Boolean(tab.active)
       }))
-  });
+      .sort((left, right) => left.id - right.id);
+  const nextFingerprint = JSON.stringify(snapshotTabs);
+  if (!force && nextFingerprint === lastSnapshotFingerprint) return;
+  if (postCommandPort({ type: "tabsSnapshot", tabs: snapshotTabs })) {
+    lastSnapshotFingerprint = nextFingerprint;
+  }
 }
 
 async function notifyNativeGuardState() {
@@ -192,7 +218,16 @@ function effectiveRules(nativeRules) {
 
 async function refreshRules() {
   await ensureInitialized();
-  if (postCommandPort({ type: "getRules" })) return;
+  if (commandPort) {
+    if (pendingRuleRefresh) return pendingRuleRefresh;
+    pendingRuleRefresh = new Promise((resolve) => {
+      resolvePendingRuleRefresh = resolve;
+    });
+    if (!postCommandPort({ type: "getRules" })) {
+      settlePendingRuleRefresh();
+    }
+    return pendingRuleRefresh;
+  }
   if (typeof browser.runtime.connectNative === "function") {
     connectCommandPort();
     return;
@@ -208,6 +243,17 @@ async function refreshRules() {
   } catch (_) {
     await applyNativeRules(inactiveRules());
   }
+}
+
+function settlePendingRuleRefresh() {
+  if (resolvePendingRuleRefresh) resolvePendingRuleRefresh();
+  pendingRuleRefresh = null;
+  resolvePendingRuleRefresh = null;
+}
+
+function sendHeartbeat() {
+  if (!commandPort) connectCommandPort();
+  postCommandPort({ type: "heartbeat" });
 }
 
 async function applyNativeRules(nativeRules) {
@@ -226,7 +272,7 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
   }
-  await publishTabSnapshot();
+  scheduleTabSnapshot(true);
 }
 
 async function getAllowedTab(tabId) {
@@ -427,7 +473,7 @@ browser.runtime.onMessage.addListener((message) => {
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await browser.tabs.get(tabId).catch(() => null);
   await recordWebsiteVisit(tab);
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active) {
     return;
   }
@@ -449,7 +495,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   if (rules.blockTabSwitching) {
     await returnToAllowedTab();
   }
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -458,7 +504,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 
   await recordWebsiteVisit(tab);
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active || !tab.url) {
     return;
   }
@@ -488,11 +534,11 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (rules.blockNavigation) {
     await returnToAllowedTab();
   }
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active) {
     return;
   }
@@ -529,12 +575,13 @@ browser.tabs.onCreated.addListener(async (tab) => {
       await returnToAllowedTab();
     }
     await returnToAllowedTab();
+    scheduleTabSnapshot();
   }, NEW_TAB_GRACE_MS);
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
-  await refreshRules();
+  scheduleTabSnapshot();
   if (!rules.active) {
     return;
   }
@@ -546,7 +593,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
   }
 
   setTimeout(returnToAllowedTab, 0);
-  await publishTabSnapshot();
+  scheduleTabSnapshot();
 });
 
 browser.webRequest.onBeforeRequest.addListener(
@@ -576,6 +623,9 @@ browser.webRequest.onBeforeRequest.addListener(
   ["blocking"]
 );
 
-ensureInitialized().then(refreshRules);
-setInterval(refreshRules, RULE_REFRESH_MS);
-setInterval(publishTabSnapshot, TAB_SNAPSHOT_MS);
+ensureInitialized().then(() => {
+  if (!commandPort && typeof browser.runtime.connectNative !== "function") {
+    refreshRules();
+  }
+});
+setInterval(sendHeartbeat, HEARTBEAT_MS);

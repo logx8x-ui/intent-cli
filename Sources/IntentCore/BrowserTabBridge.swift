@@ -70,13 +70,16 @@ public enum BrowserTabCommandAction: String, Codable, Equatable {
 
 public final class BrowserTabSnapshotStore {
     public let fileURL: URL
+    private let browserBundleIdentifier: String?
 
     public init(browserBundleIdentifier: String) {
         fileURL = Self.fileURL(for: browserBundleIdentifier)
+        self.browserBundleIdentifier = browserBundleIdentifier
     }
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
+        browserBundleIdentifier = nil
     }
 
     public func write(_ snapshot: BrowserTabSnapshot) throws {
@@ -89,8 +92,20 @@ public final class BrowserTabSnapshotStore {
 
     public func load(maxAge: TimeInterval = 3, now: Date = Date()) -> BrowserTabSnapshot? {
         guard let data = try? Data(contentsOf: fileURL),
-              let snapshot = try? JSONDecoder().decode(BrowserTabSnapshot.self, from: data),
-              now.timeIntervalSince(snapshot.updatedAt) <= maxAge else {
+              let snapshot = try? JSONDecoder().decode(BrowserTabSnapshot.self, from: data) else {
+            return nil
+        }
+        if now.timeIntervalSince(snapshot.updatedAt) <= maxAge {
+            return snapshot
+        }
+
+        // Snapshots are event-driven. An unchanged tab list can remain valid while the
+        // native connection heartbeat proves that Browser Guard is still listening.
+        guard let browserBundleIdentifier,
+              snapshot.browserBundleIdentifier == browserBundleIdentifier,
+              BrowserGuardHeartbeatStore(
+                fileURL: BrowserGuardHeartbeatStore.fileURL(for: browserBundleIdentifier)
+              ).isFresh(maxAge: 5, now: now) else {
             return nil
         }
         return snapshot
