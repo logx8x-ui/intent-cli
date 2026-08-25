@@ -27,11 +27,12 @@ intentions. Signing out restores the guest workspace.
 
 ## Backend setup
 
-1. Create a Supabase project.
-2. Run `supabase/migrations/001_intent_user_state.sql` in its SQL editor.
-3. Enable Email and Google under Authentication providers.
-4. Add both `intent://auth-callback` and `intent://password-reset` to
-   Authentication URL Configuration redirect URLs.
+1. Create a Supabase project and link this checkout with `supabase link`.
+2. Apply `supabase/migrations/001_intent_user_state.sql` with
+   `supabase db push`.
+3. Push the tracked Auth settings, including Intent's native callback URLs,
+   with `supabase config push`.
+4. Enable Email and Google under Authentication providers.
 5. For Google, add Supabase's callback URL to the Google OAuth client and copy
    the Google client ID and secret into the Supabase Google provider.
 6. Supply the project URL and publishable client key through
@@ -42,6 +43,10 @@ intentions. Signing out restores the guest workspace.
 The Supabase publishable key is designed for client apps and is protected by
 Row Level Security. Never place a Supabase service-role key or Google client
 secret in the app, plist, repository, or release bundle.
+
+Email confirmation remains enabled in `supabase/config.toml`. The confirmation
+and password-reset links return directly to the installed app through Intent's
+registered `intent://` URL scheme.
 
 For local testing, configuration can instead be supplied without editing files:
 
