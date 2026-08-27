@@ -1,4 +1,5 @@
 import AppKit
+import AuthenticationServices
 import Combine
 import Foundation
 import IntentCore
@@ -48,6 +49,7 @@ final class IntentAccountManager: ObservableObject {
     private var syncTask: Task<Void, Never>?
     private var authEventsTask: Task<Void, Never>?
     private var defaultsCancellable: AnyCancellable?
+    private var googleAuthenticationPresenter: IntentAuthenticationPresentationContextProvider?
     private var lastPortablePreferences: IntentPortablePreferences?
     private var logicalWorkspaceUpdatedAt = Date()
 
@@ -245,16 +247,20 @@ final class IntentAccountManager: ObservableObject {
             return
         }
 
+        let presenter = IntentAuthenticationPresentationContextProvider()
+        googleAuthenticationPresenter = presenter
         await performAccountAction {
             let session = try await client.auth.signInWithOAuth(
                 provider: .google,
                 redirectTo: Self.redirectURL
             ) { authenticationSession in
                 authenticationSession.prefersEphemeralWebBrowserSession = false
+                authenticationSession.presentationContextProvider = presenter
             }
             try await self.activateAccount(session: session)
             self.isPresentingAccount = false
         }
+        googleAuthenticationPresenter = nil
     }
 
     func sendPasswordReset(email: String) async {
@@ -780,6 +786,18 @@ private struct CloudWorkspaceRow: Codable {
     }
 }
 
+private final class IntentAuthenticationPresentationContextProvider: NSObject,
+    ASWebAuthenticationPresentationContextProviding,
+    @unchecked Sendable
+{
+    func presentationAnchor(for _: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        NSApp.keyWindow
+            ?? NSApp.mainWindow
+            ?? NSApp.windows.first(where: { $0.isVisible })
+            ?? ASPresentationAnchor()
+    }
+}
+
 private struct IntentSupabaseConfiguration {
     let url: URL
     let publishableKey: String
@@ -792,7 +810,7 @@ private struct IntentSupabaseConfiguration {
             return validated(rawURL: rawURL, key: key)
         }
 
-        guard let resourceURL = Bundle.module.url(forResource: "SupabaseConfig", withExtension: "plist"),
+        guard let resourceURL = bundledConfigurationURL(),
               let data = try? Data(contentsOf: resourceURL),
               let object = try? PropertyListSerialization.propertyList(from: data, format: nil),
               let dictionary = object as? [String: Any],
@@ -802,6 +820,21 @@ private struct IntentSupabaseConfiguration {
             return nil
         }
         return configuration
+    }
+
+    private static func bundledConfigurationURL() -> URL? {
+        if let resources = Bundle.main.resourceURL,
+           let resourceBundle = Bundle(
+               url: resources.appendingPathComponent("Intent_IntentApp.bundle", isDirectory: true)
+           ),
+           let configuration = resourceBundle.url(
+               forResource: "SupabaseConfig",
+               withExtension: "plist"
+           ) {
+            return configuration
+        }
+
+        return Bundle.module.url(forResource: "SupabaseConfig", withExtension: "plist")
     }
 
     private static func validated(rawURL: String, key: String) -> IntentSupabaseConfiguration? {

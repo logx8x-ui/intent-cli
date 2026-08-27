@@ -32,10 +32,29 @@ intentions. Signing out restores the guest workspace.
    `supabase db push`.
 3. Push the tracked Auth settings, including Intent's native callback URLs,
    with `supabase config push`.
-4. Enable Email and Google under Authentication providers.
-5. For Google, add Supabase's callback URL to the Google OAuth client and copy
-   the Google client ID and secret into the Supabase Google provider.
-6. Supply the project URL and publishable client key through
+4. Email is enabled by the tracked Auth configuration. Google is enabled only
+   when its OAuth credential is supplied through local environment variables.
+5. For Google, create a Web application OAuth client and add Supabase's callback
+   URL to its authorised redirect URIs:
+
+   `https://<project-ref>.supabase.co/auth/v1/callback`
+
+6. Push the Google provider without writing the credential to a file or Git:
+
+   ```zsh
+   export SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID='your-client-id'
+   export SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET='your-client-secret'
+   ./scripts/configure-google-account-oauth.sh
+   unset SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID
+   unset SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET
+   ```
+
+   The script reads the values only from the current shell and pushes the
+   tracked provider configuration to Supabase. It never prints either value.
+
+7. Set the Google Auth Platform audience to production before distributing
+   Intent so Google accounts do not need to be added individually as testers.
+8. Supply the project URL and publishable client key through
    `INTENT_SUPABASE_URL` and `INTENT_SUPABASE_PUBLISHABLE_KEY` when installing
    a development build or packaging a release. The build scripts inject them
    into the app's private resource bundle without changing tracked source.
