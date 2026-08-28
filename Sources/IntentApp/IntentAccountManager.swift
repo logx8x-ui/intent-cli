@@ -1,5 +1,4 @@
 import AppKit
-import AuthenticationServices
 import Combine
 import Foundation
 import IntentCore
@@ -49,7 +48,6 @@ final class IntentAccountManager: ObservableObject {
     private var syncTask: Task<Void, Never>?
     private var authEventsTask: Task<Void, Never>?
     private var defaultsCancellable: AnyCancellable?
-    private var googleAuthenticationPresenter: IntentAuthenticationPresentationContextProvider?
     private var lastPortablePreferences: IntentPortablePreferences?
     private var logicalWorkspaceUpdatedAt = Date()
 
@@ -247,20 +245,23 @@ final class IntentAccountManager: ObservableObject {
             return
         }
 
-        let presenter = IntentAuthenticationPresentationContextProvider()
-        googleAuthenticationPresenter = presenter
-        await performAccountAction {
-            let session = try await client.auth.signInWithOAuth(
+        guard !isBusy else { return }
+        isBusy = true
+        errorMessage = nil
+        noticeMessage = nil
+        do {
+            let authorizationURL = try client.auth.getOAuthSignInURL(
                 provider: .google,
                 redirectTo: Self.redirectURL
-            ) { authenticationSession in
-                authenticationSession.prefersEphemeralWebBrowserSession = false
-                authenticationSession.presentationContextProvider = presenter
+            )
+            guard NSWorkspace.shared.open(authorizationURL) else {
+                throw IntentAccountError.couldNotOpenBrowser
             }
-            try await self.activateAccount(session: session)
-            self.isPresentingAccount = false
+            noticeMessage = "Finish signing in with Google in your browser. Intent will reopen automatically."
+        } catch {
+            errorMessage = Self.humanReadable(error)
         }
-        googleAuthenticationPresenter = nil
+        isBusy = false
     }
 
     func sendPasswordReset(email: String) async {
@@ -786,18 +787,6 @@ private struct CloudWorkspaceRow: Codable {
     }
 }
 
-private final class IntentAuthenticationPresentationContextProvider: NSObject,
-    ASWebAuthenticationPresentationContextProviding,
-    @unchecked Sendable
-{
-    func presentationAnchor(for _: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        NSApp.keyWindow
-            ?? NSApp.mainWindow
-            ?? NSApp.windows.first(where: { $0.isVisible })
-            ?? ASPresentationAnchor()
-    }
-}
-
 private struct IntentSupabaseConfiguration {
     let url: URL
     let publishableKey: String
@@ -863,6 +852,7 @@ private struct IntentSupabaseConfiguration {
 
 private enum IntentAccountError: LocalizedError {
     case activeSession
+    case couldNotOpenBrowser
     case firstDeviceRequiresCloud
     case notConfigured
 
@@ -870,6 +860,8 @@ private enum IntentAccountError: LocalizedError {
         switch self {
         case .activeSession:
             return "Finish the active intention before switching accounts."
+        case .couldNotOpenBrowser:
+            return "Intent could not open your browser for Google sign-in. Try again after opening a browser."
         case .firstDeviceRequiresCloud:
             return "Connect to the internet once to open this account safely on this Mac. Your guest workspace is unchanged."
         case .notConfigured:
