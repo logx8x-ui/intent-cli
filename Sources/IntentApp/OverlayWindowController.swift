@@ -94,6 +94,27 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         }
     }
 
+    func handOffExternalAuthentication(to url: URL) async -> Bool {
+        // Leave the redirect state on screen long enough to read before Intent
+        // performs its normal close animation and activates the default browser.
+        try? await Task.sleep(nanoseconds: 650_000_000)
+        hideOverlay(animated: true)
+        try? await Task.sleep(nanoseconds: 220_000_000)
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        let didOpen = await withCheckedContinuation { continuation in
+            NSWorkspace.shared.open(url, configuration: configuration) { application, error in
+                continuation.resume(returning: application != nil && error == nil)
+            }
+        }
+
+        if !didOpen {
+            showOverlay(animated: true)
+        }
+        return didOpen
+    }
+
     func showSessionTimer(name: String, endsAt: Date) {
         let timerPanel = sessionTimerPanel ?? makeSessionTimerPanel()
         sessionTimerPanel = timerPanel

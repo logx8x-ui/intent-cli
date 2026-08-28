@@ -32,11 +32,13 @@ final class IntentAccountManager: ObservableObject {
     @Published private(set) var workspaceRevision = UUID()
     @Published var isPresentingAccount = false
     @Published private(set) var isResettingPassword = false
+    @Published private(set) var isRedirectingToGoogle = false
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
 
     var onPortablePreferencesApplied: (() -> Void)?
+    var onExternalAuthenticationRequested: ((URL) async -> Bool)?
 
     private weak var model: IntentAppModel?
     private let configuration: IntentSupabaseConfiguration?
@@ -247,21 +249,31 @@ final class IntentAccountManager: ObservableObject {
 
         guard !isBusy else { return }
         isBusy = true
+        isRedirectingToGoogle = true
         errorMessage = nil
         noticeMessage = nil
+        defer {
+            isRedirectingToGoogle = false
+            isBusy = false
+        }
         do {
             let authorizationURL = try client.auth.getOAuthSignInURL(
                 provider: .google,
                 redirectTo: Self.redirectURL
             )
-            guard NSWorkspace.shared.open(authorizationURL) else {
+            let didOpen: Bool
+            if let onExternalAuthenticationRequested {
+                didOpen = await onExternalAuthenticationRequested(authorizationURL)
+            } else {
+                didOpen = NSWorkspace.shared.open(authorizationURL)
+            }
+            guard didOpen else {
                 throw IntentAccountError.couldNotOpenBrowser
             }
             noticeMessage = "Finish signing in with Google in your browser. Intent will reopen automatically."
         } catch {
             errorMessage = Self.humanReadable(error)
         }
-        isBusy = false
     }
 
     func sendPasswordReset(email: String) async {

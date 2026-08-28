@@ -196,6 +196,10 @@ final class IntentRuntime {
         self.calendarSync = calendarSync
         self.accountManager = accountManager
         overlayController = controller
+        accountManager.onExternalAuthenticationRequested = { [weak controller] url in
+            guard let controller else { return false }
+            return await controller.handOffExternalAuthentication(to: url)
+        }
         accountManager.onPortablePreferencesApplied = { [weak self] in
             self?.reloadPortablePreferences()
         }

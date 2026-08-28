@@ -94,7 +94,9 @@ struct IntentAccountGate: View {
                 }
             }
 
-            if accountManager.isResettingPassword {
+            if accountManager.isRedirectingToGoogle {
+                redirectingToGoogleView
+            } else if accountManager.isResettingPassword {
                 resetPasswordView
             } else if emailMode == nil {
                 choiceView
@@ -123,17 +125,44 @@ struct IntentAccountGate: View {
     }
 
     private var accountTitle: String {
+        if accountManager.isRedirectingToGoogle { return "Signing in with Google" }
         if accountManager.isResettingPassword { return "Choose a new password" }
         return emailMode == nil ? "Your Intent workspace" : emailMode!.rawValue
     }
 
     private var accountSubtitle: String {
+        if accountManager.isRedirectingToGoogle {
+            return "Intent will close, then your default browser will open."
+        }
         if accountManager.isResettingPassword {
             return "Finish recovering your account, then your synced workspace will be ready."
         }
         return emailMode == nil
             ? "Focus on one thing. Keep it with you."
             : "Your intentions and settings stay in sync across your Macs."
+    }
+
+    private var redirectingToGoogleView: some View {
+        VStack(spacing: 13) {
+            ProgressView()
+                .controlSize(.regular)
+            Text("Redirecting to Google...")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+            Text("Continue securely in your browser. Intent will return when sign-in is complete.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .padding(.horizontal, 18)
+        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(GraphTheme.stroke(colorScheme), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Redirecting to Google")
     }
 
     private var choiceView: some View {
