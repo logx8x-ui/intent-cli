@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import IntentCore
 
 final class AllowedAppSwitcher {
     private struct Item {
@@ -9,6 +10,7 @@ final class AllowedAppSwitcher {
     }
 
     private let allowedBundleIdentifiers: Set<String>
+    private let accessMode: IntentionAccessMode
     private let stateLock = NSLock()
     private var activationOrder: [String] = []
     private var items: [Item] = []
@@ -16,8 +18,12 @@ final class AllowedAppSwitcher {
     private var visible = false
     private var panelController: AllowedAppSwitcherPanelController?
 
-    init(allowedBundleIdentifiers: Set<String>) {
+    init(
+        allowedBundleIdentifiers: Set<String>,
+        accessMode: IntentionAccessMode = .whitelist
+    ) {
         self.allowedBundleIdentifiers = allowedBundleIdentifiers
+        self.accessMode = accessMode
     }
 
     var isVisible: Bool {
@@ -26,7 +32,7 @@ final class AllowedAppSwitcher {
 
     func recordActivation(bundleIdentifier: String?) {
         guard let bundleIdentifier,
-              allowedBundleIdentifiers.contains(bundleIdentifier) else {
+              isPermitted(bundleIdentifier) else {
             return
         }
 
@@ -113,7 +119,7 @@ final class AllowedAppSwitcher {
     private func makeItems() -> [Item] {
         let running = NSWorkspace.shared.runningApplications.filter { application in
             guard let bundleIdentifier = application.bundleIdentifier else { return false }
-            return allowedBundleIdentifiers.contains(bundleIdentifier)
+            return isPermitted(bundleIdentifier)
                 && application.activationPolicy == .regular
                 && !application.isTerminated
         }
@@ -121,7 +127,7 @@ final class AllowedAppSwitcher {
         let frontmostIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         var orderedIdentifiers: [String] = []
         if let frontmostIdentifier,
-           allowedBundleIdentifiers.contains(frontmostIdentifier) {
+           isPermitted(frontmostIdentifier) {
             orderedIdentifiers.append(frontmostIdentifier)
         }
         orderedIdentifiers.append(contentsOf: activationOrder.filter { !orderedIdentifiers.contains($0) })
@@ -136,6 +142,13 @@ final class AllowedAppSwitcher {
                 name: application.localizedName ?? bundleIdentifier,
                 icon: application.icon ?? NSImage(systemSymbolName: "app", accessibilityDescription: nil) ?? NSImage()
             )
+        }
+    }
+
+    private func isPermitted(_ bundleIdentifier: String) -> Bool {
+        switch accessMode {
+        case .whitelist: allowedBundleIdentifiers.contains(bundleIdentifier)
+        case .blacklist: !allowedBundleIdentifiers.contains(bundleIdentifier)
         }
     }
 }

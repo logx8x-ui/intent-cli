@@ -18,4 +18,16 @@ assert.equal(rules.isAllowedURL("https://www.google.com/search?q=intent", instag
 assert.equal(rules.isAllowedURL("https://youtube.com/", instagram), false);
 assert.equal(rules.isAllowedURL("https://anything.example/", { ...instagram, active: false }), true);
 
+const blacklist = {
+  active: true,
+  accessMode: "blacklist",
+  allowedWebsites: ["youtube.com", "instagram.com/reels"],
+  allowGoogleSearchTabs: false
+};
+assert.equal(rules.isAllowedURL("https://youtube.com/watch?v=1", blacklist), false);
+assert.equal(rules.isAllowedURL("https://instagram.com/reels/123", blacklist), false);
+assert.equal(rules.isAllowedURL("https://wikipedia.org/wiki/Focus", blacklist), true);
+assert.equal(rules.isAllowedURL("chrome://newtab/", blacklist), true);
+assert.equal(rules.isAllowedURL("https://example.com/", { ...blacklist, allowedWebsites: [] }), true);
+
 console.log("Chrome rule helper spec passed");

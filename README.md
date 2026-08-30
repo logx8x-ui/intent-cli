@@ -65,6 +65,8 @@ a brand-new account always starts with zero intentions. See [Intent Accounts](do
 - Press `Tab` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
 - Pinch to zoom and use two fingers to pan.
 - Press `Cmd+Shift+M` to finish an active intention.
+- Press `Shift+W` for whitelist Purpose Mode or `Shift+B` for blacklist Purpose Mode while you are not typing.
+- Whitelist intentions allow only their selected resources. Blacklist intentions block their selected apps and browser websites while leaving everything else available.
 - Add a **Timer** restriction to end a session automatically.
 - Add a **Cooldown** restriction to prevent restarting an intention for a chosen period after it ends.
 

@@ -52,6 +52,7 @@ assert.ok(fs.existsSync(hostPath), `Build IntentNativeHost first: missing ${host
 try {
   const activeRules = {
     active: true,
+    accessMode: "blacklist",
     allowedWebsites: ["instagram.com/direct"],
     allowedWebsitesByBrowser: {
       "org.mozilla.firefox": ["instagram.com/direct"],
@@ -74,6 +75,7 @@ try {
 
   const [rulesResponse] = callHost([{ type: "getRules" }]);
   assert.equal(rulesResponse.active, true, "Native host should return active app rules");
+  assert.equal(rulesResponse.accessMode, "blacklist", "Native host should preserve browser access mode");
   assert.deepEqual(rulesResponse.allowedWebsites, activeRules.allowedWebsites);
   assert.deepEqual(rulesResponse.startupWebsites, activeRules.startupWebsitesByBrowser["org.mozilla.firefox"]);
   assert.equal(rulesResponse.guardEnabled, false, "Native host should include guard enabled state");

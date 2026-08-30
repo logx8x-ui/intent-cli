@@ -1,5 +1,17 @@
 import Foundation
 
+public enum IntentionAccessMode: String, Codable, CaseIterable, Hashable {
+    case whitelist
+    case blacklist
+
+    public var displayName: String {
+        switch self {
+        case .whitelist: "Allow only"
+        case .blacklist: "Block"
+        }
+    }
+}
+
 public struct Intention: Identifiable, Codable, Equatable {
     public var id: String
     public var name: String
@@ -19,6 +31,7 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var customIconData: Data?
     public var closeSessionResourcesOnFinish: Bool
     public var isLeisure: Bool
+    public var accessMode: IntentionAccessMode
 
     public init(
         id: String = UUID().uuidString,
@@ -38,7 +51,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         usesCustomIcon: Bool = false,
         customIconData: Data? = nil,
         closeSessionResourcesOnFinish: Bool = false,
-        isLeisure: Bool = false
+        isLeisure: Bool = false,
+        accessMode: IntentionAccessMode = .whitelist
     ) {
         self.id = id
         self.name = name
@@ -58,6 +72,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         self.customIconData = customIconData
         self.closeSessionResourcesOnFinish = closeSessionResourcesOnFinish
         self.isLeisure = isLeisure
+        self.accessMode = isLeisure ? .whitelist : accessMode
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -79,6 +94,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         case customIconData
         case closeSessionResourcesOnFinish
         case isLeisure
+        case accessMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -100,6 +116,9 @@ public struct Intention: Identifiable, Codable, Equatable {
             forKey: .closeSessionResourcesOnFinish
         ) ?? false
         isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
+        accessMode = isLeisure
+            ? .whitelist
+            : (try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist)
         graphPosition = try container.decodeIfPresent(GraphPoint.self, forKey: .graphPosition)
             ?? GraphPoint.defaultPosition(for: id)
         let decodedGraphModelVersion = try container.decodeIfPresent(Int.self, forKey: .graphModelVersion)

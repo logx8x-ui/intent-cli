@@ -2,6 +2,7 @@ import Foundation
 import IntentCore
 
 public struct FocusSessionSpec {
+    public let accessMode: IntentionAccessMode
     public let displayName: String
     public let startupSteps: [StartupStep]
     public let allowedBundleIdentifiers: Set<String>
@@ -23,6 +24,7 @@ public struct FocusSessionSpec {
 
     public init(
         displayName: String,
+        accessMode: IntentionAccessMode = .whitelist,
         startupSteps: [StartupStep],
         allowedBundleIdentifiers: Set<String>,
         fallbackBundleIdentifier: String,
@@ -42,6 +44,7 @@ public struct FocusSessionSpec {
         allowedWebsitesByBrowser: [String: [String]] = [:]
     ) {
         self.displayName = displayName
+        self.accessMode = accessMode
         self.startupSteps = startupSteps
         self.allowedBundleIdentifiers = allowedBundleIdentifiers
         self.fallbackBundleIdentifier = fallbackBundleIdentifier
@@ -75,10 +78,13 @@ public struct FocusSessionSpec {
         finishShortcut: FocusKeyboardShortcut = .defaultFinish
     ) -> FocusSessionSpec {
         let startupSteps = IntentionStartupPlanner.steps(for: intention)
-        let fallback = intention.isLeisure && startupSteps.isEmpty
+        let controlledBundleIdentifiers = intention.accessMode == .blacklist
+            ? intention.blockedAppBundleIdentifiers
+            : Set(intention.allowedApps.map(\.bundleIdentifier))
+        let fallback = intention.accessMode == .blacklist || (intention.isLeisure && startupSteps.isEmpty)
             ? ""
             : IntentionStartupPlanner.fallbackBundleIdentifier(for: intention)
-        let spotifyPlaylistURI = intention.startupActions.compactMap { action in
+        let spotifyPlaylistURI = intention.accessMode == .blacklist ? nil : intention.startupActions.compactMap { action in
             if case .playSpotifyPlaylist(let uri) = action,
                !intention.dontStartResourceIDs.contains("app:com.spotify.client") {
                 return uri
@@ -88,21 +94,26 @@ public struct FocusSessionSpec {
 
         return FocusSessionSpec(
             displayName: intention.name,
+            accessMode: intention.accessMode,
             startupSteps: startupSteps,
-            allowedBundleIdentifiers: Set(intention.allowedApps.map(\.bundleIdentifier)),
+            allowedBundleIdentifiers: controlledBundleIdentifiers,
             fallbackBundleIdentifier: fallback,
-            strictSingleApp: !intention.isLeisure && intention.allowedApps.count == 1,
+            strictSingleApp: intention.accessMode == .whitelist && !intention.isLeisure && intention.allowedApps.count == 1,
             blockAppSwitching: !intention.isLeisure,
             blockNewApps: !intention.isLeisure,
             keepFocused: !intention.isLeisure,
-            blockBrowserTabEscape: !intention.isLeisure && intention.allowedApps.contains(where: \.isBrowser),
+            blockBrowserTabEscape: !intention.isLeisure && (
+                intention.accessMode == .whitelist
+                    ? intention.allowedApps.contains(where: \.isBrowser)
+                    : !intention.allowedWebsites.isEmpty
+            ),
             blockFirefoxChromeClicks: false,
             allowGoogleSearchTabs: intention.browserSearchesAllowed,
             spotifyPlaylistURI: spotifyPlaylistURI,
             allowSpotifyForeground: intention.allowedApps.contains { $0.bundleIdentifier == "com.spotify.client" },
             finishShortcut: finishShortcut,
             allowsManualFinish: !intention.sessionLocksManualFinish,
-            closeSessionResourcesOnFinish: intention.closeSessionResourcesOnFinish,
+            closeSessionResourcesOnFinish: intention.accessMode == .whitelist && intention.closeSessionResourcesOnFinish,
             allowedWebsitesByBrowser: Dictionary(
                 grouping: intention.allowedWebsites.compactMap { website -> (String, String)? in
                     guard let browser = website.browserBundleIdentifier else { return nil }
@@ -127,6 +138,7 @@ public struct FocusSessionSpec {
 
         return FocusSessionSpec(
             displayName: displayName,
+            accessMode: accessMode,
             startupSteps: guardedStartupSteps,
             allowedBundleIdentifiers: allowedBundleIdentifiers,
             fallbackBundleIdentifier: fallbackBundleIdentifier,
@@ -145,6 +157,13 @@ public struct FocusSessionSpec {
             restorePreviousApplicationOnStop: restorePreviousApplicationOnStop,
             allowedWebsitesByBrowser: allowedWebsitesByBrowser
         )
+    }
+
+    public func permitsApplication(_ bundleIdentifier: String) -> Bool {
+        switch accessMode {
+        case .whitelist: allowedBundleIdentifiers.contains(bundleIdentifier)
+        case .blacklist: !allowedBundleIdentifiers.contains(bundleIdentifier)
+        }
     }
 
     private static func make(for task: ShallowTask) -> FocusSessionSpec {
@@ -244,6 +263,7 @@ public struct FocusSessionSpec {
 
 public enum IntentionStartupPlanner {
     public static func steps(for intention: Intention) -> [StartupStep] {
+        guard intention.accessMode == .whitelist else { return [] }
         let excluded = intention.dontStartResourceIDs
         let websiteSteps = intention.allowedWebsites.compactMap { website -> StartupStep? in
             guard !excluded.contains(website.resourceID),

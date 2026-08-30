@@ -33,6 +33,7 @@ export const intentionSchema = {
           },
           allowBrowserSearches: { type: "boolean" },
           isLeisure: { type: "boolean" },
+          accessMode: { type: "string", enum: ["whitelist", "blacklist"] },
           restrictions: {
             type: "array",
             maxItems: 4,
@@ -77,6 +78,7 @@ export const intentionSchema = {
           "websites",
           "allowBrowserSearches",
           "isLeisure",
+          "accessMode",
           "restrictions",
           "frictions",
         ],
@@ -97,7 +99,7 @@ splitSchema.properties.intentions.minItems = 2;
 splitSchema.properties.intentions.maxItems = 5;
 
 const systemPrompt = `
-You design focused computer sessions for Intent, an app that lets a person use only the resources needed for one task at a time.
+You design computer sessions for Intent. A whitelist intention allows only its selected resources. A blacklist intention blocks its selected resources while everything else stays available.
 
 Turn the person's request into exactly one specific, reusable intention. An intention is one concrete outcome such as Reply to messages, Write an assignment, or Review pull requests. Do not create a vague category such as Work or Productivity.
 
@@ -107,11 +109,13 @@ If the request mentions an intention with @Name or includes [intention-id:...], 
 
 Choose only applications from the installed-app catalog supplied by the user. Copy bundle identifiers exactly. Include only apps genuinely needed for the outcome. Suggest narrow website hosts or paths only when a selected installed app is a browser, and assign each website to that browser's exact bundle identifier. Do not invent applications or bundle identifiers. Keep the name short.
 
+Set accessMode to blacklist only when the person explicitly says blacklist, block, ban, avoid, keep off-limits, or do not allow. Otherwise use whitelist for a new intention. For an existing intention, preserve accessMode unless explicitly changed. In blacklist mode, include only explicitly prohibited resources and never infer extra blocked apps or websites. A browser paired with websites scopes those blocked sites and is not itself blocked unless the person separately asks to block that browser.
+
 Translate explicit requests into connected restrictions. A timer limits the session and a cooldown delays reuse after it ends. Only add allowBrowserSearches when the person explicitly asks to search, browse, Google, look something up, or do research. Never infer browser-search permission merely because a browser or website is needed. Use durationMinutes for timer and coolDown, and use 0 for restrictions without a duration. Use resourceIDs only for dontStartUp and otherwise return an empty array. Keep allowBrowserSearches consistent with the matching restriction.
 
 Translate only explicit friction requests into frictions. Never infer or suggest friction from the selected apps, websites, or task. If the person does not explicitly request friction, return an empty frictions array. For unused friction fields, return an empty string, 0, or an empty array.
 
-Set isLeisure to true only when the person explicitly asks for a Leisure intention. Otherwise set it to false.
+Set isLeisure to true only when the person explicitly asks for a Leisure intention. Leisure must always use accessMode whitelist. Otherwise set isLeisure to false.
 `.trim();
 
 const onboardingSystemPrompt = `
@@ -119,7 +123,7 @@ You create a person's first Intent desktop. Intent is a focus app built from spe
 
 The person will describe broadly what they use their computer for. Turn that answer into 3 to 7 clear intentions that cover their main life on the computer. Split broad areas into outcomes a person would actually choose before sitting down. For example, split "study" into useful outcomes such as Attend classes, Work on assignments, and Review notes when the person's answer supports that. Split "reply to people" into one communication intention unless different tools clearly need different sessions. Avoid vague names such as Work, Study, or Productivity when a more concrete name is possible.
 
-Always include exactly one Leisure intention as the final item. Leisure gives unrestricted computer use, may have no apps, and must have isLeisure true. Every other item must have isLeisure false and use only applications from the installed-app catalog. Copy bundle identifiers exactly. Never invent apps or identifiers. A website may be included only with an installed browser and must use that browser's exact identifier.
+Always include exactly one Leisure intention as the final item. Leisure gives unrestricted computer use, may have no apps, must have isLeisure true, and must use accessMode whitelist. Every other item must have isLeisure false, use accessMode whitelist, and use only applications from the installed-app catalog. Copy bundle identifiers exactly. Never invent apps or identifiers. A website may be included only with an installed browser and must use that browser's exact identifier.
 
 Make sensible, restrained setup suggestions so the person leaves onboarding ready to use Intent. Productive intentions usually need no friction. For games, social media, entertainment, or other easy-to-overuse activities, suggest a practical timer restriction and at most one light friction such as a 5-second countdown. Add allowBrowserSearches when research or open-ended web searching is central to the intention. Do not overload intentions with controls. For unused friction fields, return an empty string, 0, or an empty array.
 
@@ -127,7 +131,7 @@ Use purpose to explain in one short sentence what belongs in each intention. Kee
 `.trim();
 
 const splitSystemPrompt = `
-You refine one broad Intent intention into 2 to 5 more specific, reusable intentions. Return only the replacement intentions. Keep each one concrete and distinct, choose only apps from the supplied installed-app catalog, and copy bundle identifiers exactly. Do not include Leisure. Set isLeisure false for every item. Keep suggested restrictions and friction restrained: productive intentions normally need none, while games, social media, and entertainment may sensibly use a timer and at most one light friction.
+You refine one broad Intent intention into 2 to 5 more specific, reusable intentions. Return only the replacement intentions. Keep each one concrete and distinct, choose only apps from the supplied installed-app catalog, and copy bundle identifiers exactly. Do not include Leisure. Set isLeisure false and accessMode whitelist for every item. Keep suggested restrictions and friction restrained: productive intentions normally need none, while games, social media, and entertainment may sensibly use a timer and at most one light friction.
 `.trim();
 
 export default {
@@ -223,6 +227,10 @@ export function applyExplicitRequestRules(plan, description, installedApps = [],
   const requestsAppleMail = /\b(apple\s+mail|mail\s+app)\b/i.test(description);
   const explicitlyRequestsFriction = /\b(friction|countdown|commitment\s+phrase|typed?\s+phrase|reason\s+prompt|task\s+checklist|hard\s+mode|double\s+confirmation|write\s+(?:a\s+)?reason|before\s+(?:starting|i\s+can\s+start))\b/i
     .test(description);
+  const explicitlyRequestsBlacklist = /\b(blacklist(?:ing)?|block(?:ed|ing)?|ban(?:ned|ning)?|avoid|off[-\s]?limits|do\s+not\s+allow|don['’]t\s+allow)\b/i
+    .test(description);
+  const explicitlyRequestsWhitelist = /\b(whitelist(?:ing)?|allow\s+only|only\s+allow)\b/i
+    .test(description);
   const availableIDs = new Set(installedApps.map((app) => app.bundleIdentifier));
   const browserPriority = [
     "com.google.Chrome",
@@ -258,15 +266,21 @@ export function applyExplicitRequestRules(plan, description, installedApps = [],
       const frictions = explicitlyRequestsFriction || hasCurrentIntention
         ? [...intention.frictions]
         : [];
+      const accessMode = explicitlyRequestsBlacklist
+        ? "blacklist"
+        : explicitlyRequestsWhitelist
+          ? "whitelist"
+          : (intention.accessMode || "whitelist");
 
       return {
         ...intention,
+        accessMode: intention.isLeisure ? "whitelist" : accessMode,
         appBundleIdentifiers,
         websites,
-        allowBrowserSearches: explicitlyRequestsSearch || hasCurrentIntention
+        allowBrowserSearches: accessMode === "whitelist" && (explicitlyRequestsSearch || hasCurrentIntention)
           ? intention.allowBrowserSearches
           : false,
-        restrictions: explicitlyRequestsSearch || hasCurrentIntention
+        restrictions: accessMode === "whitelist" && (explicitlyRequestsSearch || hasCurrentIntention)
           ? intention.restrictions
           : intention.restrictions.filter((restriction) =>
               restriction.kind !== "allowBrowserSearches"
@@ -380,6 +394,7 @@ function isPlan(plan, mode = "single") {
       Array.isArray(item.appBundleIdentifiers) && Array.isArray(item.websites) &&
       typeof item.allowBrowserSearches === "boolean" &&
       typeof item.isLeisure === "boolean" &&
+      ["whitelist", "blacklist"].includes(item.accessMode) &&
       Array.isArray(item.restrictions) && Array.isArray(item.frictions)
     );
 }
@@ -396,6 +411,7 @@ export function ensureLeisure(plan) {
     restrictions: [],
     frictions: [],
     isLeisure: true,
+    accessMode: "whitelist",
   };
   return {
     ...plan,
@@ -403,6 +419,7 @@ export function ensureLeisure(plan) {
       ...leisure,
       name: leisure.name.trim() || "Leisure",
       isLeisure: true,
+      accessMode: "whitelist",
     }],
   };
 }

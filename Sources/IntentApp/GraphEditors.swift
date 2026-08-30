@@ -79,12 +79,19 @@ struct IntentionEditorMenu: View {
 
                 leisureToggle
 
+                if !intention.isLeisure {
+                    accessModeEditor
+                }
+
                 intentionArtworkEditor
 
-                fieldLabel("Allowed apps")
+                fieldLabel(intention.accessMode == .blacklist ? "Blocked apps & browser scopes" : "Allowed apps")
                 tokenFlow
 
-                TextField("Search installed apps", text: $appQuery)
+                TextField(
+                    intention.accessMode == .blacklist ? "Search apps to block" : "Search apps to allow",
+                    text: $appQuery
+                )
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(addFirstMatch)
 
@@ -124,17 +131,19 @@ struct IntentionEditorMenu: View {
 
                 browserWebsiteEditors
 
-                Divider()
-                fieldLabel("When finished")
-                Toggle(
-                    "Close session resources",
-                    isOn: $intention.closeSessionResourcesOnFinish
-                )
-                .toggleStyle(.checkbox)
-                .font(.system(size: 12, weight: .medium))
-                Text("Closes this intention's allowed apps and website tabs when it ends.")
-                    .font(.caption)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                if intention.accessMode == .whitelist {
+                    Divider()
+                    fieldLabel("When finished")
+                    Toggle(
+                        "Close session resources",
+                        isOn: $intention.closeSessionResourcesOnFinish
+                    )
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 12, weight: .medium))
+                    Text("Closes this intention's allowed apps and website tabs when it ends.")
+                        .font(.caption)
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                }
 
                 Divider()
                 Button(role: .destructive, action: onDelete) {
@@ -149,7 +158,9 @@ struct IntentionEditorMenu: View {
                     quickAddButton(
                         title: "Restriction",
                         symbol: "circle",
-                        action: { onAddRestriction(.allowBrowserSearches) }
+                        action: {
+                            onAddRestriction(intention.accessMode == .blacklist ? .timer : .allowBrowserSearches)
+                        }
                     )
                     quickAddButton(
                         title: "Friction",
@@ -176,7 +187,19 @@ struct IntentionEditorMenu: View {
 
     private var leisureToggle: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Toggle("Leisure", isOn: $intention.isLeisure)
+            Toggle(
+                "Leisure",
+                isOn: Binding(
+                    get: { intention.isLeisure },
+                    set: { enabled in
+                        intention.isLeisure = enabled
+                        if enabled {
+                            intention.accessMode = .whitelist
+                            intention.closeSessionResourcesOnFinish = false
+                        }
+                    }
+                )
+            )
                 .toggleStyle(.checkbox)
                 .font(.system(size: 13, weight: .semibold))
                 .tint(.gray)
@@ -199,6 +222,35 @@ struct IntentionEditorMenu: View {
             RoundedRectangle(cornerRadius: 9)
                 .stroke(intention.isLeisure ? Color.gray.opacity(0.70) : GraphTheme.stroke(colorScheme), lineWidth: 1)
         )
+    }
+
+    private var accessModeEditor: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            fieldLabel("Access mode")
+            Picker("Access mode", selection: $intention.accessMode) {
+                Text("Allow only").tag(IntentionAccessMode.whitelist)
+                Text("Block").tag(IntentionAccessMode.blacklist)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .tint(modeAccent)
+
+            Text(
+                intention.accessMode == .blacklist
+                    ? "Selected apps and sites stay off-limits. Everything else remains available. A browser with blocked sites remains usable."
+                    : "Only the selected apps and sites stay available while this intention runs."
+            )
+            .font(.caption)
+            .foregroundStyle(GraphTheme.muted(colorScheme))
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(modeAccent.opacity(colorScheme == .dark ? 0.10 : 0.06), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(modeAccent.opacity(0.62), lineWidth: 1))
+    }
+
+    private var modeAccent: Color {
+        intention.accessMode == .blacklist ? Color.red : GraphTheme.editBlue
     }
 
     private var intentionArtworkEditor: some View {
@@ -343,7 +395,7 @@ struct IntentionEditorMenu: View {
                                 Image(systemName: "checkmark.circle.fill")
                                     .font(.system(size: 10, weight: .bold))
                                     .symbolRenderingMode(.palette)
-                                    .foregroundStyle(.white, GraphTheme.editBlue)
+                                    .foregroundStyle(.white, modeAccent)
                                     .offset(x: 3, y: -3)
                             }
                         }
@@ -354,7 +406,7 @@ struct IntentionEditorMenu: View {
                         .overlay(
                             RoundedRectangle(cornerRadius: 9)
                                 .stroke(
-                                    isSelected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                                    isSelected ? modeAccent : GraphTheme.stroke(colorScheme),
                                     lineWidth: isSelected ? 1.5 : 1
                                 )
                         )
@@ -380,7 +432,11 @@ struct IntentionEditorMenu: View {
         } else {
             ForEach(browsers) { browser in
                 VStack(alignment: .leading, spacing: 7) {
-                    fieldLabel("\(browser.name) websites")
+                    fieldLabel(
+                        intention.accessMode == .blacklist
+                            ? "Websites blocked in \(browser.name)"
+                            : "\(browser.name) websites"
+                    )
                     if !["org.mozilla.firefox", "com.google.Chrome"].contains(browser.bundleIdentifier) {
                         Label("Browser locking is currently available in Firefox and Chrome.", systemImage: "exclamationmark.triangle")
                             .font(.caption2)
@@ -462,7 +518,7 @@ struct IntentionEditorMenu: View {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 10, weight: .bold))
                                 .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, GraphTheme.editBlue)
+                                .foregroundStyle(.white, modeAccent)
                                 .offset(x: 3, y: -3)
                         }
                     }
@@ -473,7 +529,7 @@ struct IntentionEditorMenu: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: 9)
                             .stroke(
-                                isSelected ? GraphTheme.editBlue : GraphTheme.stroke(colorScheme),
+                                isSelected ? modeAccent : GraphTheme.stroke(colorScheme),
                                 lineWidth: isSelected ? 1.5 : 1
                             )
                     )
@@ -716,8 +772,10 @@ struct IntentionEditorMenu: View {
             commonChoiceButton("End Time", symbol: "clock.badge.checkmark") {
                 onAddRestriction(.endTime)
             }
-            commonChoiceButton("Browser searches", symbol: "magnifyingglass") {
-                onAddRestriction(.allowBrowserSearches)
+            if intention.accessMode == .whitelist {
+                commonChoiceButton("Browser searches", symbol: "magnifyingglass") {
+                    onAddRestriction(.allowBrowserSearches)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

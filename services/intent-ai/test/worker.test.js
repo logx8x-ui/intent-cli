@@ -48,6 +48,8 @@ test("OpenRouter request uses strict structured output and privacy routing", () 
   const itemSchema = intentionSchema.properties.intentions.items;
   assert.ok(itemSchema.required.includes("restrictions"));
   assert.ok(itemSchema.required.includes("frictions"));
+  assert.ok(itemSchema.required.includes("accessMode"));
+  assert.deepEqual(itemSchema.properties.accessMode.enum, ["whitelist", "blacklist"]);
   assert.match(request.messages[0].content, /exactly one specific/);
   assert.match(request.messages[0].content, /timer limits the session/);
 });
@@ -84,6 +86,7 @@ test("onboarding always ends with one Leisure intention", () => {
   assert.equal(result.intentions.length, 2);
   assert.equal(result.intentions.at(-1).name, "Leisure");
   assert.equal(result.intentions.at(-1).isLeisure, true);
+  assert.equal(result.intentions.at(-1).accessMode, "whitelist");
   assert.deepEqual(result.intentions.at(-1).appBundleIdentifiers, []);
 });
 
@@ -222,6 +225,43 @@ test("follow-ups preserve existing search and friction while new drafts do not i
   const newDraft = applyExplicitRequestRules(generated, "Make a message intention", [], false);
   assert.equal(newDraft.intentions[0].allowBrowserSearches, false);
   assert.deepEqual(newDraft.intentions[0].frictions, []);
+});
+
+test("explicit blacklist and whitelist requests deterministically set access mode", () => {
+  const generated = {
+    intentions: [{
+      name: "No social media",
+      purpose: "Keep distracting sites unavailable",
+      appBundleIdentifiers: ["org.mozilla.firefox"],
+      websites: [{ value: "youtube.com", browserBundleIdentifier: "org.mozilla.firefox" }],
+      allowBrowserSearches: true,
+      restrictions: [{ kind: "allowBrowserSearches", durationMinutes: 0, resourceIDs: [] }],
+      frictions: [],
+      isLeisure: false,
+      accessMode: "whitelist",
+    }],
+  };
+
+  const blacklisted = applyExplicitRequestRules(
+    generated,
+    "Blacklist Firefox with YouTube and add a timer",
+    [],
+    false,
+  );
+  assert.equal(blacklisted.intentions[0].accessMode, "blacklist");
+  assert.equal(blacklisted.intentions[0].allowBrowserSearches, false);
+  assert.deepEqual(blacklisted.intentions[0].restrictions, []);
+
+  const preserved = applyExplicitRequestRules(blacklisted, "Add a timer", [], true);
+  assert.equal(preserved.intentions[0].accessMode, "blacklist");
+
+  const whitelisted = applyExplicitRequestRules(
+    blacklisted,
+    "Change this to whitelist mode and allow only Firefox",
+    [],
+    true,
+  );
+  assert.equal(whitelisted.intentions[0].accessMode, "whitelist");
 });
 
 test("generation route rate limits by Cloudflare client address", async () => {

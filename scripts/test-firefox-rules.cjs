@@ -78,4 +78,20 @@ assert.equal(
   "Idle browser rules should not interfere with normal browsing"
 );
 
+const blacklistRules = {
+  active: true,
+  accessMode: "blacklist",
+  allowedWebsites: ["youtube.com", "instagram.com/reels"],
+  allowGoogleSearchTabs: false
+};
+assert.equal(rules.isAllowedURL("https://youtube.com/watch?v=1", blacklistRules), false);
+assert.equal(rules.isAllowedURL("https://instagram.com/reels/123", blacklistRules), false);
+assert.equal(rules.isAllowedURL("https://wikipedia.org/wiki/Focus", blacklistRules), true);
+assert.equal(rules.isAllowedURL("about:newtab", blacklistRules), true);
+assert.equal(
+  rules.isAllowedURL("https://example.com/", { ...blacklistRules, allowedWebsites: [] }),
+  true,
+  "An empty blacklist should leave the web available"
+);
+
 console.log("Firefox rule helper spec passed");

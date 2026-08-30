@@ -337,6 +337,49 @@ async function run() {
   await chromeTest.activate(2);
   assert.equal(chromeTest.tabs.get(1).active, true, "A YouTube-only intention must reject an existing GitHub tab");
 
+  const blacklistRules = {
+    ...lockedRules,
+    accessMode: "blacklist",
+    allowedWebsites: ["youtube.com"],
+    startupWebsites: []
+  };
+  const blacklist = createHarness(blacklistRules, [
+    { id: 1, active: true, url: "https://wikipedia.org/wiki/Focus" },
+    { id: 2, active: false, url: "https://youtube.com/watch?v=1" }
+  ]);
+  await blacklist.settle();
+  await blacklist.receiveNative(blacklistRules);
+  assert.equal(blacklist.tabs.has(1), true, "Chrome blacklist mode should preserve unlisted websites");
+  assert.equal(blacklist.tabs.has(2), false, "Chrome blacklist mode should remove already-open blocked websites");
+  assert.equal(
+    blacklist.dynamicRules.some((rule) =>
+      rule.action.type === "block" && String(rule.condition.regexFilter).includes("youtube")
+    ),
+    true,
+    "Chrome blacklist mode should install a direct block rule for each blocked website"
+  );
+  assert.equal(
+    blacklist.dynamicRules.some((rule) => rule.action.type === "allow"),
+    false,
+    "Chrome blacklist mode should not install whitelist allow rules"
+  );
+  await blacklist.navigate(1, "https://youtube.com/watch?v=2");
+  assert.equal(
+    blacklist.tabs.get(1).url,
+    "https://wikipedia.org/wiki/Focus",
+    "Blocked Chrome navigation should immediately restore the last permitted page"
+  );
+  const blacklistBlank = createHarness(blacklistRules, [
+    { id: 1, active: true, url: "chrome://newtab/" }
+  ]);
+  await blacklistBlank.settle();
+  await blacklistBlank.navigate(1, "https://youtube.com/watch?v=3");
+  assert.equal(
+    blacklistBlank.tabs.get(1).url,
+    "chrome://newtab",
+    "A blacklisted site entered from a fresh Chrome tab should return to a clean tab"
+  );
+
   const disabled = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://youtube.com/" }

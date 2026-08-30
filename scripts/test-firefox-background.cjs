@@ -384,6 +384,41 @@ async function run() {
   await typedUrlHarness.remove(4);
   assert.equal(typedUrlHarness.tabs.has(4), false, "Blocked search staging tabs should remain closable after a typed URL attempt");
 
+  const blacklistRules = {
+    ...lockedRules,
+    accessMode: "blacklist",
+    allowedWebsites: ["youtube.com"],
+    startupWebsites: []
+  };
+  const blacklistHarness = createHarness(blacklistRules, [
+    { id: 1, active: true, url: "https://wikipedia.org/wiki/Focus" },
+    { id: 2, active: false, url: "https://youtube.com/watch?v=1" }
+  ]);
+  await blacklistHarness.ready();
+  assert.equal(blacklistHarness.tabs.has(1), true, "Firefox blacklist mode should preserve unlisted websites");
+  assert.equal(blacklistHarness.tabs.has(2), false, "Firefox blacklist mode should remove already-open blocked websites");
+  const blockedNavigation = await blacklistHarness.update(1, { url: "https://youtube.com/watch?v=2" });
+  assert.equal(blockedNavigation.cancel, true, "Firefox should cancel blacklisted navigation before it commits");
+  assert.equal(
+    blacklistHarness.tabs.get(1).url,
+    "https://wikipedia.org/wiki/Focus",
+    "Firefox should retain the last permitted page after blocking navigation"
+  );
+  const blacklistBlankHarness = createHarness(blacklistRules, [
+    { id: 1, active: true, url: "about:newtab" }
+  ]);
+  await blacklistBlankHarness.ready();
+  const blockedFromBlank = await blacklistBlankHarness.update(1, {
+    url: "https://youtube.com/watch?v=3"
+  });
+  await blacklistBlankHarness.ready();
+  assert.equal(blockedFromBlank.cancel, true, "Firefox should cancel a blacklisted URL entered in a new tab");
+  assert.equal(
+    blacklistBlankHarness.tabs.get(1).url,
+    "about:newtab",
+    "A blacklisted site entered from a fresh Firefox tab should return to a clean tab"
+  );
+
   const disabledHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" },
     { id: 2, active: false, url: "https://www.youtube.com/" }

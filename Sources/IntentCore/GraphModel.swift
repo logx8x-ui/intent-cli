@@ -160,6 +160,21 @@ public extension AllowedWebsite {
 }
 
 public extension Intention {
+    var blockedAppBundleIdentifiers: Set<String> {
+        guard accessMode == .blacklist else { return [] }
+        let browserScopes = Set(allowedWebsites.compactMap(\.browserBundleIdentifier))
+        return Set(allowedApps.map(\.bundleIdentifier)).subtracting(browserScopes)
+    }
+
+    func permitsApplication(_ bundleIdentifier: String) -> Bool {
+        switch accessMode {
+        case .whitelist:
+            return allowedApps.contains { $0.bundleIdentifier == bundleIdentifier }
+        case .blacklist:
+            return !blockedAppBundleIdentifiers.contains(bundleIdentifier)
+        }
+    }
+
     var browserSearchesAllowed: Bool {
         restrictionNodes.contains { $0.kind == .allowBrowserSearches }
     }

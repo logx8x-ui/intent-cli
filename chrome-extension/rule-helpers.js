@@ -47,12 +47,14 @@
 
   function isAllowedURL(url, rules) {
     if (!rules.active) return true;
+    const isBlacklist = rules.accessMode === "blacklist";
+    if (isSearchStagingURL(url)) return isBlacklist || rules.allowGoogleSearchTabs;
     if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) return true;
-    if (!rules.allowedWebsites.length) return false;
+    if (!rules.allowedWebsites.length) return isBlacklist;
 
     const parts = normalizedURLParts(url);
-    if (!parts) return false;
-    return rules.allowedWebsites.some((rawRule) => {
+    if (!parts) return isBlacklist;
+    const matchesConfiguredWebsite = rules.allowedWebsites.some((rawRule) => {
       const rule = normalizeRule(rawRule);
       if (!rule) return false;
       const slashIndex = rule.indexOf("/");
@@ -61,6 +63,7 @@
       const hostMatches = parts.host === ruleHost || parts.host.endsWith(`.${ruleHost}`);
       return hostMatches && (rulePath === "" || parts.path === rulePath || parts.path.startsWith(`${rulePath}/`));
     });
+    return isBlacklist ? !matchesConfiguredWebsite : matchesConfiguredWebsite;
   }
 
   const api = { normalizeRule, normalizedURLParts, isSearchStagingURL, isGoogleSearchURL, isAllowedURL };

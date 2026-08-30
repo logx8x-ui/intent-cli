@@ -1,6 +1,6 @@
 # Intent
 
-Intent is a macOS focus app for running saved intentions: focused sessions that allow only selected apps and browser targets until you finish with `Cmd+Shift+M`.
+Intent is a macOS focus app for running saved intentions. Whitelist intentions allow only selected apps and browser targets; blacklist intentions block selected distractions while everything else stays available. Finish a session with `Cmd+Shift+M`.
 
 ## Downloads
 

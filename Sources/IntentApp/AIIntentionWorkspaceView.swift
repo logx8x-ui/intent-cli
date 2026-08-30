@@ -902,7 +902,8 @@ struct AIIntentionWorkspaceView: View {
             restrictions: .init(),
             graphPosition: .zero,
             restrictionNodes: restrictions,
-            frictionNodes: frictions
+            frictionNodes: frictions,
+            accessMode: suggestion.accessMode
         )
     }
 

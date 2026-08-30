@@ -7,9 +7,16 @@ import SwiftUI
 
 enum PurposeModePreference {
     static let key = "intentPurposeModeEnabled"
+    static let accessModeKey = "intentPurposeAccessMode"
 
     static var isEnabled: Bool {
         UserDefaults.standard.bool(forKey: key)
+    }
+
+    static var accessMode: IntentionAccessMode {
+        IntentionAccessMode(
+            rawValue: UserDefaults.standard.string(forKey: accessModeKey) ?? ""
+        ) ?? .whitelist
     }
 }
 
@@ -242,6 +249,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
     @Binding var isFocused: Bool
     let intentions: [Intention]
     let apps: [AllowedApp]
+    let accessMode: IntentionAccessMode
     let hasAutocomplete: Bool
     let colorScheme: ColorScheme
     let onMoveAutocomplete: (Int) -> Void
@@ -365,7 +373,8 @@ private struct PurposePromptEditor: NSViewRepresentable {
         func apply(to textView: NSTextView) {
             let styleSignature = parent.intentions
                 .map { "\($0.id):\($0.name)" }
-                .joined(separator: "|") + "|" + PurposeLiveInterpreter.browserDisplayAliases(apps: parent.apps).joined(separator: "|")
+                .joined(separator: "|") + "|" + parent.accessMode.rawValue + "|"
+                + PurposeLiveInterpreter.browserDisplayAliases(apps: parent.apps).joined(separator: "|")
             let isDark = parent.colorScheme == .dark
             guard textView.string != lastStyledText
                 || styleSignature != lastStyleSignature
@@ -386,6 +395,9 @@ private struct PurposePromptEditor: NSViewRepresentable {
             let storage = textView.textStorage ?? NSTextStorage()
             storage.beginEditing()
             storage.setAttributes(baseAttributes, range: NSRange(location: 0, length: storage.length))
+            let browserColor = parent.accessMode == .blacklist
+                ? NSColor(calibratedRed: 0.98, green: 0.22, blue: 0.28, alpha: 1)
+                : NSColor.systemGreen
 
             for alias in PurposeLiveInterpreter.browserDisplayAliases(apps: parent.apps) {
                 let escaped = NSRegularExpression.escapedPattern(for: alias)
@@ -395,10 +407,10 @@ private struct PurposePromptEditor: NSViewRepresentable {
                 guard let expression else { continue }
                 for match in expression.matches(in: textView.string, range: NSRange(location: 0, length: storage.length)) {
                     storage.addAttributes([
-                        .foregroundColor: NSColor.systemGreen,
+                        .foregroundColor: browserColor,
                         .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
                         .underlineStyle: NSUnderlineStyle.single.rawValue,
-                        .underlineColor: NSColor.systemGreen
+                        .underlineColor: browserColor
                     ], range: match.range)
                 }
             }
@@ -487,6 +499,7 @@ struct PurposeModeView: View {
     @State private var autocompleteDismissed = false
     @State private var lastSpeechTranscript = ""
     @State private var learnedWebsites: [PurposeKnownWebsite] = []
+    @AppStorage(PurposeModePreference.accessModeKey) private var accessModeRawValue = IntentionAccessMode.whitelist.rawValue
 
     let onDismiss: () -> Void
 
@@ -501,6 +514,15 @@ struct PurposeModeView: View {
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .tracking(1.2)
                         .foregroundStyle(GraphTheme.muted(colorScheme))
+                    Spacer()
+                    Picker("Purpose access mode", selection: accessModeBinding) {
+                        Text("Allow only  ⇧W").tag(IntentionAccessMode.whitelist)
+                        Text("Block  ⇧B").tag(IntentionAccessMode.blacklist)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 250)
+                    .tint(modeAccent)
                     Spacer()
                     Button(action: onDismiss) {
                         HStack(spacing: 7) {
@@ -528,14 +550,18 @@ struct PurposeModeView: View {
                             .fill(GraphTheme.elevatedSurface(colorScheme))
                             .frame(width: 58, height: 58)
                         Circle()
-                            .stroke(GraphTheme.editBlue.opacity(0.65), lineWidth: 1)
+                            .stroke(modeAccent.opacity(0.72), lineWidth: 1)
                             .frame(width: 58, height: 58)
                         Image(systemName: "scope")
                             .font(.system(size: 24, weight: .light))
                             .foregroundStyle(GraphTheme.text(colorScheme))
                     }
 
-                    Text("What do you want to use your computer for?")
+                    Text(
+                        accessMode == .blacklist
+                            ? "What do you want to keep off-limits?"
+                            : "What do you want to use your computer for?"
+                    )
                         .font(.system(size: 38, weight: .semibold))
                         .multilineTextAlignment(.center)
                         .foregroundStyle(GraphTheme.text(colorScheme))
@@ -544,13 +570,17 @@ struct PurposeModeView: View {
                     HStack(alignment: .bottom, spacing: 12) {
                         Image(systemName: "sparkles")
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(GraphTheme.editBlue)
+                            .foregroundStyle(modeAccent)
                             .frame(width: 28)
                             .frame(height: 40)
 
                         ZStack(alignment: .topLeading) {
                             if purpose.isEmpty {
-                                Text("Describe the one thing you came here to do")
+                                Text(
+                                    accessMode == .blacklist
+                                        ? "Name the apps and websites you do not want to use"
+                                        : "Describe the one thing you came here to do"
+                                )
                                     .font(.system(size: 17, weight: .medium))
                                     .foregroundStyle(GraphTheme.muted(colorScheme))
                                     .padding(.top, 11)
@@ -562,6 +592,7 @@ struct PurposeModeView: View {
                                 isFocused: $purposeFocused,
                                 intentions: model.intentions,
                                 apps: availableApps,
+                                accessMode: accessMode,
                                 hasAutocomplete: !intentionAutocompleteCandidates.isEmpty,
                                 colorScheme: colorScheme,
                                 onMoveAutocomplete: moveAutocomplete,
@@ -578,7 +609,7 @@ struct PurposeModeView: View {
                                 .foregroundStyle(speech.isListening ? Color.white : GraphTheme.text(colorScheme))
                                 .frame(width: 40, height: 40)
                                 .background(
-                                    speech.isListening ? GraphTheme.editBlue : GraphTheme.elevatedSurface(colorScheme),
+                                    speech.isListening ? modeAccent : GraphTheme.elevatedSurface(colorScheme),
                                     in: Circle()
                                 )
                                 .contentShape(Circle())
@@ -597,7 +628,7 @@ struct PurposeModeView: View {
                                 }
                             }
                             .frame(width: 38, height: 38)
-                            .background(GraphTheme.editBlue, in: Circle())
+                            .background(modeAccent, in: Circle())
                             .foregroundStyle(.white)
                             .contentShape(Circle())
                         }
@@ -624,9 +655,7 @@ struct PurposeModeView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     } else {
                         HStack(spacing: 7) {
-                            example("Use Firefox with YouTube")
-                            example("Reply with Messages")
-                            example("Study with RemNote and Anki")
+                            ForEach(modeExamples, id: \.self) { example($0) }
                         }
                         .transition(.opacity)
                     }
@@ -634,7 +663,7 @@ struct PurposeModeView: View {
                     if speech.isListening {
                         Text("Listening...")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(GraphTheme.editBlue)
+                            .foregroundStyle(modeAccent)
                     } else if let message = speech.errorMessage ?? model.purposeModeError {
                         Text(message)
                             .font(.system(size: 11, weight: .medium))
@@ -646,7 +675,7 @@ struct PurposeModeView: View {
 
                 Spacer()
 
-                Text("Use * before a saved intention name. Otherwise, Intent builds the smallest focused session from the apps and websites you mention.")
+                Text(modeFooter)
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.72))
                     .padding(.bottom, 28)
@@ -710,6 +739,41 @@ struct PurposeModeView: View {
         purpose.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var accessMode: IntentionAccessMode {
+        IntentionAccessMode(rawValue: accessModeRawValue) ?? .whitelist
+    }
+
+    private var accessModeBinding: Binding<IntentionAccessMode> {
+        Binding(
+            get: { accessMode },
+            set: { accessModeRawValue = $0.rawValue }
+        )
+    }
+
+    private var modeAccent: Color {
+        accessMode == .blacklist
+            ? Color(red: 0.98, green: 0.22, blue: 0.28)
+            : GraphTheme.editBlue
+    }
+
+    private var browserAccent: Color {
+        accessMode == .blacklist ? modeAccent : Color.green
+    }
+
+    private var modeExamples: [String] {
+        if accessMode == .blacklist {
+            return ["Block Discord", "Firefox with YouTube", "Avoid Spotify"]
+        }
+        return ["Use Firefox with YouTube", "Reply with Messages", "Study with RemNote and Anki"]
+    }
+
+    private var modeFooter: String {
+        if accessMode == .blacklist {
+            return "Anything you mention is blocked. Everything else stays available. Use * before a saved intention name to run it instead."
+        }
+        return "Use * before a saved intention name. Otherwise, Intent allows only the apps and websites you mention."
+    }
+
     private var hasLiveRecognition: Bool {
         !recognizedIntentions.isEmpty
             || !recognizedApps.isEmpty
@@ -720,10 +784,12 @@ struct PurposeModeView: View {
     }
 
     private var clarificationPrompt: String? {
-        PurposeLiveInterpreter.clarificationPrompt(
+        let prompt = PurposeLiveInterpreter.clarificationPrompt(
             for: cleanedPurpose,
             interpretation: liveInterpretation
         )
+        guard accessMode == .blacklist, prompt != nil else { return prompt }
+        return "Which apps or browser websites should Intent keep off-limits?"
     }
 
     private var availableApps: [AllowedApp] {
@@ -786,7 +852,7 @@ struct PurposeModeView: View {
                     .padding(.horizontal, 12)
                     .frame(height: 36)
                     .background(
-                        index == autocompleteSelection ? GraphTheme.editBlue : Color.clear,
+                        index == autocompleteSelection ? modeAccent : Color.clear,
                         in: RoundedRectangle(cornerRadius: 9)
                     )
                     .contentShape(Rectangle())
@@ -797,7 +863,7 @@ struct PurposeModeView: View {
         .padding(6)
         .frame(maxWidth: 620)
         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(GraphTheme.editBlue.opacity(0.6), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(modeAccent.opacity(0.6), lineWidth: 1))
         .shadow(color: Color.black.opacity(0.24), radius: 16, y: 8)
     }
 
@@ -889,9 +955,9 @@ struct PurposeModeView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(Color.green)
+                    .fill(modeAccent)
                     .frame(width: 7, height: 7)
-                Text("INTENT UNDERSTANDS")
+                Text(accessMode == .blacklist ? "INTENT WILL BLOCK" : "INTENT WILL ALLOW")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .tracking(1)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
@@ -1007,7 +1073,7 @@ struct PurposeModeView: View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "sparkles")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(GraphTheme.editBlue)
+                .foregroundStyle(modeAccent)
             VStack(alignment: .leading, spacing: 5) {
                 Text("ONE QUICK QUESTION")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -1022,7 +1088,7 @@ struct PurposeModeView: View {
         .padding(16)
         .frame(maxWidth: 720, alignment: .leading)
         .background(GraphTheme.surface(colorScheme).opacity(0.82), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(GraphTheme.editBlue.opacity(0.58), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(modeAccent.opacity(0.58), lineWidth: 1))
     }
 
     private func recognizedAppCard(_ app: InstalledApp) -> some View {
@@ -1032,7 +1098,7 @@ struct PurposeModeView: View {
                 .scaledToFit()
                 .frame(width: 58, height: 58)
             VStack(alignment: .leading, spacing: 5) {
-                Text("APPLICATION")
+                Text(accessMode == .blacklist ? "BLOCKED APPLICATION" : "APPLICATION")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .tracking(0.8)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
@@ -1059,24 +1125,24 @@ struct PurposeModeView: View {
                     .scaledToFit()
                     .frame(width: 52, height: 52)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("BROWSER WORKSPACE")
+                    Text(accessMode == .blacklist ? "BLOCKED SITES IN BROWSER" : "BROWSER WORKSPACE")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .tracking(0.8)
-                        .foregroundStyle(Color.green)
+                        .foregroundStyle(browserAccent)
                     Text(browser.name)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.green)
+                        .foregroundStyle(browserAccent)
                         .underline()
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "link")
-                    .foregroundStyle(Color.green.opacity(0.8))
+                    .foregroundStyle(browserAccent.opacity(0.8))
             }
 
             if !websites.isEmpty {
-                Divider().overlay(Color.green.opacity(0.28))
+                Divider().overlay(browserAccent.opacity(0.28))
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 118), spacing: 8)], alignment: .leading, spacing: 8) {
                     ForEach(websites) { website in
                         HStack(spacing: 7) {
@@ -1089,8 +1155,8 @@ struct PurposeModeView: View {
                         .foregroundStyle(GraphTheme.text(colorScheme))
                         .padding(.horizontal, 9)
                         .frame(maxWidth: .infinity, minHeight: 32)
-                        .background(Color.green.opacity(colorScheme == .dark ? 0.11 : 0.07), in: Capsule())
-                        .overlay(Capsule().stroke(Color.green.opacity(0.42), lineWidth: 0.8))
+                        .background(browserAccent.opacity(colorScheme == .dark ? 0.11 : 0.07), in: Capsule())
+                        .overlay(Capsule().stroke(browserAccent.opacity(0.42), lineWidth: 0.8))
                     }
                 }
             }
@@ -1098,7 +1164,7 @@ struct PurposeModeView: View {
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: websites.isEmpty ? 92 : 132)
         .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 15))
-        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.green.opacity(0.62), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(browserAccent.opacity(0.62), lineWidth: 1))
         .help(websites.isEmpty ? browser.name : "\(browser.name) with \(websites.map(\.name).joined(separator: ", "))")
     }
 
@@ -1153,7 +1219,11 @@ struct PurposeModeView: View {
         )
         liveInterpretation = interpretation
         Task {
-            await model.startPurposeSession(for: request, liveInterpretation: interpretation)
+            await model.startPurposeSession(
+                for: request,
+                accessMode: accessMode,
+                liveInterpretation: interpretation
+            )
         }
     }
 

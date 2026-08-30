@@ -56,20 +56,26 @@
       return true;
     }
 
+    const isBlacklist = rules.accessMode === "blacklist";
+
+    if (isSearchStagingURL(url)) {
+      return isBlacklist || rules.allowGoogleSearchTabs;
+    }
+
     if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) {
       return true;
     }
 
     if (rules.allowedWebsites.length === 0) {
-      return false;
+      return isBlacklist;
     }
 
     const parts = normalizedURLParts(url);
     if (!parts) {
-      return false;
+      return isBlacklist;
     }
 
-    return rules.allowedWebsites.some((rawRule) => {
+    const matchesConfiguredWebsite = rules.allowedWebsites.some((rawRule) => {
       const rule = normalizeRule(rawRule);
       if (!rule) {
         return false;
@@ -86,6 +92,7 @@
 
       return rulePath === "" || parts.path === rulePath || parts.path.startsWith(`${rulePath}/`);
     });
+    return isBlacklist ? !matchesConfiguredWebsite : matchesConfiguredWebsite;
   }
 
   const api = {

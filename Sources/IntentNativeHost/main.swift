@@ -48,6 +48,7 @@ struct HostRequest: Codable {
 
 struct HostRuleState: Codable, Equatable {
     var active: Bool
+    var accessMode: String
     var allowedWebsites: [String]
     var startupWebsites: [String]
     var blockTabSwitching: Bool
@@ -59,6 +60,7 @@ struct HostRuleState: Codable, Equatable {
 
 struct HostResponse: Codable {
     var active: Bool
+    var accessMode: String
     var allowedWebsites: [String]
     var startupWebsites: [String]
     var blockTabSwitching: Bool
@@ -70,6 +72,7 @@ struct HostResponse: Codable {
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?) {
         active = state.active
+        accessMode = state.accessMode
         allowedWebsites = state.allowedWebsites
         startupWebsites = state.startupWebsites
         blockTabSwitching = state.blockTabSwitching
@@ -166,6 +169,7 @@ private final class HostRuntime {
     private var hasLoadedRules = false
     private var lastPushedState: HostRuleState?
     private var lastHeartbeatWriteAt: Date?
+    private var lastMessageReceivedAt: Date?
     private var lastSnapshotTabs: [BrowserTabItem]?
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
@@ -190,7 +194,14 @@ private final class HostRuntime {
             metrics.receivedMessages += 1
             let browser = request.browserBundleIdentifier ?? browserBundleIdentifier ?? "org.mozilla.firefox"
             registerBrowserIfNeeded(browser)
-            maybeWriteHeartbeat()
+            let now = Date()
+            let isMessageBurst = lastMessageReceivedAt.map {
+                now.timeIntervalSince($0) < 0.1
+            } ?? false
+            lastMessageReceivedAt = now
+            if !isMessageBurst {
+                maybeWriteHeartbeat()
+            }
 
             switch request.type ?? "getRules" {
             case "setGuardEnabled":
@@ -346,6 +357,7 @@ private final class HostRuntime {
               !rules.active || rules.isFresh() else {
             return HostRuleState(
                 active: false,
+                accessMode: IntentionAccessMode.whitelist.rawValue,
                 allowedWebsites: [],
                 startupWebsites: [],
                 blockTabSwitching: false,
@@ -360,6 +372,7 @@ private final class HostRuntime {
             ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
         return HostRuleState(
             active: rules.active,
+            accessMode: rules.accessMode.rawValue,
             allowedWebsites: browserWebsites,
             startupWebsites: rules.startupWebsitesByBrowser[browserBundleIdentifier] ?? [],
             blockTabSwitching: rules.blockTabSwitching,

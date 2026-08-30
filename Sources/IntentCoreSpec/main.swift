@@ -20,6 +20,7 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
     object.removeValue(forKey: "frictionNodes")
     object.removeValue(forKey: "graphModelVersion")
     object.removeValue(forKey: "isLeisure")
+    object.removeValue(forKey: "accessMode")
     return try JSONSerialization.data(withJSONObject: object)
 }
 
@@ -28,6 +29,76 @@ do {
     try expect(AppReleaseVersion.isNewer("1.0.0", than: "0.99.9"), "major releases should compare correctly")
     try expect(!AppReleaseVersion.isNewer("0.8", than: "0.8.0"), "equivalent versions should not update")
     try expect(!AppReleaseVersion.isNewer("0.7.9", than: "0.8.0"), "older versions should not update")
+
+    let legacyAccessIntention = Intention(
+        name: "Legacy focus",
+        icon: "target",
+        colorHex: "#FFFFFF",
+        folder: "",
+        allowedApps: [.init(name: "Messages", bundleIdentifier: "com.apple.MobileSMS")],
+        allowedWebsites: [],
+        startupActions: [],
+        restrictions: .init()
+    )
+    let decodedLegacyAccess = try JSONDecoder().decode(
+        Intention.self,
+        from: legacyIntentionData(legacyAccessIntention)
+    )
+    try expect(decodedLegacyAccess.accessMode == .whitelist, "Legacy intentions should default to whitelist mode")
+
+    let blacklistedIntention = Intention(
+        name: "No distractions",
+        icon: "nosign",
+        colorHex: "#FF3344",
+        folder: "",
+        allowedApps: [
+            .init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox"),
+            .init(name: "Discord", bundleIdentifier: "com.hnc.Discord")
+        ],
+        allowedWebsites: [
+            .init("youtube.com", browserBundleIdentifier: "org.mozilla.firefox")
+        ],
+        startupActions: [],
+        restrictions: .init(),
+        accessMode: .blacklist
+    )
+    try expect(
+        blacklistedIntention.blockedAppBundleIdentifiers == ["com.hnc.Discord"],
+        "A browser used to scope blocked sites should remain usable"
+    )
+    try expect(
+        IntentionStartupPlanner.steps(for: blacklistedIntention).isEmpty,
+        "Blacklist sessions must never launch blocked resources"
+    )
+    let blacklistSpec = FocusSessionSpec.make(for: blacklistedIntention)
+    try expect(blacklistSpec.accessMode == .blacklist, "Focus specs should preserve blacklist mode")
+    try expect(blacklistSpec.permitsApplication("org.mozilla.firefox"), "Scoped browsers should remain permitted")
+    try expect(!blacklistSpec.permitsApplication("com.hnc.Discord"), "Blacklisted apps should be denied")
+    try expect(blacklistSpec.permitsApplication("com.apple.MobileSMS"), "Unlisted apps should remain available")
+    try expect(
+        !FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.hnc.Discord",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: blacklistSpec.allowedBundleIdentifiers,
+            intentBundleIdentifier: "dev.loganmondi.intent",
+            accessMode: .blacklist
+        ),
+        "Clicks targeting blacklisted apps should be prevented"
+    )
+
+    let blacklistedRules = ActiveBrowserRules(
+        active: true,
+        accessMode: .blacklist,
+        allowedWebsites: ["youtube.com"],
+        blockTabSwitching: true,
+        blockNavigation: true,
+        blockNewTabs: false
+    )
+    let decodedBlacklistedRules = try JSONDecoder().decode(
+        ActiveBrowserRules.self,
+        from: JSONEncoder().encode(blacklistedRules)
+    )
+    try expect(decodedBlacklistedRules.accessMode == .blacklist, "Browser rules should round-trip blacklist mode")
 
     let installedForAI = [
         AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox"),

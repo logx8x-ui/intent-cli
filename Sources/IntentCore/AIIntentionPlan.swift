@@ -17,6 +17,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
     public var restrictions: [AIRestrictionSuggestion]
     public var frictions: [AIFrictionSuggestion]
     public var isLeisure: Bool
+    public var accessMode: IntentionAccessMode
 
     public init(
         name: String,
@@ -26,7 +27,8 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         allowBrowserSearches: Bool,
         restrictions: [AIRestrictionSuggestion] = [],
         frictions: [AIFrictionSuggestion] = [],
-        isLeisure: Bool = false
+        isLeisure: Bool = false,
+        accessMode: IntentionAccessMode = .whitelist
     ) {
         self.name = name
         self.purpose = purpose
@@ -36,6 +38,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         self.restrictions = restrictions
         self.frictions = frictions
         self.isLeisure = isLeisure
+        self.accessMode = isLeisure ? .whitelist : accessMode
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -47,6 +50,7 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         case restrictions
         case frictions
         case isLeisure
+        case accessMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -59,6 +63,9 @@ public struct AIIntentionSuggestion: Codable, Equatable {
         restrictions = try container.decodeIfPresent([AIRestrictionSuggestion].self, forKey: .restrictions) ?? []
         frictions = try container.decodeIfPresent([AIFrictionSuggestion].self, forKey: .frictions) ?? []
         isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
+        accessMode = isLeisure
+            ? .whitelist
+            : (try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist)
     }
 }
 
@@ -140,11 +147,11 @@ public struct AIWebsiteSuggestion: Codable, Equatable {
 
 public enum AIIntentionPrompt {
     public static let system = """
-    You design focused computer sessions for Intent, an app that lets a person use only the resources needed for one task at a time.
+    You design computer sessions for Intent. A whitelist intention allows only its selected resources. A blacklist intention blocks its selected resources while everything else stays available.
 
     Turn the person's request into exactly one specific, reusable intention. An intention is one concrete outcome such as Reply to messages, Write an assignment, or Review pull requests. Do not create a vague category such as Work or Productivity.
 
-    Choose only applications from the installed-app catalog supplied by the user. Copy bundle identifiers exactly. Include only apps genuinely needed for the outcome. Suggest narrow website hosts or paths only when a selected installed app is a browser, and assign each website to that browser's exact bundle identifier. Do not invent applications or bundle identifiers. Keep the name short. Add explicitly requested timers, cooldowns, restrictions, and friction. Never infer or suggest friction from the selected apps, websites, or task; when the user does not explicitly request friction, return no friction. Only allow browser searches when the person explicitly asks to search, browse, Google, look something up, or do research; never infer it merely because a browser is needed. When a request names an existing intention with @ or an intention-id marker, modify that intention and preserve every field the user did not ask to change.
+    Use blacklist mode only when the person explicitly says blacklist, block, ban, avoid, keep off-limits, or do not allow. Use whitelist mode for new intentions otherwise. In blacklist mode, include only resources the person explicitly wants blocked and never infer extra blocked apps or websites. A browser paired with websites is their blocking scope; it is not itself blocked unless the person separately asks to block the browser. Choose only applications from the installed-app catalog supplied by the user. Copy bundle identifiers exactly. Suggest narrow website hosts or paths only when a selected installed app is a browser, and assign each website to that browser's exact bundle identifier. Do not invent applications or bundle identifiers. Keep the name short. Add explicitly requested timers, cooldowns, restrictions, and friction. Never infer or suggest friction from the selected apps, websites, or task; when the user does not explicitly request friction, return no friction. Only allow browser searches in whitelist mode when the person explicitly asks to search, browse, Google, look something up, or do research. When a request names an existing intention with @ or an intention-id marker, modify that intention and preserve every field the user did not ask to change, including accessMode.
     """
 
     public static func user(description: String, installedApps: [AllowedApp]) -> String {
@@ -229,7 +236,8 @@ public extension AIIntentionPlan {
                 allowBrowserSearches: restrictions.contains { $0.kind == .allowBrowserSearches },
                 restrictions: restrictions,
                 frictions: frictions,
-                isLeisure: suggestion.isLeisure
+                isLeisure: suggestion.isLeisure,
+                accessMode: suggestion.isLeisure ? .whitelist : suggestion.accessMode
             )
         }
 

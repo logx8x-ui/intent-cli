@@ -1,19 +1,30 @@
+import IntentCore
+
 public enum FocusClickTargetPolicy {
     public static func shouldAllow(
         ownerBundleIdentifier: String?,
         representedBundleIdentifier: String?,
         allowedBundleIdentifiers: Set<String>,
-        intentBundleIdentifier: String?
+        intentBundleIdentifier: String?,
+        accessMode: IntentionAccessMode = .whitelist
     ) -> Bool {
         if let representedBundleIdentifier {
-            return allowedBundleIdentifiers.contains(representedBundleIdentifier)
+            return isPermitted(
+                representedBundleIdentifier,
+                controlledBundleIdentifiers: allowedBundleIdentifiers,
+                accessMode: accessMode
+            )
         }
 
         guard let ownerBundleIdentifier else {
             return false
         }
 
-        if allowedBundleIdentifiers.contains(ownerBundleIdentifier) {
+        if isPermitted(
+            ownerBundleIdentifier,
+            controlledBundleIdentifiers: allowedBundleIdentifiers,
+            accessMode: accessMode
+        ) {
             return true
         }
 
@@ -22,6 +33,17 @@ public enum FocusClickTargetPolicy {
         }
 
         return trustedSystemBundles.contains(ownerBundleIdentifier)
+    }
+
+    private static func isPermitted(
+        _ bundleIdentifier: String,
+        controlledBundleIdentifiers: Set<String>,
+        accessMode: IntentionAccessMode
+    ) -> Bool {
+        switch accessMode {
+        case .whitelist: controlledBundleIdentifiers.contains(bundleIdentifier)
+        case .blacklist: !controlledBundleIdentifiers.contains(bundleIdentifier)
+        }
     }
 
     private static let trustedSystemBundles: Set<String> = [

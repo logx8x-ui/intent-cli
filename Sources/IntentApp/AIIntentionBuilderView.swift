@@ -239,8 +239,31 @@ struct AIIntentionBuilderView: View {
                         .foregroundStyle(GraphTheme.muted(colorScheme))
                 }
 
+                if !drafts[index].suggestion.isLeisure {
+                    VStack(alignment: .leading, spacing: 7) {
+                        fieldLabel("ACCESS MODE")
+                        Picker("Access mode", selection: suggestion.accessMode) {
+                            Text("Allow only").tag(IntentionAccessMode.whitelist)
+                            Text("Block").tag(IntentionAccessMode.blacklist)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(
+                            drafts[index].suggestion.accessMode == .blacklist
+                                ? "These resources are blocked. Everything else stays available."
+                                : "Only these resources stay available."
+                        )
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                    }
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
-                    fieldLabel("ALLOWED APPS")
+                    fieldLabel(
+                        drafts[index].suggestion.accessMode == .blacklist
+                            ? "BLOCKED APPS & BROWSER SCOPES"
+                            : "ALLOWED APPS"
+                    )
                     ForEach(selectedApps(for: index)) { app in
                         HStack(spacing: 9) {
                             Image(nsImage: app.icon)
@@ -289,7 +312,11 @@ struct AIIntentionBuilderView: View {
 
                 if !selectedBrowsers.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        fieldLabel("ALLOWED WEBSITES")
+                        fieldLabel(
+                            drafts[index].suggestion.accessMode == .blacklist
+                                ? "BLOCKED WEBSITES"
+                                : "ALLOWED WEBSITES"
+                        )
                         ForEach(Array(drafts[index].suggestion.websites.enumerated()), id: \.offset) { websiteIndex, website in
                             HStack {
                                 Image(systemName: "globe")
@@ -324,9 +351,11 @@ struct AIIntentionBuilderView: View {
                             .disabled(websiteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
 
-                        Toggle("Allow browser searches", isOn: suggestion.allowBrowserSearches)
-                            .toggleStyle(.checkbox)
-                            .font(.system(size: 11))
+                        if drafts[index].suggestion.accessMode == .whitelist {
+                            Toggle("Allow browser searches", isOn: suggestion.allowBrowserSearches)
+                                .toggleStyle(.checkbox)
+                                .font(.system(size: 11))
+                        }
                     }
                 }
 

@@ -265,7 +265,8 @@ final class IntentAppModel: ObservableObject {
                 graphPosition: position,
                 restrictionNodes: restrictionNodes,
                 frictionNodes: frictionNodes,
-                isLeisure: suggestion.isLeisure
+                isLeisure: suggestion.isLeisure,
+                accessMode: suggestion.accessMode
             ))
             occupied.append(position)
         }
@@ -279,6 +280,7 @@ final class IntentAppModel: ObservableObject {
 
     func startPurposeSession(
         for rawPurpose: String,
+        accessMode: IntentionAccessMode,
         liveInterpretation: PurposeLiveInterpretation? = nil
     ) async {
         let purpose = rawPurpose.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -318,19 +320,23 @@ final class IntentAppModel: ObservableObject {
         } ?? []
         let includedWebsiteNames = liveInterpretation?.includedWebsites.map(\.name) ?? []
         let excludedWebsiteNames = liveInterpretation?.excludedWebsites.map(\.name) ?? []
+        let resourceVerb = accessMode == .blacklist ? "Block" : "Keep"
         let liveResolution = """
         Final live interpretation after applying the person's corrections in order:
-        - Keep these apps: \(includedAppNames.isEmpty ? "No app was explicitly resolved" : includedAppNames.joined(separator: ", "))
+        - \(resourceVerb) these apps: \(includedAppNames.isEmpty ? "No app was explicitly resolved" : includedAppNames.joined(separator: ", "))
         - Never include these removed apps: \(excludedAppNames.isEmpty ? "None" : excludedAppNames.joined(separator: ", "))
-        - Keep these websites: \(includedWebsiteNames.isEmpty ? "No website was explicitly resolved" : includedWebsiteNames.joined(separator: ", "))
+        - \(resourceVerb) these websites: \(includedWebsiteNames.isEmpty ? "No website was explicitly resolved" : includedWebsiteNames.joined(separator: ", "))
         - Never include these removed websites: \(excludedWebsiteNames.isEmpty ? "None" : excludedWebsiteNames.joined(separator: ", "))
         - Explicitly starred saved intentions: \(includedIntentionNames.isEmpty ? "None" : includedIntentionNames.joined(separator: ", "))
         Later corrections override earlier words. Never re-add an app or website listed as removed.
         """
+        let modeInstruction = accessMode == .blacklist
+            ? "This is blacklist mode. The mentioned resources are prohibited and everything else stays available. Never infer extra blocked resources."
+            : "This is whitelist mode. The selected resources are the only resources available during the session."
         let description = """
-        Start one immediate focused session for this purpose: \(purpose)
+        Start one immediate session for this purpose: \(purpose)
 
-        Choose only the installed apps and narrow websites needed right now. A saved intention may only be reused when the person explicitly prefixed its name with an asterisk; do not infer a saved intention from an unstarred name. Do not add friction, timers, cooldowns, or leisure mode unless the person explicitly requested them.
+        \(modeInstruction) A saved intention may only be reused when the person explicitly prefixed its name with an asterisk; do not infer a saved intention from an unstarred name. Do not add friction, timers, cooldowns, or leisure mode unless the person explicitly requested them.
 
         \(liveResolution)
         """
@@ -345,6 +351,7 @@ final class IntentAppModel: ObservableObject {
                 purposeModeError = "Intent could not identify the apps needed for that purpose. Try naming the task or app more specifically."
                 return
             }
+            suggestion.accessMode = accessMode
 
             if let liveInterpretation {
                 let included = liveInterpretation.includedAppBundleIdentifiers
@@ -398,6 +405,19 @@ final class IntentAppModel: ObservableObject {
                     }
                 }
                 suggestion.websites.removeAll { excludedWebsiteValues.contains(AllowedWebsite.normalized($0.value)) }
+
+                if accessMode == .blacklist {
+                    suggestion.appBundleIdentifiers = included.filter { !excluded.contains($0) }
+                    suggestion.websites = liveInterpretation.includedWebsites.compactMap { website in
+                        guard let browser = website.browserBundleIdentifier
+                                ?? suggestion.appBundleIdentifiers.first(where: BrowserApplication.isBrowser),
+                              suggestion.appBundleIdentifiers.contains(browser),
+                              !excludedWebsiteValues.contains(AllowedWebsite.normalized(website.value)) else {
+                            return nil
+                        }
+                        return AIWebsiteSuggestion(value: website.value, browserBundleIdentifier: browser)
+                    }
+                }
             }
 
             let appsByIdentifier = Dictionary(
@@ -754,11 +774,16 @@ final class IntentAppModel: ObservableObject {
         }
 
         guard intention.isLeisure || !intention.allowedApps.isEmpty else {
-            errorMessage = "Add at least one allowed app before starting this intention."
+            errorMessage = intention.accessMode == .blacklist
+                ? "Add at least one app or browser website to block before starting this intention."
+                : "Add at least one allowed app before starting this intention."
             return
         }
         let unsupportedBrowsers = intention.isLeisure ? [] : intention.allowedApps.filter {
-            $0.isBrowser && !Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
+            let requiresWebsiteGuard = intention.accessMode == .whitelist
+                || !intention.websites(for: $0.bundleIdentifier).isEmpty
+            return $0.isBrowser && !Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
+                && requiresWebsiteGuard
         }
         if !unsupportedBrowsers.isEmpty {
             let names = unsupportedBrowsers.map(\.name).joined(separator: ", ")
@@ -985,9 +1010,13 @@ final class IntentAppModel: ObservableObject {
             for: intention,
             finishShortcut: FinishShortcutStore.load().focusShortcut
         )
-        let websitesByBrowser = Dictionary(uniqueKeysWithValues: requiredBrowserGuards(for: intention).map { browser in
+        let browserGuards = requiredBrowserGuards(for: intention)
+        let websitesByBrowser = Dictionary(uniqueKeysWithValues: browserGuards.map { browser in
             let websites = intention.websites(for: browser.bundleIdentifier).map(\.value)
-            return (browser.bundleIdentifier, websites.isEmpty ? ["intent.invalid"] : websites)
+            return (
+                browser.bundleIdentifier,
+                websites.isEmpty && intention.accessMode == .whitelist ? ["intent.invalid"] : websites
+            )
         })
         let firefoxWebsites = websitesByBrowser["org.mozilla.firefox"] ?? []
         let startupWebsitesByBrowser = Dictionary(
@@ -999,8 +1028,9 @@ final class IntentAppModel: ObservableObject {
             },
             by: \.0
         ).mapValues { $0.map(\.1) }
-        let rules = intention.isLeisure ? nil : ActiveBrowserRules(
+        let rules = intention.isLeisure || browserGuards.isEmpty ? nil : ActiveBrowserRules(
             active: true,
+            accessMode: intention.accessMode,
             // A non-matching sentinel keeps already-installed Browser Guard 0.1.3 builds strict
             // when Firefox is allowed but the intention has no website spikes.
             allowedWebsites: firefoxWebsites,
@@ -1009,7 +1039,7 @@ final class IntentAppModel: ObservableObject {
             blockTabSwitching: true,
             blockNavigation: true,
             blockNewTabs: false,
-            allowGoogleSearchTabs: intention.browserSearchesAllowed
+            allowGoogleSearchTabs: intention.accessMode == .whitelist && intention.browserSearchesAllowed
         )
 
         do {
@@ -1272,6 +1302,8 @@ final class IntentAppModel: ObservableObject {
         guard !intention.isLeisure else { return [] }
         return intention.allowedApps.filter {
             Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
+                && (intention.accessMode == .whitelist
+                    || !intention.websites(for: $0.bundleIdentifier).isEmpty)
         }
     }
 
@@ -1425,7 +1457,8 @@ final class IntentAppModel: ObservableObject {
             graphPosition: position,
             restrictionNodes: restrictionNodes,
             frictionNodes: frictionNodes,
-            isLeisure: false
+            isLeisure: false,
+            accessMode: suggestion.accessMode
         )
     }
 

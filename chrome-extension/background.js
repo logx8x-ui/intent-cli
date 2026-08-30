@@ -35,6 +35,7 @@ const recentlyRecordedSites = new Map();
 function inactiveRules() {
   return {
     active: false,
+    accessMode: "whitelist",
     allowedWebsites: [],
     startupWebsites: [],
     blockTabSwitching: false,
@@ -221,6 +222,7 @@ function effectiveRules(nativeRules) {
   return {
     ...inactiveRules(),
     active: true,
+    accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
@@ -241,6 +243,7 @@ async function applyNativeRules(nativeRules) {
   await updateNetworkRules();
   broadcastRules();
   if (rules.active) {
+    await removeAlreadyBlockedTabs();
     await synchronizeStartupTabs();
     await primeAllowedTab();
   }
@@ -250,6 +253,20 @@ async function applyNativeRules(nativeRules) {
     lastAllowedURLByTab.clear();
   }
   scheduleTabSnapshot(true);
+}
+
+async function removeAlreadyBlockedTabs() {
+  if (rules.accessMode !== "blacklist") return;
+  const tabs = await chrome.tabs.query({});
+  const blocked = tabs.filter((tab) => tab.id != null && tab.url && !isAllowedURL(tab.url, rules));
+  for (const tab of blocked) {
+    if (tabs.length - blocked.length <= 0 && blocked[blocked.length - 1]?.id === tab.id) {
+      await chrome.tabs.update(tab.id, { url: "chrome://newtab", active: Boolean(tab.active) }).catch(() => {});
+      freshBlankTabIds.add(tab.id);
+    } else {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+  }
 }
 
 function escapeRegex(value) {
@@ -269,26 +286,29 @@ function allowedRuleRegex(rawRule) {
 
 function desiredNetworkRules() {
   if (!rules.active || !rules.blockNavigation) return [];
-  const dynamicRules = [{
-    id: DYNAMIC_RULE_ID_START,
-    priority: 1,
-    action: { type: "block" },
-    condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"] }
-  }];
+  const dynamicRules = [];
+  let nextID = DYNAMIC_RULE_ID_START;
+  if (rules.accessMode === "whitelist") {
+    dynamicRules.push({
+      id: nextID++,
+      priority: 1,
+      action: { type: "block" },
+      condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"] }
+    });
+  }
 
-  let nextID = DYNAMIC_RULE_ID_START + 1;
   for (const website of rules.allowedWebsites) {
     const regexFilter = allowedRuleRegex(website);
     if (!regexFilter) continue;
     dynamicRules.push({
       id: nextID++,
-      priority: 2,
-      action: { type: "allow" },
+      priority: rules.accessMode === "blacklist" ? 1 : 2,
+      action: { type: rules.accessMode === "blacklist" ? "block" : "allow" },
       condition: { regexFilter, resourceTypes: ["main_frame"] }
     });
   }
 
-  if (rules.allowGoogleSearchTabs) {
+  if (rules.accessMode === "whitelist" && rules.allowGoogleSearchTabs) {
     dynamicRules.push({
       id: nextID,
       priority: 2,
@@ -452,6 +472,12 @@ async function recoverBlockedNavigation(tabId) {
     lastAllowedTabId = tabId;
     return;
   }
+  if (rules.accessMode === "blacklist") {
+    await chrome.tabs.update(tabId, { url: "chrome://newtab", active: true }).catch(returnToAllowedTab);
+    freshBlankTabIds.add(tabId);
+    lastAllowedTabId = tabId;
+    return;
+  }
   await returnToAllowedTab();
 }
 
@@ -488,7 +514,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     if (isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
   } else if (rules.blockTabSwitching) {
-    await returnToAllowedTab();
+    await recoverBlockedNavigation(tabId);
   }
   scheduleTabSnapshot();
 });
@@ -499,6 +525,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!rules.active || (!changeInfo.url && changeInfo.status !== "complete") || !tab.url) return;
 
   if (
+    rules.accessMode === "whitelist" &&
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs &&
     changeInfo.url &&
@@ -568,6 +595,7 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   Promise.resolve().then(async () => {
     if (!rules.active || !rules.blockNavigation) return;
     if (
+      rules.accessMode === "whitelist" &&
       freshBlankTabIds.has(details.tabId) &&
       !rules.allowGoogleSearchTabs &&
       !isSearchStagingURL(details.url) &&

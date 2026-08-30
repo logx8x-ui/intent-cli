@@ -19,6 +19,7 @@ let rulesFingerprint = fingerprintRules(rules);
 let guardEnabled = true;
 let initialized = false;
 let freshBlankTabIds = new Set();
+const lastAllowedURLByTab = new Map();
 let commandPort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
@@ -33,6 +34,7 @@ const recentlyRecordedSites = new Map();
 function inactiveRules() {
   return {
     active: false,
+    accessMode: "whitelist",
     allowedWebsites: [],
     startupWebsites: [],
     blockTabSwitching: false,
@@ -207,6 +209,7 @@ function effectiveRules(nativeRules) {
   return {
     ...inactiveRules(),
     active: true,
+    accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
@@ -266,13 +269,29 @@ async function applyNativeRules(nativeRules) {
   }
 
   if (rules.active) {
+    await removeAlreadyBlockedTabs();
     await synchronizeStartupTabs();
     await primeAllowedTab();
   } else {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
+    lastAllowedURLByTab.clear();
   }
   scheduleTabSnapshot(true);
+}
+
+async function removeAlreadyBlockedTabs() {
+  if (rules.accessMode !== "blacklist") return;
+  const tabs = await browser.tabs.query({});
+  const blocked = tabs.filter((tab) => tab.id != null && tab.url && !isAllowedURL(tab.url, rules));
+  for (const tab of blocked) {
+    if (tabs.length - blocked.length <= 0 && blocked[blocked.length - 1]?.id === tab.id) {
+      await browser.tabs.update(tab.id, { url: "about:newtab", active: tab.active }).catch(() => {});
+      freshBlankTabIds.add(tab.id);
+    } else {
+      await browser.tabs.remove(tab.id).catch(() => {});
+    }
+  }
 }
 
 async function getAllowedTab(tabId) {
@@ -296,6 +315,11 @@ function isRuntimeAllowedTab(tab) {
 
 async function primeAllowedTab() {
   const tabs = await browser.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.id != null && isAllowedURL(tab.url, rules)) {
+      lastAllowedURLByTab.set(tab.id, tab.url);
+    }
+  }
   const activeAllowed = tabs.find((tab) => tab.active && isRuntimeAllowedTab(tab));
   const firstAllowed = activeAllowed || tabs.find((tab) => isRuntimeAllowedTab(tab));
   lastAllowedTabId = firstAllowed?.id ?? null;
@@ -378,6 +402,7 @@ async function rememberIfAllowed(tabId) {
 
   const tab = await getAllowedTab(tabId);
   if (tab) {
+    if (isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
   }
 }
@@ -438,12 +463,29 @@ async function recoverBlockedNavigation(tabId) {
     return;
   }
 
-  if (freshBlankTabIds.has(tabId) && !rules.allowGoogleSearchTabs) {
+  if (
+    rules.accessMode === "whitelist" &&
+    freshBlankTabIds.has(tabId) &&
+    !rules.allowGoogleSearchTabs
+  ) {
     freshBlankTabIds.delete(tabId);
     try {
       await browser.tabs.remove(tabId);
     } catch (_) {}
     await returnToAllowedTab();
+    return;
+  }
+
+  const fallbackURL = lastAllowedURLByTab.get(tabId);
+  if (fallbackURL) {
+    await browser.tabs.update(tabId, { url: fallbackURL, active: true }).catch(() => {});
+    lastAllowedTabId = tabId;
+    return;
+  }
+  if (rules.accessMode === "blacklist") {
+    await browser.tabs.update(tabId, { url: "about:newtab", active: true }).catch(() => {});
+    freshBlankTabIds.add(tabId);
+    lastAllowedTabId = tabId;
     return;
   }
 
@@ -483,6 +525,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
 
   if (isAllowedURL(tab.url, rules)) {
     freshBlankTabIds.delete(tabId);
+    lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
     return;
   }
@@ -493,7 +536,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   }
 
   if (rules.blockTabSwitching) {
-    await returnToAllowedTab();
+    await recoverBlockedNavigation(tabId);
   }
   scheduleTabSnapshot();
 });
@@ -522,6 +565,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   if (isAllowedURL(tab.url, rules)) {
     freshBlankTabIds.delete(tabId);
+    lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
     return;
   }
@@ -532,7 +576,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 
   if (rules.blockNavigation) {
-    await returnToAllowedTab();
+    await recoverBlockedNavigation(tabId);
   }
   scheduleTabSnapshot();
 });
@@ -558,6 +602,7 @@ browser.tabs.onCreated.addListener(async (tab) => {
   }
 
   if (isAllowedURL(tab.url, rules)) {
+    lastAllowedURLByTab.set(tab.id, tab.url);
     lastAllowedTabId = tab.id;
     return;
   }
@@ -587,6 +632,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
   }
 
   freshBlankTabIds.delete(tabId);
+  lastAllowedURLByTab.delete(tabId);
 
   if (lastAllowedTabId === tabId) {
     lastAllowedTabId = null;

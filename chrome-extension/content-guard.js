@@ -1,5 +1,6 @@
 let intentRules = {
   active: false,
+  accessMode: "whitelist",
   allowedWebsites: [],
   blockNavigation: false,
   allowGoogleSearchTabs: false

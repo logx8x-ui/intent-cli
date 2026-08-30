@@ -27,6 +27,14 @@ struct IntentionNodeView: View {
                             Capsule()
                                 .stroke(leisureGradient.opacity(0.72), lineWidth: 0.8)
                         )
+                } else {
+                    Text(intention.accessMode == .blacklist ? "BLOCK" : "ALLOW ONLY")
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .frame(height: 18)
+                        .foregroundStyle(accessModeColor)
+                        .background(accessModeColor.opacity(colorScheme == .dark ? 0.14 : 0.08), in: Capsule())
+                        .overlay(Capsule().stroke(accessModeColor.opacity(0.72), lineWidth: 0.8))
                 }
             }
             .font(.system(size: 14, weight: .semibold))
@@ -40,6 +48,13 @@ struct IntentionNodeView: View {
                         .blur(radius: 15)
                         .opacity(colorScheme == .dark ? 0.44 : 0.32)
                         .allowsHitTesting(false)
+                } else {
+                    RoundedRectangle(cornerRadius: 25)
+                        .stroke(accessModeColor.opacity(0.86), lineWidth: 5)
+                        .frame(width: squareSize + 16, height: squareSize + 16)
+                        .blur(radius: 11)
+                        .opacity(colorScheme == .dark ? 0.58 : 0.42)
+                        .allowsHitTesting(false)
                 }
 
                 intentionArtwork
@@ -51,6 +66,12 @@ struct IntentionNodeView: View {
                         .stroke(leisureGradient, lineWidth: selected ? 2.8 : 2.0)
                         .frame(width: squareSize, height: squareSize)
                         .shadow(color: Color.white.opacity(colorScheme == .dark ? 0.20 : 0.10), radius: 5)
+                        .allowsHitTesting(false)
+                } else {
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(accessModeColor.opacity(0.82), lineWidth: selected ? 2.8 : 1.7)
+                        .frame(width: squareSize, height: squareSize)
+                        .shadow(color: accessModeColor.opacity(0.52), radius: 9)
                         .allowsHitTesting(false)
                 }
 
@@ -85,6 +106,10 @@ struct IntentionNodeView: View {
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    private var accessModeColor: Color {
+        intention.accessMode == .blacklist ? Color(red: 0.98, green: 0.24, blue: 0.30) : GraphTheme.editBlue
     }
 
     @ViewBuilder
@@ -123,9 +148,9 @@ struct IntentionNodeView: View {
                         .help("Leisure uses the Mac freely")
                 } else {
                     VStack(spacing: 9) {
-                        Image(systemName: "plus")
+                        Image(systemName: intention.accessMode == .blacklist ? "nosign" : "plus")
                             .font(.system(size: 23, weight: .light))
-                        Text("Add an app")
+                        Text(intention.accessMode == .blacklist ? "Add something to block" : "Add an app")
                             .font(.caption)
                     }
                     .foregroundStyle(GraphTheme.muted(colorScheme))

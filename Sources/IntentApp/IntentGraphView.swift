@@ -14,6 +14,7 @@ struct IntentGraphView: View {
     @AppStorage("intentDidCompleteOnboarding") private var didCompleteOnboarding = false
     @AppStorage("intentZeroDriftWarningSuppressed") private var zeroDriftWarningSuppressed = false
     @AppStorage(PurposeModePreference.key) private var purposeModeEnabled = false
+    @AppStorage(PurposeModePreference.accessModeKey) private var purposeAccessModeRawValue = IntentionAccessMode.whitelist.rawValue
 
     @State private var editMode = false
     @State private var hoverSelectMode = false
@@ -173,6 +174,10 @@ struct IntentGraphView: View {
                    model.pendingPurposeSessionSave == nil,
                    !showQuickGuide {
                     PurposeModeView(onDismiss: { purposeModeDismissed = true })
+                        .environment(
+                            \.colorScheme,
+                            purposeAccessMode == .blacklist ? ColorScheme.dark : ColorScheme.light
+                        )
                         .transition(.opacity.combined(with: .scale(scale: 0.985)))
                         .zIndex(900)
                 }
@@ -480,6 +485,24 @@ struct IntentGraphView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Ask what this computer session is for when Intent opens")
+
+                Button {
+                    setPurposeAccessMode(purposeAccessMode == .whitelist ? .blacklist : .whitelist)
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: purposeAccessMode == .blacklist ? "nosign" : "checkmark.shield")
+                        Text(purposeAccessMode == .blacklist ? "Block" : "Allow only")
+                    }
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(purposeAccessModeColor)
+                    .padding(.horizontal, 11)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
+                    .background(purposeAccessModeColor.opacity(0.09), in: Capsule())
+                    .overlay(Capsule().stroke(purposeAccessModeColor.opacity(0.86), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Purpose Mode access rule (⇧W allow only, ⇧B block)")
 
                 Button {
                     model.hideOverlay()
@@ -1127,6 +1150,15 @@ struct IntentGraphView: View {
     }
 
     private func handleKeyboard(_ key: GraphKeyboardKey, viewportSize: CGSize) {
+        if key == .whitelistMode {
+            setPurposeAccessMode(.whitelist)
+            return
+        }
+        if key == .blacklistMode {
+            setPurposeAccessMode(.blacklist)
+            return
+        }
+
         if key == .dismissPurpose,
            purposeModeEnabled,
            !purposeModeDismissed {
@@ -1150,6 +1182,8 @@ struct IntentGraphView: View {
         }
 
         switch key {
+        case .whitelistMode, .blacklistMode:
+            return
         case .dismissPurpose:
             return
         case .edit:
@@ -1232,6 +1266,24 @@ struct IntentGraphView: View {
         case .pageScheduler:
             switchPage(to: .scheduler)
         }
+    }
+
+    private var purposeAccessMode: IntentionAccessMode {
+        IntentionAccessMode(rawValue: purposeAccessModeRawValue) ?? .whitelist
+    }
+
+    private var purposeAccessModeColor: Color {
+        purposeAccessMode == .blacklist
+            ? Color(red: 0.98, green: 0.24, blue: 0.30)
+            : GraphTheme.editBlue
+    }
+
+    private func setPurposeAccessMode(_ mode: IntentionAccessMode) {
+        purposeAccessModeRawValue = mode.rawValue
+        if purposeModeEnabled, !model.hasActiveSession {
+            purposeModeDismissed = false
+        }
+        showStatus(mode == .blacklist ? "Blacklist mode" : "Whitelist mode")
     }
 
     private func performCreationAction(_ key: GraphKeyboardKey, viewportSize: CGSize) {
@@ -1779,6 +1831,8 @@ private enum GraphSelection: Equatable {
 }
 
 private enum GraphKeyboardKey {
+    case whitelistMode
+    case blacklistMode
     case edit
     case escape
     case dismissPurpose
@@ -1927,6 +1981,14 @@ private struct GraphInputMonitor: NSViewRepresentable {
 
                     let editingText = Self.isEditingText(in: self.window)
                     let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+                    if !editingText, modifiers == [.shift], event.keyCode == 13 {
+                        self.keyboardHandler?(.whitelistMode)
+                        return nil
+                    }
+                    if !editingText, modifiers == [.shift], event.keyCode == 11 {
+                        self.keyboardHandler?(.blacklistMode)
+                        return nil
+                    }
                     if event.keyCode == 7, modifiers == [.shift] {
                         self.keyboardHandler?(.dismissPurpose)
                         return nil

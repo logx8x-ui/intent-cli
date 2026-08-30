@@ -78,7 +78,10 @@ public final class FocusLock {
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
-        allowedAppSwitcher = AllowedAppSwitcher(allowedBundleIdentifiers: spec.allowedBundleIdentifiers)
+        allowedAppSwitcher = AllowedAppSwitcher(
+            allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
+            accessMode: spec.accessMode
+        )
     }
 
     public func stop() {
@@ -401,7 +404,8 @@ public final class FocusLock {
             return nil
         }
 
-        if spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
+        if spec.accessMode == .whitelist,
+           spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
             if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {
                 refocus()
                 return nil
@@ -416,7 +420,7 @@ public final class FocusLock {
     }
 
     private var shouldBlockSystemCommand: Bool {
-        spec.blockAppSwitching || spec.blockNewApps || spec.keepFocused
+        spec.accessMode == .whitelist && (spec.blockAppSwitching || spec.blockNewApps || spec.keepFocused)
     }
 
     private func isBlockedBrowserCommand(keyCode: Int64, command: Bool, control: Bool, option: Bool, shift: Bool) -> Bool {
@@ -476,7 +480,7 @@ public final class FocusLock {
     private func handleLaunched(_ app: NSRunningApplication) {
         guard spec.blockNewApps else { return }
         guard let bundleIdentifier = app.bundleIdentifier else { return }
-        guard !spec.allowedBundleIdentifiers.contains(bundleIdentifier) else { return }
+        guard !spec.permitsApplication(bundleIdentifier) else { return }
         guard app.activationPolicy == .regular else { return }
         guard !baselinePids.contains(app.processIdentifier) else { return }
 
@@ -506,7 +510,7 @@ public final class FocusLock {
             return
         }
 
-        guard spec.allowedBundleIdentifiers.contains(bundleIdentifier) else {
+        guard spec.permitsApplication(bundleIdentifier) else {
             app.hide()
             refocus()
             return
@@ -555,13 +559,14 @@ public final class FocusLock {
             return
         }
 
-        if frontmost.bundleIdentifier == "com.spotify.client", !spec.allowSpotifyForeground {
+        if spec.accessMode == .whitelist,
+           frontmost.bundleIdentifier == "com.spotify.client", !spec.allowSpotifyForeground {
             refocus()
             return
         }
 
         guard let bundleIdentifier = frontmost.bundleIdentifier,
-              spec.allowedBundleIdentifiers.contains(bundleIdentifier) else {
+              spec.permitsApplication(bundleIdentifier) else {
             refocus()
             return
         }
@@ -578,11 +583,36 @@ public final class FocusLock {
         }
 
         if let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-           spec.allowedBundleIdentifiers.contains(bundleIdentifier) {
+           spec.permitsApplication(bundleIdentifier) {
             return
         }
 
-        activateFallbackApp()
+        if spec.accessMode == .blacklist {
+            NSWorkspace.shared.frontmostApplication?.hide()
+            activateBestPermittedApplication()
+        } else {
+            activateFallbackApp()
+        }
+    }
+
+    private func activateBestPermittedApplication() {
+        if let returnApplication,
+           let bundleIdentifier = returnApplication.bundleIdentifier,
+           spec.permitsApplication(bundleIdentifier),
+           !returnApplication.isTerminated {
+            returnApplication.unhide()
+            _ = returnApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            return
+        }
+
+        guard let application = NSWorkspace.shared.runningApplications.first(where: {
+            guard let bundleIdentifier = $0.bundleIdentifier else { return false }
+            return $0.activationPolicy == .regular
+                && !$0.isTerminated
+                && spec.permitsApplication(bundleIdentifier)
+        }) else { return }
+        application.unhide()
+        _ = application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     }
 
     private func shouldAllowMouseDown(at point: CGPoint) -> Bool {
@@ -595,7 +625,8 @@ public final class FocusLock {
             ownerBundleIdentifier: target.ownerBundleIdentifier,
             representedBundleIdentifier: target.representedBundleIdentifier,
             allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
-            intentBundleIdentifier: Bundle.main.bundleIdentifier
+            intentBundleIdentifier: Bundle.main.bundleIdentifier,
+            accessMode: spec.accessMode
         )
     }
 
@@ -772,7 +803,7 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
-        if spec.closeSessionResourcesOnFinish {
+        if spec.accessMode == .whitelist, spec.closeSessionResourcesOnFinish {
             closeSessionResources()
         }
     }
