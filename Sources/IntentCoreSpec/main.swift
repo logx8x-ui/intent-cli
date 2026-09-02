@@ -317,6 +317,31 @@ do {
         !FocusForegroundPolicy.shouldDeferRefocus(bundleIdentifier: "io.remnote"),
         "Regular unallowed apps should not get Mission Control grace"
     )
+    try expect(
+        FocusSystemShortcutPolicy.isSpaceNavigationKey(126),
+        "Control-Up should remain available to open Mission Control"
+    )
+    try expect(
+        FocusSystemShortcutPolicy.isSpaceNavigationKey(123),
+        "Control-Left should remain available for macOS Space navigation"
+    )
+    let activeTransitionGrace = Date(timeIntervalSinceNow: 1)
+    try expect(
+        FocusForegroundPolicy.shouldHonorSystemTransitionGrace(
+            bundleIdentifier: "com.apple.finder",
+            graceUntil: activeTransitionGrace,
+            now: Date()
+        ),
+        "Finder should get enough grace for a Mission Control Space transition to finish"
+    )
+    try expect(
+        !FocusForegroundPolicy.shouldHonorSystemTransitionGrace(
+            bundleIdentifier: "com.apple.finder",
+            graceUntil: .distantPast,
+            now: Date()
+        ),
+        "A blank desktop should refocus to an allowed application after transition grace"
+    )
     let allowedClickBundles: Set<String> = ["org.mozilla.firefox"]
     try expect(
         FocusClickTargetPolicy.shouldAllow(

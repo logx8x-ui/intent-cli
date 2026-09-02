@@ -102,7 +102,7 @@ final class AllowedAppSwitcher {
         DispatchQueue.main.async { [weak self] in
             self?.panelController?.hide()
             application?.unhide()
-            application?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            application?.activate(options: [.activateIgnoringOtherApps])
         }
     }
 

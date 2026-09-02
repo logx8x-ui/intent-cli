@@ -21,6 +21,14 @@ public enum FocusLockError: Error, CustomStringConvertible {
 }
 
 public enum FocusForegroundPolicy {
+    public static func shouldHonorSystemTransitionGrace(
+        bundleIdentifier: String?,
+        graceUntil: Date,
+        now: Date
+    ) -> Bool {
+        shouldDeferRefocus(bundleIdentifier: bundleIdentifier) || now < graceUntil
+    }
+
     public static func shouldDeferRefocus(bundleIdentifier: String?) -> Bool {
         guard let bundleIdentifier else { return false }
         return [
@@ -72,6 +80,7 @@ public final class FocusLock {
     private var spotifyTimer: Timer?
     private var launchObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
+    private var activeSpaceObserver: NSObjectProtocol?
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
     private var systemSwitcherGraceUntil: Date = .distantPast
@@ -103,6 +112,7 @@ public final class FocusLock {
         try installEventTap()
         installLaunchObserver()
         installActivationObserver()
+        installActiveSpaceObserver()
         startFocusTimer()
         startSpotifyTimerIfNeeded()
 
@@ -118,7 +128,7 @@ public final class FocusLock {
 
         cleanup()
         if spec.restorePreviousApplicationOnStop {
-            returnApplication?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            returnApplication?.activate(options: [.activateIgnoringOtherApps])
         }
     }
 
@@ -255,7 +265,7 @@ public final class FocusLock {
             return false
         }
 
-        _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        _ = app.activate(options: [.activateIgnoringOtherApps])
         return app.isActive
     }
 
@@ -265,7 +275,7 @@ public final class FocusLock {
             return false
         }
 
-        return app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        return app.activate(options: [.activateIgnoringOtherApps])
     }
 
     private func installEventTap() throws {
@@ -308,6 +318,13 @@ public final class FocusLock {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
+            // Mission Control owns this click. Let macOS finish selecting the
+            // Space, then normal focus enforcement chooses an allowed app.
+            if isMissionControlActive() {
+                systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
+                return Unmanaged.passUnretained(event)
+            }
+
             if spec.blockFirefoxChromeClicks,
                isFirefoxFrontmost(),
                isProtectedFirefoxChromeClick(event.location) {
@@ -320,9 +337,6 @@ public final class FocusLock {
                 return nil
             }
 
-            if isMissionControlActive() {
-                systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
-            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -399,9 +413,11 @@ public final class FocusLock {
             return nil
         }
 
-        if control && shouldBlockSystemCommand && isSpaceSwitchKey(keyCode) {
-            refocus()
-            return nil
+        if control,
+           shouldBlockSystemCommand,
+           FocusSystemShortcutPolicy.isSpaceNavigationKey(keyCode) {
+            systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
+            return Unmanaged.passUnretained(event)
         }
 
         if spec.accessMode == .whitelist,
@@ -432,15 +448,6 @@ public final class FocusLock {
             shift: shift,
             allowGoogleSearchTabs: spec.allowGoogleSearchTabs
         )
-    }
-
-    private func isSpaceSwitchKey(_ keyCode: Int64) -> Bool {
-        [
-            KeyCode.leftArrow,
-            KeyCode.rightArrow,
-            KeyCode.upArrow,
-            KeyCode.downArrow
-        ].contains(keyCode)
     }
 
     private func installLaunchObserver() {
@@ -477,6 +484,16 @@ public final class FocusLock {
         }
     }
 
+    private func installActiveSpaceObserver() {
+        activeSpaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.0)
+        }
+    }
+
     private func handleLaunched(_ app: NSRunningApplication) {
         guard spec.blockNewApps else { return }
         guard let bundleIdentifier = app.bundleIdentifier else { return }
@@ -503,7 +520,6 @@ public final class FocusLock {
 
         if spec.strictSingleApp {
             guard bundleIdentifier == spec.fallbackBundleIdentifier else {
-                app.hide()
                 refocus()
                 return
             }
@@ -511,7 +527,6 @@ public final class FocusLock {
         }
 
         guard spec.permitsApplication(bundleIdentifier) else {
-            app.hide()
             refocus()
             return
         }
@@ -588,7 +603,6 @@ public final class FocusLock {
         }
 
         if spec.accessMode == .blacklist {
-            NSWorkspace.shared.frontmostApplication?.hide()
             activateBestPermittedApplication()
         } else {
             activateFallbackApp()
@@ -600,8 +614,7 @@ public final class FocusLock {
            let bundleIdentifier = returnApplication.bundleIdentifier,
            spec.permitsApplication(bundleIdentifier),
            !returnApplication.isTerminated {
-            returnApplication.unhide()
-            _ = returnApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            _ = returnApplication.activate(options: [.activateIgnoringOtherApps])
             return
         }
 
@@ -611,8 +624,7 @@ public final class FocusLock {
                 && !$0.isTerminated
                 && spec.permitsApplication(bundleIdentifier)
         }) else { return }
-        application.unhide()
-        _ = application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        _ = application.activate(options: [.activateIgnoringOtherApps])
     }
 
     private func shouldAllowMouseDown(at point: CGPoint) -> Bool {
@@ -750,7 +762,11 @@ public final class FocusLock {
             return true
         }
 
-        return bundleIdentifier == nil && Date() < systemSwitcherGraceUntil
+        return FocusForegroundPolicy.shouldHonorSystemTransitionGrace(
+            bundleIdentifier: bundleIdentifier,
+            graceUntil: systemSwitcherGraceUntil,
+            now: Date()
+        )
     }
 
     private func isSupportedBrowserFrontmost() -> Bool {
@@ -790,6 +806,11 @@ public final class FocusLock {
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
             self.activationObserver = nil
+        }
+
+        if let activeSpaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
+            self.activeSpaceObserver = nil
         }
 
         if let eventTap {

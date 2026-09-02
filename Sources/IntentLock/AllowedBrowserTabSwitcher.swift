@@ -84,7 +84,7 @@ final class AllowedBrowserTabSwitcher {
             self?.panelController?.hide()
             NSWorkspace.shared.runningApplications
                 .first(where: { $0.bundleIdentifier == browserBundleIdentifier })?
-                .activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                .activate(options: [.activateIgnoringOtherApps])
         }
     }
 

@@ -6,6 +6,15 @@ public enum FocusSystemShortcutPolicy {
             KeyCode.m
         ].contains(keyCode)
     }
+
+    public static func isSpaceNavigationKey(_ keyCode: Int64) -> Bool {
+        [
+            KeyCode.leftArrow,
+            KeyCode.rightArrow,
+            KeyCode.upArrow,
+            KeyCode.downArrow
+        ].contains(keyCode)
+    }
 }
 
 public enum FocusBrowserShortcutPolicy {
