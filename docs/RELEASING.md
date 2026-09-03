@@ -3,35 +3,36 @@
 Intent public releases must be signed with Apple Developer ID certificates and
 notarized by Apple. Unsigned local builds must never be uploaded as `Intent.dmg`.
 
-## Required GitHub Actions secrets
+## Required release credentials
 
-- `APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64`
-- `APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64`
-- `APPLE_CERTIFICATE_PASSWORD`
-- `APPLE_NOTARY_KEY_ID`
-- `APPLE_NOTARY_ISSUER_ID`
-- `APPLE_NOTARY_PRIVATE_KEY_BASE64`
+- Installed Developer ID Application and Developer ID Installer certificates
+- A `notarytool` Keychain profile named `intent-notary`
 - `INTENT_SUPABASE_URL`
 - `INTENT_SUPABASE_PUBLISHABLE_KEY`
+- `INTENT_GOOGLE_CLIENT_SECRET`
+- `AMO_JWT_ISSUER`
+- `AMO_JWT_SECRET`
 
-The two certificate secrets are base64-encoded `.p12` exports. The notary private
-key is the base64-encoded App Store Connect API `.p8` file. Supabase's publishable
-client key is intentionally safe to ship in a client app because Row Level
-Security protects user data, but it is still injected by the release workflow
+Pass the certificate names as `INTENT_APPLICATION_IDENTITY` and
+`INTENT_INSTALLER_IDENTITY`, and the notary profile as `INTENT_NOTARY_PROFILE`.
+Supabase's publishable client key is intentionally safe to ship in a client app because Row Level
+Security protects user data, but it is still injected by the release environment
 to keep environment configuration out of source. Secrets must never be committed
 to this repository; a service-role key must never be supplied to the app build.
 
 ## Publish
 
-1. Configure all six repository secrets.
-2. Run the **Signed macOS release** workflow with a version and increasing build
-   number, or push a `vX.Y.Z` tag.
-3. The workflow builds a universal app, signs the app and package, notarizes and
-   staples the DMG, runs `scripts/verify-release.sh`, and publishes only after
-   every check succeeds.
-4. Confirm the release contains:
+1. Configure every release credential listed above without committing it.
+2. Run `npm test`.
+3. Run `scripts/build-release.sh VERSION BUILD_NUMBER`, then
+   `scripts/verify-release.sh`. The build signs the universal app and package,
+   obtains Mozilla's unlisted signature, notarizes and staples the DMG, and
+   refuses incomplete public artifacts.
+4. Publish only after the verifier succeeds. Repository release automation is
+   not active yet, so this gate must be run locally before uploading assets.
+5. Confirm the release contains:
    - `Intent.dmg`
-   - `Intent-Firefox-Extension.zip`
+   - `Intent-Firefox-Extension.xpi` (Mozilla-signed unlisted build)
    - `Intent-Chrome-Extension.zip`
    - `release-manifest.json` (machine-readable verification metadata)
 
@@ -51,7 +52,9 @@ Before calling a release stable:
 5. On macOS 15, run `scripts/smoke-test-overlay.sh /Applications/Intent.app 100`
    and confirm the process survives.
 6. Upgrade over an older install and confirm `~/.intent` data is unchanged.
-7. Test `uninstall.sh` both with and without `--delete-data`.
+7. Install the Firefox `.xpi`, restart Firefox, and confirm the guard remains installed.
+8. Confirm an outdated Browser Guard is rejected before any website session starts.
+9. Test `uninstall.sh` both with and without `--delete-data`.
 
 ## Local QA
 

@@ -12,6 +12,7 @@ const intentDir = fs.mkdtempSync(path.join(os.tmpdir(), "intent-native-host-spec
 const rulesPath = path.join(intentDir, "browser-rules.json");
 const snapshotPath = path.join(intentDir, "browser-tabs-com-google-Chrome.json");
 const commandPath = path.join(intentDir, "browser-tab-command-com-google-Chrome.json");
+const heartbeatPath = path.join(intentDir, "browser-guard-heartbeat-com-google-Chrome.json");
 
 function swiftReferenceDateNow() {
   return Date.now() / 1000 - 978307200;
@@ -93,6 +94,8 @@ try {
   const snapshotResponses = callHost([{
     type: "tabsSnapshot",
     browserBundleIdentifier: "com.google.Chrome",
+    extensionVersion: "0.2.2",
+    extensionCapabilities: ["single-startup-launch-v1"],
     tabs: [{
       id: 14,
       windowID: 3,
@@ -103,6 +106,13 @@ try {
     }]
   }]);
   assert.equal(snapshotResponses.length, 0, "Snapshots should not generate unused native responses");
+  const heartbeat = JSON.parse(fs.readFileSync(heartbeatPath, "utf8"));
+  assert.equal(heartbeat.extensionVersion, "0.2.2", "Native host should record the connected extension version");
+  assert.deepEqual(
+    heartbeat.capabilities,
+    ["single-startup-launch-v1"],
+    "Native host should record extension safety capabilities"
+  );
   const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
   assert.equal(snapshot.browserBundleIdentifier, "com.google.Chrome");
   assert.equal(snapshot.tabs[0].id, 14, "Native host should persist allowed browser tabs for Ctrl+Tab");

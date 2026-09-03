@@ -16,7 +16,7 @@ Or download [Intent.dmg](https://github.com/logx8x-ui/intent-cli/releases/latest
 
 Intent Browser Guard is the Firefox extension that makes tab and URL restrictions work.
 
-- Download: [Intent-Firefox-Extension.zip](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.zip)
+- Download: [Intent-Firefox-Extension.xpi](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi)
 - Release notes and signing plan: `firefox-extension-release.md`
 - Mozilla Add-ons listing: pending listed review
 

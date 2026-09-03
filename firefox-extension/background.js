@@ -6,6 +6,8 @@ const HEARTBEAT_MS = 2000;
 const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
+const EXTENSION_VERSION = browser.runtime.getManifest().version;
+const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
 
 const {
   isAllowedURL,
@@ -111,7 +113,12 @@ function scheduleCommandReconnect() {
 function postCommandPort(message) {
   if (!commandPort) return false;
   try {
-    commandPort.postMessage({ ...message, browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER });
+    commandPort.postMessage({
+      ...message,
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
+      extensionVersion: EXTENSION_VERSION,
+      extensionCapabilities: EXTENSION_CAPABILITIES
+    });
     return true;
   } catch (_) {
     commandPort = null;
@@ -145,7 +152,9 @@ async function recordWebsiteVisit(tab) {
   try {
     await browser.runtime.sendNativeMessage(HOST_NAME, {
       ...message,
-      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
+      extensionVersion: EXTENSION_VERSION,
+      extensionCapabilities: EXTENSION_CAPABILITIES
     });
   } catch (_) {}
 }
@@ -204,7 +213,9 @@ async function notifyNativeGuardState() {
     await browser.runtime.sendNativeMessage(HOST_NAME, {
       type: "setGuardEnabled",
       enabled: guardEnabled,
-      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
+      extensionVersion: EXTENSION_VERSION,
+      extensionCapabilities: EXTENSION_CAPABILITIES
     });
   } catch (_) {}
 }

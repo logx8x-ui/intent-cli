@@ -153,6 +153,7 @@ final class AllowedAppSwitcher {
     }
 }
 
+@MainActor
 private final class AllowedAppSwitcherPanelController {
     struct Item {
         let name: String
@@ -273,6 +274,7 @@ private final class AllowedAppSwitcherPanelController {
     }
 }
 
+@MainActor
 private final class AllowedAppSwitcherItemView: NSView {
     private let index: Int
     private let onHover: (Int) -> Void

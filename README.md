@@ -32,18 +32,18 @@ These are the only three manual downloads:
 | Download | Use it for |
 | --- | --- |
 | **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent.dmg)** | The main app. Requires macOS 13 or newer. |
-| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.zip)** | Website restrictions in Firefox. |
+| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi)** | Website restrictions in Firefox. Mozilla-signed for normal installs. |
 | **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Chrome-Extension.zip)** | Website restrictions in Chrome. |
 
 Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only enforces rules while an intention is running.
 
 ### Firefox
 
-1. Unzip the Firefox Browser Guard download.
-2. Open `about:debugging#/runtime/this-firefox` in Firefox.
-3. Choose **Load Temporary Add-on** and select `manifest.json` from the unzipped folder.
+1. Open the Firefox Browser Guard `.xpi` download in Firefox.
+2. Accept the installation prompt.
+3. Keep the Intent Browser Guard toolbar switch on.
 
-Firefox removes temporary add-ons after a restart. A permanent Mozilla Add-ons listing is planned.
+Tester releases use Mozilla's unlisted signing, so Browser Guard remains installed after Firefox restarts even before a public Add-ons listing exists.
 
 ### Chrome
 
@@ -95,10 +95,8 @@ cd intent-cli
 Run the complete checks:
 
 ```zsh
-swift run IntentCoreSpec
 npm install
-npm run test:extensions
-npm run extension:lint
+npm test
 ```
 
 Public DMGs must be signed with Apple Developer ID certificates and notarized. `scripts/build-release.sh` supports that process and refuses a public release when the required Apple credentials are missing.

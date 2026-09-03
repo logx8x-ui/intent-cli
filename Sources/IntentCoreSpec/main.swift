@@ -25,6 +25,17 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    let secureHome = FileManager.default.temporaryDirectory
+        .appendingPathComponent("intent-security-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: secureHome) }
+    try IntentLocalDataSecurity.hardenDefaultDirectory(homeDirectory: secureHome)
+    let secureDirectory = secureHome.appendingPathComponent(".intent", isDirectory: true)
+    let securePermissions = try FileManager.default.attributesOfItem(atPath: secureDirectory.path)[.posixPermissions] as? NSNumber
+    try expect(
+        securePermissions?.intValue == 0o700,
+        "Intent's local data directory should be private to the signed-in macOS user"
+    )
+
     try expect(AppReleaseVersion.isNewer("v0.8.1", than: "0.8.0"), "patch releases should compare correctly")
     try expect(AppReleaseVersion.isNewer("1.0.0", than: "0.99.9"), "major releases should compare correctly")
     try expect(!AppReleaseVersion.isNewer("0.8", than: "0.8.0"), "equivalent versions should not update")
@@ -1004,6 +1015,20 @@ do {
     try heartbeatStore.write(date: Date(timeIntervalSince1970: 98))
     try expect(heartbeatStore.isFresh(maxAge: 5, now: Date(timeIntervalSince1970: 100)), "Recent browser heartbeat should be fresh")
     try expect(!heartbeatStore.isFresh(maxAge: 1, now: Date(timeIntervalSince1970: 100)), "Old browser heartbeat should expire")
+    try expect(
+        !heartbeatStore.supports(.singleStartupLaunch, maxAge: 5, now: Date(timeIntervalSince1970: 100)),
+        "Legacy Browser Guards should not claim startup launch safety"
+    )
+    try heartbeatStore.write(
+        date: Date(timeIntervalSince1970: 100),
+        extensionVersion: "0.2.2",
+        capabilities: [BrowserGuardCapability.singleStartupLaunch.rawValue]
+    )
+    try expect(
+        heartbeatStore.supports(.singleStartupLaunch, maxAge: 5, now: Date(timeIntervalSince1970: 101)),
+        "Current Browser Guards should advertise single-launch startup safety"
+    )
+    try expect(heartbeatStore.heartbeat()?.extensionVersion == "0.2.2", "Browser Guard versions should round-trip")
 
     let guardStateStore = BrowserGuardStateStore(fileURL: tempDirectory.appendingPathComponent("browser-guard-state.json"))
     try expect(guardStateStore.isEnabled(), "Missing browser guard state should default to enabled")

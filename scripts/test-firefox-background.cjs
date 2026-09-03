@@ -36,6 +36,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
 
   const browser = {
     runtime: {
+      getManifest: () => ({ version: "0.2.2" }),
       onMessage: { addListener: (listener) => listeners.onMessage.push(listener) },
       sendNativeMessage: async (_hostName, message) => {
         nativeMessages.push(message);
@@ -226,6 +227,13 @@ async function run() {
     "Firefox should keep only one low-frequency native heartbeat while idle"
   );
   await startupHarness.refresh();
+  assert.ok(
+    startupHarness.nativeMessages.some((message) =>
+      message.extensionVersion === "0.2.2" &&
+      message.extensionCapabilities?.includes("single-startup-launch-v1")
+    ),
+    "Firefox should identify a startup-safe Browser Guard to the native host"
+  );
   assert.equal(
     startupHarness.tabs.get(1).url,
     "https://www.instagram.com/direct/inbox/",

@@ -2,6 +2,8 @@ import Foundation
 import IntentCore
 import IntentLock
 
+try? IntentLocalDataSecurity.hardenDefaultDirectory()
+
 var menu = IntentMenu()
 let input = TerminalInput()
 

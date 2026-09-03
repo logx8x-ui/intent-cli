@@ -996,6 +996,12 @@ final class IntentAppModel: ObservableObject {
                 errorMessage = "\(browser.name) browser locking is not connected. Load Intent Browser Guard in \(browser.name), then start this intention again."
                 return
             }
+            if !heartbeatStore.supports(.singleStartupLaunch, maxAge: 5) {
+                let installedVersion = heartbeatStore.heartbeat()?.extensionVersion
+                    .map { " \($0)" } ?? ""
+                errorMessage = "\(browser.name) is using an outdated Intent Browser Guard\(installedVersion). Update or reload Browser Guard before starting this intention."
+                return
+            }
 
             let stateStore = BrowserGuardStateStore(
                 fileURL: BrowserGuardStateStore.fileURL(for: browser.bundleIdentifier)

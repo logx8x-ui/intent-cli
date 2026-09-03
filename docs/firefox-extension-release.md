@@ -25,13 +25,13 @@ To load it locally:
 3. Click `Load Temporary Add-on...`.
 4. Choose `firefox-extension/manifest.json`.
 
-## Build The Unsigned Package
+## Build The Unsigned Development Package
 
 ```zsh
 ./scripts/build-firefox-extension.sh
 ```
 
-The unsigned development package is written to `dist/firefox/`. This is useful for local checks, but normal Firefox installs need Mozilla signing.
+The unsigned development package is written to `dist/firefox/`. It is useful only for local checks; tester and public releases must use Mozilla signing.
 
 ## Unlisted Beta Signing
 
@@ -63,6 +63,8 @@ The script uses `web-ext sign --channel=unlisted`. The signed `.xpi` is written 
 3. Accept the Firefox install prompt.
 4. Click the Intent Browser Guard toolbar icon and keep the switch on.
 5. Start an Intent session that uses Firefox.
+
+Public Intent release builds refuse to complete without AMO signing credentials and publish the signed file as `Intent-Firefox-Extension.xpi`. This prevents testers from silently keeping an old temporary or previously signed guard while running a newer app.
 
 The Intent desktop app must still be installed because the extension reads active session rules from Intent through native messaging.
 

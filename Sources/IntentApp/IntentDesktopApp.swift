@@ -1,4 +1,5 @@
 import AppKit
+import IntentCore
 import ServiceManagement
 import SwiftUI
 
@@ -6,6 +7,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: IntentStatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        try? IntentLocalDataSecurity.hardenDefaultDirectory()
         NSApp.setActivationPolicy(.accessory)
         LaunchAtLoginController.applySavedPreference()
         IntentRuntime.shared.start()

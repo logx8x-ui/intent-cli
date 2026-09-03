@@ -9,6 +9,8 @@ const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
 const SITE_RECORD_THROTTLE_MS = 30000;
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
 
 const { normalizeRule, isAllowedURL, isSearchStagingURL } = IntentBrowserRules;
 
@@ -108,7 +110,12 @@ function scheduleReconnect() {
 function postNative(message) {
   if (!nativePort) return false;
   try {
-    nativePort.postMessage({ ...message, browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER });
+    nativePort.postMessage({
+      ...message,
+      browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
+      extensionVersion: EXTENSION_VERSION,
+      extensionCapabilities: EXTENSION_CAPABILITIES
+    });
     return true;
   } catch (_) {
     nativePort = null;

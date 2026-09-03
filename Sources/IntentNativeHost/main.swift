@@ -2,6 +2,13 @@ import Darwin
 import Foundation
 import IntentCore
 
+let nativeHostEnvironment = ProcessInfo.processInfo.environment
+if let override = nativeHostEnvironment["INTENT_NATIVE_HOST_DIRECTORY"], !override.isEmpty {
+    try? IntentLocalDataSecurity.harden(directory: URL(fileURLWithPath: override, isDirectory: true))
+} else {
+    try? IntentLocalDataSecurity.hardenDefaultDirectory()
+}
+
 func readMessage() -> Data? {
     var lengthBytes = [UInt8](repeating: 0, count: 4)
     let lengthRead = FileHandle.standardInput.readData(ofLength: 4)
@@ -41,6 +48,8 @@ struct HostRequest: Codable {
     var type: String?
     var enabled: Bool?
     var browserBundleIdentifier: String?
+    var extensionVersion: String?
+    var extensionCapabilities: [String]?
     var tabs: [HostTab]?
     var url: String?
     var title: String?
@@ -166,6 +175,8 @@ private final class HostRuntime {
     private let metricsURL: URL?
 
     private var browserBundleIdentifier: String?
+    private var extensionVersion: String?
+    private var extensionCapabilities: [String] = []
     private var guardEnabled = true
     private var cachedRules: ActiveBrowserRules?
     private var rulesSignature: FileSignature?
@@ -196,6 +207,13 @@ private final class HostRuntime {
         queue.sync {
             metrics.receivedMessages += 1
             let browser = request.browserBundleIdentifier ?? browserBundleIdentifier ?? "org.mozilla.firefox"
+            if let version = request.extensionVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !version.isEmpty {
+                extensionVersion = version
+            }
+            if let capabilities = request.extensionCapabilities {
+                extensionCapabilities = Array(Set(capabilities)).sorted()
+            }
             registerBrowserIfNeeded(browser)
             let now = Date()
             let isMessageBurst = lastMessageReceivedAt.map {
@@ -273,7 +291,11 @@ private final class HostRuntime {
         let store = BrowserGuardHeartbeatStore(
             fileURL: paths.heartbeat(for: browserBundleIdentifier)
         )
-        if (try? store.write(date: now)) != nil {
+        if (try? store.write(
+            date: now,
+            extensionVersion: extensionVersion,
+            capabilities: extensionCapabilities
+        )) != nil {
             metrics.heartbeatWrites += 1
             lastHeartbeatWriteAt = now
         }

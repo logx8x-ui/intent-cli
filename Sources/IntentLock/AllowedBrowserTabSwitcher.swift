@@ -144,6 +144,7 @@ final class AllowedBrowserTabSwitcher {
     }
 }
 
+@MainActor
 private final class BrowserTabSwitcherPanelController {
     struct Item {
         let title: String
@@ -244,6 +245,7 @@ private final class BrowserTabSwitcherPanelController {
     }
 }
 
+@MainActor
 private final class BrowserTabSwitcherItemView: NSView {
     private let index: Int
     private let onHover: (Int) -> Void

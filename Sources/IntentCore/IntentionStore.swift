@@ -196,10 +196,37 @@ public final class ActiveBrowserRulesStore {
 
 public struct BrowserGuardHeartbeat: Codable, Equatable {
     public var lastSeenAt: Date
+    public var extensionVersion: String?
+    public var capabilities: [String]
 
-    public init(lastSeenAt: Date) {
+    public init(
+        lastSeenAt: Date,
+        extensionVersion: String? = nil,
+        capabilities: [String] = []
+    ) {
         self.lastSeenAt = lastSeenAt
+        self.extensionVersion = extensionVersion
+        self.capabilities = capabilities
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastSeenAt, extensionVersion, capabilities
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lastSeenAt = try container.decode(Date.self, forKey: .lastSeenAt)
+        extensionVersion = try container.decodeIfPresent(String.self, forKey: .extensionVersion)
+        capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+    }
+
+    public func supports(_ capability: BrowserGuardCapability) -> Bool {
+        capabilities.contains(capability.rawValue)
+    }
+}
+
+public enum BrowserGuardCapability: String, Codable, Equatable {
+    case singleStartupLaunch = "single-startup-launch-v1"
 }
 
 public struct BrowserGuardState: Codable, Equatable {
@@ -261,21 +288,35 @@ public final class BrowserGuardHeartbeatStore {
         self.fileURL = fileURL
     }
 
-    public func write(date: Date = Date()) throws {
+    public func write(
+        date: Date = Date(),
+        extensionVersion: String? = nil,
+        capabilities: [String] = []
+    ) throws {
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let data = try JSONEncoder().encode(BrowserGuardHeartbeat(lastSeenAt: date))
+        let data = try JSONEncoder().encode(
+            BrowserGuardHeartbeat(
+                lastSeenAt: date,
+                extensionVersion: extensionVersion,
+                capabilities: capabilities
+            )
+        )
         try data.write(to: fileURL, options: [.atomic])
     }
 
-    public func lastSeenAt() -> Date? {
+    public func heartbeat() -> BrowserGuardHeartbeat? {
         guard let data = try? Data(contentsOf: fileURL),
               let heartbeat = try? JSONDecoder().decode(BrowserGuardHeartbeat.self, from: data) else {
             return nil
         }
-        return heartbeat.lastSeenAt
+        return heartbeat
+    }
+
+    public func lastSeenAt() -> Date? {
+        heartbeat()?.lastSeenAt
     }
 
     public func isFresh(maxAge: TimeInterval, now: Date = Date()) -> Bool {
@@ -283,6 +324,18 @@ public final class BrowserGuardHeartbeatStore {
             return false
         }
         return now.timeIntervalSince(lastSeenAt) <= maxAge
+    }
+
+    public func supports(
+        _ capability: BrowserGuardCapability,
+        maxAge: TimeInterval,
+        now: Date = Date()
+    ) -> Bool {
+        guard let heartbeat = heartbeat(),
+              now.timeIntervalSince(heartbeat.lastSeenAt) <= maxAge else {
+            return false
+        }
+        return heartbeat.supports(capability)
     }
 
     public static func defaultFileURL() -> URL {

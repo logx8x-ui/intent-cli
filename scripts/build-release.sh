@@ -61,7 +61,12 @@ for product in Intent IntentApp IntentNativeHost; do
   swift build --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple "arm64-apple-macosx${MINIMUM_MACOS}" --product "$product"
   swift build --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
 done
-npm run extension:build
+if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
+  npm run extension:build
+else
+  find "$ROOT/dist/firefox" -maxdepth 1 -type f -name '*.xpi' -delete 2>/dev/null || true
+  "$ROOT/scripts/sign-firefox-extension.sh"
+fi
 npm run extension:build:chrome
 
 lipo -create \
@@ -259,10 +264,25 @@ cp -f "$WORK_DMG" "$DMG"
 
 FIREFOX_VERSION="$(node -p "require('$ROOT/firefox-extension/manifest.json').version")"
 CHROME_VERSION="$(node -p "require('$ROOT/chrome-extension/manifest.json').version")"
-cp -f "$ROOT/dist/firefox/intent_browser_guard-${FIREFOX_VERSION}.zip" "$DIST/Intent-Firefox-Extension.zip"
+if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
+  FIREFOX_ASSET="$DIST/Intent-Firefox-Extension.zip"
+  FIREFOX_SOURCE="$ROOT/dist/firefox/intent_browser_guard-${FIREFOX_VERSION}.zip"
+  FIREFOX_SIGNED=false
+else
+  FIREFOX_ASSET="$DIST/Intent-Firefox-Extension.xpi"
+  FIREFOX_SOURCE="$(find "$ROOT/dist/firefox" -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+  [[ -n "$FIREFOX_SOURCE" ]] || {
+    echo "Release refused: Mozilla did not return a signed Firefox extension." >&2
+    exit 6
+  }
+  FIREFOX_SIGNED=true
+fi
+cp -f "$FIREFOX_SOURCE" "$FIREFOX_ASSET"
 cp -f "$ROOT/dist/chrome/intent-browser-guard-chrome-${CHROME_VERSION}.zip" "$DIST/Intent-Chrome-Extension.zip"
 
 DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+FIREFOX_SHA256="$(shasum -a 256 "$FIREFOX_ASSET" | awk '{print $1}')"
+CHROME_SHA256="$(shasum -a 256 "$DIST/Intent-Chrome-Extension.zip" | awk '{print $1}')"
 TEAM_ID=""
 NOTARIZED=false
 ASSET_URL=""
@@ -281,12 +301,19 @@ cat > "$DIST/release-manifest.json" <<JSON
   "minimum_macos": "${MINIMUM_MACOS}",
   "architectures": ["arm64", "x86_64"],
   "team_id": "${TEAM_ID}",
-  "notarized": ${NOTARIZED}
+  "notarized": ${NOTARIZED},
+  "firefox_extension_version": "${FIREFOX_VERSION}",
+  "firefox_extension_asset": "$(basename "$FIREFOX_ASSET")",
+  "firefox_extension_sha256": "${FIREFOX_SHA256}",
+  "firefox_extension_signed": ${FIREFOX_SIGNED},
+  "chrome_extension_version": "${CHROME_VERSION}",
+  "chrome_extension_asset": "Intent-Chrome-Extension.zip",
+  "chrome_extension_sha256": "${CHROME_SHA256}"
 }
 JSON
 
 printf '%s\n' \
   "$DMG" \
-  "$DIST/Intent-Firefox-Extension.zip" \
+  "$FIREFOX_ASSET" \
   "$DIST/Intent-Chrome-Extension.zip" \
   "$DIST/release-manifest.json"

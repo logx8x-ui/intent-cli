@@ -36,6 +36,7 @@ pkill -x IntentApp 2>/dev/null || true
 
 mkdir -p "$BIN_DIR"
 mkdir -p "$APP_DIR"
+chmod 700 "${HOME}/.intent"
 atomic_install_executable "$ROOT/.build/release/Intent" "$APP_DIR/Intent"
 atomic_install_executable "$ROOT/.build/release/IntentApp" "$APP_DIR/IntentApp"
 atomic_install_executable "$ROOT/.build/release/IntentNativeHost" "$APP_DIR/IntentNativeHost"

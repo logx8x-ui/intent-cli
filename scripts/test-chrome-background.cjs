@@ -53,6 +53,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const chrome = {
     runtime: {
       connectNative: () => port,
+      getManifest: () => ({ version: "0.2.2" }),
       onMessage: runtimeMessage,
       onStartup: event(),
       onInstalled: event()
@@ -187,6 +188,13 @@ async function run() {
     { id: 1, active: true, url: "https://youtube.com/" }
   ]);
   await idle.settle();
+  assert.ok(
+    idle.nativeMessages.some((message) =>
+      message.extensionVersion === "0.2.2" &&
+      message.extensionCapabilities?.includes("single-startup-launch-v1")
+    ),
+    "Chrome should identify a startup-safe Browser Guard to the native host"
+  );
   assert.equal(idle.dynamicRules.length, 0, "Listening mode must not block anything while Intent is idle");
   assert.deepEqual(
     idle.intervals.map(({ delay }) => delay),
