@@ -62,6 +62,9 @@ function createHarness(activeRules, initialTabs, options = {}) {
         if (!tab) {
           throw new Error("missing tab");
         }
+        if (patch.active === false && tab.active && tabs.size === 1) {
+          throw new Error("cannot deactivate the only tab");
+        }
         Object.assign(tab, patch);
         if (patch.active) {
           setActiveTab(tabId);
@@ -233,6 +236,18 @@ async function run() {
     startupHarness.storage.completedStartupSessionID,
     startupRules.startupSessionID,
     "Firefox should persist the completed startup session before opening its website"
+  );
+
+  const lateFirefoxWindow = createHarness({
+    ...startupRules,
+    startupSessionID: "firefox-late-window-session"
+  }, []);
+  await lateFirefoxWindow.refresh();
+  await lateFirefoxWindow.create({ id: 1, active: true, url: "about:blank" });
+  assert.equal(
+    lateFirefoxWindow.tabs.get(1).url,
+    "https://www.instagram.com/direct/inbox/",
+    "Firefox should spend the one startup launch when its first tab appears late"
   );
 
   const restartedStartupHarness = createHarness(startupRules, [

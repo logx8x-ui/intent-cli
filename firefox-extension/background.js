@@ -364,14 +364,19 @@ function uniqueStartupURLs(urls) {
   return unique;
 }
 
+function startupLaunchPending() {
+  if (!rules.active || rules.startupWebsites.length === 0) return false;
+  if (rules.startupSessionID) {
+    return completedStartupSessionID !== rules.startupSessionID;
+  }
+  return completedStartupFingerprint !== JSON.stringify(rules.startupWebsites);
+}
+
 async function synchronizeStartupTabs() {
   const startupFingerprint = JSON.stringify(rules.startupWebsites);
   if (
     synchronizingStartupTabs ||
-    !rules.active ||
-    rules.startupWebsites.length === 0 ||
-    (rules.startupSessionID && completedStartupSessionID === rules.startupSessionID) ||
-    (!rules.startupSessionID && completedStartupFingerprint === startupFingerprint)
+    !startupLaunchPending()
   ) return;
 
   synchronizingStartupTabs = true;
@@ -396,7 +401,7 @@ async function synchronizeStartupTabs() {
       if (!tab) {
         const staging = stagingTabs.shift();
         tab = staging
-          ? await browser.tabs.update(staging.id, { url: startupURL, active: false })
+          ? await browser.tabs.update(staging.id, { url: startupURL, active: Boolean(staging.active) })
           : await browser.tabs.create({ url: startupURL, active: false });
       }
       claimedTabIds.add(tab.id);
@@ -611,6 +616,10 @@ browser.tabs.onCreated.addListener(async (tab) => {
   }
 
   if (!tab.url || isSearchStagingURL(tab.url)) {
+    if (startupLaunchPending()) {
+      await synchronizeStartupTabs();
+      return;
+    }
     freshBlankTabIds.add(tab.id);
     lastAllowedTabId = tab.id;
     return;

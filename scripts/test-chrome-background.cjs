@@ -78,6 +78,9 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       update: async (id, patch) => {
         const tab = tabs.get(id);
         if (!tab) throw new Error("missing tab");
+        if (patch.active === false && tab.active && tabs.size === 1) {
+          throw new Error("cannot deactivate the only tab");
+        }
         Object.assign(tab, patch);
         if (patch.active) setActive(id);
         updates.push({ tabId: id, patch });
@@ -222,6 +225,19 @@ async function run() {
     startup.storage.completedStartupSessionID,
     "chrome-startup-session",
     "Chrome should persist the completed startup session before opening its website"
+  );
+
+  const lateChromeWindow = createHarness({
+    ...lockedRules,
+    startupSessionID: "chrome-late-window-session",
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  }, []);
+  await lateChromeWindow.settle();
+  await lateChromeWindow.create({ id: 1, active: true, url: "chrome://newtab/" });
+  assert.equal(
+    lateChromeWindow.tabs.get(1).url,
+    "https://www.instagram.com/direct/inbox/",
+    "Chrome should spend the one startup launch when its first tab appears late"
   );
 
   const restartedStartup = createHarness({
