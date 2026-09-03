@@ -51,6 +51,7 @@ struct HostRuleState: Codable, Equatable {
     var accessMode: String
     var allowedWebsites: [String]
     var startupWebsites: [String]
+    var startupSessionID: String?
     var blockTabSwitching: Bool
     var blockNavigation: Bool
     var blockNewTabs: Bool
@@ -63,6 +64,7 @@ struct HostResponse: Codable {
     var accessMode: String
     var allowedWebsites: [String]
     var startupWebsites: [String]
+    var startupSessionID: String?
     var blockTabSwitching: Bool
     var blockNavigation: Bool
     var blockNewTabs: Bool
@@ -75,6 +77,7 @@ struct HostResponse: Codable {
         accessMode = state.accessMode
         allowedWebsites = state.allowedWebsites
         startupWebsites = state.startupWebsites
+        startupSessionID = state.startupSessionID
         blockTabSwitching = state.blockTabSwitching
         blockNavigation = state.blockNavigation
         blockNewTabs = state.blockNewTabs
@@ -360,6 +363,7 @@ private final class HostRuntime {
                 accessMode: IntentionAccessMode.whitelist.rawValue,
                 allowedWebsites: [],
                 startupWebsites: [],
+                startupSessionID: nil,
                 blockTabSwitching: false,
                 blockNavigation: false,
                 blockNewTabs: false,
@@ -375,6 +379,7 @@ private final class HostRuntime {
             accessMode: rules.accessMode.rawValue,
             allowedWebsites: browserWebsites,
             startupWebsites: rules.startupWebsitesByBrowser[browserBundleIdentifier] ?? [],
+            startupSessionID: rules.startupSessionID,
             blockTabSwitching: rules.blockTabSwitching,
             blockNavigation: rules.blockNavigation,
             blockNewTabs: rules.blockNewTabs,

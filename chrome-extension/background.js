@@ -26,6 +26,8 @@ let dnrFingerprint = "";
 const lastAllowedURLByTab = new Map();
 const pendingRuleRequests = new Set();
 let synchronizingStartupTabs = false;
+let completedStartupSessionID = null;
+let completedStartupFingerprint = null;
 let ruleRefreshPromise = null;
 let snapshotTimer = null;
 let snapshotForcePending = false;
@@ -38,6 +40,7 @@ function inactiveRules() {
     accessMode: "whitelist",
     allowedWebsites: [],
     startupWebsites: [],
+    startupSessionID: null,
     blockTabSwitching: false,
     blockNavigation: false,
     blockNewTabs: false,
@@ -52,8 +55,12 @@ function fingerprintRules(value) {
 async function ensureInitialized() {
   if (initialized) return;
   try {
-    const stored = await chrome.storage.local.get({ guardEnabled: true });
+    const stored = await chrome.storage.local.get({
+      guardEnabled: true,
+      completedStartupSessionID: null
+    });
     guardEnabled = stored.guardEnabled !== false;
+    completedStartupSessionID = stored.completedStartupSessionID || null;
   } catch (_) {
     guardEnabled = true;
   }
@@ -225,6 +232,7 @@ function effectiveRules(nativeRules) {
     accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
+    startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
     blockNavigation: Boolean(nativeRules.blockNavigation),
     blockNewTabs: Boolean(nativeRules.blockNewTabs),
@@ -251,6 +259,7 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
+    completedStartupFingerprint = null;
   }
   scheduleTabSnapshot(true);
 }
@@ -392,16 +401,25 @@ function uniqueStartupURLs(urls) {
 }
 
 async function synchronizeStartupTabs() {
+  const startupFingerprint = JSON.stringify(rules.startupWebsites);
   if (
     synchronizingStartupTabs ||
     !rules.active ||
-    rules.startupWebsites.length === 0
+    rules.startupWebsites.length === 0 ||
+    (rules.startupSessionID && completedStartupSessionID === rules.startupSessionID) ||
+    (!rules.startupSessionID && completedStartupFingerprint === startupFingerprint)
   ) return;
 
   synchronizingStartupTabs = true;
   try {
     const tabs = await chrome.tabs.query({});
     if (tabs.length === 0) return;
+
+    completedStartupFingerprint = startupFingerprint;
+    if (rules.startupSessionID) {
+      completedStartupSessionID = rules.startupSessionID;
+      await chrome.storage.local.set({ completedStartupSessionID }).catch(() => {});
+    }
 
     const claimedTabIds = new Set();
     let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
@@ -457,9 +475,6 @@ async function returnToAllowedTab() {
       await chrome.tabs.update(allowed.id, { active: true });
       return;
     }
-    if (tabs.length > 0 && rules.startupWebsites.length > 0) {
-      await synchronizeStartupTabs();
-    }
   } finally {
     enforcing = false;
   }
@@ -468,6 +483,14 @@ async function returnToAllowedTab() {
 async function recoverBlockedNavigation(tabId) {
   const fallbackURL = lastAllowedURLByTab.get(tabId);
   if (fallbackURL) {
+    const isStartupFallback = rules.startupWebsites.some((startupURL) =>
+      startupURLMatches(fallbackURL, startupURL) && startupURLMatches(startupURL, fallbackURL)
+    );
+    if (isStartupFallback) {
+      lastAllowedURLByTab.delete(tabId);
+      await returnToAllowedTab();
+      return;
+    }
     await chrome.tabs.update(tabId, { url: fallbackURL, active: true }).catch(returnToAllowedTab);
     lastAllowedTabId = tabId;
     return;
@@ -554,14 +577,6 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   scheduleTabSnapshot();
   if (!rules.active) return;
   if (!tab.url || isSearchStagingURL(tab.url)) {
-    const tabs = await chrome.tabs.query({});
-    const hasOtherAllowedTab = tabs.some((candidate) =>
-      candidate.id !== tab.id && isAllowedURL(candidate.url, rules)
-    );
-    if (rules.startupWebsites.length > 0 && !hasOtherAllowedTab) {
-      await synchronizeStartupTabs();
-      return;
-    }
     freshBlankTabIds.add(tab.id);
     lastAllowedTabId = tab.id;
     return;

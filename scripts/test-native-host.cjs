@@ -62,6 +62,7 @@ try {
       "org.mozilla.firefox": ["https://www.instagram.com/direct/inbox/"],
       "com.google.Chrome": ["https://www.youtube.com/"]
     },
+    startupSessionID: "native-host-startup-session",
     blockTabSwitching: true,
     blockNavigation: true,
     blockNewTabs: true,
@@ -78,6 +79,7 @@ try {
   assert.equal(rulesResponse.accessMode, "blacklist", "Native host should preserve browser access mode");
   assert.deepEqual(rulesResponse.allowedWebsites, activeRules.allowedWebsites);
   assert.deepEqual(rulesResponse.startupWebsites, activeRules.startupWebsitesByBrowser["org.mozilla.firefox"]);
+  assert.equal(rulesResponse.startupSessionID, activeRules.startupSessionID);
   assert.equal(rulesResponse.guardEnabled, false, "Native host should include guard enabled state");
 
   fs.writeFileSync(rulesPath, JSON.stringify({ ...activeRules, updatedAt: 0 }));

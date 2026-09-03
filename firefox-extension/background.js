@@ -24,6 +24,8 @@ let commandPort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
 let synchronizingStartupTabs = false;
+let completedStartupSessionID = null;
+let completedStartupFingerprint = null;
 let snapshotTimer = null;
 let snapshotForcePending = false;
 let lastSnapshotFingerprint = null;
@@ -37,6 +39,7 @@ function inactiveRules() {
     accessMode: "whitelist",
     allowedWebsites: [],
     startupWebsites: [],
+    startupSessionID: null,
     blockTabSwitching: false,
     blockNavigation: false,
     blockNewTabs: false,
@@ -54,8 +57,12 @@ async function ensureInitialized() {
   }
 
   try {
-    const stored = await browser.storage.local.get({ guardEnabled: true });
+    const stored = await browser.storage.local.get({
+      guardEnabled: true,
+      completedStartupSessionID: null
+    });
     guardEnabled = stored.guardEnabled !== false;
+    completedStartupSessionID = stored.completedStartupSessionID || null;
   } catch (_) {
     guardEnabled = true;
   }
@@ -212,6 +219,7 @@ function effectiveRules(nativeRules) {
     accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
+    startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
     blockNavigation: Boolean(nativeRules.blockNavigation),
     blockNewTabs: Boolean(nativeRules.blockNewTabs),
@@ -276,6 +284,7 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
+    completedStartupFingerprint = null;
   }
   scheduleTabSnapshot(true);
 }
@@ -356,16 +365,25 @@ function uniqueStartupURLs(urls) {
 }
 
 async function synchronizeStartupTabs() {
+  const startupFingerprint = JSON.stringify(rules.startupWebsites);
   if (
     synchronizingStartupTabs ||
     !rules.active ||
-    rules.startupWebsites.length === 0
+    rules.startupWebsites.length === 0 ||
+    (rules.startupSessionID && completedStartupSessionID === rules.startupSessionID) ||
+    (!rules.startupSessionID && completedStartupFingerprint === startupFingerprint)
   ) return;
 
   synchronizingStartupTabs = true;
   try {
     const tabs = await browser.tabs.query({});
     if (tabs.length === 0) return;
+
+    completedStartupFingerprint = startupFingerprint;
+    if (rules.startupSessionID) {
+      completedStartupSessionID = rules.startupSessionID;
+      await browser.storage.local.set({ completedStartupSessionID }).catch(() => {});
+    }
 
     const claimedTabIds = new Set();
     let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
@@ -431,9 +449,6 @@ async function returnToAllowedTab() {
       return;
     }
 
-    if (tabs.length > 0 && rules.startupWebsites.length > 0) {
-      await synchronizeStartupTabs();
-    }
   } catch (_) {
     lastAllowedTabId = null;
   } finally {
@@ -478,6 +493,14 @@ async function recoverBlockedNavigation(tabId) {
 
   const fallbackURL = lastAllowedURLByTab.get(tabId);
   if (fallbackURL) {
+    const isStartupFallback = rules.startupWebsites.some((startupURL) =>
+      startupURLMatches(fallbackURL, startupURL) && startupURLMatches(startupURL, fallbackURL)
+    );
+    if (isStartupFallback) {
+      lastAllowedURLByTab.delete(tabId);
+      await returnToAllowedTab();
+      return;
+    }
     await browser.tabs.update(tabId, { url: fallbackURL, active: true }).catch(() => {});
     lastAllowedTabId = tabId;
     return;
@@ -588,14 +611,6 @@ browser.tabs.onCreated.addListener(async (tab) => {
   }
 
   if (!tab.url || isSearchStagingURL(tab.url)) {
-    const tabs = await browser.tabs.query({});
-    const hasOtherAllowedTab = tabs.some((candidate) =>
-      candidate.id !== tab.id && isAllowedURL(candidate.url, rules)
-    );
-    if (rules.startupWebsites.length > 0 && !hasOtherAllowedTab) {
-      await synchronizeStartupTabs();
-      return;
-    }
     freshBlankTabIds.add(tab.id);
     lastAllowedTabId = tab.id;
     return;

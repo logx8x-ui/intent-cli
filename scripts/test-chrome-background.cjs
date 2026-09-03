@@ -16,10 +16,14 @@ function event() {
 
 function createHarness(nativeRules, initialTabs, options = {}) {
   const tabs = new Map(initialTabs.map((tab) => [tab.id, { ...tab }]));
-  const storage = { guardEnabled: options.guardEnabled !== false };
+  const storage = {
+    guardEnabled: options.guardEnabled !== false,
+    ...(options.storage || {})
+  };
   const nativeMessages = [];
   const dynamicUpdates = [];
   const removedTabs = [];
+  const updates = [];
   const focusedWindows = [];
   const intervals = [];
   let dynamicRules = [];
@@ -76,6 +80,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         if (!tab) throw new Error("missing tab");
         Object.assign(tab, patch);
         if (patch.active) setActive(id);
+        updates.push({ tabId: id, patch });
         return { ...tab };
       },
       create: async (properties) => {
@@ -117,11 +122,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   vm.runInNewContext(source, context, { filename: "chrome-extension/background.js" });
 
   async function settle() {
-    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    for (let index = 0; index < 24; index += 1) await Promise.resolve();
   }
 
   return {
-    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows, intervals,
+    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows, intervals, updates,
     get dynamicRules() { return dynamicRules; },
     settle,
     async activate(id) {
@@ -188,6 +193,7 @@ async function run() {
 
   const lockedRules = {
     active: true,
+    startupSessionID: "chrome-startup-session",
     allowedWebsites: ["instagram.com/direct"],
     startupWebsites: [],
     blockTabSwitching: true,
@@ -212,6 +218,24 @@ async function run() {
     "Chrome should replace its startup blank with the first allowed website"
   );
   assert.equal(startup.tabs.size, 1, "Chrome startup should not create an extra blank tab");
+  assert.equal(
+    startup.storage.completedStartupSessionID,
+    "chrome-startup-session",
+    "Chrome should persist the completed startup session before opening its website"
+  );
+
+  const restartedStartup = createHarness({
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  }, [
+    { id: 1, active: true, url: "chrome://newtab/" }
+  ], { storage: startup.storage });
+  await restartedStartup.settle();
+  assert.equal(
+    restartedStartup.tabs.get(1).url,
+    "chrome://newtab/",
+    "Restarting Chrome Browser Guard must not reopen a completed session website"
+  );
 
   const existingStartup = createHarness({
     ...lockedRules,
@@ -236,15 +260,20 @@ async function run() {
     { id: 1, active: true, url: "https://example.com/" }
   ]);
   await concurrentStartup.settle();
-  concurrentStartup.tabs.clear();
-  concurrentStartup.tabs.set(1, { id: 1, active: true, url: "https://example.com/" });
-  await concurrentStartup.synchronizeStartupTabsConcurrently();
+  await concurrentStartup.receiveNative({
+    ...lockedRules,
+    startupSessionID: "chrome-equivalent-startup-session-ready",
+    startupWebsites: [
+      "https://www.instagram.com/direct/inbox/",
+      "https://instagram.com/direct/inbox"
+    ]
+  });
   assert.equal(
     Array.from(concurrentStartup.tabs.values()).filter((tab) =>
       tab.url.includes("instagram.com/direct/inbox")
     ).length,
     1,
-    "Concurrent Chrome startup passes must create only one copy of the same website"
+    "Equivalent Chrome startup URLs must create only one copy of the website"
   );
   const locked = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },
@@ -263,6 +292,29 @@ async function run() {
     chromeRuleRequestsBeforeActivation,
     "Chrome tab events should enforce cached rules without polling the native host"
   );
+
+  const redirect = createHarness({
+    ...lockedRules,
+    startupSessionID: "chrome-outlook-redirect-session",
+    allowedWebsites: ["outlook.cloud.microsoft/mail/inbox/id/message"],
+    startupWebsites: ["https://outlook.cloud.microsoft/mail/inbox/id/message"]
+  }, [
+    { id: 1, active: true, url: "chrome://newtab/" }
+  ]);
+  await redirect.settle();
+  const chromeStartupUpdates = () => redirect.updates.filter(
+    ({ patch }) => patch.url === "https://outlook.cloud.microsoft/mail/inbox/id/message"
+  ).length;
+  assert.equal(chromeStartupUpdates(), 1, "Chrome should launch an Outlook startup URL once");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await redirect.navigate(1, "https://outlook.cloud.microsoft/mail/");
+  }
+  assert.equal(
+    chromeStartupUpdates(),
+    1,
+    "An Outlook redirect must never make Chrome reload the startup URL"
+  );
+  assert.equal(redirect.tabs.size, 1, "An Outlook redirect must never create replacement tabs");
 
   const allowed = createHarness(lockedRules, [
     { id: 1, windowId: 7, index: 0, active: true, url: "https://instagram.com/direct/inbox/" },
@@ -296,6 +348,24 @@ async function run() {
   await closeBrowser.settle();
   await closeBrowser.remove(1);
   assert.equal(closeBrowser.tabs.size, 0, "Closing Chrome should not manufacture a recovery tab");
+
+  const closeOnlyAllowed = createHarness({
+    ...lockedRules,
+    startupSessionID: "chrome-close-startup-session",
+    startupWebsites: ["https://instagram.com/direct/inbox/"]
+  }, [
+    { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },
+    { id: 2, active: false, url: "https://youtube.com/" }
+  ]);
+  await closeOnlyAllowed.settle();
+  await closeOnlyAllowed.remove(1);
+  assert.equal(
+    Array.from(closeOnlyAllowed.tabs.values()).some((tab) =>
+      tab.url === "https://instagram.com/direct/inbox/"
+    ),
+    false,
+    "Closing the final Chrome startup tab must not reopen a website that already started once"
+  );
 
   const strictNewTab = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" }
@@ -375,7 +445,7 @@ async function run() {
   await blacklistBlank.settle();
   await blacklistBlank.navigate(1, "https://youtube.com/watch?v=3");
   assert.equal(
-    blacklistBlank.tabs.get(1).url,
+    blacklistBlank.tabs.get(1).url.replace(/\/$/, ""),
     "chrome://newtab",
     "A blacklisted site entered from a fresh Chrome tab should return to a clean tab"
   );

@@ -24,7 +24,8 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const nativeMessages = [];
   const intervals = [];
   const storage = {
-    guardEnabled: options.guardEnabled !== false
+    guardEnabled: options.guardEnabled !== false,
+    ...(options.storage || {})
   };
 
   function setActiveTab(tabId) {
@@ -200,6 +201,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
 async function run() {
   const lockedRules = {
     active: true,
+    startupSessionID: "firefox-startup-session",
     allowedWebsites: ["instagram.com/direct"],
     startupWebsites: [],
     blockTabSwitching: true,
@@ -227,6 +229,21 @@ async function run() {
     "Firefox should replace its startup blank with the first allowed website"
   );
   assert.equal(startupHarness.tabs.size, 1, "Firefox startup should not create an extra blank tab");
+  assert.equal(
+    startupHarness.storage.completedStartupSessionID,
+    startupRules.startupSessionID,
+    "Firefox should persist the completed startup session before opening its website"
+  );
+
+  const restartedStartupHarness = createHarness(startupRules, [
+    { id: 1, active: true, url: "about:blank" }
+  ], { storage: startupHarness.storage });
+  await restartedStartupHarness.refresh();
+  assert.equal(
+    restartedStartupHarness.tabs.get(1).url,
+    "about:blank",
+    "Restarting Firefox Browser Guard must not reopen a completed session website"
+  );
 
   const existingStartupHarness = createHarness(startupRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
@@ -244,15 +261,12 @@ async function run() {
     { id: 1, active: true, url: "https://example.com/" }
   ]);
   await concurrentStartupHarness.ready();
-  concurrentStartupHarness.tabs.clear();
-  concurrentStartupHarness.tabs.set(1, { id: 1, active: true, url: "https://example.com/" });
-  await concurrentStartupHarness.synchronizeStartupTabsConcurrently();
   assert.equal(
     Array.from(concurrentStartupHarness.tabs.values()).filter((tab) =>
       tab.url.includes("instagram.com/direct/inbox")
     ).length,
     1,
-    "Concurrent Firefox startup passes must create only one copy of the same website"
+    "Equivalent Firefox startup URLs must create only one copy of the website"
   );
 
   const activationHarness = createHarness(lockedRules, [
@@ -296,6 +310,30 @@ async function run() {
   await navigationHarness.update(2, { url: "https://www.instagram.com/explore/" });
   assert.equal(navigationHarness.tabs.get(2).url, "https://www.instagram.com/direct/inbox/", "Unallowed navigation should be cancelled before the page changes");
   assert.equal(navigationHarness.tabs.get(1).active, true, "Blocked navigation should return to the allowed tab");
+
+  const redirectHarness = createHarness({
+    ...lockedRules,
+    startupSessionID: "firefox-outlook-redirect-session",
+    allowedWebsites: ["outlook.cloud.microsoft/mail/inbox/id/message"],
+    startupWebsites: ["https://outlook.cloud.microsoft/mail/inbox/id/message"]
+  }, [
+    { id: 1, active: true, url: "about:blank" }
+  ]);
+  await redirectHarness.refresh();
+  await redirectHarness.activate(1);
+  const firefoxStartupUpdates = () => redirectHarness.updates.filter(
+    ({ patch }) => patch.url === "https://outlook.cloud.microsoft/mail/inbox/id/message"
+  ).length;
+  assert.equal(firefoxStartupUpdates(), 1, "Firefox should launch an Outlook startup URL once");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await redirectHarness.update(1, { url: "https://outlook.cloud.microsoft/mail/" });
+  }
+  assert.equal(
+    firefoxStartupUpdates(),
+    1,
+    "An Outlook redirect must never make Firefox reload the startup URL"
+  );
+  assert.equal(redirectHarness.tabs.size, 1, "An Outlook redirect must never create replacement tabs");
 
   const strictNewTabHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
@@ -361,8 +399,8 @@ async function run() {
     Array.from(closeOnlyAllowedHarness.tabs.values()).some((tab) =>
       tab.active && tab.url === "https://www.instagram.com/direct/inbox/"
     ),
-    true,
-    "Closing the final allowed tab should restore the startup website instead of exposing an unallowed tab"
+    false,
+    "Closing the final allowed tab must not reopen a website that already started once"
   );
 
   const closeBrowserHarness = createHarness(startupRules, [

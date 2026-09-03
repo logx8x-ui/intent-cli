@@ -967,6 +967,7 @@ do {
             "org.mozilla.firefox": ["https://github.com/"],
             "com.google.Chrome": ["https://www.instagram.com/direct/inbox/"]
         ],
+        startupSessionID: "browser-startup-session",
         blockTabSwitching: true,
         blockNavigation: true,
         blockNewTabs: false,
@@ -980,6 +981,7 @@ do {
         loadedRules.startupWebsitesByBrowser["org.mozilla.firefox"] == ["https://github.com/"],
         "Full startup URLs should remain browser-specific"
     )
+    try expect(loadedRules.startupSessionID == "browser-startup-session", "Browser startup sessions should round-trip")
     try expect(loadedRules.isFresh(), "Freshly written active browser rules should be fresh")
     let staleLegacyRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: Data("""
     {

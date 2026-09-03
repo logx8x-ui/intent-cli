@@ -1036,6 +1036,7 @@ final class IntentAppModel: ObservableObject {
             allowedWebsites: firefoxWebsites,
             allowedWebsitesByBrowser: websitesByBrowser,
             startupWebsitesByBrowser: startupWebsitesByBrowser,
+            startupSessionID: UUID().uuidString,
             blockTabSwitching: true,
             blockNavigation: true,
             blockNewTabs: false,
