@@ -487,24 +487,6 @@ struct IntentGraphView: View {
                 .help("Ask what this computer session is for when Intent opens")
 
                 Button {
-                    setPurposeAccessMode(purposeAccessMode == .whitelist ? .blacklist : .whitelist)
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: purposeAccessMode == .blacklist ? "nosign" : "checkmark.shield")
-                        Text(purposeAccessMode == .blacklist ? "Block" : "Allow only")
-                    }
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(purposeAccessModeColor)
-                    .padding(.horizontal, 11)
-                    .frame(height: 30)
-                    .contentShape(Rectangle())
-                    .background(purposeAccessModeColor.opacity(0.09), in: Capsule())
-                    .overlay(Capsule().stroke(purposeAccessModeColor.opacity(0.86), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .help("Purpose Mode access rule (⇧W allow only, ⇧B block)")
-
-                Button {
                     model.hideOverlay()
                 } label: {
                     HStack(spacing: 7) {
@@ -1270,12 +1252,6 @@ struct IntentGraphView: View {
 
     private var purposeAccessMode: IntentionAccessMode {
         IntentionAccessMode(rawValue: purposeAccessModeRawValue) ?? .whitelist
-    }
-
-    private var purposeAccessModeColor: Color {
-        purposeAccessMode == .blacklist
-            ? Color(red: 0.98, green: 0.24, blue: 0.30)
-            : GraphTheme.editBlue
     }
 
     private func setPurposeAccessMode(_ mode: IntentionAccessMode) {

@@ -27,14 +27,6 @@ struct IntentionNodeView: View {
                             Capsule()
                                 .stroke(leisureGradient.opacity(0.72), lineWidth: 0.8)
                         )
-                } else {
-                    Text(intention.accessMode == .blacklist ? "BLOCK" : "ALLOW ONLY")
-                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 6)
-                        .frame(height: 18)
-                        .foregroundStyle(accessModeColor)
-                        .background(accessModeColor.opacity(colorScheme == .dark ? 0.14 : 0.08), in: Capsule())
-                        .overlay(Capsule().stroke(accessModeColor.opacity(0.72), lineWidth: 0.8))
                 }
             }
             .font(.system(size: 14, weight: .semibold))
@@ -48,7 +40,7 @@ struct IntentionNodeView: View {
                         .blur(radius: 15)
                         .opacity(colorScheme == .dark ? 0.44 : 0.32)
                         .allowsHitTesting(false)
-                } else {
+                } else if intention.accessMode == .blacklist {
                     RoundedRectangle(cornerRadius: 25)
                         .stroke(accessModeColor.opacity(0.86), lineWidth: 5)
                         .frame(width: squareSize + 16, height: squareSize + 16)
@@ -67,7 +59,7 @@ struct IntentionNodeView: View {
                         .frame(width: squareSize, height: squareSize)
                         .shadow(color: Color.white.opacity(colorScheme == .dark ? 0.20 : 0.10), radius: 5)
                         .allowsHitTesting(false)
-                } else {
+                } else if intention.accessMode == .blacklist {
                     RoundedRectangle(cornerRadius: 20)
                         .stroke(accessModeColor.opacity(0.82), lineWidth: selected ? 2.8 : 1.7)
                         .frame(width: squareSize, height: squareSize)
@@ -109,7 +101,7 @@ struct IntentionNodeView: View {
     }
 
     private var accessModeColor: Color {
-        intention.accessMode == .blacklist ? Color(red: 0.98, green: 0.24, blue: 0.30) : GraphTheme.editBlue
+        Color(red: 0.98, green: 0.24, blue: 0.30)
     }
 
     @ViewBuilder
