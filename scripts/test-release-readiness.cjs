@@ -59,6 +59,13 @@ assert.ok(
   desktopApp.includes(".terminationOnRemoval"),
   "Removing Intent's menu item must close the app instead of leaving a hidden process"
 );
+assert.ok(
+  desktopApp.includes('"NSStatusItem Preferred Position \\(Self.statusItemAutosaveName)"') &&
+    desktopApp.includes('"NSStatusItem Visible \\(Self.statusItemAutosaveName)"') &&
+    desktopApp.indexOf("NSStatusItem Preferred Position") <
+      desktopApp.indexOf("NSStatusBar.system.statusItem"),
+  "Intent must repair its visible menu-bar placement before AppKit creates the status item"
+);
 
 const hotKeyManager = read("Sources/IntentApp/GlobalHotKeyManager.swift");
 assert.ok(

@@ -54,17 +54,36 @@ struct IntentDesktopApp: App {
 
 @MainActor
 final class IntentStatusItemController: NSObject {
+    private static let statusItemAutosaveName = "Intent"
+    private static let visiblePreferredPosition = 360
+
     private let model: IntentAppModel
     private let updateManager: IntentUpdateManager
-    private let statusItem = NSStatusBar.system.statusItem(withLength: 30)
+    private let statusItem: NSStatusItem
 
     init(model: IntentAppModel, updateManager: IntentUpdateManager) {
+        // Menu-bar organizers place newly-created items to the left of their
+        // hide marker. With a crowded bar that can leave Intent at a negative,
+        // genuinely off-screen coordinate even though AppKit reports it as
+        // visible. Give the autosaved item a stable position in the always-
+        // visible part of the bar before AppKit restores its placement.
+        let defaults = UserDefaults.standard
+        defaults.set(
+            Self.visiblePreferredPosition,
+            forKey: "NSStatusItem Preferred Position \(Self.statusItemAutosaveName)"
+        )
+        defaults.set(
+            true,
+            forKey: "NSStatusItem Visible \(Self.statusItemAutosaveName)"
+        )
+
         self.model = model
         self.updateManager = updateManager
+        statusItem = NSStatusBar.system.statusItem(withLength: 30)
         super.init()
 
         guard let button = statusItem.button else { return }
-        statusItem.autosaveName = "Intent"
+        statusItem.autosaveName = Self.statusItemAutosaveName
         statusItem.behavior = [.removalAllowed, .terminationOnRemoval]
         statusItem.isVisible = true
         button.image = IntentMenuBarIcon.makeImage()
