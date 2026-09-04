@@ -130,6 +130,16 @@ final class IntentStatusItemController: NSObject {
             menu.addItem(zeroDriftItem)
         }
 
+        if model.activityRecorder.isRecording {
+            let recordingItem = NSMenuItem(
+                title: "Recording Mode: \(model.activityRecorder.statusText)",
+                action: nil,
+                keyEquivalent: ""
+            )
+            recordingItem.isEnabled = false
+            menu.addItem(recordingItem)
+        }
+
         if let shortcutWarning = model.shortcutWarning {
             menu.addItem(.separator())
             let warningItem = NSMenuItem(title: shortcutWarning, action: nil, keyEquivalent: "")

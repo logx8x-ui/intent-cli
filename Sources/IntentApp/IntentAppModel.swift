@@ -41,6 +41,8 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
+    let activityRecorder = ActivityRecordingController()
+
     weak var overlayPresenter: IntentOverlayPresenting?
     var onWorkspaceChanged: (() -> Void)?
 

@@ -35,7 +35,7 @@ These are the only three manual downloads:
 | **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi)** | Website restrictions in Firefox. Mozilla-signed for normal installs. |
 | **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Chrome-Extension.zip)** | Website restrictions in Chrome. |
 
-Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only enforces rules while an intention is running.
+Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only blocks pages while an intention is running, while local domain history can also improve Purpose Mode and Recording Mode suggestions.
 
 ### Firefox
 
@@ -67,6 +67,7 @@ a brand-new account always starts with zero intentions. See [Intent Accounts](do
 - Press `Cmd+Shift+M` to finish an active intention.
 - Press `Shift+W` for whitelist Purpose Mode or `Shift+B` for blacklist Purpose Mode while you are not typing.
 - Whitelist intentions allow only their selected resources. Blacklist intentions block their selected apps and browser websites while leaving everything else available.
+- Open **Recording Mode** from the record-circle control to learn aggregate app and browser-domain usage for 24 hours, one week, or until you stop it, then review up to seven local Allow Only suggestions.
 - Add a **Timer** restriction to end a session automatically.
 - Add a **Cooldown** restriction to prevent restarting an intention for a chosen period after it ends.
 
@@ -83,6 +84,8 @@ No API key is required. Intent sends the description you submit plus installed a
 The scheduler page keeps local Intent schedules in `~/.intent/schedules.json` and can start intentions when they become due. Optional Apple Calendar and Google Calendar connections appear under **Calendars** in the scheduler header. Local scheduling always works without an account, permission, or network. See [Google Calendar setup](docs/GOOGLE_CALENDAR.md) for the optional OAuth client ID.
 
 The first session asks once for macOS Accessibility permission so Intent can enforce app restrictions.
+
+Recording Mode does not record the screen. It stores only aggregate app time and normalized browser-domain counts under `~/.intent/activity-recording.json`, never sends that data to AI, and requires no Screen Recording permission. Browser domains are included only when Browser Guard is enabled.
 
 ## Build From Source
 

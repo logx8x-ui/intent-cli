@@ -21,6 +21,15 @@ public enum FocusLockError: Error, CustomStringConvertible {
 }
 
 public enum FocusForegroundPolicy {
+    public static func shouldImmediatelyReject(
+        bundleIdentifier: String?,
+        accessMode: IntentionAccessMode,
+        controlledBundleIdentifiers: Set<String>
+    ) -> Bool {
+        guard accessMode == .blacklist, let bundleIdentifier else { return false }
+        return controlledBundleIdentifiers.contains(bundleIdentifier)
+    }
+
     public static func shouldHonorSystemTransitionGrace(
         bundleIdentifier: String?,
         graceUntil: Date,
@@ -83,6 +92,7 @@ public final class FocusLock {
     private var activeSpaceObserver: NSObjectProtocol?
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
+    private var lastPermittedApplication: NSRunningApplication?
     private var systemSwitcherGraceUntil: Date = .distantPast
 
     public init(spec: FocusSessionSpec) {
@@ -101,6 +111,11 @@ public final class FocusLock {
 
     public func run() throws {
         returnApplication = NSWorkspace.shared.frontmostApplication
+        if let returnApplication,
+           let bundleIdentifier = returnApplication.bundleIdentifier,
+           spec.permitsApplication(bundleIdentifier) {
+            lastPermittedApplication = returnApplication
+        }
         allowedAppSwitcher.recordActivation(bundleIdentifier: returnApplication?.bundleIdentifier)
 
         guard requestAccessibilityIfNeeded() else {
@@ -506,8 +521,16 @@ public final class FocusLock {
     }
 
     private func handleActivated(_ app: NSRunningApplication) {
-        allowedAppSwitcher.recordActivation(bundleIdentifier: app.bundleIdentifier)
         guard spec.blockAppSwitching || spec.keepFocused else { return }
+
+        if FocusForegroundPolicy.shouldImmediatelyReject(
+            bundleIdentifier: app.bundleIdentifier,
+            accessMode: spec.accessMode,
+            controlledBundleIdentifiers: spec.allowedBundleIdentifiers
+        ) {
+            refocus(ignoreSystemTransitionGrace: true)
+            return
+        }
 
         if shouldWaitForSystemSwitcher(bundleIdentifier: app.bundleIdentifier) {
             return
@@ -530,6 +553,9 @@ public final class FocusLock {
             refocus()
             return
         }
+
+        lastPermittedApplication = app
+        allowedAppSwitcher.recordActivation(bundleIdentifier: bundleIdentifier)
     }
 
     private func startFocusTimer() {
@@ -562,6 +588,15 @@ public final class FocusLock {
             return
         }
 
+        if FocusForegroundPolicy.shouldImmediatelyReject(
+            bundleIdentifier: frontmost.bundleIdentifier,
+            accessMode: spec.accessMode,
+            controlledBundleIdentifiers: spec.allowedBundleIdentifiers
+        ) {
+            refocus(ignoreSystemTransitionGrace: true)
+            return
+        }
+
         if shouldWaitForSystemSwitcher(bundleIdentifier: frontmost.bundleIdentifier) {
             return
         }
@@ -585,10 +620,14 @@ public final class FocusLock {
             refocus()
             return
         }
+
+        lastPermittedApplication = frontmost
+        allowedAppSwitcher.recordActivation(bundleIdentifier: bundleIdentifier)
     }
 
-    private func refocus() {
-        if shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+    private func refocus(ignoreSystemTransitionGrace: Bool = false) {
+        if !ignoreSystemTransitionGrace,
+           shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
             return
         }
 
@@ -610,6 +649,14 @@ public final class FocusLock {
     }
 
     private func activateBestPermittedApplication() {
+        if let lastPermittedApplication,
+           let bundleIdentifier = lastPermittedApplication.bundleIdentifier,
+           spec.permitsApplication(bundleIdentifier),
+           !lastPermittedApplication.isTerminated {
+            _ = lastPermittedApplication.activate(options: [.activateIgnoringOtherApps])
+            return
+        }
+
         if let returnApplication,
            let bundleIdentifier = returnApplication.bundleIdentifier,
            spec.permitsApplication(bundleIdentifier),

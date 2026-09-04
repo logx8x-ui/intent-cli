@@ -29,6 +29,7 @@ struct IntentGraphView: View {
     @State private var welcomeTitleDraft = ""
     @State private var editingWelcomeTitle = false
     @State private var showSettings = false
+    @State private var showRecordingMode = false
     @State private var aiPrompt = ""
     @State private var aiWorkspaceRequest: AIWorkspaceRequest?
     @State private var pendingPlacementID: String?
@@ -934,7 +935,18 @@ struct IntentGraphView: View {
 
     private func bottomControls(in size: CGSize) -> some View {
         VStack(alignment: .trailing, spacing: 9) {
+            ActivityRecordingControl(
+                recorder: model.activityRecorder,
+                isPresented: $showRecordingMode,
+                installedApps: model.installedApps,
+                onOpen: { showSettings = false },
+                onAddSuggestions: { suggestions in
+                    model.addAIIntentions(suggestions)
+                }
+            )
+
             Button {
+                showRecordingMode = false
                 showSettings = true
             } label: {
                 Image(systemName: "gearshape")

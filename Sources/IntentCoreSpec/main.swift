@@ -329,6 +329,22 @@ do {
         "Regular unallowed apps should not get Mission Control grace"
     )
     try expect(
+        FocusForegroundPolicy.shouldImmediatelyReject(
+            bundleIdentifier: "com.hnc.Discord",
+            accessMode: .blacklist,
+            controlledBundleIdentifiers: ["com.hnc.Discord"]
+        ),
+        "Explicitly blacklisted apps should bypass Mission Control grace"
+    )
+    try expect(
+        !FocusForegroundPolicy.shouldImmediatelyReject(
+            bundleIdentifier: "com.apple.MobileSMS",
+            accessMode: .blacklist,
+            controlledBundleIdentifiers: ["com.hnc.Discord"]
+        ),
+        "Permitted apps should still receive normal transition handling"
+    )
+    try expect(
         FocusSystemShortcutPolicy.isSpaceNavigationKey(126),
         "Control-Up should remain available to open Mission Control"
     )
@@ -819,6 +835,107 @@ do {
     let tempDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("intent-core-spec-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+
+    let recordingStart = Date(timeIntervalSince1970: 1_800_000_000)
+    try expect(
+        ActivityRecordingPeriod.twentyFourHours.endDate(startingAt: recordingStart)
+            == recordingStart.addingTimeInterval(86_400),
+        "The 24-hour Recording Mode option should stop after exactly one day"
+    )
+    try expect(
+        ActivityRecordingPeriod.oneWeek.endDate(startingAt: recordingStart)
+            == recordingStart.addingTimeInterval(604_800),
+        "The one-week Recording Mode option should stop after exactly seven days"
+    )
+    try expect(
+        ActivityRecordingPeriod.indefinite.endDate(startingAt: recordingStart) == nil,
+        "Indefinite Recording Mode should continue until the person stops it"
+    )
+
+    let firefoxWebsiteKey = ActivityRecordingKey.website(
+        browserBundleIdentifier: "org.mozilla.firefox",
+        host: "mail.google.com"
+    )
+    var recordingState = ActivityRecordingState(
+        period: .twentyFourHours,
+        startedAt: recordingStart,
+        websiteBaselineCounts: [
+            ActivityRecordingKey.baselineFingerprint(for: firefoxWebsiteKey): 3
+        ]
+    )
+    recordingState.recordApplication(bundleIdentifier: "com.apple.mail", seconds: 900)
+    recordingState.recordApplication(bundleIdentifier: "io.remnote", seconds: 1_200)
+    recordingState.recordApplication(bundleIdentifier: "org.mozilla.firefox", seconds: 600)
+    recordingState.recordApplication(bundleIdentifier: "dev.loganmondi.intent", seconds: 5_000)
+    recordingState.updateWebsiteCounts([firefoxWebsiteKey: 8])
+    try expect(
+        recordingState.applicationSeconds["dev.loganmondi.intent"] == nil,
+        "Recording Mode should never learn from Intent's own foreground time"
+    )
+    try expect(
+        recordingState.websiteVisitCounts[firefoxWebsiteKey] == 5,
+        "Recording Mode should retain only website visits made after recording began"
+    )
+    recordingState.updateWebsiteCounts([firefoxWebsiteKey: 3])
+    try expect(
+        recordingState.websiteVisitCounts[firefoxWebsiteKey] == nil,
+        "Recording Mode should not persist readable domains that had no visits during the recording"
+    )
+    recordingState.updateWebsiteCounts([firefoxWebsiteKey: 8])
+
+    let recordingApps = [
+        AllowedApp(name: "Mail", bundleIdentifier: "com.apple.mail"),
+        AllowedApp(name: "RemNote", bundleIdentifier: "io.remnote"),
+        AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")
+    ]
+    let recordingSuggestions = ActivitySuggestionBuilder.suggestions(
+        from: recordingState,
+        installedApps: recordingApps
+    )
+    try expect(
+        recordingSuggestions.contains { $0.name == "Messages & Email" },
+        "Recorded Mail and webmail activity should become a communication intention"
+    )
+    try expect(
+        recordingSuggestions.contains { $0.name == "Study" },
+        "Recorded learning tools should become a study intention"
+    )
+    try expect(
+        recordingSuggestions.allSatisfy { $0.accessMode == .whitelist },
+        "Recording Mode must only create whitelist suggestions"
+    )
+    try expect(
+        recordingSuggestions.allSatisfy { $0.frictions.isEmpty },
+        "Recording Mode should not invent friction from observed activity"
+    )
+
+    var broadRecording = ActivityRecordingState(period: .indefinite, startedAt: recordingStart)
+    let broadApps = (0..<10).map {
+        AllowedApp(name: "Utility \($0)", bundleIdentifier: "example.utility.\($0)")
+    }
+    for app in broadApps {
+        broadRecording.recordApplication(bundleIdentifier: app.bundleIdentifier, seconds: 120)
+    }
+    try expect(
+        ActivitySuggestionBuilder.suggestions(from: broadRecording, installedApps: broadApps).count == 7,
+        "Recording Mode should never suggest more than seven intentions"
+    )
+
+    let recordingURL = tempDirectory.appendingPathComponent("activity-recording.json")
+    let recordingStore = ActivityRecordingStore(fileURL: recordingURL)
+    try recordingStore.save(recordingState)
+    try expect(
+        recordingStore.load() == recordingState,
+        "An active recording should survive an Intent relaunch"
+    )
+    let recordingPermissions = try FileManager.default.attributesOfItem(
+        atPath: recordingURL.path
+    )[.posixPermissions] as? NSNumber
+    try expect(
+        recordingPermissions?.intValue == 0o600,
+        "Recording Mode data should be readable only by the signed-in macOS user"
+    )
+
     let freshStore = IntentionStore(fileURL: tempDirectory.appendingPathComponent("fresh-intentions.json"))
     let freshIntentions = try freshStore.load()
     try expect(freshIntentions.isEmpty, "A first install should start with a blank desktop")
