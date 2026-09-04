@@ -56,7 +56,7 @@ struct IntentDesktopApp: App {
 final class IntentStatusItemController: NSObject {
     private let model: IntentAppModel
     private let updateManager: IntentUpdateManager
-    private let statusItem = NSStatusBar.system.statusItem(withLength: 28)
+    private let statusItem = NSStatusBar.system.statusItem(withLength: 30)
 
     init(model: IntentAppModel, updateManager: IntentUpdateManager) {
         self.model = model
@@ -65,11 +65,9 @@ final class IntentStatusItemController: NSObject {
 
         guard let button = statusItem.button else { return }
         statusItem.autosaveName = "Intent"
+        statusItem.behavior = [.removalAllowed, .terminationOnRemoval]
         statusItem.isVisible = true
-        let menuBarIcon = NSApp.applicationIconImage.copy() as? NSImage
-        menuBarIcon?.size = NSSize(width: 19, height: 19)
-        menuBarIcon?.isTemplate = false
-        button.image = menuBarIcon
+        button.image = IntentMenuBarIcon.makeImage()
         button.imagePosition = .imageOnly
         button.title = ""
         button.toolTip = "Intent"
@@ -138,7 +136,7 @@ final class IntentStatusItemController: NSObject {
         }
 
         menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "Quit Intent", action: #selector(quitIntent), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Close Intent", action: #selector(closeIntent), keyEquivalent: "q")
         quitItem.target = self
         quitItem.isEnabled = !model.isZeroDriftActive
         menu.addItem(quitItem)
@@ -162,10 +160,13 @@ final class IntentStatusItemController: NSObject {
         updateManager.installAvailableUpdate()
     }
 
-    @objc private func quitIntent() {
+    @objc private func closeIntent() {
         NSApp.terminate(nil)
     }
 
+    deinit {
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
 }
 
 @MainActor

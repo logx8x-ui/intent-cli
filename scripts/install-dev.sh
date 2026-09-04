@@ -178,3 +178,15 @@ if [[ -w /opt/homebrew/bin ]]; then
 elif [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
   echo "Make sure $BIN_DIR is on your PATH."
 fi
+
+open "$APP_BUNDLE"
+for _ in {1..30}; do
+  if pgrep -f "^${APP_BUNDLE}/Contents/MacOS/IntentApp$" >/dev/null; then
+    echo "Intent is running in the menu bar."
+    exit 0
+  fi
+  sleep 0.1
+done
+
+echo "Intent was installed but did not stay running: $APP_BUNDLE" >&2
+exit 1

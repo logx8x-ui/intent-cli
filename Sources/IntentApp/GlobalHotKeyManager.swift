@@ -220,14 +220,16 @@ enum OverlayShortcutConflictChecker {
 }
 
 final class GlobalHotKeyManager {
-    private var hotKeyRef: EventHotKeyRef?
+    private var requiredHotKeyRef: EventHotKeyRef?
+    private var customHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
+    private var nextHotKeyID: UInt32 = 2
     private let handler: () -> Void
     private(set) var shortcut: OverlayShortcut
     private(set) var registrationStatus: OSStatus = OSStatus(eventNotHandledErr)
 
     var isRegistered: Bool {
-        hotKeyRef != nil && registrationStatus == noErr
+        requiredHotKeyRef != nil && registrationStatus == noErr
     }
 
     init(shortcut: OverlayShortcut = OverlayShortcutStore.load(), handler: @escaping () -> Void) {
@@ -236,36 +238,51 @@ final class GlobalHotKeyManager {
         registrationStatus = installHandler()
         guard registrationStatus == noErr else { return }
 
-        registrationStatus = register(shortcut)
-        if registrationStatus != noErr, shortcut != .defaultShortcut {
-            self.shortcut = .defaultShortcut
-            registrationStatus = register(.defaultShortcut)
-            if registrationStatus == noErr {
+        registrationStatus = registerRequiredShortcut()
+        guard registrationStatus == noErr else { return }
+
+        if shortcut != .defaultShortcut {
+            let status = registerCustomShortcut(shortcut)
+            if status != noErr {
+                self.shortcut = .defaultShortcut
                 OverlayShortcutStore.save(.defaultShortcut)
             }
         }
     }
 
     deinit {
-        unregister()
+        unregister(ref: &requiredHotKeyRef)
+        unregister(ref: &customHotKeyRef)
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
     }
 
     func update(to candidate: OverlayShortcut) -> OSStatus {
-        guard candidate != shortcut || !isRegistered else { return noErr }
-        let previous = shortcut
-        unregister()
+        guard isRegistered else { return registrationStatus }
+        guard candidate != shortcut else { return noErr }
 
-        let status = register(candidate)
-        if status == noErr {
-            shortcut = candidate
-            registrationStatus = noErr
+        let previous = shortcut
+        unregister(ref: &customHotKeyRef)
+
+        if candidate == .defaultShortcut {
+            shortcut = .defaultShortcut
             return noErr
         }
 
-        registrationStatus = register(previous)
+        let status = registerCustomShortcut(candidate)
+        if status == noErr {
+            shortcut = candidate
+            return noErr
+        }
+
+        if previous != .defaultShortcut {
+            let restoreStatus = registerCustomShortcut(previous)
+            if restoreStatus != noErr {
+                shortcut = .defaultShortcut
+                OverlayShortcutStore.save(.defaultShortcut)
+            }
+        }
         return status
     }
 
@@ -292,8 +309,21 @@ final class GlobalHotKeyManager {
         )
     }
 
-    private func register(_ shortcut: OverlayShortcut) -> OSStatus {
-        let hotKeyID = EventHotKeyID(signature: fourCharCode("IntO"), id: 1)
+    private func registerRequiredShortcut() -> OSStatus {
+        register(.defaultShortcut, id: 1, ref: &requiredHotKeyRef)
+    }
+
+    private func registerCustomShortcut(_ shortcut: OverlayShortcut) -> OSStatus {
+        defer { nextHotKeyID &+= 1 }
+        return register(shortcut, id: nextHotKeyID, ref: &customHotKeyRef)
+    }
+
+    private func register(
+        _ shortcut: OverlayShortcut,
+        id: UInt32,
+        ref: inout EventHotKeyRef?
+    ) -> OSStatus {
+        let hotKeyID = EventHotKeyID(signature: fourCharCode("IntO"), id: id)
         var newHotKeyRef: EventHotKeyRef?
         let status = RegisterEventHotKey(
             shortcut.keyCode,
@@ -304,17 +334,16 @@ final class GlobalHotKeyManager {
             &newHotKeyRef
         )
         if status == noErr {
-            hotKeyRef = newHotKeyRef
+            ref = newHotKeyRef
         }
         return status
     }
 
-    private func unregister() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
+    private func unregister(ref: inout EventHotKeyRef?) {
+        if let current = ref {
+            UnregisterEventHotKey(current)
+            ref = nil
         }
-        registrationStatus = OSStatus(eventNotHandledErr)
     }
 }
 

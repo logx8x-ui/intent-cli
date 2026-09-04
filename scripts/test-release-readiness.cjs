@@ -46,4 +46,32 @@ assert.ok(
   "Release verification must check the Mozilla signature"
 );
 
+const desktopApp = read("Sources/IntentApp/IntentDesktopApp.swift");
+assert.ok(
+  desktopApp.includes("IntentMenuBarIcon.makeImage()"),
+  "Intent must use its monochrome menu bar mark instead of the full application icon"
+);
+assert.ok(
+  desktopApp.includes('NSMenuItem(title: "Close Intent"'),
+  "The menu bar context menu must let the user close Intent"
+);
+assert.ok(
+  desktopApp.includes(".terminationOnRemoval"),
+  "Removing Intent's menu item must close the app instead of leaving a hidden process"
+);
+
+const hotKeyManager = read("Sources/IntentApp/GlobalHotKeyManager.swift");
+assert.ok(
+  hotKeyManager.includes("registerRequiredShortcut()") &&
+    hotKeyManager.includes("register(.defaultShortcut, id: 1"),
+  "Shift+grave must remain registered even when a custom shortcut is configured"
+);
+
+const developmentInstaller = read("scripts/install-dev.sh");
+assert.ok(
+  developmentInstaller.includes('open "$APP_BUNDLE"') &&
+    developmentInstaller.includes("Intent is running in the menu bar."),
+  "The development installer must relaunch Intent and verify its menu process"
+);
+
 console.log(`Release readiness spec passed (Browser Guard ${firefoxManifest.version})`);
