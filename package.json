@@ -8,7 +8,7 @@
     "test:swift": "swift run IntentCoreSpec && swift run PurposeMatcherSpec && swift run IntentAccountSpec",
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs",
     "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
-    "test:extensions": "npm run test:firefox && npm run test:chrome",
+    "test:extensions": "npm run test:firefox && npm run test:chrome && node scripts/test-browser-idle-work.cjs",
     "test:native-host": "swift build -c release --product IntentNativeHost && node scripts/test-native-host.cjs && node scripts/test-native-host-performance.cjs",
     "test:ai": "npm --prefix services/intent-ai test",
     "test:release-readiness": "node scripts/test-release-readiness.cjs",

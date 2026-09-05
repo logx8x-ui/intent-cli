@@ -4,7 +4,8 @@ const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
 const RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 30000;
-const HEARTBEAT_MS = 2000;
+// Stay inside Intent's five-second readiness window without waking every two seconds.
+const HEARTBEAT_MS = 3000;
 const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
@@ -72,7 +73,7 @@ async function ensureInitialized() {
 }
 
 function connectNativeHost() {
-  if (nativePort) return;
+  if (nativePort || reconnectTimer !== null) return;
   try {
     const port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
@@ -194,6 +195,7 @@ async function handleRequestedTab(message) {
 }
 
 function scheduleTabSnapshot(force = false) {
+  if (!rules.active && !force) return;
   snapshotForcePending ||= force;
   if (snapshotTimer) return;
   snapshotTimer = setTimeout(() => {

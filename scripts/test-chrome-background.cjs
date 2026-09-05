@@ -53,7 +53,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const chrome = {
     runtime: {
       connectNative: () => port,
-      getManifest: () => ({ version: "0.2.2" }),
+      getManifest: () => require("../chrome-extension/manifest.json"),
       onMessage: runtimeMessage,
       onStartup: event(),
       onInstalled: event()
@@ -190,7 +190,7 @@ async function run() {
   await idle.settle();
   assert.ok(
     idle.nativeMessages.some((message) =>
-      message.extensionVersion === "0.2.2" &&
+      message.extensionVersion === require("../chrome-extension/manifest.json").version &&
       message.extensionCapabilities?.includes("single-startup-launch-v1")
     ),
     "Chrome should identify a startup-safe Browser Guard to the native host"
@@ -198,7 +198,7 @@ async function run() {
   assert.equal(idle.dynamicRules.length, 0, "Listening mode must not block anything while Intent is idle");
   assert.deepEqual(
     idle.intervals.map(({ delay }) => delay),
-    [2000],
+    [3000],
     "Chrome should keep only one low-frequency native heartbeat while idle"
   );
 

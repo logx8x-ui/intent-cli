@@ -36,7 +36,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
 
   const browser = {
     runtime: {
-      getManifest: () => ({ version: "0.2.2" }),
+      getManifest: () => require("../firefox-extension/manifest.json"),
       onMessage: { addListener: (listener) => listeners.onMessage.push(listener) },
       sendNativeMessage: async (_hostName, message) => {
         nativeMessages.push(message);
@@ -223,13 +223,13 @@ async function run() {
   ]);
   assert.deepEqual(
     startupHarness.intervals.map(({ delay }) => delay),
-    [2000],
+    [3000],
     "Firefox should keep only one low-frequency native heartbeat while idle"
   );
   await startupHarness.refresh();
   assert.ok(
     startupHarness.nativeMessages.some((message) =>
-      message.extensionVersion === "0.2.2" &&
+      message.extensionVersion === require("../firefox-extension/manifest.json").version &&
       message.extensionCapabilities?.includes("single-startup-launch-v1")
     ),
     "Firefox should identify a startup-safe Browser Guard to the native host"

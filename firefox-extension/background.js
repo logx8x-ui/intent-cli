@@ -2,7 +2,8 @@ const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "org.mozilla.firefox";
 const RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 30000;
-const HEARTBEAT_MS = 2000;
+// Stay inside Intent's five-second readiness window without waking every two seconds.
+const HEARTBEAT_MS = 3000;
 const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
@@ -76,7 +77,7 @@ async function ensureInitialized() {
 }
 
 function connectCommandPort() {
-  if (commandPort) return;
+  if (commandPort || reconnectTimer !== null) return;
   if (typeof browser.runtime.connectNative !== "function") return;
   try {
     const port = browser.runtime.connectNative(HOST_NAME);
@@ -174,6 +175,7 @@ async function handleRequestedTab(message) {
 }
 
 function scheduleTabSnapshot(force = false) {
+  if (!rules.active && !force) return;
   snapshotForcePending ||= force;
   if (snapshotTimer !== null) return;
   snapshotTimer = setTimeout(() => {
