@@ -53,9 +53,16 @@ Tester releases use Mozilla's unlisted signing, so Browser Guard remains install
 
 ### Chrome
 
+The Chrome Web Store build is the tester/public channel and receives Chrome's
+automatic extension updates. Until that listing is published, the unpacked ZIP
+below is development-only and must be reloaded after its files change.
+
 1. Unzip the Chrome Browser Guard download.
 2. Open `chrome://extensions` in Chrome.
 3. Turn on **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
+
+See [Browser extension distribution](docs/BROWSER_EXTENSION_DISTRIBUTION.md)
+for the update guarantees and release gates for both browsers.
 
 ## Use Intent
 

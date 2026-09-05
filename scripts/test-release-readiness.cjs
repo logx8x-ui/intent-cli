@@ -10,10 +10,32 @@ const json = (relativePath) => JSON.parse(read(relativePath));
 
 const firefoxManifest = json("firefox-extension/manifest.json");
 const chromeManifest = json("chrome-extension/manifest.json");
+const firefoxUpdates = json("firefox-updates.json");
 assert.equal(
   firefoxManifest.version,
   chromeManifest.version,
   "Firefox and Chrome Browser Guard releases must use the same version"
+);
+assert.equal(
+  firefoxManifest.browser_specific_settings?.gecko?.update_url,
+  "https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/firefox-updates.json",
+  "Firefox Browser Guard must use the stable self-update feed"
+);
+const firefoxUpdate = firefoxUpdates.addons?.["intent-firefox@loganmondi.dev"]?.updates?.at(-1);
+assert.equal(
+  firefoxUpdate?.version,
+  firefoxManifest.version,
+  "The Firefox update feed must publish the current extension version"
+);
+assert.match(
+  firefoxUpdate?.update_link || "",
+  /^https:\/\/github\.com\/logx8x-ui\/intent-cli\/releases\/latest\/download\/Intent-Firefox-Extension\.xpi$/,
+  "The Firefox update feed must point to the stable signed release asset"
+);
+assert.equal(
+  chromeManifest.update_url,
+  "https://clients2.google.com/service/update2/crx",
+  "Chrome Browser Guard must use the Chrome Web Store update service"
 );
 
 for (const browser of ["firefox", "chrome"]) {

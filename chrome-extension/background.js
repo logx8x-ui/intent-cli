@@ -27,6 +27,9 @@ let freshBlankTabIds = new Set();
 let rulesFingerprint = fingerprintRules(rules);
 let dnrFingerprint = "";
 const lastAllowedURLByTab = new Map();
+// Chrome can also reuse a discarded or half-restored startup tab. Track the
+// intentional navigation so its old completion event cannot cancel the load.
+const startupNavigationURLByTab = new Map();
 const pendingRuleRequests = new Set();
 let synchronizingStartupTabs = false;
 let completedStartupSessionID = null;
@@ -268,6 +271,7 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
+    startupNavigationURLByTab.clear();
     completedStartupFingerprint = null;
   }
   scheduleTabSnapshot(true);
@@ -397,6 +401,46 @@ function startupURLMatches(existingURL, requestedURL) {
   }
 }
 
+function sameWebsiteHost(existingURL, requestedURL) {
+  try {
+    const normalizeHost = (host) => host.toLowerCase().replace(/^www\./, "");
+    return normalizeHost(new URL(existingURL).hostname) ===
+      normalizeHost(new URL(requestedURL).hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function sameNavigationURL(existingURL, requestedURL) {
+  try {
+    const normalize = (value) => {
+      const url = new URL(value);
+      url.hash = "";
+      url.hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+      url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+      return url.href;
+    };
+    return normalize(existingURL) === normalize(requestedURL);
+  } catch (_) {
+    return existingURL === requestedURL;
+  }
+}
+
+function beginStartupNavigation(tabId, startupURL) {
+  startupNavigationURLByTab.set(tabId, {
+    startupURL,
+    lastNavigationURL: null
+  });
+}
+
+function isPendingStartupNavigation(tabId, url) {
+  const pending = startupNavigationURLByTab.get(tabId);
+  return Boolean(
+    pending &&
+    (isSearchStagingURL(url) || sameWebsiteHost(url, pending.startupURL))
+  );
+}
+
 function uniqueStartupURLs(urls) {
   const unique = [];
   for (const url of urls) {
@@ -443,11 +487,29 @@ async function synchronizeStartupTabs() {
       let tab = tabs.find((candidate) =>
         !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
       );
-      if (!tab) {
+      if (tab) {
+        beginStartupNavigation(tab.id, startupURL);
+        if (sameNavigationURL(tab.url || "", startupURL)) {
+          await chrome.tabs.reload(tab.id);
+        } else {
+          tab = await chrome.tabs.update(tab.id, {
+            url: startupURL,
+            active: Boolean(tab.active)
+          });
+        }
+      } else {
         const staging = stagingTabs.shift();
-        tab = staging
-          ? await chrome.tabs.update(staging.id, { url: startupURL, active: Boolean(staging.active) })
-          : await chrome.tabs.create({ url: startupURL, active: false });
+        if (staging) {
+          beginStartupNavigation(staging.id, startupURL);
+          tab = await chrome.tabs.update(staging.id, {
+            url: startupURL,
+            active: Boolean(staging.active)
+          });
+        } else {
+          tab = await chrome.tabs.create({ url: "chrome://newtab/", active: false });
+          beginStartupNavigation(tab.id, startupURL);
+          tab = await chrome.tabs.update(tab.id, { url: startupURL, active: false });
+        }
       }
       claimedTabIds.add(tab.id);
       freshBlankTabIds.delete(tab.id);
@@ -561,6 +623,25 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   scheduleTabSnapshot();
   if (!rules.active || (!changeInfo.url && changeInfo.status !== "complete") || !tab.url) return;
 
+  if (isPendingStartupNavigation(tabId, tab.url)) {
+    const pending = startupNavigationURLByTab.get(tabId);
+    if (changeInfo.url && !isSearchStagingURL(tab.url)) {
+      pending.lastNavigationURL = tab.url;
+    }
+    if (
+      changeInfo.status === "complete" &&
+      pending.lastNavigationURL &&
+      sameNavigationURL(tab.url, pending.lastNavigationURL)
+    ) {
+      startupNavigationURLByTab.delete(tabId);
+    }
+    return;
+  }
+
+  if (startupNavigationURLByTab.has(tabId) && changeInfo.url) {
+    startupNavigationURLByTab.delete(tabId);
+  }
+
   if (
     rules.accessMode === "whitelist" &&
     freshBlankTabIds.has(tabId) &&
@@ -618,6 +699,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   freshBlankTabIds.delete(tabId);
   lastAllowedURLByTab.delete(tabId);
+  startupNavigationURLByTab.delete(tabId);
   if (lastAllowedTabId === tabId) lastAllowedTabId = null;
   if (rules.active) setTimeout(returnToAllowedTab, 0);
   scheduleTabSnapshot();
@@ -627,6 +709,10 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0 || details.tabId < 0) return;
   Promise.resolve().then(async () => {
     if (!rules.active || !rules.blockNavigation) return;
+    if (isPendingStartupNavigation(details.tabId, details.url)) {
+      startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
+      return;
+    }
     if (
       rules.accessMode === "whitelist" &&
       freshBlankTabIds.has(details.tabId) &&

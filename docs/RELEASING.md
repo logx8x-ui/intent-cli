@@ -54,7 +54,9 @@ Before calling a release stable:
 6. Upgrade over an older install and confirm `~/.intent` data is unchanged.
 7. Install the Firefox `.xpi`, restart Firefox, and confirm the guard remains installed.
 8. Confirm an outdated Browser Guard is rejected before any website session starts.
-9. Test `uninstall.sh` both with and without `--delete-data`.
+9. Confirm the public Firefox update feed serves the signed XPI version and the
+   Chrome Web Store item serves the Chrome package version.
+10. Test `uninstall.sh` both with and without `--delete-data`.
 
 ## Local QA
 

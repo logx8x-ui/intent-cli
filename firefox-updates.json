@@ -1,0 +1,12 @@
+{
+  "addons": {
+    "intent-firefox@loganmondi.dev": {
+      "updates": [
+        {
+          "version": "0.2.5",
+          "update_link": "https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi"
+        }
+      ]
+    }
+  }
+}

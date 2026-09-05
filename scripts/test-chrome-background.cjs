@@ -24,6 +24,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const dynamicUpdates = [];
   const removedTabs = [];
   const updates = [];
+  const reloads = [];
   const focusedWindows = [];
   const intervals = [];
   let dynamicRules = [];
@@ -87,6 +88,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         updates.push({ tabId: id, patch });
         return { ...tab };
       },
+      reload: async (id) => {
+        if (!tabs.has(id)) throw new Error("missing tab");
+        reloads.push(id);
+      },
       create: async (properties) => {
         const id = Math.max(0, ...tabs.keys()) + 1;
         const tab = { id, active: properties.active === true, url: properties.url || "chrome://newtab/" };
@@ -130,7 +135,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   }
 
   return {
-    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows, intervals, updates,
+    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows, intervals, updates, reloads,
     get dynamicRules() { return dynamicRules; },
     settle,
     async activate(id) {
@@ -273,6 +278,41 @@ async function run() {
     startupWebsites: ["https://www.instagram.com/direct/inbox/"]
   });
   assert.equal(existingStartup.tabs.size, 1, "Chrome should not duplicate an open startup website");
+  assert.deepEqual(
+    existingStartup.reloads,
+    [1],
+    "Chrome should deliberately load an existing startup tab once instead of trusting a suspended or half-restored page"
+  );
+  await existingStartup.receiveNative({
+    ...lockedRules,
+    startupWebsites: ["https://www.instagram.com/direct/inbox/"]
+  });
+  assert.deepEqual(
+    existingStartup.reloads,
+    [1],
+    "Chrome must not reload an existing startup tab again during the same intention session"
+  );
+
+  const existingRootStartup = createHarness({
+    ...lockedRules,
+    startupSessionID: "chrome-existing-root-session",
+    allowedWebsites: ["instagram.com"],
+    startupWebsites: ["https://www.instagram.com/"]
+  }, [
+    { id: 1, active: true, url: "https://www.instagram.com/?variant=following", status: "complete" }
+  ]);
+  await existingRootStartup.settle();
+  assert.equal(existingRootStartup.tabs.size, 1, "A broad website intention should reuse its existing Chrome tab");
+  assert.equal(
+    existingRootStartup.tabs.get(1).url,
+    "https://www.instagram.com/",
+    "Reused Chrome website tabs must navigate to the configured startup URL instead of showing stale content"
+  );
+  assert.equal(
+    existingRootStartup.updates.filter(({ patch }) => patch.url === "https://www.instagram.com/").length,
+    1,
+    "A reused Chrome website tab must load exactly once for the new intention session"
+  );
 
   const concurrentStartup = createHarness({
     ...lockedRules,
