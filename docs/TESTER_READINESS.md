@@ -4,10 +4,11 @@ Status: blocked for a fresh, verified tester installation.
 
 ## Release blockers
 
-- Mozilla accepted Browser Guard 0.2.2 with zero validation errors or warnings.
-  The unlisted submission is version 6462819, file 5006990, and now shows
-  Approved with a signed XPI. That XPI must be downloaded, verified, installed, and
-  published before Firefox testers can receive the fixes.
+- Battery-optimized Browser Guard 0.2.3 is Mozilla-approved and signed (version
+  6462862, file 5007033), installed locally, and published as
+  Intent-Firefox-Extension.xpi on GitHub. The native heartbeat confirms version
+  0.2.3 and capability single-startup-launch-v1. Its source matches the submitted
+  package. This extension asset does not update the older v0.8.1 Mac binary.
 - GitHub's latest binary release is v0.8.1. It has an unsigned Firefox ZIP and
   no release-manifest.json. A dry run of install.sh returned HTTP 404 for that
   manifest. Do not claim the current one-command installer is usable yet.
@@ -43,8 +44,6 @@ has been exercised live.
 
 ## Remaining acceptance work
 
-- Obtain and verify the Mozilla-signed XPI, install it, and confirm the installed
-  guard reports 0.2.2 and single-startup-launch-v1 to the running app.
 - Exercise a real Outlook intention once the updated guard is installed.
 - Publish a complete signed and notarized Mac release with its manifest and both
   browser artifacts; verify the public download URLs and clean installation.

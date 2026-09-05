@@ -33,3 +33,9 @@ No battery-life percentage improvement is claimed. A controlled before/after
 profile with the same tabs and workload remains necessary once the signed 0.2.3
 extension is installed. The desktop app and native-host binaries did not change
 in this optimization.
+
+Mozilla signed 0.2.3 on September 5. The installed XPI matches the submitted
+package (manifest compared structurally); the running native heartbeat reports
+0.2.3 and single-startup-launch-v1. The signed GitHub release asset SHA-256 is
+895e68a50e000cc858b2b68e01fe692c50f767c575e0d5713c2dd259287b5295.
+These installation checks are not a controlled battery benchmark.
