@@ -23,6 +23,10 @@ let guardEnabled = true;
 let initialized = false;
 let freshBlankTabIds = new Set();
 const lastAllowedURLByTab = new Map();
+// Firefox can deliver the completed about:blank event for a reused startup tab
+// after tabs.update() has already begun loading the requested site. Keep the
+// startup navigation explicit so that stale event cannot cancel the real load.
+const startupNavigationURLByTab = new Map();
 let commandPort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
@@ -297,6 +301,7 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
+    startupNavigationURLByTab.clear();
     completedStartupFingerprint = null;
   }
   scheduleTabSnapshot(true);
@@ -365,6 +370,24 @@ function startupURLMatches(existingURL, requestedURL) {
   }
 }
 
+function sameWebsiteHost(existingURL, requestedURL) {
+  try {
+    const normalizeHost = (host) => host.toLowerCase().replace(/^www\./, "");
+    return normalizeHost(new URL(existingURL).hostname) ===
+      normalizeHost(new URL(requestedURL).hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isPendingStartupNavigation(tabId, url) {
+  const startupURL = startupNavigationURLByTab.get(tabId);
+  return Boolean(
+    startupURL &&
+    (isSearchStagingURL(url) || sameWebsiteHost(url, startupURL))
+  );
+}
+
 function uniqueStartupURLs(urls) {
   const unique = [];
   for (const url of urls) {
@@ -413,9 +436,18 @@ async function synchronizeStartupTabs() {
       );
       if (!tab) {
         const staging = stagingTabs.shift();
-        tab = staging
-          ? await browser.tabs.update(staging.id, { url: startupURL, active: Boolean(staging.active) })
-          : await browser.tabs.create({ url: startupURL, active: false });
+        if (staging) {
+          // Mark this before tabs.update: Firefox may emit the old blank tab's
+          // completion event before the update promise settles.
+          startupNavigationURLByTab.set(staging.id, startupURL);
+          tab = await browser.tabs.update(staging.id, {
+            url: startupURL,
+            active: Boolean(staging.active)
+          });
+        } else {
+          tab = await browser.tabs.create({ url: startupURL, active: false });
+          startupNavigationURLByTab.set(tab.id, startupURL);
+        }
       }
       claimedTabIds.add(tab.id);
       freshBlankTabIds.delete(tab.id);
@@ -593,6 +625,21 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
+  if (isPendingStartupNavigation(tabId, tab.url)) {
+    // Ignore Firefox's late completion for the replaced blank document. Also
+    // permit a same-host shell redirect (for example Outlook's message URL to
+    // /mail/) until the first real document completes. Subsequent navigation is
+    // enforced normally.
+    if (changeInfo.status === "complete" && !isSearchStagingURL(tab.url)) {
+      startupNavigationURLByTab.delete(tabId);
+    }
+    return;
+  }
+
+  if (startupNavigationURLByTab.has(tabId) && changeInfo.url) {
+    startupNavigationURLByTab.delete(tabId);
+  }
+
   if (
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs &&
@@ -670,6 +717,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
   freshBlankTabIds.delete(tabId);
   lastAllowedURLByTab.delete(tabId);
+  startupNavigationURLByTab.delete(tabId);
 
   if (lastAllowedTabId === tabId) {
     lastAllowedTabId = null;
@@ -681,6 +729,10 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (isPendingStartupNavigation(details.tabId, details.url)) {
+      return {};
+    }
+
     if (
       rules.active &&
       freshBlankTabIds.has(details.tabId) &&

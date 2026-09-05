@@ -179,6 +179,13 @@ function createHarness(activeRules, initialTabs, options = {}) {
       }
       await Promise.resolve();
     },
+    async emitUpdated(tabId, changeInfo, tabOverride) {
+      const tab = tabOverride || tabs.get(tabId) || {};
+      for (const listener of listeners.onUpdated) {
+        await listener(tabId, changeInfo, { ...tab });
+      }
+      await Promise.resolve();
+    },
     async create(tab) {
       tabs.set(tab.id, { ...tab });
       for (const listener of listeners.onCreated) {
@@ -240,6 +247,16 @@ async function run() {
     "Firefox should replace its startup blank with the first allowed website"
   );
   assert.equal(startupHarness.tabs.size, 1, "Firefox startup should not create an extra blank tab");
+  await startupHarness.emitUpdated(1, { status: "complete" }, {
+    id: 1,
+    active: true,
+    url: "about:blank"
+  });
+  assert.equal(
+    startupHarness.tabs.get(1).url,
+    "https://www.instagram.com/direct/inbox/",
+    "A late completion event from Firefox's replaced blank tab must not interrupt Instagram startup"
+  );
   assert.equal(
     startupHarness.storage.completedStartupSessionID,
     startupRules.startupSessionID,
@@ -348,15 +365,44 @@ async function run() {
     ({ patch }) => patch.url === "https://outlook.cloud.microsoft/mail/inbox/id/message"
   ).length;
   assert.equal(firefoxStartupUpdates(), 1, "Firefox should launch an Outlook startup URL once");
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await redirectHarness.update(1, { url: "https://outlook.cloud.microsoft/mail/" });
-  }
+  const shellRedirect = await redirectHarness.update(1, {
+    url: "https://outlook.cloud.microsoft/mail/"
+  });
+  assert.equal(shellRedirect?.cancel, undefined, "Outlook's same-host startup shell redirect must load");
+  assert.equal(
+    redirectHarness.tabs.get(1).url,
+    "https://outlook.cloud.microsoft/mail/",
+    "Outlook's shell redirect should not leave a partially loaded startup page"
+  );
+  await redirectHarness.emitUpdated(1, { status: "complete" });
   assert.equal(
     firefoxStartupUpdates(),
     1,
     "An Outlook redirect must never make Firefox reload the startup URL"
   );
   assert.equal(redirectHarness.tabs.size, 1, "An Outlook redirect must never create replacement tabs");
+  const laterSameHostEscape = await redirectHarness.update(1, {
+    url: "https://outlook.cloud.microsoft/calendar/"
+  });
+  assert.equal(
+    laterSameHostEscape?.cancel,
+    true,
+    "Same-host navigation outside the configured Outlook path must be blocked after startup settles"
+  );
+
+  const crossHostRedirectHarness = createHarness({
+    ...lockedRules,
+    startupSessionID: "firefox-cross-host-redirect-session",
+    allowedWebsites: ["instagram.com"],
+    startupWebsites: ["https://www.instagram.com/"]
+  }, [
+    { id: 1, active: true, url: "about:blank" }
+  ]);
+  await crossHostRedirectHarness.refresh();
+  const crossHostRedirect = await crossHostRedirectHarness.update(1, {
+    url: "https://example.com/escape"
+  });
+  assert.equal(crossHostRedirect?.cancel, true, "Startup grace must not allow cross-site escapes");
 
   const strictNewTabHarness = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }
