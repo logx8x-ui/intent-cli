@@ -33,7 +33,11 @@ download() {
 
 mkdir -p "$MOUNT_POINT"
 echo "Checking the latest verified Intent release..."
-download "$MANIFEST_URL" "$MANIFEST"
+if ! download "$MANIFEST_URL" "$MANIFEST"; then
+  echo "Intent could not download the verified release manifest. No installation was performed." >&2
+  echo "Check your connection and https://github.com/logx8x-ui/intent-cli/releases for a signed release containing release-manifest.json." >&2
+  exit 2
+fi
 
 NOTARIZED="$(json_value notarized)"
 TEAM_ID="$(json_value team_id)"
