@@ -13,9 +13,10 @@ Status: blocked for a fresh, verified tester installation.
 - Chrome Browser Guard 0.2.5 is published as both a versioned ZIP and the stable
   GitHub ZIP. The Web Store-safe package has been accepted into draft item
   `ffgfjfpkddgimambgmahlodjjojmjnbc`, with the listing assets and privacy
-  disclosures saved. The public listing is waiting for a public publisher contact
-  email to be supplied and verified before review submission. Consumer Chrome on
-  macOS does not auto-update unpacked extensions.
+  disclosures saved. The public publisher contact email was verified and the
+  extension was submitted on September 6, 2026 with automatic publication enabled.
+  Google reports the item as Pending Review and says review may take a few business
+  days. Consumer Chrome on macOS does not auto-update unpacked extensions.
 - GitHub's latest binary release is v0.8.1. It has an unsigned Firefox ZIP and
   no release-manifest.json. A dry run of install.sh returned HTTP 404 for that
   manifest. Do not claim the current one-command installer is usable yet.
@@ -69,9 +70,9 @@ has been exercised live.
 
 - Confirm Firefox's currently open install prompt for the signed 0.2.5 XPI, then exercise real
   Instagram and Outlook intentions and confirm the native heartbeat reports 0.2.5.
-- Supply and verify the public Chrome Web Store publisher contact email, submit
-  draft `ffgfjfpkddgimambgmahlodjjojmjnbc` for review, and verify the store-served
-  version in a clean Chrome profile.
+- Wait for Google to approve and automatically publish Chrome Web Store item
+  `ffgfjfpkddgimambgmahlodjjojmjnbc`, then verify the store-served version in a
+  clean Chrome profile.
 - Publish a complete signed and notarized Mac release with its manifest and both
   browser artifacts; verify the public download URLs and clean installation.
 - Complete clean Intel and Apple Silicon installation and upgrade tests,

@@ -39,5 +39,7 @@ Privacy policy: https://github.com/logx8x-ui/intent-cli/blob/main/PRIVACY.md
 ## Chrome Web Store identity
 
 - Public item ID: `ffgfjfpkddgimambgmahlodjjojmjnbc`
+- Status on September 6, 2026: Pending Review, with automatic publication after
+  approval enabled.
 - Build the upload ZIP with `npm run extension:build:chrome:web-store` so the
   development-only manifest key is excluded.
