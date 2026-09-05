@@ -20,6 +20,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
     onMessage: []
   };
   const updates = [];
+  const reloads = [];
   const removals = [];
   const nativeMessages = [];
   const intervals = [];
@@ -73,6 +74,10 @@ function createHarness(activeRules, initialTabs, options = {}) {
         updates.push({ tabId, patch });
         return { ...tab };
       },
+      reload: async (tabId) => {
+        if (!tabs.has(tabId)) throw new Error("missing tab");
+        reloads.push(tabId);
+      },
       remove: async (tabId) => {
         removals.push(tabId);
         tabs.delete(tabId);
@@ -124,6 +129,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
     tabs,
     listeners,
     updates,
+    reloads,
     removals,
     nativeMessages,
     intervals,
@@ -290,6 +296,38 @@ async function run() {
   ]);
   await existingStartupHarness.refresh();
   assert.equal(existingStartupHarness.tabs.size, 1, "Firefox should not duplicate an open startup website");
+  assert.deepEqual(
+    existingStartupHarness.reloads,
+    [1],
+    "Firefox should deliberately load an existing startup tab once instead of trusting a suspended or half-restored page"
+  );
+  await existingStartupHarness.refresh();
+  assert.deepEqual(
+    existingStartupHarness.reloads,
+    [1],
+    "Firefox must not reload an existing startup tab again during the same intention session"
+  );
+
+  const existingRootStartupHarness = createHarness({
+    ...startupRules,
+    startupSessionID: "firefox-existing-root-session",
+    allowedWebsites: ["instagram.com"],
+    startupWebsites: ["https://www.instagram.com/"]
+  }, [
+    { id: 1, active: true, url: "https://www.instagram.com/?variant=following", status: "complete" }
+  ]);
+  await existingRootStartupHarness.refresh();
+  assert.equal(existingRootStartupHarness.tabs.size, 1, "A broad website intention should reuse its existing tab");
+  assert.equal(
+    existingRootStartupHarness.tabs.get(1).url,
+    "https://www.instagram.com/",
+    "Reused website tabs must navigate to the configured startup URL instead of showing stale content"
+  );
+  assert.equal(
+    existingRootStartupHarness.updates.filter(({ patch }) => patch.url === "https://www.instagram.com/").length,
+    1,
+    "A reused website tab must load exactly once for the new intention session"
+  );
 
   const concurrentStartupHarness = createHarness({
     ...startupRules,

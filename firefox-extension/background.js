@@ -380,11 +380,33 @@ function sameWebsiteHost(existingURL, requestedURL) {
   }
 }
 
+function sameNavigationURL(existingURL, requestedURL) {
+  try {
+    const normalize = (value) => {
+      const url = new URL(value);
+      url.hash = "";
+      url.hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+      url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+      return url.href;
+    };
+    return normalize(existingURL) === normalize(requestedURL);
+  } catch (_) {
+    return existingURL === requestedURL;
+  }
+}
+
+function beginStartupNavigation(tabId, startupURL) {
+  startupNavigationURLByTab.set(tabId, {
+    startupURL,
+    lastNavigationURL: null
+  });
+}
+
 function isPendingStartupNavigation(tabId, url) {
-  const startupURL = startupNavigationURLByTab.get(tabId);
+  const pending = startupNavigationURLByTab.get(tabId);
   return Boolean(
-    startupURL &&
-    (isSearchStagingURL(url) || sameWebsiteHost(url, startupURL))
+    pending &&
+    (isSearchStagingURL(url) || sameWebsiteHost(url, pending.startupURL))
   );
 }
 
@@ -434,19 +456,32 @@ async function synchronizeStartupTabs() {
       let tab = tabs.find((candidate) =>
         !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
       );
-      if (!tab) {
+      if (tab) {
+        // An existing matching tab may be discarded by Firefox/Sidebery or
+        // incompletely restored. Load it deliberately once for this session.
+        beginStartupNavigation(tab.id, startupURL);
+        if (sameNavigationURL(tab.url || "", startupURL)) {
+          await browser.tabs.reload(tab.id);
+        } else {
+          tab = await browser.tabs.update(tab.id, {
+            url: startupURL,
+            active: Boolean(tab.active)
+          });
+        }
+      } else {
         const staging = stagingTabs.shift();
         if (staging) {
           // Mark this before tabs.update: Firefox may emit the old blank tab's
           // completion event before the update promise settles.
-          startupNavigationURLByTab.set(staging.id, startupURL);
+          beginStartupNavigation(staging.id, startupURL);
           tab = await browser.tabs.update(staging.id, {
             url: startupURL,
             active: Boolean(staging.active)
           });
         } else {
-          tab = await browser.tabs.create({ url: startupURL, active: false });
-          startupNavigationURLByTab.set(tab.id, startupURL);
+          tab = await browser.tabs.create({ url: "about:blank", active: false });
+          beginStartupNavigation(tab.id, startupURL);
+          tab = await browser.tabs.update(tab.id, { url: startupURL, active: false });
         }
       }
       claimedTabIds.add(tab.id);
@@ -630,7 +665,15 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // permit a same-host shell redirect (for example Outlook's message URL to
     // /mail/) until the first real document completes. Subsequent navigation is
     // enforced normally.
-    if (changeInfo.status === "complete" && !isSearchStagingURL(tab.url)) {
+    const pending = startupNavigationURLByTab.get(tabId);
+    if (changeInfo.url && !isSearchStagingURL(tab.url)) {
+      pending.lastNavigationURL = tab.url;
+    }
+    if (
+      changeInfo.status === "complete" &&
+      pending.lastNavigationURL &&
+      sameNavigationURL(tab.url, pending.lastNavigationURL)
+    ) {
       startupNavigationURLByTab.delete(tabId);
     }
     return;
@@ -730,6 +773,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (isPendingStartupNavigation(details.tabId, details.url)) {
+      startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
       return {};
     }
 
