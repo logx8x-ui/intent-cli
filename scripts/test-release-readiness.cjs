@@ -37,6 +37,16 @@ assert.equal(
   "https://clients2.google.com/service/update2/crx",
   "Chrome Browser Guard must use the Chrome Web Store update service"
 );
+assert.ok(
+  chromeManifest.key,
+  "The unpacked Chrome build must keep its stable development extension ID"
+);
+
+const chromeBuilder = read("scripts/build-chrome-extension.sh");
+assert.ok(
+  chromeBuilder.includes("--web-store") && chromeBuilder.includes("delete manifest.key"),
+  "The Chrome Web Store package must omit the development-only manifest key"
+);
 
 for (const browser of ["firefox", "chrome"]) {
   const background = read(`${browser}-extension/background.js`);
@@ -102,5 +112,12 @@ assert.ok(
     developmentInstaller.includes("Intent is running in the menu bar."),
   "The development installer must relaunch Intent and verify its menu process"
 );
+for (const installer of [developmentInstaller, releaseBuilder]) {
+  assert.ok(
+    installer.includes("chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/") &&
+      installer.includes("chrome-extension://ffgfjfpkddgimambgmahlodjjojmjnbc/"),
+    "Chrome native messaging must allow both development and Web Store extension IDs"
+  );
+}
 
 console.log(`Release readiness spec passed (Browser Guard ${firefoxManifest.version})`);

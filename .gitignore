@@ -20,3 +20,4 @@ downloads/
 *.webp
 !Assets/*.png
 !Sources/IntentApp/Resources/Backgrounds/*.png
+!store-assets/chrome/*.jpg

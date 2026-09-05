@@ -22,8 +22,15 @@ distribution channel serves that version.
 - Tester and public installs must come from the Chrome Web Store. Chrome checks
   that channel on startup and periodically, then installs newer versions when the
   extension is idle.
-- The manifest uses Chrome's Web Store update service and a fixed extension key,
-  preserving the ID `aibdbhjdckeeejpggfpfaghmomopjbpb`.
+- The source manifest uses Chrome's Web Store update service. Local unpacked
+  builds keep a fixed development key, preserving the development ID
+  `aibdbhjdckeeejpggfpfaghmomopjbpb`.
+- Web Store uploads must be built with
+  `npm run extension:build:chrome:web-store`. That package deliberately omits
+  the development key because Chrome Web Store assigns and signs the public
+  extension identity. The assigned public ID is
+  `ffgfjfpkddgimambgmahlodjjojmjnbc`; native-host installers allow that ID and
+  the fixed development ID.
 - Unpacked extensions are for local development only. Chrome does not turn an
   unpacked folder into an automatically updated consumer install on macOS.
 - Every release must upload the new ZIP to the existing Web Store item and submit

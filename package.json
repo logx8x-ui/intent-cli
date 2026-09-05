@@ -17,6 +17,7 @@
     "extension:lint": "addons-linter --self-hosted firefox-extension",
     "extension:build": "web-ext build --source-dir firefox-extension --artifacts-dir dist/firefox --overwrite-dest",
     "extension:build:chrome": "./scripts/build-chrome-extension.sh",
+    "extension:build:chrome:web-store": "./scripts/build-chrome-extension.sh --web-store",
     "extension:sign:unlisted": "web-ext sign --channel=unlisted --source-dir firefox-extension --artifacts-dir dist/firefox --api-key=$AMO_JWT_ISSUER --api-secret=$AMO_JWT_SECRET",
     "extension:sign:listed": "web-ext sign --channel=listed --source-dir firefox-extension --artifacts-dir dist/firefox --amo-metadata amo-listing.json --api-key=$AMO_JWT_ISSUER --api-secret=$AMO_JWT_SECRET"
   },

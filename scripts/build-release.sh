@@ -167,7 +167,10 @@ cat > "$PKG_ROOT/Library/Google/Chrome/NativeMessagingHosts/intent_native_host.j
   "description": "Intent browser rules native host",
   "path": "/Library/Application Support/Intent/IntentNativeHost",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/"]
+  "allowed_origins": [
+    "chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/",
+    "chrome-extension://ffgfjfpkddgimambgmahlodjjojmjnbc/"
+  ]
 }
 JSON
 

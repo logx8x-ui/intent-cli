@@ -163,7 +163,8 @@ cat > "$CHROME_HOST_FILE" <<JSON
   "path": "${APP_DIR}/IntentNativeHost",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/"
+    "chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/",
+    "chrome-extension://ffgfjfpkddgimambgmahlodjjojmjnbc/"
   ]
 }
 JSON

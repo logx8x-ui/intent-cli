@@ -35,3 +35,9 @@ Privacy policy: https://github.com/logx8x-ui/intent-cli/blob/main/PRIVACY.md
 - `nativeMessaging`: receive active rules from the Intent desktop app.
 - `storage`: remember the user's on/off switch after browser or computer restarts.
 - broad host access: required because users choose their own allowed websites inside Intent.
+
+## Chrome Web Store identity
+
+- Public item ID: `ffgfjfpkddgimambgmahlodjjojmjnbc`
+- Build the upload ZIP with `npm run extension:build:chrome:web-store` so the
+  development-only manifest key is excluded.
