@@ -53,6 +53,11 @@ Status: blocked for a fresh, verified tester installation.
 The full npm test suite passed on the release branch after the 0.2.5 changes: Swift core, purpose
 matching, accounts, Firefox and Chrome behavior, native host correctness and
 memory checks, 14 hosted-AI unit tests, release assertions, and Firefox lint.
+Chrome's installed unpacked copy was then reloaded from the updated `main`
+checkout. The live heartbeat reported 0.2.5 with
+`single-startup-launch-v1`; a real `morning watch` intention started without the
+outdated-guard alert, produced one fully loaded YouTube tab, remained at one tab
+after seven seconds, and was ended with browser rules confirmed inactive.
 The optimized IntentApp build also passed. The installer syntax check passed;
 its missing-manifest dry run now exits with a clear explanation and performs
 no installation.
@@ -61,7 +66,7 @@ has been exercised live.
 
 ## Remaining acceptance work
 
-- Confirm Firefox's install prompt for the signed 0.2.5 XPI, then exercise real
+- Confirm Firefox's currently open install prompt for the signed 0.2.5 XPI, then exercise real
   Instagram and Outlook intentions and confirm the native heartbeat reports 0.2.5.
 - Complete the Chrome Web Store passkey verification, upload 0.2.5, submit it for
   review, and verify the store-served version in a clean Chrome profile.
