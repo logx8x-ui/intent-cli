@@ -1,6 +1,6 @@
 # Browser Guard background work — September 5, 2026
 
-Browser Guard 0.2.3 reduces avoidable work in Firefox and Chrome:
+Browser Guard 0.2.3 and later reduce avoidable work in Firefox and Chrome:
 
 - Ordinary tab events do not enqueue snapshot timers while no intention is active.
   Forced snapshots still clear the native tab switcher at session end.
@@ -30,12 +30,12 @@ significant-energy indicator alone cannot attribute consumption to this extensio
 Other Firefox content processes were also active.
 
 No battery-life percentage improvement is claimed. A controlled before/after
-profile with the same tabs and workload remains necessary once the signed 0.2.3
-extension is installed. The desktop app and native-host binaries did not change
+profile with the same tabs and workload remains necessary. The desktop app and
+native-host binaries did not change
 in this optimization.
 
-Mozilla signed 0.2.3 on September 5. The installed XPI matches the submitted
+Mozilla signed 0.2.4 on September 5. The installed XPI matches the submitted
 package (manifest compared structurally); the running native heartbeat reports
-0.2.3 and single-startup-launch-v1. The signed GitHub release asset SHA-256 is
-895e68a50e000cc858b2b68e01fe692c50f767c575e0d5713c2dd259287b5295.
+0.2.4 and single-startup-launch-v1. The signed GitHub release asset SHA-256 is
+dc55e31761be9f81e42baf3e2b46dafd26b8f864dc7c3eae78073834162e8992.
 These installation checks are not a controlled battery benchmark.

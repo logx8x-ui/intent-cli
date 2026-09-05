@@ -4,10 +4,10 @@ Status: blocked for a fresh, verified tester installation.
 
 ## Release blockers
 
-- Battery-optimized Browser Guard 0.2.3 is Mozilla-approved and signed (version
-  6462862, file 5007033), installed locally, and published as
+- Browser Guard 0.2.4 is Mozilla-approved and signed (version 6462895, file
+  5007066), installed locally, and published as
   Intent-Firefox-Extension.xpi on GitHub. The native heartbeat confirms version
-  0.2.3 and capability single-startup-launch-v1. Its source matches the submitted
+  0.2.4 and capability single-startup-launch-v1. Its source matches the submitted
   package. This extension asset does not update the older v0.8.1 Mac binary.
 - GitHub's latest binary release is v0.8.1. It has an unsigned Firefox ZIP and
   no release-manifest.json. A dry run of install.sh returned HTTP 404 for that
@@ -23,6 +23,11 @@ Status: blocked for a fresh, verified tester installation.
   repeating startup. Redirect recovery does not reload the original startup URL.
   Both browsers have regression coverage for redirects, repeated refreshes,
   concurrent synchronization, duplicate URLs, and a late first browser tab.
+- 94738dd prevents Firefox's stale completion event for a replaced blank tab from
+  interrupting the real startup page. It also allows the first same-host website
+  shell redirect to complete, then restores the configured path restriction.
+  Regression coverage includes Instagram startup, Outlook's mail-shell redirect,
+  later same-host path blocking, and cross-site redirect blocking.
 - a6938a9 adds capability checks before starting browser sessions, saved-data
   recovery and permissions hardening, native-message size limits, and release
   verification gates.

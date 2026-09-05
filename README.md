@@ -14,7 +14,7 @@ builder while every generated app and website remains editable before import.
 >
 > **Tester status (September 5, 2026):** the latest GitHub binary release, v0.8.1,
 > has no verification manifest, so the installer below cannot install it.
-> Firefox Browser Guard 0.2.3 is Mozilla-signed and available through the Firefox
+> Firefox Browser Guard 0.2.4 is Mozilla-signed and available through the Firefox
 > download below. The complete updated Mac release is still pending.
 > See [tester readiness](docs/TESTER_READINESS.md) for verified checks and remaining blockers.
 
