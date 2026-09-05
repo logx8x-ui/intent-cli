@@ -391,6 +391,11 @@ async function run() {
     true,
     "Chrome should temporarily allow the deliberate startup tab through path-specific network rules"
   );
+  assert.deepEqual(
+    Array.from(redirect.sessionRules.at(-1)?.condition.requestDomains || []),
+    ["outlook.cloud.microsoft"],
+    "Chrome's startup exception must stay on the configured host and never allow a cross-site redirect"
+  );
   await redirect.navigate(1, "https://outlook.cloud.microsoft/mail/");
   await redirect.complete(1);
   assert.equal(
