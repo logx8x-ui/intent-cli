@@ -9,6 +9,8 @@ const HEARTBEAT_MS = 3000;
 const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
+const STARTUP_SESSION_RULE_ID_START = 22000;
+const STARTUP_SESSION_RULE_ID_END = 22999;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
@@ -39,6 +41,7 @@ let snapshotTimer = null;
 let snapshotForcePending = false;
 let lastSnapshotFingerprint = null;
 const recentlyRecordedSites = new Map();
+let nextStartupSessionRuleID = STARTUP_SESSION_RULE_ID_START;
 
 function inactiveRules() {
   return {
@@ -71,6 +74,7 @@ async function ensureInitialized() {
     guardEnabled = true;
   }
   initialized = true;
+  await clearStaleStartupNavigationRules();
   connectNativeHost();
   chrome.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
 }
@@ -271,7 +275,9 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
-    startupNavigationURLByTab.clear();
+    for (const tabId of Array.from(startupNavigationURLByTab.keys())) {
+      await endStartupNavigation(tabId);
+    }
     completedStartupFingerprint = null;
   }
   scheduleTabSnapshot(true);
@@ -356,6 +362,20 @@ async function updateNetworkRules() {
   dnrFingerprint = nextFingerprint;
 }
 
+async function clearStaleStartupNavigationRules() {
+  if (typeof chrome.declarativeNetRequest.getSessionRules !== "function" ||
+      typeof chrome.declarativeNetRequest.updateSessionRules !== "function") return;
+  const current = await chrome.declarativeNetRequest.getSessionRules().catch(() => []);
+  const staleRuleIDs = current
+    .map((rule) => rule.id)
+    .filter((id) => id >= STARTUP_SESSION_RULE_ID_START && id <= STARTUP_SESSION_RULE_ID_END);
+  if (staleRuleIDs.length === 0) return;
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: staleRuleIDs,
+    addRules: []
+  }).catch(() => {});
+}
+
 function broadcastRules() {
   chrome.tabs.query({}).then((tabs) => {
     for (const tab of tabs) {
@@ -426,11 +446,53 @@ function sameNavigationURL(existingURL, requestedURL) {
   }
 }
 
-function beginStartupNavigation(tabId, startupURL) {
+async function beginStartupNavigation(tabId, startupURL) {
+  await endStartupNavigation(tabId);
+  const ruleID = nextStartupSessionRuleID;
+  nextStartupSessionRuleID = nextStartupSessionRuleID >= STARTUP_SESSION_RULE_ID_END
+    ? STARTUP_SESSION_RULE_ID_START
+    : nextStartupSessionRuleID + 1;
   startupNavigationURLByTab.set(tabId, {
     startupURL,
-    lastNavigationURL: null
+    lastNavigationURL: null,
+    ruleID
   });
+
+  let host;
+  try {
+    host = new URL(startupURL).hostname.toLowerCase();
+  } catch (_) {
+    return;
+  }
+  if (typeof chrome.declarativeNetRequest.updateSessionRules !== "function") return;
+
+  // Path-specific starts such as Outlook messages can redirect to a same-host
+  // shell while booting. A high-priority, tab-scoped session rule lets only
+  // that deliberate first load pass the global DNR block; it is removed as
+  // soon as the document completes.
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [ruleID],
+    addRules: [{
+      id: ruleID,
+      priority: 3,
+      action: { type: "allow" },
+      condition: {
+        requestDomains: [host],
+        resourceTypes: ["main_frame"],
+        tabIds: [tabId]
+      }
+    }]
+  }).catch(() => {});
+}
+
+async function endStartupNavigation(tabId) {
+  const pending = startupNavigationURLByTab.get(tabId);
+  startupNavigationURLByTab.delete(tabId);
+  if (!pending?.ruleID || typeof chrome.declarativeNetRequest.updateSessionRules !== "function") return;
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [pending.ruleID],
+    addRules: []
+  }).catch(() => {});
 }
 
 function isPendingStartupNavigation(tabId, url) {
@@ -488,7 +550,7 @@ async function synchronizeStartupTabs() {
         !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
       );
       if (tab) {
-        beginStartupNavigation(tab.id, startupURL);
+        await beginStartupNavigation(tab.id, startupURL);
         if (sameNavigationURL(tab.url || "", startupURL)) {
           await chrome.tabs.reload(tab.id);
         } else {
@@ -500,14 +562,14 @@ async function synchronizeStartupTabs() {
       } else {
         const staging = stagingTabs.shift();
         if (staging) {
-          beginStartupNavigation(staging.id, startupURL);
+          await beginStartupNavigation(staging.id, startupURL);
           tab = await chrome.tabs.update(staging.id, {
             url: startupURL,
             active: Boolean(staging.active)
           });
         } else {
           tab = await chrome.tabs.create({ url: "chrome://newtab/", active: false });
-          beginStartupNavigation(tab.id, startupURL);
+          await beginStartupNavigation(tab.id, startupURL);
           tab = await chrome.tabs.update(tab.id, { url: startupURL, active: false });
         }
       }
@@ -633,13 +695,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       pending.lastNavigationURL &&
       sameNavigationURL(tab.url, pending.lastNavigationURL)
     ) {
-      startupNavigationURLByTab.delete(tabId);
+      await endStartupNavigation(tabId);
     }
     return;
   }
 
   if (startupNavigationURLByTab.has(tabId) && changeInfo.url) {
-    startupNavigationURLByTab.delete(tabId);
+    await endStartupNavigation(tabId);
   }
 
   if (
@@ -696,10 +758,10 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   scheduleTabSnapshot();
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
   freshBlankTabIds.delete(tabId);
   lastAllowedURLByTab.delete(tabId);
-  startupNavigationURLByTab.delete(tabId);
+  await endStartupNavigation(tabId);
   if (lastAllowedTabId === tabId) lastAllowedTabId = null;
   if (rules.active) setTimeout(returnToAllowedTab, 0);
   scheduleTabSnapshot();

@@ -22,12 +22,14 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   };
   const nativeMessages = [];
   const dynamicUpdates = [];
+  const sessionUpdates = [];
   const removedTabs = [];
   const updates = [];
   const reloads = [];
   const focusedWindows = [];
   const intervals = [];
   let dynamicRules = [];
+  let sessionRules = [];
 
   const runtimeMessage = event();
   const tabActivated = event();
@@ -68,6 +70,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       updateDynamicRules: async ({ removeRuleIds, addRules }) => {
         dynamicRules = dynamicRules.filter((rule) => !removeRuleIds.includes(rule.id)).concat(addRules);
         dynamicUpdates.push({ removeRuleIds, addRules });
+      },
+      getSessionRules: async () => sessionRules.map((rule) => ({ ...rule })),
+      updateSessionRules: async ({ removeRuleIds, addRules }) => {
+        sessionRules = sessionRules.filter((rule) => !removeRuleIds.includes(rule.id)).concat(addRules);
+        sessionUpdates.push({ removeRuleIds, addRules });
       }
     },
     tabs: {
@@ -131,12 +138,13 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   vm.runInNewContext(source, context, { filename: "chrome-extension/background.js" });
 
   async function settle() {
-    for (let index = 0; index < 24; index += 1) await Promise.resolve();
+    for (let index = 0; index < 48; index += 1) await Promise.resolve();
   }
 
   return {
-    tabs, storage, nativeMessages, dynamicUpdates, removedTabs, focusedWindows, intervals, updates, reloads,
+    tabs, storage, nativeMessages, dynamicUpdates, sessionUpdates, removedTabs, focusedWindows, intervals, updates, reloads,
     get dynamicRules() { return dynamicRules; },
+    get sessionRules() { return sessionRules; },
     settle,
     async activate(id) {
       setActive(id);
@@ -159,6 +167,14 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       tab.url = url;
       for (const listener of tabUpdated.listeners) {
         await listener(id, { url }, { ...tab });
+      }
+      await settle();
+    },
+    async complete(id) {
+      const tab = tabs.get(id);
+      if (!tab) return;
+      for (const listener of tabUpdated.listeners) {
+        await listener(id, { status: "complete" }, { ...tab });
       }
       await settle();
     },
@@ -370,15 +386,24 @@ async function run() {
     ({ patch }) => patch.url === "https://outlook.cloud.microsoft/mail/inbox/id/message"
   ).length;
   assert.equal(chromeStartupUpdates(), 1, "Chrome should launch an Outlook startup URL once");
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await redirect.navigate(1, "https://outlook.cloud.microsoft/mail/");
-  }
+  assert.equal(
+    redirect.sessionRules.some((rule) => rule.condition.tabIds?.includes(1)),
+    true,
+    "Chrome should temporarily allow the deliberate startup tab through path-specific network rules"
+  );
+  await redirect.navigate(1, "https://outlook.cloud.microsoft/mail/");
+  await redirect.complete(1);
   assert.equal(
     chromeStartupUpdates(),
     1,
     "An Outlook redirect must never make Chrome reload the startup URL"
   );
   assert.equal(redirect.tabs.size, 1, "An Outlook redirect must never create replacement tabs");
+  assert.equal(
+    redirect.sessionRules.length,
+    0,
+    "Chrome should remove its same-host startup exception once the first document completes"
+  );
 
   const allowed = createHarness(lockedRules, [
     { id: 1, windowId: 7, index: 0, active: true, url: "https://instagram.com/direct/inbox/" },
