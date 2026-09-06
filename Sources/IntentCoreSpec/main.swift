@@ -424,6 +424,118 @@ do {
         ),
         "Unknown and desktop click targets should stay blocked"
     )
+    try expect(
+        FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.apple.controlcenter",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: allowedClickBundles,
+            intentBundleIdentifier: "dev.loganmondi.intent",
+            accessMode: .whitelist,
+            isMenuBarClick: true
+        ),
+        "Menu bar controls should remain clickable during whitelist sessions"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.example.status-app",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: ["com.example.status-app"],
+            intentBundleIdentifier: "dev.loganmondi.intent",
+            accessMode: .blacklist,
+            isMenuBarClick: true
+        ),
+        "An explicitly blacklisted menu bar app should remain blocked"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllow(
+            ownerBundleIdentifier: "com.apple.controlcenter",
+            representedBundleIdentifier: nil,
+            allowedBundleIdentifiers: ["com.apple.controlcenter"],
+            intentBundleIdentifier: "dev.loganmondi.intent",
+            accessMode: .blacklist
+        ),
+        "Trusted system controls should not bypass an explicit blacklist"
+    )
+    try expect(
+        FocusClickTargetPolicy.shouldAllowMissionControlClick(
+            ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: "org.mozilla.firefox",
+            controlledBundleIdentifiers: allowedClickBundles,
+            accessMode: .whitelist
+        ),
+        "Mission Control should pass an allowed application tile"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllowMissionControlClick(
+            ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: "com.spotify.client",
+            controlledBundleIdentifiers: allowedClickBundles,
+            accessMode: .whitelist
+        ),
+        "Mission Control should swallow an unallowed application tile before activation"
+    )
+    try expect(
+        FocusClickTargetPolicy.shouldAllowMissionControlClick(
+            ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: nil,
+            controlledBundleIdentifiers: allowedClickBundles,
+            accessMode: .whitelist
+        ),
+        "Mission Control Space and background navigation should remain usable"
+    )
+    try expect(
+        FocusClickTargetPolicy.representedBundleIdentifier(
+            labels: ["Spotify — Music and Podcasts"],
+            applicationNamesByBundleIdentifier: [
+                "com.spotify.client": "Spotify",
+                "org.mozilla.firefox": "Firefox"
+            ]
+        ) == "com.spotify.client",
+        "Mission Control accessibility labels should resolve running app tiles"
+    )
+    try expect(
+        FocusClickTargetPolicy.representedBundleIdentifier(
+            labels: ["Search Archives"],
+            applicationNamesByBundleIdentifier: ["company.thebrowser.Browser": "Arc"]
+        ) == nil,
+        "Short app names should not match inside unrelated Mission Control labels"
+    )
+    try expect(
+        FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+            bundleIdentifier: "com.example.menu-extra",
+            isRegularApplication: false,
+            controlledBundleIdentifiers: allowedClickBundles,
+            accessMode: .whitelist
+        ),
+        "Menu bar-only applications should remain available in whitelist mode"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+            bundleIdentifier: "com.apple.dock",
+            isRegularApplication: false,
+            controlledBundleIdentifiers: allowedClickBundles,
+            accessMode: .whitelist
+        ),
+        "Dock clicks should still be inspected for represented application targets"
+    )
+    try expect(
+        FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+            bundleIdentifier: "com.example.menu-extra",
+            isRegularApplication: false,
+            controlledBundleIdentifiers: ["com.example.blocked-extra"],
+            accessMode: .blacklist
+        ),
+        "Unlisted menu bar applications should remain available in blacklist mode"
+    )
+    try expect(
+        !FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+            bundleIdentifier: "com.example.blocked-extra",
+            isRegularApplication: false,
+            controlledBundleIdentifiers: ["com.example.blocked-extra"],
+            accessMode: .blacklist
+        ),
+        "Explicitly blacklisted menu bar applications should remain blocked"
+    )
     let temporaryAppURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("IntentBundleResolver-\(UUID().uuidString)", isDirectory: true)
         .appendingPathComponent("Transient.app", isDirectory: true)
@@ -836,6 +948,39 @@ do {
         .appendingPathComponent("intent-core-spec-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
 
+    let alwaysAllowedURL = tempDirectory.appendingPathComponent("always-allowed-apps.json")
+    let alwaysAllowedStore = AlwaysAllowedAppStore(fileURL: alwaysAllowedURL)
+    let defaultAlwaysAllowedApps = try alwaysAllowedStore.load()
+    try expect(
+        defaultAlwaysAllowedApps == [AlwaysAllowedAppStore.finder],
+        "Finder should be the universal first-install always-allowed app"
+    )
+    let whitelistWithFinder = AlwaysAllowedAppStore.applying(
+        [AlwaysAllowedAppStore.finder],
+        to: dataScience
+    )
+    try expect(
+        whitelistWithFinder.allowedApps.contains { $0.bundleIdentifier == "com.apple.finder" },
+        "Always-allowed apps should be added to existing whitelist intentions"
+    )
+    var blacklistWithFinder = dataScience
+    blacklistWithFinder.accessMode = .blacklist
+    blacklistWithFinder.allowedApps.append(AlwaysAllowedAppStore.finder)
+    let cleanedBlacklist = AlwaysAllowedAppStore.applying(
+        [AlwaysAllowedAppStore.finder],
+        to: blacklistWithFinder
+    )
+    try expect(
+        !cleanedBlacklist.allowedApps.contains { $0.bundleIdentifier == "com.apple.finder" },
+        "Always-allowed apps should never become blocked resources in blacklist intentions"
+    )
+    try alwaysAllowedStore.save([])
+    let clearedAlwaysAllowedApps = try alwaysAllowedStore.load()
+    try expect(
+        clearedAlwaysAllowedApps.isEmpty,
+        "Turning off the Finder preset should persist instead of resetting on relaunch"
+    )
+
     let recordingStart = Date(timeIntervalSince1970: 1_800_000_000)
     try expect(
         ActivityRecordingPeriod.twentyFourHours.endDate(startingAt: recordingStart)
@@ -1225,7 +1370,7 @@ do {
         )
     ]
     let encoded = AIIntentionMentionResolver.encodeMention(displayName: "Emails", intentionID: "emails")
-    try expect(encoded == "@[Emails](emails)", "Mentions should encode a stable intention id")
+    try expect(encoded == "*[Emails](emails)", "Mentions should encode a stable intention id behind the * syntax")
     switch AIIntentionMentionResolver.resolvePrimaryTarget(
         in: "Add a 15-minute timer to \(encoded).",
         intentions: mentionIntentions
@@ -1234,6 +1379,23 @@ do {
         try expect(id == "emails" && name == "Emails", "Encoded mentions should resolve by id")
     default:
         throw SpecFailure(description: "Encoded mention should resolve")
+    }
+
+    try expect(
+        AIIntentionMentionResolver.resolvePrimaryTarget(
+            in: "Update Emails with a timer",
+            intentions: mentionIntentions
+        ) == nil,
+        "Unstarred intention names should never silently target saved intentions"
+    )
+    switch AIIntentionMentionResolver.resolvePrimaryTarget(
+        in: "Update * Emails with a timer",
+        intentions: mentionIntentions
+    ) {
+    case .resolved(let id, _):
+        try expect(id == "emails", "A starred exact intention name should resolve")
+    default:
+        throw SpecFailure(description: "Starred intention should resolve")
     }
 
     var renamed = mentionIntentions
@@ -1258,18 +1420,81 @@ do {
         throw SpecFailure(description: "Missing intention should not resolve to another intention")
     }
 
-    switch AIIntentionMentionResolver.resolvePrimaryTarget(
-        in: "Update Emails and Data Science together",
-        intentions: mentionIntentions
-    ) {
-    case .ambiguous(let matches):
-        try expect(matches.count == 2, "Ambiguous multi-intention prompts should ask for clarification")
-    default:
-        throw SpecFailure(description: "Ambiguous prompts should not mutate multiple intentions")
-    }
+    try expect(
+        AIIntentionMentionResolver.resolvePrimaryTarget(
+            in: "Update Emails and Data Science together",
+            intentions: mentionIntentions
+        ) == nil,
+        "Unstarred intention names should not target or mutate saved intentions"
+    )
 
     let typeahead = AIIntentionMentionResolver.typeahead(query: "em", intentions: mentionIntentions)
-    try expect(typeahead.map(\.id) == ["emails"], "@ typeahead should filter intentions case-insensitively")
+    try expect(typeahead.map(\.id) == ["emails"], "* typeahead should filter intentions case-insensitively")
+
+    let promptApps = [
+        AllowedApp(name: "Firefox", bundleIdentifier: "org.mozilla.firefox"),
+        AllowedApp(name: "Google Chrome", bundleIdentifier: "com.google.Chrome"),
+        AllowedApp(name: "Spotify", bundleIdentifier: "com.spotify.client")
+    ]
+    let browserEdit = PromptAutocompleteEngine.insertingBrowserGroupIfNeeded(
+        in: "Use Firefox",
+        cursorUTF16Offset: 11,
+        apps: promptApps
+    )
+    try expect(
+        browserEdit == PromptTextEdit(text: "Use Firefox()", cursorUTF16Offset: 12),
+        "Typing a supported browser should immediately place the cursor inside parentheses"
+    )
+    let websiteState = PromptAutocompleteEngine.state(
+        for: "Use Firefox(you)",
+        cursorUTF16Offset: 15,
+        apps: promptApps,
+        intentions: mentionIntentions,
+        websitesByBrowser: [
+            "org.mozilla.firefox": [
+                PurposeKnownWebsite(name: "YouTube", value: "youtube.com"),
+                PurposeKnownWebsite(name: "Youniversity", value: "example.edu")
+            ]
+        ]
+    )
+    try expect(
+        websiteState?.candidates.first?.title == "YouTube",
+        "Website autocomplete should use the history for the browser surrounding the cursor"
+    )
+    if let websiteState, let youtube = websiteState.candidates.first {
+        try expect(
+            PromptAutocompleteEngine.applying(
+                youtube,
+                to: "Use Firefox(you)",
+                state: websiteState
+            ) == PromptTextEdit(text: "Use Firefox(YouTube, )", cursorUTF16Offset: 21),
+            "Tab completion should add a comma and keep the cursor ready for another website"
+        )
+    } else {
+        throw SpecFailure(description: "Website autocomplete state should exist")
+    }
+    let intentionCompletionState = PromptAutocompleteEngine.state(
+        for: "Update * Em",
+        cursorUTF16Offset: 11,
+        apps: promptApps,
+        intentions: mentionIntentions,
+        websitesByBrowser: [:]
+    )
+    try expect(
+        intentionCompletionState?.candidates.map(\.title) == ["Emails"],
+        "Star completion should show matching saved intentions above the cursor"
+    )
+    let appCompletionState = PromptAutocompleteEngine.state(
+        for: "Use fir",
+        cursorUTF16Offset: 7,
+        apps: promptApps,
+        intentions: mentionIntentions,
+        websitesByBrowser: [:]
+    )
+    try expect(
+        appCompletionState?.candidates.first?.title == "Firefox",
+        "Ordinary app prefixes should offer installed-app completion"
+    )
 
     let noFrictionPlan = AIIntentionPlan(intentions: [
         AIIntentionSuggestion(

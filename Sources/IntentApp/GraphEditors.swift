@@ -11,11 +11,11 @@ struct IntentionEditorMenu: View {
     let onAddFriction: (Friction) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var model: IntentAppModel
     @State private var appQuery = ""
     @State private var websiteDrafts: [String: String] = [:]
     @State private var isIconDropTarget = false
     @State private var iconImportError: String?
-    @State private var lastQuickAppIndex: Int?
     @State private var lastQuickWebsiteIndexByBrowser: [String: Int] = [:]
     @FocusState private var nameFocused: Bool
 
@@ -32,32 +32,7 @@ struct IntentionEditorMenu: View {
     }
 
     private var quickApps: [InstalledApp] {
-        let preferredBundleIdentifiers = [
-            "com.apple.MobileSMS",
-            "org.mozilla.firefox",
-            "com.google.Chrome",
-            "com.apple.mail",
-            "com.apple.iCal",
-            "com.apple.Notes",
-            "com.apple.reminders",
-            "com.openai.codex",
-            "com.spotify.client",
-            "net.ankiweb.dtop",
-            "com.todesktop.230313mzl4w4u92",
-            "com.microsoft.VSCode",
-            "com.rstudio.desktop",
-            "io.remnote",
-            "com.remnote.desktop",
-            "net.whatsapp.WhatsApp",
-            "com.hnc.Discord",
-            "com.tinyspeck.slackmacgap",
-            "us.zoom.xos"
-        ]
-        let appsByIdentifier = Dictionary(
-            catalog.map { ($0.bundleIdentifier, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        return preferredBundleIdentifiers.compactMap { appsByIdentifier[$0] }
+        AppCatalog.mostUsed(in: catalog)
     }
 
     private var quickPickColumns: [GridItem] {
@@ -345,6 +320,7 @@ struct IntentionEditorMenu: View {
     private var tokenFlow: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(intention.allowedApps) { app in
+                let isPreset = model.isAlwaysAllowed(app.bundleIdentifier)
                 HStack(spacing: 8) {
                     appIcon(app)
                     VStack(alignment: .leading, spacing: 1) {
@@ -354,18 +330,36 @@ struct IntentionEditorMenu: View {
                             .foregroundStyle(GraphTheme.muted(colorScheme))
                     }
                     Spacer()
+                    if isPreset {
+                        Image(systemName: "checkmark.shield.fill")
+                            .foregroundStyle(Color.green)
+                            .help(presetHelp)
+                    }
                     Button {
                         remove(app)
                     } label: {
                         Image(systemName: "xmark")
                     }
                     .buttonStyle(.plain)
-                    .help("Remove app")
+                    .disabled(isPreset)
+                    .help(isPreset ? presetHelp : "Remove app")
                 }
                 .padding(.horizontal, 9)
                 .frame(height: 40)
-                .background(GraphTheme.surface(colorScheme))
+                .contentShape(Rectangle())
+                .background(
+                    isPreset ? Color.green.opacity(0.11) : GraphTheme.surface(colorScheme)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(isPreset ? Color.green : Color.clear, lineWidth: isPreset ? 1.7 : 0)
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onTapGesture {
+                    guard NSEvent.modifierFlags.contains(.shift) else { return }
+                    model.toggleAlwaysAllowedApp(app)
+                }
+                .help(isPreset ? presetHelp : app.name)
             }
         }
     }
@@ -377,12 +371,13 @@ struct IntentionEditorMenu: View {
                 columns: quickPickColumns,
                 spacing: 8
             ) {
-                ForEach(Array(quickApps.enumerated()), id: \.element.id) { index, app in
+                ForEach(quickApps) { app in
                     let isSelected = intention.allowedApps.contains {
                         $0.bundleIdentifier == app.bundleIdentifier
                     }
+                    let isPreset = model.isAlwaysAllowed(app.bundleIdentifier)
                     Button {
-                        handleQuickAppClick(app, at: index)
+                        handleQuickAppClick(app)
                     } label: {
                         ZStack(alignment: .topTrailing) {
                             Image(nsImage: app.icon)
@@ -391,11 +386,11 @@ struct IntentionEditorMenu: View {
                                 .padding(5)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                            if isSelected {
+                            if isSelected || isPreset {
                                 Image(systemName: "checkmark.circle.fill")
                                     .font(.system(size: 10, weight: .bold))
                                     .symbolRenderingMode(.palette)
-                                    .foregroundStyle(.white, modeAccent)
+                                    .foregroundStyle(.white, isPreset ? Color.green : modeAccent)
                                     .offset(x: 3, y: -3)
                             }
                         }
@@ -406,15 +401,19 @@ struct IntentionEditorMenu: View {
                         .overlay(
                             RoundedRectangle(cornerRadius: 9)
                                 .stroke(
-                                    isSelected ? modeAccent : GraphTheme.stroke(colorScheme),
-                                    lineWidth: isSelected ? 1.5 : 1
+                                    isPreset ? Color.green : (isSelected ? modeAccent : GraphTheme.stroke(colorScheme)),
+                                    lineWidth: isPreset ? 2 : (isSelected ? 1.5 : 1)
                                 )
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 9))
                     }
                     .buttonStyle(.plain)
-                    .help(app.name)
-                    .accessibilityLabel("\(isSelected ? "Remove" : "Add") \(app.name)")
+                    .help(isPreset ? presetHelp : app.name)
+                    .accessibilityLabel(
+                        isPreset
+                            ? "\(app.name), always allowed. Shift-click to turn off."
+                            : "\(isSelected ? "Remove" : "Add") \(app.name)"
+                    )
                 }
             }
             .padding(.vertical, 2)
@@ -577,13 +576,22 @@ struct IntentionEditorMenu: View {
         appQuery = ""
     }
 
-    private func handleQuickAppClick(_ app: InstalledApp, at index: Int) {
+    private func handleQuickAppClick(_ app: InstalledApp) {
         let modifiers = NSEvent.modifierFlags
-        if modifiers.contains(.shift), let anchor = lastQuickAppIndex {
-            let range = min(anchor, index)...max(anchor, index)
-            for quickApp in quickApps[range] {
-                add(quickApp)
+        if modifiers.contains(.shift) {
+            let wasPreset = model.isAlwaysAllowed(app.bundleIdentifier)
+            model.toggleAlwaysAllowedApp(.init(name: app.name, bundleIdentifier: app.bundleIdentifier))
+            if !wasPreset {
+                if intention.accessMode == .whitelist {
+                    add(app)
+                } else {
+                    remove(.init(name: app.name, bundleIdentifier: app.bundleIdentifier))
+                }
             }
+            return
+        }
+        if model.isAlwaysAllowed(app.bundleIdentifier) {
+            return
         } else if intention.allowedApps.contains(where: {
             $0.bundleIdentifier == app.bundleIdentifier
         }) {
@@ -591,7 +599,10 @@ struct IntentionEditorMenu: View {
         } else {
             add(app)
         }
-        lastQuickAppIndex = index
+    }
+
+    private var presetHelp: String {
+        "GREEN MEANS: This app is always allowed in every intention. Shift-click to toggle it."
     }
 
     private func addFirstMatch() {

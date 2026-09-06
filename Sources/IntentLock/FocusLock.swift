@@ -43,7 +43,11 @@ public enum FocusForegroundPolicy {
         return [
             "com.apple.dock",
             "com.apple.Spotlight",
-            "com.apple.WindowManager"
+            "com.apple.WindowManager",
+            "com.apple.controlcenter",
+            "com.apple.systemuiserver",
+            "com.apple.notificationcenterui",
+            "com.apple.TextInputMenuAgent"
         ].contains(bundleIdentifier)
     }
 
@@ -333,9 +337,17 @@ public final class FocusLock {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
-            // Mission Control owns this click. Let macOS finish selecting the
-            // Space, then normal focus enforcement chooses an allowed app.
             if isMissionControlActive() {
+                let target = clickTarget(at: event.location)
+                guard FocusClickTargetPolicy.shouldAllowMissionControlClick(
+                    ownerBundleIdentifier: target.ownerBundleIdentifier,
+                    representedBundleIdentifier: target.representedBundleIdentifier,
+                    controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+                    accessMode: spec.accessMode
+                ) else {
+                    refocus(ignoreSystemTransitionGrace: true)
+                    return nil
+                }
                 systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
                 return Unmanaged.passUnretained(event)
             }
@@ -532,6 +544,15 @@ public final class FocusLock {
             return
         }
 
+        if FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+            bundleIdentifier: app.bundleIdentifier,
+            isRegularApplication: app.activationPolicy == .regular,
+            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            accessMode: spec.accessMode
+        ) {
+            return
+        }
+
         if shouldWaitForSystemSwitcher(bundleIdentifier: app.bundleIdentifier) {
             return
         }
@@ -594,6 +615,15 @@ public final class FocusLock {
             controlledBundleIdentifiers: spec.allowedBundleIdentifiers
         ) {
             refocus(ignoreSystemTransitionGrace: true)
+            return
+        }
+
+        if FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+            bundleIdentifier: frontmost.bundleIdentifier,
+            isRegularApplication: frontmost.activationPolicy == .regular,
+            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            accessMode: spec.accessMode
+        ) {
             return
         }
 
@@ -680,12 +710,25 @@ public final class FocusLock {
         }
 
         let target = clickTarget(at: point)
+        if let ownerBundleIdentifier = target.ownerBundleIdentifier,
+           let owner = NSWorkspace.shared.runningApplications.first(where: {
+               $0.bundleIdentifier == ownerBundleIdentifier
+           }),
+           FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+               bundleIdentifier: ownerBundleIdentifier,
+               isRegularApplication: owner.activationPolicy == .regular,
+               controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+               accessMode: spec.accessMode
+           ) {
+            return true
+        }
         return FocusClickTargetPolicy.shouldAllow(
             ownerBundleIdentifier: target.ownerBundleIdentifier,
             representedBundleIdentifier: target.representedBundleIdentifier,
             allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
             intentBundleIdentifier: Bundle.main.bundleIdentifier,
-            accessMode: spec.accessMode
+            accessMode: spec.accessMode,
+            isMenuBarClick: isMenuBarClick(point)
         )
     }
 
@@ -736,20 +779,38 @@ public final class FocusLock {
             current = accessibilityElement(currentElement, attribute: kAXParentAttribute)
         }
 
-        let normalizedLabels = labels.map { $0.lowercased() }
-        for bundleIdentifier in spec.allowedBundleIdentifiers {
-            guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
-                continue
-            }
-            let appName = FileManager.default.displayName(atPath: appURL.path)
-                .replacingOccurrences(of: ".app", with: "")
-                .lowercased()
-            if normalizedLabels.contains(where: { $0 == appName || $0.contains(appName) }) {
-                return bundleIdentifier
-            }
+        var applicationNames: [String: String] = [:]
+        for application in NSWorkspace.shared.runningApplications {
+            guard let bundleIdentifier = application.bundleIdentifier else { continue }
+            let name = application.localizedName
+                ?? application.bundleURL.map { FileManager.default.displayName(atPath: $0.path) }
+                ?? bundleIdentifier
+            applicationNames[bundleIdentifier] = name.replacingOccurrences(of: ".app", with: "")
         }
+        return FocusClickTargetPolicy.representedBundleIdentifier(
+            labels: labels,
+            applicationNamesByBundleIdentifier: applicationNames
+        )
+    }
 
-        return nil
+    private func isMenuBarClick(_ point: CGPoint) -> Bool {
+        var displayID = CGDirectDisplayID()
+        var displayCount: UInt32 = 0
+        guard CGGetDisplaysWithPoint(point, 1, &displayID, &displayCount) == .success,
+              displayCount > 0 else {
+            return false
+        }
+        let displayBounds = CGDisplayBounds(displayID)
+        let screen = NSScreen.screens.first { screen in
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
+                .uint32Value == displayID
+        }
+        let menuBarHeight = max(
+            30,
+            screen.map { max(0, $0.frame.maxY - $0.visibleFrame.maxY) } ?? 0
+        )
+        return point.y >= displayBounds.minY
+            && point.y <= displayBounds.minY + menuBarHeight
     }
 
     private func accessibilityURL(_ element: AXUIElement) -> URL? {

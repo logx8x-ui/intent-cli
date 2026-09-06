@@ -103,10 +103,15 @@ struct LocalTimeEditor: View {
             hourText = sanitized
             return
         }
-        guard focusedField == .hour, sanitized.count == 2 else { return }
-        commitHour()
-        focusedField = .minute
-        selectFocusedText(for: .minute)
+        guard focusedField == .hour,
+              let hour = Int(sanitized),
+              (1...12).contains(hour) else { return }
+        updateSelection()
+        if sanitized.count == 2 {
+            commitHour()
+            focusedField = .minute
+            selectFocusedText(for: .minute)
+        }
     }
 
     private func handleMinuteChange(_ value: String) {
@@ -115,9 +120,14 @@ struct LocalTimeEditor: View {
             minuteText = sanitized
             return
         }
-        guard focusedField == .minute, sanitized.count == 2 else { return }
-        commitMinute()
-        focusedField = nil
+        guard focusedField == .minute,
+              let minute = Int(sanitized),
+              (0...59).contains(minute) else { return }
+        updateSelection()
+        if sanitized.count == 2 {
+            commitMinute()
+            focusedField = nil
+        }
     }
 
     private func commitAllFields() {

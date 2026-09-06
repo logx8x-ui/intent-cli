@@ -243,10 +243,11 @@ final class PurposeSpeechRecognizer: ObservableObject {
     }
 }
 
-private struct PurposePromptEditor: NSViewRepresentable {
+struct PurposePromptEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var measuredHeight: CGFloat
     @Binding var isFocused: Bool
+    @Binding var cursorUTF16Offset: Int
     let intentions: [Intention]
     let apps: [AllowedApp]
     let accessMode: IntentionAccessMode
@@ -256,6 +257,10 @@ private struct PurposePromptEditor: NSViewRepresentable {
     let onAcceptAutocomplete: () -> Void
     let onDismissAutocomplete: () -> Void
     let onSubmit: () -> Void
+    var minimumHeight: CGFloat = 44
+    var maximumHeight: CGFloat = 176
+    var fontSize: CGFloat = 17
+    var verticalInset: CGFloat = 8
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -278,7 +283,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
-        textView.textContainerInset = NSSize(width: 0, height: 8)
+        textView.textContainerInset = NSSize(width: 0, height: verticalInset)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
@@ -292,14 +297,19 @@ private struct PurposePromptEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? NSTextView else { return }
+        textView.textContainerInset = NSSize(width: 0, height: verticalInset)
         if textView.string != text {
             context.coordinator.isApplyingUpdate = true
             textView.string = text
+            textView.setSelectedRange(NSRange(
+                location: min(max(0, cursorUTF16Offset), (text as NSString).length),
+                length: 0
+            ))
             context.coordinator.isApplyingUpdate = false
         }
         context.coordinator.apply(to: textView)
         context.coordinator.updateHeight(for: textView, in: scrollView)
-        scrollView.hasVerticalScroller = measuredHeight >= Coordinator.maximumHeight
+        scrollView.hasVerticalScroller = maximumHeight > minimumHeight && measuredHeight >= maximumHeight
 
         if isFocused, textView.window?.firstResponder !== textView {
             DispatchQueue.main.async {
@@ -309,9 +319,6 @@ private struct PurposePromptEditor: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
-        static let minimumHeight: CGFloat = 44
-        static let maximumHeight: CGFloat = 176
-
         var parent: PurposePromptEditor
         var isApplyingUpdate = false
         private var lastStyledText = ""
@@ -336,11 +343,28 @@ private struct PurposePromptEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard !isApplyingUpdate,
                   let textView = notification.object as? NSTextView else { return }
+            if let edit = PromptAutocompleteEngine.insertingBrowserGroupIfNeeded(
+                in: textView.string,
+                cursorUTF16Offset: textView.selectedRange().location,
+                apps: parent.apps
+            ) {
+                isApplyingUpdate = true
+                textView.string = edit.text
+                textView.setSelectedRange(NSRange(location: edit.cursorUTF16Offset, length: 0))
+                isApplyingUpdate = false
+            }
             parent.text = textView.string
+            parent.cursorUTF16Offset = textView.selectedRange().location
             apply(to: textView)
             if let scrollView = textView.enclosingScrollView {
                 updateHeight(for: textView, in: scrollView)
             }
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !isApplyingUpdate,
+                  let textView = notification.object as? NSTextView else { return }
+            parent.cursorUTF16Offset = textView.selectedRange().location
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -387,7 +411,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
                 ? NSColor(calibratedWhite: 0.96, alpha: 1)
                 : NSColor(calibratedWhite: 0.08, alpha: 1)
             let baseAttributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 17, weight: .medium),
+                .font: NSFont.systemFont(ofSize: parent.fontSize, weight: .medium),
                 .foregroundColor: baseColor
             ]
 
@@ -408,7 +432,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
                 for match in expression.matches(in: textView.string, range: NSRange(location: 0, length: storage.length)) {
                     storage.addAttributes([
                         .foregroundColor: browserColor,
-                        .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+                        .font: NSFont.systemFont(ofSize: parent.fontSize, weight: .semibold),
                         .underlineStyle: NSUnderlineStyle.single.rawValue,
                         .underlineColor: browserColor
                     ], range: match.range)
@@ -435,7 +459,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
                         guard nameRange.location != NSNotFound else { continue }
                         storage.addAttributes([
                             .foregroundColor: NSColor(calibratedRed: 0.20, green: 0.48, blue: 0.98, alpha: 1),
-                            .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+                            .font: NSFont.systemFont(ofSize: parent.fontSize, weight: .semibold),
                             .underlineStyle: NSUnderlineStyle.single.rawValue,
                             .underlineColor: NSColor(calibratedRed: 0.20, green: 0.48, blue: 0.98, alpha: 1)
                         ], range: nameRange)
@@ -461,7 +485,7 @@ private struct PurposePromptEditor: NSViewRepresentable {
             textContainer.containerSize = NSSize(width: availableWidth, height: CGFloat.greatestFiniteMagnitude)
             layoutManager.ensureLayout(for: textContainer)
             let usedHeight = layoutManager.usedRect(for: textContainer).height + textView.textContainerInset.height * 2
-            let nextHeight = min(max(Self.minimumHeight, ceil(usedHeight)), Self.maximumHeight)
+            let nextHeight = min(max(parent.minimumHeight, ceil(usedHeight)), parent.maximumHeight)
             lastMeasuredText = textView.string
             lastMeasuredWidth = availableWidth
             guard abs(parent.measuredHeight - nextHeight) > 0.5 else { return }
@@ -493,12 +517,14 @@ struct PurposeModeView: View {
     @State private var purpose = ""
     @State private var purposeFocused = false
     @State private var promptHeight: CGFloat = 44
+    @State private var promptCursorUTF16Offset = 0
     @State private var liveInterpretation = PurposeLiveInterpretation()
     @State private var interpretationTask: Task<Void, Never>?
     @State private var autocompleteSelection = 0
     @State private var autocompleteDismissed = false
     @State private var lastSpeechTranscript = ""
     @State private var learnedWebsites: [PurposeKnownWebsite] = []
+    @State private var autocompleteWebsitesByBrowser: [String: [PurposeKnownWebsite]] = [:]
     @AppStorage(PurposeModePreference.accessModeKey) private var accessModeRawValue = IntentionAccessMode.whitelist.rawValue
 
     let onDismiss: () -> Void
@@ -590,10 +616,11 @@ struct PurposeModeView: View {
                                 text: $purpose,
                                 measuredHeight: $promptHeight,
                                 isFocused: $purposeFocused,
+                                cursorUTF16Offset: $promptCursorUTF16Offset,
                                 intentions: model.intentions,
                                 apps: availableApps,
                                 accessMode: accessMode,
-                                hasAutocomplete: !intentionAutocompleteCandidates.isEmpty,
+                                hasAutocomplete: promptAutocompleteState != nil,
                                 colorScheme: colorScheme,
                                 onMoveAutocomplete: moveAutocomplete,
                                 onAcceptAutocomplete: acceptAutocomplete,
@@ -641,11 +668,25 @@ struct PurposeModeView: View {
                     .frame(maxWidth: 940)
                     .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
                     .shadow(color: Color.black.opacity(0.28), radius: 24, y: 10)
-
-                    if !intentionAutocompleteCandidates.isEmpty {
-                        intentionAutocompleteMenu
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                    .overlay(alignment: .top) {
+                        if let state = promptAutocompleteState {
+                            PromptAutocompleteMenu(
+                                state: state,
+                                selectedIndex: autocompleteSelection,
+                                colorScheme: colorScheme,
+                                accent: modeAccent,
+                                catalog: model.installedApps,
+                                intentions: model.intentions,
+                                onSelect: { index in
+                                    autocompleteSelection = index
+                                    acceptAutocomplete()
+                                }
+                            )
+                            .offset(y: -autocompleteMenuHeight(for: state) - 8)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
                     }
+                    .zIndex(20)
 
                     if let clarificationPrompt {
                         clarificationCard(clarificationPrompt)
@@ -684,6 +725,9 @@ struct PurposeModeView: View {
         }
         .onAppear {
             learnedWebsites = PurposeWebsiteHistoryStore.frequentKnownWebsites()
+            autocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                intentions: model.intentions
+            )
             purposeFocused = true
             model.purposeModeError = nil
             scheduleInterpretation(for: purpose, immediately: true)
@@ -731,6 +775,9 @@ struct PurposeModeView: View {
             scheduleInterpretation(for: purpose, immediately: true)
         }
         .onChange(of: model.intentions.map { "\($0.id):\($0.name)" }) { _ in
+            autocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                intentions: model.intentions
+            )
             scheduleInterpretation(for: purpose, immediately: true)
         }
     }
@@ -813,74 +860,40 @@ struct PurposeModeView: View {
         )
     }
 
-    private var intentionAutocompleteCandidates: [Intention] {
-        guard !autocompleteDismissed else { return [] }
-        return PurposeLiveInterpreter.intentionAutocompleteCandidates(
+    private var promptAutocompleteState: PromptAutocompleteState? {
+        guard !autocompleteDismissed else { return nil }
+        return PromptAutocompleteEngine.state(
             for: purpose,
-            intentions: model.intentions
+            cursorUTF16Offset: promptCursorUTF16Offset,
+            apps: availableApps,
+            intentions: model.intentions,
+            websitesByBrowser: autocompleteWebsitesByBrowser
         )
     }
 
-    private var intentionAutocompleteMenu: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("SAVED INTENTIONS")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .tracking(0.9)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-                Spacer()
-                Text("↑↓  TAB")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(GraphTheme.muted(colorScheme).opacity(0.72))
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
-
-            ForEach(Array(intentionAutocompleteCandidates.enumerated()), id: \.element.id) { index, intention in
-                Button {
-                    autocompleteSelection = index
-                    acceptAutocomplete()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: intention.icon)
-                            .frame(width: 24)
-                        Text(intention.name)
-                            .font(.system(size: 13, weight: .semibold))
-                        Spacer()
-                    }
-                    .foregroundStyle(index == autocompleteSelection ? Color.white : GraphTheme.text(colorScheme))
-                    .padding(.horizontal, 12)
-                    .frame(height: 36)
-                    .background(
-                        index == autocompleteSelection ? modeAccent : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 9)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(6)
-        .frame(maxWidth: 620)
-        .background(GraphTheme.elevatedSurface(colorScheme), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(modeAccent.opacity(0.6), lineWidth: 1))
-        .shadow(color: Color.black.opacity(0.24), radius: 16, y: 8)
-    }
-
     private func moveAutocomplete(_ delta: Int) {
-        let count = intentionAutocompleteCandidates.count
+        let count = promptAutocompleteState?.candidates.count ?? 0
         guard count > 0 else { return }
         autocompleteSelection = (autocompleteSelection + delta + count) % count
     }
 
+    private func autocompleteMenuHeight(for state: PromptAutocompleteState) -> CGFloat {
+        27 + CGFloat(state.candidates.count) * 41
+    }
+
     private func acceptAutocomplete() {
-        let candidates = intentionAutocompleteCandidates
-        guard candidates.indices.contains(autocompleteSelection) else { return }
-        purpose = PurposeLiveInterpreter.completingIntentionMention(
-            in: purpose,
-            with: candidates[autocompleteSelection]
-        )
-        autocompleteDismissed = true
+        guard let state = promptAutocompleteState,
+              state.candidates.indices.contains(autocompleteSelection) else { return }
+        let candidate = state.candidates[autocompleteSelection]
+        let edit = PromptAutocompleteEngine.applying(candidate, to: purpose, state: state)
+        purpose = edit.text
+        promptCursorUTF16Offset = edit.cursorUTF16Offset
+        autocompleteSelection = 0
+        if case .website = candidate.kind {
+            autocompleteDismissed = false
+        } else {
+            autocompleteDismissed = true
+        }
         purposeFocused = true
     }
 

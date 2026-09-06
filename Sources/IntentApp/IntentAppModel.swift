@@ -9,7 +9,7 @@ protocol IntentOverlayPresenting: AnyObject {
     func showOverlay(animated: Bool)
     func hideOverlay(animated: Bool)
     func toggleOverlay()
-    func showSessionTimer(name: String, endsAt: Date)
+    func showSessionTimer(name: String, endsAt: Date, displaysEndTime: Bool)
     func hideSessionTimer()
 }
 
@@ -28,6 +28,7 @@ final class IntentAppModel: ObservableObject {
     @Published var pendingEndTimeRequest: PendingEndTimeRequest?
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
+    @Published var alwaysAllowedApps: [AllowedApp] = []
     @Published var schedules: [IntentSchedule] = []
     @Published var sessionSwitchWarning: SessionSwitchWarning?
     @Published var shortcutWarning: String?
@@ -49,6 +50,7 @@ final class IntentAppModel: ObservableObject {
     private(set) var profileDirectory = IntentProfilePaths.guestDirectory()
     private var store = IntentionStore()
     private var scheduleStore = IntentScheduleStore()
+    private let alwaysAllowedAppStore = AlwaysAllowedAppStore()
     private let cooldownStore = IntentionCooldownStore()
     private let zeroDriftStore = ZeroDriftStateStore()
     private let browserRulesStore = ActiveBrowserRulesStore()
@@ -109,7 +111,17 @@ final class IntentAppModel: ObservableObject {
         }
 
         do {
-            intentions = try store.load()
+            alwaysAllowedApps = try alwaysAllowedAppStore.load()
+        } catch {
+            alwaysAllowedApps = [AlwaysAllowedAppStore.finder]
+            errorMessage = "Intent could not load always-allowed apps: \(error)"
+        }
+
+        do {
+            intentions = AlwaysAllowedAppStore.applying(
+                alwaysAllowedApps,
+                to: try store.load()
+            )
             selectedID = selectedID ?? intentions.first?.id
             undoStack.removeAll()
             activeMoveUndoKeys.removeAll()
@@ -153,7 +165,7 @@ final class IntentAppModel: ObservableObject {
 
     func replaceWorkspace(intentions newIntentions: [Intention], schedules newSchedules: [IntentSchedule]) {
         guard !hasActiveSession else { return }
-        intentions = newIntentions
+        intentions = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: newIntentions)
         schedules = newSchedules
         selectedID = intentions.first?.id
         undoStack.removeAll()
@@ -169,6 +181,7 @@ final class IntentAppModel: ObservableObject {
     func save() {
         guard !hasActiveSession else { return }
         do {
+            intentions = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intentions)
             let namedIntentions = intentions.filter {
                 !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
@@ -179,10 +192,31 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
+    func isAlwaysAllowed(_ bundleIdentifier: String) -> Bool {
+        alwaysAllowedApps.contains { $0.bundleIdentifier == bundleIdentifier }
+    }
+
+    func toggleAlwaysAllowedApp(_ app: AllowedApp) {
+        guard !hasActiveSession else { return }
+        if isAlwaysAllowed(app.bundleIdentifier) {
+            alwaysAllowedApps.removeAll { $0.bundleIdentifier == app.bundleIdentifier }
+        } else {
+            alwaysAllowedApps.append(app)
+            intentions = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intentions)
+        }
+
+        do {
+            try alwaysAllowedAppStore.save(alwaysAllowedApps)
+            save()
+        } catch {
+            errorMessage = "Could not update always-allowed apps: \(error)"
+        }
+    }
+
     @discardableResult
     func createIntention(at position: GraphPoint) -> String {
         recordUndoSnapshot()
-        let intention = Intention(
+        let intention = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: Intention(
             name: "",
             icon: "target",
             colorHex: "#F5F5F7",
@@ -192,7 +226,7 @@ final class IntentAppModel: ObservableObject {
             startupActions: [],
             restrictions: .init(),
             graphPosition: position
-        )
+        ))
         intentions.append(intention)
         selectedID = intention.id
         save()
@@ -255,7 +289,7 @@ final class IntentAppModel: ObservableObject {
                 )
             }
 
-            imported.append(Intention(
+            imported.append(AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: Intention(
                 name: suggestion.name,
                 icon: "sparkles",
                 colorHex: "#F5F5F7",
@@ -269,7 +303,7 @@ final class IntentAppModel: ObservableObject {
                 frictionNodes: frictionNodes,
                 isLeisure: suggestion.isLeisure,
                 accessMode: suggestion.accessMode
-            ))
+            )))
             occupied.append(position)
         }
 
@@ -459,7 +493,7 @@ final class IntentAppModel: ObservableObject {
         }
 
         recordUndoSnapshot()
-        intentions.append(intention)
+        intentions.append(AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intention))
         selectedID = intention.id
         pendingPurposeSessionSave = nil
         save()
@@ -477,24 +511,24 @@ final class IntentAppModel: ObservableObject {
 
     @discardableResult
     func addDraftIntention(_ draft: Intention, at position: GraphPoint) -> String? {
+        var imported = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: draft)
         guard !hasActiveSession,
-              !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !draft.allowedApps.isEmpty else {
+              !imported.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !imported.allowedApps.isEmpty else {
             return nil
         }
 
-        let deltaX = position.x - draft.graphPosition.x
-        let deltaY = position.y - draft.graphPosition.y
-        var imported = draft
+        let deltaX = position.x - imported.graphPosition.x
+        let deltaY = position.y - imported.graphPosition.y
         imported.id = UUID().uuidString
         imported.graphPosition = position
-        imported.restrictionNodes = draft.restrictionNodes.map { node in
+        imported.restrictionNodes = imported.restrictionNodes.map { node in
             var moved = node
             moved.id = UUID().uuidString
             moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
             return moved
         }
-        imported.frictionNodes = draft.frictionNodes.map { node in
+        imported.frictionNodes = imported.frictionNodes.map { node in
             var moved = node
             moved.id = UUID().uuidString
             moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
@@ -502,6 +536,7 @@ final class IntentAppModel: ObservableObject {
         }
 
         recordUndoSnapshot()
+        imported = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: imported)
         intentions.append(imported)
         selectedID = imported.id
         save()
@@ -510,26 +545,27 @@ final class IntentAppModel: ObservableObject {
 
     @discardableResult
     func replaceIntention(id: String, with draft: Intention) -> Bool {
+        let normalizedDraft = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: draft)
         guard !hasActiveSession,
-              !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !draft.allowedApps.isEmpty,
+              !normalizedDraft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !normalizedDraft.allowedApps.isEmpty,
               let index = intentions.firstIndex(where: { $0.id == id }) else {
             return false
         }
 
         let existing = intentions[index]
-        let deltaX = existing.graphPosition.x - draft.graphPosition.x
-        let deltaY = existing.graphPosition.y - draft.graphPosition.y
-        var updated = draft
+        let deltaX = existing.graphPosition.x - normalizedDraft.graphPosition.x
+        let deltaY = existing.graphPosition.y - normalizedDraft.graphPosition.y
+        var updated = normalizedDraft
         updated.id = existing.id
         updated.graphPosition = existing.graphPosition
-        updated.restrictionNodes = draft.restrictionNodes.map { node in
+        updated.restrictionNodes = normalizedDraft.restrictionNodes.map { node in
             var moved = node
             moved.id = UUID().uuidString
             moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
             return moved
         }
-        updated.frictionNodes = draft.frictionNodes.map { node in
+        updated.frictionNodes = normalizedDraft.frictionNodes.map { node in
             var moved = node
             moved.id = UUID().uuidString
             moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
@@ -537,7 +573,7 @@ final class IntentAppModel: ObservableObject {
         }
 
         recordUndoSnapshot()
-        intentions[index] = updated
+        intentions[index] = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: updated)
         selectedID = id
         save()
         return true
@@ -762,7 +798,8 @@ final class IntentAppModel: ObservableObject {
         saveSchedules()
     }
 
-    func requestStart(_ intention: Intention) {
+    func requestStart(_ requestedIntention: Intention) {
+        let intention = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: requestedIntention)
         do {
             if let nextAllowedDate = try cooldownStore.nextAllowedDate(for: intention.id) {
                 cooldownExpirations[intention.id] = nextAllowedDate
@@ -1255,20 +1292,25 @@ final class IntentAppModel: ObservableObject {
         let now = Date()
         let timerEndDate = intention.timerMinutes.map { now.addingTimeInterval(TimeInterval($0 * 60)) }
         let clockEndDate = intention.endTimeDate(after: now)
-        let candidates = [timerEndDate, clockEndDate, runtimeEndDate].compactMap { $0 }
-        guard let endDate = candidates.min() else {
+        let candidates: [(date: Date, displaysEndTime: Bool)] = [
+            timerEndDate.map { ($0, false) },
+            clockEndDate.map { ($0, true) },
+            runtimeEndDate.map { ($0, true) }
+        ].compactMap { $0 }
+        guard let deadline = candidates.min(by: { $0.date < $1.date }) else {
             activeSessionEndsAt = nil
             sessionLimitTask = nil
             overlayPresenter?.hideSessionTimer()
             return
         }
 
-        let duration = max(0.1, endDate.timeIntervalSince(now))
-        activeSessionEndsAt = endDate
+        let duration = max(0.1, deadline.date.timeIntervalSince(now))
+        activeSessionEndsAt = deadline.date
         if let activeSessionEndsAt {
             overlayPresenter?.showSessionTimer(
                 name: intention.name,
-                endsAt: activeSessionEndsAt
+                endsAt: activeSessionEndsAt,
+                displaysEndTime: deadline.displaysEndTime
             )
         }
         sessionLimitTask = Task { @MainActor [weak self] in

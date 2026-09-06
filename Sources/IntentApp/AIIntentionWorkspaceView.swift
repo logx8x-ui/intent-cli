@@ -28,6 +28,7 @@ struct AIIntentionWorkspaceView: View {
     let request: AIWorkspaceRequest?
     let onFinalise: (Intention, String?) -> Bool
 
+    @EnvironmentObject private var model: IntentAppModel
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var history = AIWorkspaceSessionController()
     @State private var draft: Intention?
@@ -41,8 +42,12 @@ struct AIIntentionWorkspaceView: View {
     @State private var targetIntentionID: String?
     @State private var showHistory = false
     @State private var pendingDeleteID: String?
-    @State private var mentionQuery: String?
-    @FocusState private var promptFocused: Bool
+    @State private var promptFocused = false
+    @State private var promptHeight: CGFloat = 28
+    @State private var promptCursorUTF16Offset = 0
+    @State private var autocompleteSelection = 0
+    @State private var autocompleteDismissed = false
+    @State private var autocompleteWebsitesByBrowser: [String: [PurposeKnownWebsite]] = [:]
 
     private let service = IntentAIService()
 
@@ -56,7 +61,7 @@ struct AIIntentionWorkspaceView: View {
                         selection = nil
                         withAnimation(.easeOut(duration: 0.16)) {
                             showHistory = false
-                            mentionQuery = nil
+                            autocompleteDismissed = true
                         }
                     }
 
@@ -120,11 +125,27 @@ struct AIIntentionWorkspaceView: View {
         .task(id: request?.id) {
             generatePendingRequest()
         }
+        .onAppear {
+            autocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                intentions: existingIntentions
+            )
+        }
+        .onChange(of: promptFocused) { isFocused in
+            guard isFocused else { return }
+            autocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                intentions: existingIntentions
+            )
+        }
+        .onChange(of: autocompleteSourceSignature) { _ in
+            autocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                intentions: existingIntentions
+            )
+        }
         .onExitCommand {
             if showHistory {
                 showHistory = false
-            } else if mentionQuery != nil {
-                mentionQuery = nil
+            } else if promptAutocompleteState != nil {
+                autocompleteDismissed = true
             }
         }
         .confirmationDialog(
@@ -270,7 +291,7 @@ struct AIIntentionWorkspaceView: View {
                 .foregroundStyle(GraphTheme.editBlue)
             Text("What intention would you like to build today?")
                 .font(.system(size: 24, weight: .medium))
-            Text("Describe one outcome, or type @ to revise an existing intention.")
+            Text("Describe one outcome, or type * to revise an existing intention.")
                 .font(.system(size: 12))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
                 .multilineTextAlignment(.center)
@@ -525,26 +546,60 @@ struct AIIntentionWorkspaceView: View {
 
     private var bottomComposer: some View {
         VStack(spacing: 8) {
-            if let mentionQuery {
-                mentionTypeahead(query: mentionQuery)
+            if let state = promptAutocompleteState {
+                PromptAutocompleteMenu(
+                    state: state,
+                    selectedIndex: autocompleteSelection,
+                    colorScheme: colorScheme,
+                    accent: GraphTheme.editBlue,
+                    catalog: catalog,
+                    intentions: existingIntentions,
+                    onSelect: { index in
+                        autocompleteSelection = index
+                        acceptPromptAutocomplete()
+                    }
+                )
             }
 
             HStack(spacing: 10) {
                 Image(systemName: "plus")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(GraphTheme.muted(colorScheme))
-                TextField(
-                    draft == nil
-                        ? "What intention would you like to build today?"
-                        : "Add or change something — type @ to target an intention",
-                    text: $prompt
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .focused($promptFocused)
-                .onSubmit(submitPrompt)
-                .onChange(of: prompt) { value in
-                    mentionQuery = AIIntentionMentionResolver.extractAtQuery(from: value)
+                ZStack(alignment: .leading) {
+                    if prompt.isEmpty {
+                        Text(
+                            draft == nil
+                                ? "What intention would you like to build today?"
+                                : "Add or change something — type * to target an intention"
+                        )
+                        .font(.system(size: 13))
+                        .foregroundStyle(GraphTheme.muted(colorScheme))
+                        .allowsHitTesting(false)
+                    }
+                    PurposePromptEditor(
+                        text: $prompt,
+                        measuredHeight: $promptHeight,
+                        isFocused: $promptFocused,
+                        cursorUTF16Offset: $promptCursorUTF16Offset,
+                        intentions: existingIntentions,
+                        apps: promptApps,
+                        accessMode: draft?.accessMode ?? .whitelist,
+                        hasAutocomplete: promptAutocompleteState != nil,
+                        colorScheme: colorScheme,
+                        onMoveAutocomplete: movePromptAutocomplete,
+                        onAcceptAutocomplete: acceptPromptAutocomplete,
+                        onDismissAutocomplete: { autocompleteDismissed = true },
+                        onSubmit: submitPrompt,
+                        minimumHeight: 28,
+                        maximumHeight: 28,
+                        fontSize: 13,
+                        verticalInset: 4
+                    )
+                    .frame(height: 28)
+                }
+                .onChange(of: prompt) { _ in
+                    autocompleteSelection = 0
+                    autocompleteDismissed = false
                 }
                 if isGenerating {
                     ProgressView().controlSize(.small)
@@ -576,30 +631,50 @@ struct AIIntentionWorkspaceView: View {
         .padding(.bottom, 18)
     }
 
-    private func mentionTypeahead(query: String) -> some View {
-        let matches = AIIntentionMentionResolver.typeahead(query: query, intentions: existingIntentions).prefix(6)
-        return VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(matches)) { intention in
-                Button {
-                    insertMention(intention)
-                } label: {
-                    HStack(spacing: 10) {
-                        appPreview(for: intention)
-                        Text(intention.name)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(GraphTheme.text(colorScheme))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+    private var promptApps: [AllowedApp] {
+        catalog.map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
+    }
+
+    private var autocompleteSourceSignature: [String] {
+        existingIntentions.map { intention in
+            "\(intention.id):\(intention.name):\(intention.allowedWebsites.map(\.resourceID).joined(separator: ","))"
         }
-        .padding(6)
-        .frame(maxWidth: 420, alignment: .leading)
-        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 14)
+    }
+
+    private var promptAutocompleteState: PromptAutocompleteState? {
+        guard !autocompleteDismissed else { return nil }
+        return PromptAutocompleteEngine.state(
+            for: prompt,
+            cursorUTF16Offset: promptCursorUTF16Offset,
+            apps: promptApps,
+            intentions: existingIntentions,
+            websitesByBrowser: autocompleteWebsitesByBrowser
+        )
+    }
+
+    private func movePromptAutocomplete(_ delta: Int) {
+        let count = promptAutocompleteState?.candidates.count ?? 0
+        guard count > 0 else { return }
+        autocompleteSelection = (autocompleteSelection + delta + count) % count
+    }
+
+    private func acceptPromptAutocomplete() {
+        guard let state = promptAutocompleteState,
+              state.candidates.indices.contains(autocompleteSelection) else { return }
+        let candidate = state.candidates[autocompleteSelection]
+        let edit = PromptAutocompleteEngine.applying(candidate, to: prompt, state: state)
+        prompt = edit.text
+        promptCursorUTF16Offset = edit.cursorUTF16Offset
+        autocompleteSelection = 0
+        promptFocused = true
+
+        if case .intention(let id) = candidate.kind,
+           let intention = existingIntentions.first(where: { $0.id == id }) {
+            targetIntentionID = id
+            draft = intention
+            history.recordTargetChange(id)
+            history.recordDraftEdit(intention)
+        }
     }
 
     private var finaliseButton: some View {
@@ -612,7 +687,7 @@ struct AIIntentionWorkspaceView: View {
             }
             if let targetIntentionID,
                existingIntentions.first(where: { $0.id == targetIntentionID }) == nil {
-                errorMessage = "That intention no longer exists. Start a new draft or choose another @ mention."
+                errorMessage = "That intention no longer exists. Start a new draft or choose another * mention."
                 return
             }
             let finalDraft = draft
@@ -705,21 +780,6 @@ struct AIIntentionWorkspaceView: View {
         history.recordDraftEdit(draft)
     }
 
-    private func insertMention(_ intention: Intention) {
-        guard let atIndex = prompt.lastIndex(of: "@") else { return }
-        let prefix = prompt[..<atIndex]
-        let token = AIIntentionMentionResolver.encodeMention(
-            displayName: intention.name,
-            intentionID: intention.id
-        )
-        prompt = prefix + token + " "
-        mentionQuery = nil
-        targetIntentionID = intention.id
-        draft = intention
-        history.recordTargetChange(intention.id)
-        history.recordDraftEdit(intention)
-    }
-
     private func beginNewDraft() {
         history.startNewDraft()
         draft = nil
@@ -733,7 +793,9 @@ struct AIIntentionWorkspaceView: View {
 
     private func resume(_ session: AIWorkspaceSession) {
         history.resume(id: session.id)
-        draft = session.draft
+        draft = session.draft.map {
+            AlwaysAllowedAppStore.applying(model.alwaysAllowedApps, to: $0)
+        }
         targetIntentionID = session.targetIntentionID
         displayedPrompt = session.messages.last(where: { $0.role == .user })?.content ?? ""
         assistantSummary = session.messages.last(where: { $0.role == .assistant })?.content ?? ""
@@ -747,7 +809,6 @@ struct AIIntentionWorkspaceView: View {
         guard !value.isEmpty, !isGenerating else { return }
         prompt = ""
         promptFocused = false
-        mentionQuery = nil
 
         let resolution = history.resolveTarget(
             for: value,
@@ -780,8 +841,12 @@ struct AIIntentionWorkspaceView: View {
         _ = history.ensureActiveSession()
         targetIntentionID = request.targetIntentionID
         if let currentIntention = request.currentIntention {
-            draft = currentIntention
-            history.recordDraftEdit(currentIntention)
+            let normalized = AlwaysAllowedAppStore.applying(
+                model.alwaysAllowedApps,
+                to: currentIntention
+            )
+            draft = normalized
+            history.recordDraftEdit(normalized)
             history.recordTargetChange(request.targetIntentionID)
         }
         history.recordUserPrompt(request.prompt, draft: draft, targetIntentionID: targetIntentionID)
@@ -792,6 +857,7 @@ struct AIIntentionWorkspaceView: View {
         let installedApps = catalog.map {
             AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
         }
+        let alwaysAllowedApps = model.alwaysAllowedApps
         let aiPrompt = AIIntentionMentionResolver.promptForAI(
             stored: description,
             intentions: existingIntentions
@@ -811,7 +877,10 @@ struct AIIntentionWorkspaceView: View {
                 guard let suggestion = plan.intentions.first else {
                     throw IntentAIError.invalidResponse
                 }
-                var intention = Self.makeDraft(from: suggestion, apps: installedApps)
+                var intention = AlwaysAllowedAppStore.applying(
+                    alwaysAllowedApps,
+                    to: Self.makeDraft(from: suggestion, apps: installedApps)
+                )
                 if let current = draft {
                     intention.id = current.id
                     intention.icon = current.icon
@@ -855,12 +924,12 @@ struct AIIntentionWorkspaceView: View {
     ) -> String {
         if isUpdate {
             if let timer = suggestion.restrictions.first(where: { $0.kind == .timer }) {
-                return "Updated @\(targetName) with a \(timer.durationMinutes)-minute timer."
+                return "Updated * \(targetName) with a \(timer.durationMinutes)-minute timer."
             }
             if suggestion.frictions.contains(where: { $0.kind == .typedPhrase }) {
-                return "Updated @\(targetName) with a typed phrase friction."
+                return "Updated * \(targetName) with a typed phrase friction."
             }
-            return "Updated @\(targetName)."
+            return "Updated * \(targetName)."
         }
         return "Drafted \(suggestion.name)."
     }

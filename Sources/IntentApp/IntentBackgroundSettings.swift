@@ -225,6 +225,10 @@ struct IntentSettingsView: View {
 
             Divider()
 
+            AlwaysAllowedAppsSettingsSection()
+
+            Divider()
+
             IntentAccountSettingsSection()
 
             Divider()
@@ -372,6 +376,163 @@ struct IntentSettingsView: View {
             onBackgroundChanged()
         } catch {
             importError = "Intent could not save that image."
+        }
+    }
+}
+
+private struct AlwaysAllowedAppsSettingsSection: View {
+    @EnvironmentObject private var model: IntentAppModel
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var query = ""
+
+    private var matches: [InstalledApp] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        return model.installedApps
+            .filter { $0.matchesSearch(trimmed) && !model.isAlwaysAllowed($0.bundleIdentifier) }
+            .prefix(6)
+            .map { $0 }
+    }
+
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(minimum: 38), spacing: 8), count: 6)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("ALWAYS ALLOWED")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(1.1)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+
+            Text("These apps are automatically allowed in every current and future intention.")
+                .font(.caption2)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+
+            ForEach(model.alwaysAllowedApps) { app in
+                HStack(spacing: 8) {
+                    appIcon(app)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(app.name).font(.system(size: 12, weight: .medium))
+                        Text(app.bundleIdentifier)
+                            .font(.caption2)
+                            .foregroundStyle(GraphTheme.muted(colorScheme))
+                    }
+                    Spacer()
+                    Button {
+                        model.toggleAlwaysAllowedApp(app)
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop always allowing \(app.name)")
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 40)
+                .background(Color.green.opacity(0.11))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green, lineWidth: 1.7))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .help(presetHelp)
+            }
+
+            TextField("Search apps to always allow", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
+                    guard let app = matches.first else { return }
+                    add(app)
+                }
+
+            if !matches.isEmpty {
+                VStack(spacing: 2) {
+                    ForEach(matches) { app in
+                        Button { add(app) } label: {
+                            HStack(spacing: 8) {
+                                Image(nsImage: app.icon)
+                                    .resizable()
+                                    .frame(width: 20, height: 20)
+                                Text(app.name)
+                                Spacer()
+                                Text(app.bundleIdentifier)
+                                    .font(.caption2)
+                                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 34)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(GraphTheme.surface(colorScheme))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                }
+            }
+
+            Text("MOST USED APPS")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(AppCatalog.mostUsed(in: model.installedApps)) { app in
+                    let selected = model.isAlwaysAllowed(app.bundleIdentifier)
+                    Button {
+                        model.toggleAlwaysAllowedApp(.init(
+                            name: app.name,
+                            bundleIdentifier: app.bundleIdentifier
+                        ))
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            Image(nsImage: app.icon)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .padding(5)
+                            if selected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, Color.green)
+                                    .offset(x: 3, y: -3)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(1, contentMode: .fit)
+                        .background(GraphTheme.surface(colorScheme))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(selected ? Color.green : GraphTheme.stroke(colorScheme), lineWidth: selected ? 2 : 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .help(selected ? presetHelp : "Always allow \(app.name)")
+                }
+            }
+
+            Text("You can also Shift-click an app in an intention's Allowed Apps or Most Used Apps section.")
+                .font(.caption2)
+                .foregroundStyle(GraphTheme.muted(colorScheme))
+        }
+    }
+
+    private var presetHelp: String {
+        "GREEN MEANS: This app is always allowed in every intention. Shift-click to toggle it."
+    }
+
+    private func add(_ app: InstalledApp) {
+        model.toggleAlwaysAllowedApp(.init(name: app.name, bundleIdentifier: app.bundleIdentifier))
+        query = ""
+    }
+
+    @ViewBuilder
+    private func appIcon(_ app: AllowedApp) -> some View {
+        if let installed = model.installedApps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+            Image(nsImage: installed.icon)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 23, height: 23)
+        } else {
+            Image(systemName: "app")
+                .frame(width: 23, height: 23)
         }
     }
 }

@@ -11,7 +11,9 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private var sessionTimerPanel: NSPanel?
     private var sessionTimerName = ""
     private var sessionTimerEndsAt = Date()
+    private var sessionTimerDisplaysEndTime = false
     private var sessionTimerCollapsed = false
+    private var sessionTimerMoveObserver: NSObjectProtocol?
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
 
@@ -115,11 +117,12 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         return didOpen
     }
 
-    func showSessionTimer(name: String, endsAt: Date) {
+    func showSessionTimer(name: String, endsAt: Date, displaysEndTime: Bool) {
         let timerPanel = sessionTimerPanel ?? makeSessionTimerPanel()
         sessionTimerPanel = timerPanel
         sessionTimerName = name
         sessionTimerEndsAt = endsAt
+        sessionTimerDisplaysEndTime = displaysEndTime
         sessionTimerCollapsed = false
         installSessionTimerContent()
 
@@ -128,12 +131,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             ?? NSScreen.screens.first
         guard let screen else { return }
         let size = sessionTimerSize
-        let frame = NSRect(
-            x: screen.visibleFrame.midX - size.width / 2,
-            y: screen.visibleFrame.maxY - size.height - 12,
-            width: size.width,
-            height: size.height
-        )
+        let frame = restoredSessionTimerFrame(size: size, defaultScreen: screen)
         timerPanel.setFrame(frame, display: true)
         timerPanel.orderFrontRegardless()
     }
@@ -191,22 +189,35 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             backing: .buffered,
             defer: false
         )
-        panel.level = .statusBar
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.ignoresMouseEvents = false
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
+        panel.becomesKeyOnlyIfNeeded = true
         panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        sessionTimerMoveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self, weak panel] _ in
+            Task { @MainActor [weak self, weak panel] in
+                guard let self, let panel else { return }
+                self.persistSessionTimerOrigin(panel.frame.origin)
+            }
+        }
         return panel
     }
 
     private var sessionTimerSize: NSSize {
         sessionTimerCollapsed
-            ? NSSize(width: 38, height: 30)
-            : NSSize(width: 204, height: 56)
+            ? NSSize(width: 76, height: 30)
+            : (sessionTimerDisplaysEndTime
+                ? NSSize(width: 230, height: 68)
+                : NSSize(width: 204, height: 56))
     }
 
     private func installSessionTimerContent() {
@@ -214,6 +225,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             rootView: SessionTimerView(
                 name: sessionTimerName,
                 endsAt: sessionTimerEndsAt,
+                displaysEndTime: sessionTimerDisplaysEndTime,
                 isCollapsed: sessionTimerCollapsed,
                 onToggleCollapsed: { [weak self] in
                     self?.toggleSessionTimerCollapsed()
@@ -241,11 +253,38 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         }
         panel.setFrame(frame, display: true, animate: true)
     }
+
+    private func restoredSessionTimerFrame(size: NSSize, defaultScreen: NSScreen) -> NSRect {
+        let defaults = UserDefaults.standard
+        let hasStoredOrigin = defaults.object(forKey: "intentSessionTimerX") != nil
+            && defaults.object(forKey: "intentSessionTimerY") != nil
+        let proposedOrigin = hasStoredOrigin
+            ? NSPoint(
+                x: defaults.double(forKey: "intentSessionTimerX"),
+                y: defaults.double(forKey: "intentSessionTimerY")
+            )
+            : NSPoint(
+                x: defaultScreen.visibleFrame.midX - size.width / 2,
+                y: defaultScreen.visibleFrame.maxY - size.height - 12
+            )
+        var frame = NSRect(origin: proposedOrigin, size: size)
+        let visibleFrame = NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) })?.visibleFrame
+            ?? defaultScreen.visibleFrame
+        frame.origin.x = min(max(frame.origin.x, visibleFrame.minX), visibleFrame.maxX - size.width)
+        frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), visibleFrame.maxY - size.height)
+        return frame
+    }
+
+    private func persistSessionTimerOrigin(_ origin: NSPoint) {
+        UserDefaults.standard.set(origin.x, forKey: "intentSessionTimerX")
+        UserDefaults.standard.set(origin.y, forKey: "intentSessionTimerY")
+    }
 }
 
 private struct SessionTimerView: View {
     let name: String
     let endsAt: Date
+    let displaysEndTime: Bool
     let isCollapsed: Bool
     let onToggleCollapsed: () -> Void
 
@@ -255,38 +294,68 @@ private struct SessionTimerView: View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             Group {
                 if isCollapsed {
-                    Button(action: onToggleCollapsed) {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(width: 38, height: 30)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show timer")
-                } else {
-                    HStack(spacing: 10) {
-                        Image(systemName: "timer")
-                            .font(.system(size: 14, weight: .semibold))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(name)
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Text(remainingText(at: context.date))
-                                .font(.system(size: 17, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
+                    HStack(spacing: 0) {
+                        ZStack {
+                            Image(systemName: "line.3.horizontal")
+                                .font(.system(size: 11, weight: .semibold))
+                                .allowsHitTesting(false)
+                            SessionTimerDragRegion()
                         }
-                        Spacer(minLength: 0)
+                        .frame(width: 40, height: 30)
+                        Button(action: onToggleCollapsed) {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                                .frame(width: 36, height: 30)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show timer")
+                    }
+                    .frame(width: 76, height: 30)
+                } else {
+                    HStack(spacing: 0) {
+                        ZStack {
+                            HStack(spacing: 10) {
+                                Image(systemName: displaysEndTime ? "clock.badge.checkmark" : "timer")
+                                    .font(.system(size: 14, weight: .semibold))
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(name)
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    if displaysEndTime {
+                                        Text("Ends at \(endsAt.formatted(date: .omitted, time: .shortened))")
+                                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        Text("\(remainingDurationText(at: context.date)) left")
+                                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                    } else {
+                                        Text(remainingClockText(at: context.date))
+                                            .font(.system(size: 17, weight: .semibold, design: .rounded))
+                                            .monospacedDigit()
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.leading, 15)
+                            .padding(.trailing, 4)
+                            .allowsHitTesting(false)
+                            SessionTimerDragRegion()
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         Button(action: onToggleCollapsed) {
                             Image(systemName: "chevron.up")
                                 .font(.system(size: 10, weight: .bold))
-                                .frame(width: 24, height: 28)
+                                .frame(width: 32, height: 28)
                         }
                         .buttonStyle(.plain)
                         .help("Hide timer")
                     }
-                    .padding(.leading, 15)
-                    .padding(.trailing, 8)
-                    .frame(width: 204, height: 56)
+                    .padding(.trailing, 4)
+                    .frame(
+                        width: displaysEndTime ? 230 : 204,
+                        height: displaysEndTime ? 68 : 56
+                    )
                 }
             }
             .foregroundStyle(Color.primary)
@@ -300,7 +369,7 @@ private struct SessionTimerView: View {
         .preferredColorScheme(appearance == "light" ? .light : .dark)
     }
 
-    private func remainingText(at date: Date) -> String {
+    private func remainingClockText(at date: Date) -> String {
         let remaining = max(0, Int(endsAt.timeIntervalSince(date).rounded(.up)))
         let hours = remaining / 3_600
         let minutes = (remaining % 3_600) / 60
@@ -309,6 +378,33 @@ private struct SessionTimerView: View {
             return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
         }
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func remainingDurationText(at date: Date) -> String {
+        let remaining = max(0, Int(endsAt.timeIntervalSince(date).rounded(.up)))
+        let hours = remaining / 3_600
+        let minutes = (remaining % 3_600) / 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        if minutes > 0 {
+            return "\(minutes)m"
+        }
+        return "<1m"
+    }
+}
+
+private struct SessionTimerDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        DragView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class DragView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
     }
 }
 

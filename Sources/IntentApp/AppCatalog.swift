@@ -25,6 +25,37 @@ struct InstalledApp: Identifiable, Hashable {
 }
 
 enum AppCatalog {
+    static let preferredBundleIdentifiers = [
+        "com.apple.finder",
+        "com.apple.MobileSMS",
+        "org.mozilla.firefox",
+        "com.google.Chrome",
+        "com.apple.mail",
+        "com.apple.iCal",
+        "com.apple.Notes",
+        "com.apple.reminders",
+        "com.openai.codex",
+        "com.spotify.client",
+        "net.ankiweb.dtop",
+        "com.todesktop.230313mzl4w4u92",
+        "com.microsoft.VSCode",
+        "com.rstudio.desktop",
+        "io.remnote",
+        "com.remnote.desktop",
+        "net.whatsapp.WhatsApp",
+        "com.hnc.Discord",
+        "com.tinyspeck.slackmacgap",
+        "us.zoom.xos"
+    ]
+
+    static func mostUsed(in catalog: [InstalledApp]) -> [InstalledApp] {
+        let appsByIdentifier = Dictionary(
+            catalog.map { ($0.bundleIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return preferredBundleIdentifiers.compactMap { appsByIdentifier[$0] }
+    }
+
     static func load() -> [InstalledApp] {
         let roots = [
             URL(fileURLWithPath: "/Applications", isDirectory: true),
@@ -37,6 +68,11 @@ enum AppCatalog {
         var seen = Set<String>()
         var apps: [InstalledApp] = []
         var candidateURLs: [URL] = []
+
+        candidateURLs.append(URL(
+            fileURLWithPath: "/System/Library/CoreServices/Finder.app",
+            isDirectory: true
+        ))
 
         for root in roots {
             guard let enumerator = FileManager.default.enumerator(

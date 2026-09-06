@@ -104,6 +104,22 @@ public final class PurposeWebsiteHistoryStore {
             }
     }
 
+    public static func frequentKnownWebsites(
+        browserBundleIdentifier: String,
+        limit: Int = 24
+    ) -> [PurposeKnownWebsite] {
+        PurposeWebsiteHistoryStore(browserBundleIdentifier: browserBundleIdentifier)
+            .loadEntries()
+            .sorted {
+                if $0.visitCount != $1.visitCount { return $0.visitCount > $1.visitCount }
+                return $0.lastVisitedAt > $1.lastVisitedAt
+            }
+            .prefix(max(0, limit))
+            .map {
+                PurposeKnownWebsite(name: $0.name, value: $0.value, aliases: $0.aliases)
+            }
+    }
+
     private func write(entries: [PurposeWebsiteHistoryEntry]) throws {
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),

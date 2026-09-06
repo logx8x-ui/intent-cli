@@ -31,6 +31,12 @@ struct IntentGraphView: View {
     @State private var showSettings = false
     @State private var showRecordingMode = false
     @State private var aiPrompt = ""
+    @State private var aiPromptFocused = false
+    @State private var aiPromptHeight: CGFloat = 28
+    @State private var aiPromptCursorUTF16Offset = 0
+    @State private var aiAutocompleteSelection = 0
+    @State private var aiAutocompleteDismissed = false
+    @State private var aiAutocompleteWebsitesByBrowser: [String: [PurposeKnownWebsite]] = [:]
     @State private var aiWorkspaceRequest: AIWorkspaceRequest?
     @State private var pendingPlacementID: String?
     @State private var showQuickGuide = false
@@ -45,7 +51,6 @@ struct IntentGraphView: View {
     @State private var pagePosition: CGFloat = OverlayPage.desktop.position
     @State private var warningShakeCount: CGFloat = 0
     @FocusState private var welcomeTitleFocused: Bool
-    @FocusState private var aiPromptFocused: Bool
 
     private let minimumScale: CGFloat = 0.35
     private let maximumScale: CGFloat = 2.35
@@ -238,6 +243,9 @@ struct IntentGraphView: View {
             .modifier(ShakeEffect(shakes: warningShakeCount))
             .onAppear {
                 pagePosition = currentPage.position
+                aiAutocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                    intentions: model.intentions
+                )
                 if !didCompleteOnboarding {
                     showQuickGuide = true
                 }
@@ -247,6 +255,19 @@ struct IntentGraphView: View {
                     leaveEditMode()
                 }
                 showSettings = false
+            }
+            .onChange(of: aiPromptFocused) { isFocused in
+                guard isFocused else { return }
+                aiAutocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                    intentions: model.intentions
+                )
+            }
+            .onChange(of: model.intentions.map { intention in
+                "\(intention.id):\(intention.name):\(intention.allowedWebsites.map(\.resourceID).joined(separator: ","))"
+            }) { _ in
+                aiAutocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
+                    intentions: model.intentions
+                )
             }
             .onChange(of: model.sessionSwitchWarning?.id) { warningID in
                 guard let warningID else { return }
@@ -1019,42 +1040,123 @@ struct IntentGraphView: View {
     }
 
     private var aiPromptBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(GraphTheme.muted(colorScheme))
-
-            TextField("What intention would you like to build today?", text: $aiPrompt)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .focused($aiPromptFocused)
-                .onSubmit(submitAIPrompt)
-
-            Button(action: submitAIPrompt) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            ? GraphTheme.muted(colorScheme).opacity(0.35)
-                            : GraphTheme.text(colorScheme),
-                        in: Circle()
-                    )
+        VStack(spacing: 8) {
+            if let state = aiPromptAutocompleteState {
+                PromptAutocompleteMenu(
+                    state: state,
+                    selectedIndex: aiAutocompleteSelection,
+                    colorScheme: colorScheme,
+                    accent: GraphTheme.editBlue,
+                    catalog: model.installedApps,
+                    intentions: model.intentions,
+                    onSelect: { index in
+                        aiAutocompleteSelection = index
+                        acceptAIPromptAutocomplete()
+                    }
+                )
             }
-            .buttonStyle(.plain)
-            .disabled(aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .help("Build with Intent AI")
+
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                ZStack(alignment: .leading) {
+                    if aiPrompt.isEmpty {
+                        Text("What intention would you like to build today?")
+                            .font(.system(size: 13))
+                            .foregroundStyle(GraphTheme.muted(colorScheme))
+                            .allowsHitTesting(false)
+                    }
+                    PurposePromptEditor(
+                        text: $aiPrompt,
+                        measuredHeight: $aiPromptHeight,
+                        isFocused: $aiPromptFocused,
+                        cursorUTF16Offset: $aiPromptCursorUTF16Offset,
+                        intentions: model.intentions,
+                        apps: aiPromptApps,
+                        accessMode: .whitelist,
+                        hasAutocomplete: aiPromptAutocompleteState != nil,
+                        colorScheme: colorScheme,
+                        onMoveAutocomplete: moveAIPromptAutocomplete,
+                        onAcceptAutocomplete: acceptAIPromptAutocomplete,
+                        onDismissAutocomplete: { aiAutocompleteDismissed = true },
+                        onSubmit: submitAIPrompt,
+                        minimumHeight: 28,
+                        maximumHeight: 28,
+                        fontSize: 13,
+                        verticalInset: 4
+                    )
+                    .frame(height: 28)
+                }
+                .onChange(of: aiPrompt) { _ in
+                    aiAutocompleteSelection = 0
+                    aiAutocompleteDismissed = false
+                }
+
+                Button(action: submitAIPrompt) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                ? GraphTheme.muted(colorScheme).opacity(0.35)
+                                : GraphTheme.text(colorScheme),
+                            in: Circle()
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Build with Intent AI")
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 8)
+            .frame(maxWidth: 560)
+            .frame(height: 48)
+            .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
+            .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 16, y: 8)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 8)
-        .frame(maxWidth: 560)
-        .frame(height: 48)
-        .adaptiveGlassPanel(colorScheme: colorScheme, cornerRadius: 24)
-        .shadow(color: GraphTheme.glassShadow(colorScheme), radius: 16, y: 8)
         .padding(.horizontal, 96)
         .padding(.bottom, 18)
         .disabled(showQuickGuide)
+    }
+
+    private var aiPromptApps: [AllowedApp] {
+        model.installedApps.map {
+            AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier)
+        }
+    }
+
+    private var aiPromptAutocompleteState: PromptAutocompleteState? {
+        guard !aiAutocompleteDismissed else { return nil }
+        return PromptAutocompleteEngine.state(
+            for: aiPrompt,
+            cursorUTF16Offset: aiPromptCursorUTF16Offset,
+            apps: aiPromptApps,
+            intentions: model.intentions,
+            websitesByBrowser: aiAutocompleteWebsitesByBrowser
+        )
+    }
+
+    private func moveAIPromptAutocomplete(_ delta: Int) {
+        let count = aiPromptAutocompleteState?.candidates.count ?? 0
+        guard count > 0 else { return }
+        aiAutocompleteSelection = (aiAutocompleteSelection + delta + count) % count
+    }
+
+    private func acceptAIPromptAutocomplete() {
+        guard let state = aiPromptAutocompleteState,
+              state.candidates.indices.contains(aiAutocompleteSelection) else { return }
+        let edit = PromptAutocompleteEngine.applying(
+            state.candidates[aiAutocompleteSelection],
+            to: aiPrompt,
+            state: state
+        )
+        aiPrompt = edit.text
+        aiPromptCursorUTF16Offset = edit.cursorUTF16Offset
+        aiAutocompleteSelection = 0
+        aiPromptFocused = true
     }
 
     private func submitAIPrompt() {

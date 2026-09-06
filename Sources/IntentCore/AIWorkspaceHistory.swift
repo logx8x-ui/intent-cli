@@ -220,7 +220,7 @@ public enum AIIntentionMention: Equatable {
 }
 
 public enum AIIntentionMentionResolver {
-    public static let tokenPattern = #"@\[([^\]]+)\]\(([0-9a-fA-F-]{36}|[A-Za-z0-9._-]+)\)"#
+    public static let tokenPattern = #"[@*]\[([^\]]+)\]\(([0-9a-fA-F-]{36}|[A-Za-z0-9._-]+)\)"#
 
     public static func mentions(in text: String) -> [(range: Range<String.Index>, intentionID: String, displayName: String)] {
         guard let regex = try? NSRegularExpression(pattern: tokenPattern) else { return [] }
@@ -237,7 +237,7 @@ public enum AIIntentionMentionResolver {
     }
 
     public static func encodeMention(displayName: String, intentionID: String) -> String {
-        "@[\(displayName)](\(intentionID))"
+        "*[\(displayName)](\(intentionID))"
     }
 
     public static func resolvePrimaryTarget(
@@ -260,8 +260,8 @@ public enum AIIntentionMentionResolver {
             return .missing(intentionID: first.intentionID, displayName: first.displayName)
         }
 
-        let queryMatches = typeahead(query: extractAtQuery(from: text) ?? "", intentions: intentions)
-        if queryMatches.count > 1, text.contains("@") {
+        let queryMatches = typeahead(query: extractStarQuery(from: text) ?? "", intentions: intentions)
+        if queryMatches.count > 1, text.contains("*") {
             // Incomplete typeahead — not a finished mention.
             return nil
         }
@@ -271,7 +271,7 @@ public enum AIIntentionMentionResolver {
             .sorted { $0.name.count > $1.name.count }
             .filter { intention in
                 let escaped = NSRegularExpression.escapedPattern(for: intention.name)
-                let pattern = "(?<![\\p{L}\\p{N}])@?\(escaped)(?![\\p{L}\\p{N}])"
+                let pattern = "(?<![\\p{L}\\p{N}])\\*\\s*\(escaped)(?![\\p{L}\\p{N}])"
                 return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
             }
 
@@ -315,13 +315,26 @@ public enum AIIntentionMentionResolver {
         return query
     }
 
+    public static func extractStarQuery(from text: String) -> String? {
+        guard let markerIndex = text.lastIndex(of: "*") else { return nil }
+        let after = text[text.index(after: markerIndex)...]
+        if after.contains("]") { return nil }
+        if after.first == "[" { return nil }
+        let query = String(after)
+        if query.contains("\n")
+            || query.rangeOfCharacter(from: CharacterSet(charactersIn: ".,;:!?()[]{}")) != nil {
+            return nil
+        }
+        return query.trimmingCharacters(in: .whitespaces)
+    }
+
     public static func displayText(for stored: String, intentions: [Intention]) -> String {
         var result = stored
         for mention in mentions(in: stored).reversed() {
             if let intention = intentions.first(where: { $0.id == mention.intentionID }) {
-                result.replaceSubrange(mention.range, with: "@\(intention.name)")
+                result.replaceSubrange(mention.range, with: "* \(intention.name)")
             } else {
-                result.replaceSubrange(mention.range, with: "@\(mention.displayName)")
+                result.replaceSubrange(mention.range, with: "* \(mention.displayName)")
             }
         }
         return result
@@ -333,12 +346,12 @@ public enum AIIntentionMentionResolver {
             if let intention = intentions.first(where: { $0.id == mention.intentionID }) {
                 result.replaceSubrange(
                     mention.range,
-                    with: "@\(intention.name) [intention-id:\(intention.id)]"
+                    with: "* \(intention.name) [intention-id:\(intention.id)]"
                 )
             } else {
                 result.replaceSubrange(
                     mention.range,
-                    with: "@\(mention.displayName) [missing-intention-id:\(mention.intentionID)]"
+                    with: "* \(mention.displayName) [missing-intention-id:\(mention.intentionID)]"
                 )
             }
         }
