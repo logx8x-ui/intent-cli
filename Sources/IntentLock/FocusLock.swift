@@ -51,6 +51,20 @@ public enum FocusForegroundPolicy {
         ].contains(bundleIdentifier)
     }
 
+    public static func shouldRecoverAfterSpaceChange(
+        bundleIdentifier: String?,
+        accessMode: IntentionAccessMode,
+        controlledBundleIdentifiers: Set<String>
+    ) -> Bool {
+        guard let bundleIdentifier else { return true }
+        switch accessMode {
+        case .whitelist:
+            return !controlledBundleIdentifiers.contains(bundleIdentifier)
+        case .blacklist:
+            return controlledBundleIdentifiers.contains(bundleIdentifier)
+        }
+    }
+
     public static func isMissionControlOverlay(
         ownerName: String?,
         layer: Int?,
@@ -94,6 +108,7 @@ public final class FocusLock {
     private var launchObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
+    private var pendingSpaceRecovery: DispatchWorkItem?
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
     private var lastPermittedApplication: NSRunningApplication?
@@ -517,8 +532,33 @@ public final class FocusLock {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.0)
+            self?.scheduleSpaceRecovery()
         }
+    }
+
+    private func scheduleSpaceRecovery() {
+        let transitionGrace: TimeInterval = 1.0
+        systemSwitcherGraceUntil = Date(timeIntervalSinceNow: transitionGrace)
+        pendingSpaceRecovery?.cancel()
+
+        let recovery = DispatchWorkItem { [weak self] in
+            guard let self, !self.isStopped else { return }
+            // Let the native Space animation finish, then make one decisive
+            // focus check. This bypasses system-UI grace that can otherwise be
+            // continually extended while Dock or WindowManager stays frontmost.
+            let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            guard FocusForegroundPolicy.shouldRecoverAfterSpaceChange(
+                bundleIdentifier: frontmostBundleIdentifier,
+                accessMode: self.spec.accessMode,
+                controlledBundleIdentifiers: self.spec.allowedBundleIdentifiers
+            ) else { return }
+            self.refocus(ignoreSystemTransitionGrace: true)
+        }
+        pendingSpaceRecovery = recovery
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + transitionGrace + 0.1,
+            execute: recovery
+        )
     }
 
     private func handleLaunched(_ app: NSRunningApplication) {
@@ -898,6 +938,8 @@ public final class FocusLock {
     }
 
     private func cleanup() {
+        pendingSpaceRecovery?.cancel()
+        pendingSpaceRecovery = nil
         allowedAppSwitcher.cancel()
         allowedBrowserTabSwitcher.cancel()
         focusTimer?.invalidate()

@@ -369,6 +369,30 @@ do {
         ),
         "A blank desktop should refocus to an allowed application after transition grace"
     )
+    try expect(
+        FocusForegroundPolicy.shouldRecoverAfterSpaceChange(
+            bundleIdentifier: "com.apple.WindowManager",
+            accessMode: .whitelist,
+            controlledBundleIdentifiers: ["org.mozilla.firefox"]
+        ),
+        "System UI should not indefinitely defer recovery after a Space transition"
+    )
+    try expect(
+        FocusForegroundPolicy.shouldRecoverAfterSpaceChange(
+            bundleIdentifier: "com.spotify.client",
+            accessMode: .whitelist,
+            controlledBundleIdentifiers: ["org.mozilla.firefox"]
+        ),
+        "An unallowed Space should recover to an allowed application"
+    )
+    try expect(
+        !FocusForegroundPolicy.shouldRecoverAfterSpaceChange(
+            bundleIdentifier: "org.mozilla.firefox",
+            accessMode: .whitelist,
+            controlledBundleIdentifiers: ["org.mozilla.firefox"]
+        ),
+        "An allowed Space should remain selected"
+    )
     let allowedClickBundles: Set<String> = ["org.mozilla.firefox"]
     try expect(
         FocusClickTargetPolicy.shouldAllow(
@@ -1628,6 +1652,20 @@ do {
         "A linked external event should not duplicate its local schedule"
     )
     try expect(display.contains { if case .external = $0 { return true }; return false }, "Merged display should keep unrelated events")
+
+    // MARK: Session timer
+    try expect(
+        SessionTimerFormatter.countdownText(seconds: 5 * 60) == "05:00",
+        "A five-minute timer should keep counting seconds instead of collapsing to 5m"
+    )
+    try expect(
+        SessionTimerFormatter.countdownText(seconds: 3_909) == "01:05:09",
+        "Session countdowns longer than an hour should show hours, minutes, and seconds"
+    )
+    try expect(
+        SessionTimerFormatter.countdownText(seconds: -1) == "00:00",
+        "A finished session countdown should stop at zero"
+    )
 
     // MARK: Zero Drift
     let zeroDriftStart = Date(timeIntervalSince1970: 1_800_000_000)

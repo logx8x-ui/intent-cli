@@ -13,7 +13,6 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private var sessionTimerEndsAt = Date()
     private var sessionTimerDisplaysEndTime = false
     private var sessionTimerCollapsed = false
-    private var sessionTimerMoveObserver: NSObjectProtocol?
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
 
@@ -131,7 +130,12 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             ?? NSScreen.screens.first
         guard let screen else { return }
         let size = sessionTimerSize
-        let frame = restoredSessionTimerFrame(size: size, defaultScreen: screen)
+        let frame = NSRect(
+            x: screen.visibleFrame.midX - size.width / 2,
+            y: screen.visibleFrame.maxY - size.height - 12,
+            width: size.width,
+            height: size.height
+        )
         timerPanel.setFrame(frame, display: true)
         timerPanel.orderFrontRegardless()
     }
@@ -199,16 +203,6 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         panel.becomesKeyOnlyIfNeeded = true
         panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        sessionTimerMoveObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification,
-            object: panel,
-            queue: .main
-        ) { [weak self, weak panel] _ in
-            Task { @MainActor [weak self, weak panel] in
-                guard let self, let panel else { return }
-                self.persistSessionTimerOrigin(panel.frame.origin)
-            }
-        }
         return panel
     }
 
@@ -254,31 +248,6 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         panel.setFrame(frame, display: true, animate: true)
     }
 
-    private func restoredSessionTimerFrame(size: NSSize, defaultScreen: NSScreen) -> NSRect {
-        let defaults = UserDefaults.standard
-        let hasStoredOrigin = defaults.object(forKey: "intentSessionTimerX") != nil
-            && defaults.object(forKey: "intentSessionTimerY") != nil
-        let proposedOrigin = hasStoredOrigin
-            ? NSPoint(
-                x: defaults.double(forKey: "intentSessionTimerX"),
-                y: defaults.double(forKey: "intentSessionTimerY")
-            )
-            : NSPoint(
-                x: defaultScreen.visibleFrame.midX - size.width / 2,
-                y: defaultScreen.visibleFrame.maxY - size.height - 12
-            )
-        var frame = NSRect(origin: proposedOrigin, size: size)
-        let visibleFrame = NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) })?.visibleFrame
-            ?? defaultScreen.visibleFrame
-        frame.origin.x = min(max(frame.origin.x, visibleFrame.minX), visibleFrame.maxX - size.width)
-        frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), visibleFrame.maxY - size.height)
-        return frame
-    }
-
-    private func persistSessionTimerOrigin(_ origin: NSPoint) {
-        UserDefaults.standard.set(origin.x, forKey: "intentSessionTimerX")
-        UserDefaults.standard.set(origin.y, forKey: "intentSessionTimerY")
-    }
 }
 
 private struct SessionTimerView: View {
@@ -325,7 +294,7 @@ private struct SessionTimerView: View {
                                     if displaysEndTime {
                                         Text("Ends at \(endsAt.formatted(date: .omitted, time: .shortened))")
                                             .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                        Text("\(remainingDurationText(at: context.date)) left")
+                                        Text("\(remainingClockText(at: context.date)) left")
                                             .font(.system(size: 10.5, weight: .medium, design: .rounded))
                                             .foregroundStyle(.secondary)
                                             .monospacedDigit()
@@ -370,28 +339,9 @@ private struct SessionTimerView: View {
     }
 
     private func remainingClockText(at date: Date) -> String {
-        let remaining = max(0, Int(endsAt.timeIntervalSince(date).rounded(.up)))
-        let hours = remaining / 3_600
-        let minutes = (remaining % 3_600) / 60
-        let seconds = remaining % 60
-        if hours > 0 {
-            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        }
-        return String(format: "%02d:%02d", minutes, seconds)
+        SessionTimerFormatter.countdownText(until: endsAt, now: date)
     }
 
-    private func remainingDurationText(at date: Date) -> String {
-        let remaining = max(0, Int(endsAt.timeIntervalSince(date).rounded(.up)))
-        let hours = remaining / 3_600
-        let minutes = (remaining % 3_600) / 60
-        if hours > 0 {
-            return "\(hours)h \(minutes)m"
-        }
-        if minutes > 0 {
-            return "\(minutes)m"
-        }
-        return "<1m"
-    }
 }
 
 private struct SessionTimerDragRegion: NSViewRepresentable {
