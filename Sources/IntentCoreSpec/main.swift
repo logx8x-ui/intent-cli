@@ -25,6 +25,46 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    let quickApps: [AllowedApp] = [.init(name: "Notes", bundleIdentifier: "com.apple.Notes"),
+        .init(name: "Chrome", bundleIdentifier: "com.google.Chrome"),
+        .init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")]
+    let quickSnapshots = ["com.google.Chrome", "org.mozilla.firefox"].map { browser in
+        BrowserTabSnapshot(browserBundleIdentifier: browser, tabs: [
+            .init(id: 7, windowID: 1, index: 0, title: "Work", url: "https://example.org/work", active: true),
+            .init(id: 8, windowID: 1, index: 1, title: "Duplicate", url: "https://example.org/work", active: false),
+            .init(id: 9, windowID: 1, index: 2, title: "Settings", url: "about:preferences", active: false)])
+    }
+    var quick = QuickSelection()
+    quick.toggleApp("com.apple.Notes", snapshots: quickSnapshots)
+    quick.toggleApp("com.google.Chrome", snapshots: quickSnapshots)
+    try expect(quick.tabs.count == 2, "Browser selection includes website tabs, not privileged browser pages")
+    quick.toggleTab(.init(browser: "com.google.Chrome", id: 8))
+    quick.toggleTab(.init(browser: "org.mozilla.firefox", id: 7))
+    try expect(quick.tabs.count == 2 && quick.apps.count == 3, "Tab IDs are scoped per browser and select their browser")
+    let quickIntention = try quick.makeIntention(apps: quickApps, snapshots: quickSnapshots)
+    try expect(quickIntention.selectionOnly && quickIntention.allowedWebsites.count == 2, "Quick Focus keeps browser ownership")
+    try expect(IntentionStartupPlanner.steps(for: quickIntention).isEmpty, "Quick Focus reuses running resources without opening duplicate tabs")
+    try expect(AlwaysAllowedAppStore.applying([.init(name: "Music", bundleIdentifier: "com.apple.Music")], to: quickIntention).allowedApps.count == 3,
+               "Always Allowed must not silently expand green selections")
+    let quickRoundTrip = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(quickIntention))
+    try expect(quickRoundTrip.selectionOnly, "Saved Quick Focus preserves selection-only behavior")
+    let quickRules = ActiveBrowserRules(active: true, allowedWebsites: [], selectedTabIDsByBrowser: quick.tabIDsByBrowser,
+                                       blockTabSwitching: true, blockNavigation: true, blockNewTabs: true)
+    let decodedQuickRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: JSONEncoder().encode(quickRules.refreshed()))
+    try expect(decodedQuickRules.selectedTabIDsByBrowser == quick.tabIDsByBrowser, "Rule renewals preserve exact selected tab IDs")
+    do {
+        _ = try quick.makeIntention(apps: quickApps, snapshots: [])
+        throw SpecFailure(description: "Disconnected browser must not start an unrestricted session")
+    } catch is QuickSelectionError {}
+    var closedSnapshot = quickSnapshots
+    closedSnapshot[0].tabs = []
+    do {
+        _ = try quick.makeIntention(apps: quickApps, snapshots: closedSnapshot)
+        throw SpecFailure(description: "Closed tabs must fail selection validation")
+    } catch is QuickSelectionError {}
+    quick.toggleTab(.init(browser: "org.mozilla.firefox", id: 7))
+    try expect(!quick.apps.contains("org.mozilla.firefox"), "Deselecting final tab deselects browser")
+
     let secureHome = FileManager.default.temporaryDirectory
         .appendingPathComponent("intent-security-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: secureHome) }

@@ -32,6 +32,7 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var closeSessionResourcesOnFinish: Bool
     public var isLeisure: Bool
     public var accessMode: IntentionAccessMode
+    public var selectionOnly: Bool = false
 
     public init(
         id: String = UUID().uuidString,
@@ -95,6 +96,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         case closeSessionResourcesOnFinish
         case isLeisure
         case accessMode
+        case selectionOnly
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +118,7 @@ public struct Intention: Identifiable, Codable, Equatable {
             forKey: .closeSessionResourcesOnFinish
         ) ?? false
         isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
+        selectionOnly = try container.decodeIfPresent(Bool.self, forKey: .selectionOnly) ?? false
         accessMode = isLeisure
             ? .whitelist
             : (try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist)

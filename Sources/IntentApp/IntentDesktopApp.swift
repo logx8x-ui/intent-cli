@@ -207,6 +207,7 @@ final class IntentRuntime {
     let accountManager: IntentAccountManager
     private let overlayController: OverlayWindowController
     private var hotKeyManager: GlobalHotKeyManager?
+    private lazy var quickSelectionController = QuickSelectionController(model: model)
     private var showOverlayObserver: NSObjectProtocol?
     private var becomeActiveObserver: NSObjectProtocol?
     private var hasStarted = false
@@ -248,6 +249,12 @@ final class IntentRuntime {
         }
         if hotKeyManager?.isRegistered != true {
             model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
+        }
+        hotKeyManager?.selectionHandler = { [weak self] in
+            Task { @MainActor in self?.quickSelectionController.toggle() }
+        }
+        if hotKeyManager?.selectionRegistrationStatus != 0 {
+            model.shortcutWarning = "⌘G is unavailable. Another app may have registered it."
         }
         showOverlayObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("dev.loganmondi.intent.showOverlay"),

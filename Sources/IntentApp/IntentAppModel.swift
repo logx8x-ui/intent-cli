@@ -65,6 +65,43 @@ final class IntentAppModel: ObservableObject {
     private var purposeTemporaryIntention: Intention?
     private var purposeStatedPrompt: String?
     private var purposeUsageTracker: PurposeSessionUsageTracker?
+    private var quickSelectionTabIDs: [String: [Int]]?
+    private var quickSelectionIntentionID: String?
+    private var quickSelectionMonitor: Task<Void, Never>?
+
+    func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot]) -> Bool {
+        guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil else {
+            errorMessage = "Finish the current intention and save or dismiss its result first."
+            return false
+        }
+        do {
+            let intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
+            for browser in selection.apps.intersection(QuickSelection.browsers) {
+                guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
+                    .supports(.quickSelection, maxAge: 5) else {
+                    errorMessage = "Update Intent Browser Guard for selected-tab sessions, then try again."
+                    return false
+                }
+            }
+            errorMessage = nil
+            quickSelectionIntentionID = intention.id
+            quickSelectionTabIDs = selection.tabIDsByBrowser
+            purposeTemporaryIntention = intention
+            purposeStatedPrompt = "your Quick Focus selection"
+            // Deliberately bypass Always Allowed additions: only green selections belong here.
+            start(intention)
+            if !hasActiveSession {
+                quickSelectionIntentionID = nil
+                quickSelectionTabIDs = nil
+                purposeTemporaryIntention = nil
+                purposeStatedPrompt = nil
+            }
+            return hasActiveSession
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
     private var pendingZeroDriftStart: (intention: Intention, runtimeEndDate: Date?)?
     private var undoStack: [[Intention]] = []
     private var activeMoveUndoKeys: Set<String> = []
@@ -477,6 +514,10 @@ final class IntentAppModel: ObservableObject {
 
     func savePurposeSessionCandidate() {
         guard var intention = pendingPurposeSessionSave?.intention else { return }
+        if intention.selectionOnly {
+            // Only the first, already-running session suppresses resource startup.
+            intention.restrictionNodes.removeAll { $0.kind == .dontStartUp }
+        }
         let position = availableAIPosition(index: 0, occupied: intentions.map(\.graphPosition))
         let deltaX = position.x - intention.graphPosition.x
         let deltaY = position.y - intention.graphPosition.y
@@ -1082,6 +1123,7 @@ final class IntentAppModel: ObservableObject {
             allowedWebsitesByBrowser: websitesByBrowser,
             startupWebsitesByBrowser: startupWebsitesByBrowser,
             startupSessionID: UUID().uuidString,
+            selectedTabIDsByBrowser: quickSelectionIntentionID == intention.id ? quickSelectionTabIDs : nil,
             blockTabSwitching: true,
             blockNavigation: true,
             blockNewTabs: false,
@@ -1108,6 +1150,23 @@ final class IntentAppModel: ObservableObject {
         activeSessionIntention = intention
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
+        if quickSelectionIntentionID == intention.id, let tabIDs = quickSelectionTabIDs, !tabIDs.isEmpty {
+            quickSelectionMonitor = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled, let self, self.activeSessionID == intention.id else { return }
+                    for (browser, selected) in tabIDs {
+                        if let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+                           snapshot.updatedAt > Date().addingTimeInterval(-3),
+                           !snapshot.tabs.contains(where: { selected.contains($0.id) }) {
+                            self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
+                            self.endActiveSession()
+                            return
+                        }
+                    }
+                }
+            }
+        }
         if purposeTemporaryIntention?.id == intention.id {
             let tracker = PurposeSessionUsageTracker(intention: intention)
             purposeUsageTracker = tracker
@@ -1165,6 +1224,8 @@ final class IntentAppModel: ObservableObject {
                     self.errorMessage = failureMessage
                 }
                 self.activeLock = nil
+                self.quickSelectionMonitor?.cancel()
+                self.quickSelectionMonitor = nil
                 self.activeSessionID = nil
                 self.activeSessionIntention = nil
                 self.activeSessionName = nil
@@ -1173,13 +1234,17 @@ final class IntentAppModel: ObservableObject {
                    wasPurposeSession,
                    let purposeUsage,
                    let statedPurpose {
-                    self.pendingPurposeSessionSave = self.makePurposeSaveCandidate(
+                    self.pendingPurposeSessionSave = self.quickSelectionIntentionID == intention.id
+                        ? PurposeSessionSaveCandidate(intention: intention, statedPurpose: statedPurpose)
+                        : self.makePurposeSaveCandidate(
                         from: intention,
                         statedPurpose: statedPurpose,
                         usage: purposeUsage
                     )
                 }
                 if wasPurposeSession {
+                    self.quickSelectionIntentionID = nil
+                    self.quickSelectionTabIDs = nil
                     self.purposeTemporaryIntention = nil
                     self.purposeStatedPrompt = nil
                 }

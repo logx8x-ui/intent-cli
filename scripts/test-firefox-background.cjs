@@ -17,9 +17,11 @@ function createHarness(activeRules, initialTabs, options = {}) {
     onCreated: [],
     onRemoved: [],
     onBeforeRequest: [],
-    onMessage: []
+    onMessage: [],
+    onWindowFocus: []
   };
   const updates = [];
+  const focusedWindows = [];
   const reloads = [];
   const removals = [];
   const nativeMessages = [];
@@ -102,6 +104,10 @@ function createHarness(activeRules, initialTabs, options = {}) {
         return { ...tab };
       }
     },
+    windows: {
+      onFocusChanged: { addListener: listener => listeners.onWindowFocus.push(listener) },
+      update: async (id, patch) => { focusedWindows.push(id); return { id, ...patch }; }
+    },
     webRequest: {
       onBeforeRequest: {
         addListener: (listener) => listeners.onBeforeRequest.push(listener)
@@ -129,6 +135,10 @@ function createHarness(activeRules, initialTabs, options = {}) {
     tabs,
     listeners,
     updates,
+    focusedWindows,
+    async focusWindow(id) {
+      for (const listener of listeners.onWindowFocus) await listener(id);
+    },
     reloads,
     removals,
     nativeMessages,
@@ -216,6 +226,26 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  const selectedOnly = createHarness({
+    active: true, accessMode: "whitelist", allowedWebsites: ["example.org/work"],
+    startupWebsites: [], selectedTabIDs: [7], blockTabSwitching: true,
+    blockNavigation: true, blockNewTabs: true
+  }, [
+    { id: 7, windowId: 1, index: 0, active: false, url: "https://example.org/work" },
+    { id: 8, windowId: 1, index: 1, active: true, url: "https://example.org/work" }
+  ]);
+  await selectedOnly.refresh();
+  assert.equal(selectedOnly.tabs.get(7).active, true, "Starting Quick Focus selects an allowed tab");
+  await selectedOnly.activate(8);
+  assert.equal(selectedOnly.tabs.get(7).active, true, "Unselected same-URL tabs must not become allowed");
+  assert.equal(selectedOnly.tabs.get(8).url, "https://example.org/work", "Existing unselected tabs are preserved");
+  selectedOnly.tabs.get(8).windowId = 2;
+  selectedOnly.tabs.get(8).active = true;
+  await selectedOnly.focusWindow(2);
+  assert.equal(selectedOnly.focusedWindows.at(-1), 1, "Window focus must return to a selected tab's window");
+  await selectedOnly.create({ id: 9, windowId: 1, active: true, url: "https://example.org/work" });
+  assert.equal(selectedOnly.tabs.get(7).active, true, "New tabs cannot bypass selected-tab scope");
+
   const lockedRules = {
     active: true,
     startupSessionID: "firefox-startup-session",

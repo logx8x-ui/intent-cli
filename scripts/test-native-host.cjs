@@ -64,6 +64,7 @@ try {
       "com.google.Chrome": ["https://www.youtube.com/"]
     },
     startupSessionID: "native-host-startup-session",
+    selectedTabIDsByBrowser: { "org.mozilla.firefox": [7], "com.google.Chrome": [14] },
     blockTabSwitching: true,
     blockNavigation: true,
     blockNewTabs: true,
@@ -78,6 +79,8 @@ try {
   const [rulesResponse] = callHost([{ type: "getRules" }]);
   assert.equal(rulesResponse.active, true, "Native host should return active app rules");
   assert.equal(rulesResponse.accessMode, "blacklist", "Native host should preserve browser access mode");
+  assert.deepEqual(rulesResponse.selectedTabIDs, [7], "Native host must forward browser-scoped selected tab IDs");
+  assert.ok(rulesResponse.hostCapabilities.includes("quick-selection-host-v1"), "Native host must acknowledge the selected-tab protocol");
   assert.deepEqual(rulesResponse.allowedWebsites, activeRules.allowedWebsites);
   assert.deepEqual(rulesResponse.startupWebsites, activeRules.startupWebsitesByBrowser["org.mozilla.firefox"]);
   assert.equal(rulesResponse.startupSessionID, activeRules.startupSessionID);

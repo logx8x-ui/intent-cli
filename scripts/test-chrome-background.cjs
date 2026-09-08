@@ -39,6 +39,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const beforeNavigate = event();
   const nativeMessage = event();
   const nativeDisconnect = event();
+  const windowFocus = event();
 
   function setActive(id) {
     for (const tab of tabs.values()) tab.active = tab.id === id;
@@ -115,6 +116,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       sendMessage: async () => ({})
     },
     windows: {
+      onFocusChanged: windowFocus,
       update: async (id, patch) => {
         focusedWindows.push({ id, patch });
         return { id, ...patch };
@@ -146,6 +148,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
+    async focusWindow(id) {
+      for (const listener of windowFocus.listeners) await listener(id);
+      await settle();
+    },
     async activate(id) {
       setActive(id);
       for (const listener of tabActivated.listeners) await listener({ tabId: id });
@@ -205,10 +211,41 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  const selectedOnly = createHarness({
+    active: true, accessMode: "whitelist", allowedWebsites: ["example.org/work"],
+    startupWebsites: [], selectedTabIDs: [7], blockTabSwitching: true,
+    blockNavigation: true, blockNewTabs: true
+  }, [
+    { id: 7, windowId: 1, index: 0, active: false, url: "https://example.org/work" },
+    { id: 8, windowId: 1, index: 1, active: true, url: "https://example.org/work" }
+  ]);
+  await selectedOnly.settle();
+  assert.deepEqual(Array.from(selectedOnly.sessionRules.find(rule => rule.id === 23000).condition.excludedTabIds), [7],
+    "Chrome blocks main-frame network navigation outside selected tab IDs");
+  assert.equal(selectedOnly.tabs.get(7).active, true, "Starting Quick Focus selects an allowed tab");
+  await selectedOnly.activate(8);
+  assert.equal(selectedOnly.tabs.get(7).active, true, "Unselected same-URL tabs must not become allowed");
+  assert.equal(selectedOnly.tabs.get(8).url, "https://example.org/work", "Existing unselected tabs are preserved");
+  selectedOnly.tabs.get(8).windowId = 2;
+  selectedOnly.tabs.get(8).active = true;
+  await selectedOnly.focusWindow(2);
+  assert.equal(selectedOnly.focusedWindows.at(-1).id, 1, "Window focus must return to a selected tab's window");
+  await selectedOnly.create({ id: 9, windowId: 1, active: true, url: "https://example.org/work" });
+  assert.equal(selectedOnly.tabs.get(7).active, true, "New tabs cannot bypass selected-tab scope");
+
   const idle = createHarness({ active: false }, [
     { id: 1, active: true, url: "https://youtube.com/" }
   ]);
   await idle.settle();
+  assert.equal(idle.nativeMessages.some(message => message.extensionCapabilities?.includes("quick-selection-tabs-v1")), false,
+    "An old native host must not be advertised as selected-tab capable");
+  await idle.receiveNative({ active: false, hostCapabilities: ["quick-selection-host-v1"] });
+  assert.ok(idle.nativeMessages.some(message => message.extensionCapabilities?.includes("quick-selection-tabs-v1")),
+    "Selected-tab capability requires a matching native host handshake");
+  await idle.receiveNative({ active: false, hostCapabilities: ["quick-selection-host-v1"],
+    tabCommand: { action: "snapshot", tabID: -1, windowID: -1 } });
+  assert.ok(idle.nativeMessages.some(message => message.type === "tabsSnapshot" && message.tabs.some(tab => tab.id === 1)),
+    "Picker discovery returns idle tabs on demand");
   assert.ok(
     idle.nativeMessages.some((message) =>
       message.extensionVersion === require("../chrome-extension/manifest.json").version &&

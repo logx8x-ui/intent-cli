@@ -66,6 +66,7 @@ public struct BrowserTabCommand: Codable, Equatable, Identifiable {
 public enum BrowserTabCommandAction: String, Codable, Equatable {
     case activate
     case close
+    case snapshot
 }
 
 public final class BrowserTabSnapshotStore {

@@ -39,6 +39,7 @@ public final class AlwaysAllowedAppStore {
     }
 
     public static func applying(_ presets: [AllowedApp], to intention: Intention) -> Intention {
+        guard !intention.selectionOnly else { return intention }
         var updated = intention
         let presetIDs = Set(presets.map(\.bundleIdentifier))
 

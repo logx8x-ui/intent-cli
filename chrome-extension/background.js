@@ -14,6 +14,11 @@ const STARTUP_SESSION_RULE_ID_END = 22999;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
+let hostSupportsQuickSelection = false;
+function advertisedCapabilities() {
+  return hostSupportsQuickSelection
+    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1"] : EXTENSION_CAPABILITIES;
+}
 
 const { normalizeRule, isAllowedURL, isSearchStagingURL } = IntentBrowserRules;
 
@@ -84,8 +89,14 @@ function connectNativeHost() {
   try {
     const port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
+    hostSupportsQuickSelection = false;
     port.onMessage.addListener((message) => {
       reconnectDelayMs = RECONNECT_MS;
+      const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
+      if (supported !== hostSupportsQuickSelection) {
+        hostSupportsQuickSelection = supported;
+        sendHeartbeat();
+      }
       if (message?.tabCommand) handleRequestedTab(message.tabCommand);
       applyNativeRules(message);
     });
@@ -122,7 +133,7 @@ function postNative(message) {
       ...message,
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
-      extensionCapabilities: EXTENSION_CAPABILITIES
+      extensionCapabilities: advertisedCapabilities()
     });
     return true;
   } catch (_) {
@@ -188,6 +199,10 @@ function sendHeartbeat() {
 }
 
 async function handleRequestedTab(message) {
+  if (message.action === "snapshot") {
+    await publishTabSnapshot(true, true);
+    return;
+  }
   const tab = await chrome.tabs.get(message.tabID).catch(() => null);
   if (!tab) return;
   if (message.action === "close") {
@@ -213,13 +228,13 @@ function scheduleTabSnapshot(force = false) {
   }, TAB_SNAPSHOT_DEBOUNCE_MS);
 }
 
-async function publishTabSnapshot(force = false) {
+async function publishTabSnapshot(force = false, discovery = false) {
   await ensureInitialized();
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
-  const tabs = rules.active ? await chrome.tabs.query({}) : [];
+  const tabs = rules.active || discovery ? await chrome.tabs.query({}) : [];
   const snapshotTabs = tabs
-    .filter((tab) => isRuntimeAllowedTab(tab))
+    .filter((tab) => discovery || isRuntimeAllowedTab(tab))
     .map((tab) => ({
       id: tab.id,
       windowID: tab.windowId,
@@ -249,6 +264,7 @@ function effectiveRules(nativeRules) {
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
+    selectedTabIDs: Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
     blockNavigation: Boolean(nativeRules.blockNavigation),
     blockNewTabs: Boolean(nativeRules.blockNewTabs),
@@ -270,6 +286,7 @@ async function applyNativeRules(nativeRules) {
     await removeAlreadyBlockedTabs();
     await synchronizeStartupTabs();
     await primeAllowedTab();
+    if (Array.isArray(rules.selectedTabIDs)) await returnToAllowedTab();
   }
   else {
     lastAllowedTabId = null;
@@ -351,6 +368,19 @@ function desiredNetworkRules() {
 }
 
 async function updateNetworkRules() {
+  // Tab-scoped DNR conditions are session rules, not dynamic rules. This also
+  // blocks new, unselected tabs before their first document loads.
+  if (typeof chrome.declarativeNetRequest.updateSessionRules === "function") {
+    const selected = rules.active && Array.isArray(rules.selectedTabIDs) ? rules.selectedTabIDs : null;
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [23000],
+      addRules: selected === null ? [] : [{
+        id: 23000, priority: 1000, action: { type: "block" },
+        condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"],
+          ...(selected.length ? { excludedTabIds: selected } : {}) }
+      }]
+    });
+  }
   const nextRules = desiredNetworkRules();
   const nextFingerprint = JSON.stringify(nextRules);
   if (nextFingerprint === dnrFingerprint) return;
@@ -390,6 +420,7 @@ function isFreshBlankTab(tab) {
 }
 
 function isRuntimeAllowedTab(tab) {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab?.id)) return false;
   return Boolean(tab?.url && (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab)));
 }
 
@@ -601,6 +632,9 @@ async function returnToAllowedTab() {
       const lastAllowed = await getAllowedTab(lastAllowedTabId);
       if (lastAllowed) {
         await chrome.tabs.update(lastAllowed.id, { active: true });
+        if (Array.isArray(rules.selectedTabIDs) && lastAllowed.windowId != null) {
+          await chrome.windows?.update(lastAllowed.windowId, { focused: true }).catch(() => {});
+        }
         return;
       }
       lastAllowedTabId = null;
@@ -611,6 +645,9 @@ async function returnToAllowedTab() {
     if (allowed) {
       lastAllowedTabId = allowed.id;
       await chrome.tabs.update(allowed.id, { active: true });
+      if (Array.isArray(rules.selectedTabIDs) && allowed.windowId != null) {
+        await chrome.windows?.update(allowed.windowId, { focused: true }).catch(() => {});
+      }
       return;
     }
   } finally {
@@ -619,6 +656,11 @@ async function returnToAllowedTab() {
 }
 
 async function recoverBlockedNavigation(tabId) {
+  // Do not navigate or close an existing unselected tab. Leave it intact for after the session.
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+    await returnToAllowedTab();
+    return;
+  }
   const fallbackURL = lastAllowedURLByTab.get(tabId);
   if (fallbackURL) {
     const isStartupFallback = rules.startupWebsites.some((startupURL) =>
@@ -665,7 +707,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
+// Focusing an existing window need not emit tabs.onActivated.
+chrome.windows?.onFocusChanged?.addListener(async (windowId) => {
+  if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
+  const tabs = await chrome.tabs.query({});
+  const active = tabs.find(tab => tab.windowId === windowId && tab.active);
+  if (active && !isRuntimeAllowedTab(active)) await returnToAllowedTab();
+});
+
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+    await returnToAllowedTab();
+    return;
+  }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   recordWebsiteVisit(tab);
   scheduleTabSnapshot();
@@ -681,6 +735,10 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+    if (tab.active) await returnToAllowedTab();
+    return;
+  }
   if (changeInfo.url || changeInfo.status === "complete") recordWebsiteVisit(tab);
   scheduleTabSnapshot();
   if (!rules.active || (!changeInfo.url && changeInfo.status !== "complete") || !tab.url) return;
@@ -731,6 +789,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab.id)) {
+    await returnToAllowedTab();
+    return;
+  }
   scheduleTabSnapshot();
   if (!rules.active) return;
   if (!tab.url || isSearchStagingURL(tab.url)) {
@@ -771,6 +833,10 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0 || details.tabId < 0) return;
   Promise.resolve().then(async () => {
     if (!rules.active || !rules.blockNavigation) return;
+    if (Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(details.tabId)) {
+      await returnToAllowedTab();
+      return;
+    }
     if (isPendingStartupNavigation(details.tabId, details.url)) {
       startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
       return;

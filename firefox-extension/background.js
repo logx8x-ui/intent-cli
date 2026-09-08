@@ -9,6 +9,11 @@ const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
+let hostSupportsQuickSelection = false;
+function advertisedCapabilities() {
+  return hostSupportsQuickSelection
+    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1"] : EXTENSION_CAPABILITIES;
+}
 
 const {
   isAllowedURL,
@@ -86,8 +91,14 @@ function connectCommandPort() {
   try {
     const port = browser.runtime.connectNative(HOST_NAME);
     commandPort = port;
+    hostSupportsQuickSelection = false;
     port.onMessage.addListener(async (message) => {
       reconnectDelayMs = RECONNECT_MS;
+      const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
+      if (supported !== hostSupportsQuickSelection) {
+        hostSupportsQuickSelection = supported;
+        sendHeartbeat();
+      }
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
       await applyNativeRules(message);
       settlePendingRuleRefresh();
@@ -122,7 +133,7 @@ function postCommandPort(message) {
       ...message,
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
-      extensionCapabilities: EXTENSION_CAPABILITIES
+      extensionCapabilities: advertisedCapabilities()
     });
     return true;
   } catch (_) {
@@ -159,12 +170,16 @@ async function recordWebsiteVisit(tab) {
       ...message,
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
-      extensionCapabilities: EXTENSION_CAPABILITIES
+      extensionCapabilities: advertisedCapabilities()
     });
   } catch (_) {}
 }
 
 async function handleRequestedTab(message) {
+  if (message.action === "snapshot") {
+    await publishTabSnapshot(true, true);
+    return;
+  }
   const tab = await browser.tabs.get(message.tabID).catch(() => null);
   if (!tab) return;
   if (message.action === "close") {
@@ -190,12 +205,12 @@ function scheduleTabSnapshot(force = false) {
   }, TAB_SNAPSHOT_DEBOUNCE_MS);
 }
 
-async function publishTabSnapshot(force = false) {
+async function publishTabSnapshot(force = false, discovery = false) {
   if (!commandPort) connectCommandPort();
   if (!commandPort) return;
-  const tabs = rules.active ? await browser.tabs.query({}) : [];
+  const tabs = rules.active || discovery ? await browser.tabs.query({}) : [];
   const snapshotTabs = tabs
-      .filter((tab) => isRuntimeAllowedTab(tab))
+    .filter((tab) => discovery || isRuntimeAllowedTab(tab))
       .map((tab) => ({
         id: tab.id,
         windowID: tab.windowId,
@@ -221,7 +236,7 @@ async function notifyNativeGuardState() {
       enabled: guardEnabled,
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
-      extensionCapabilities: EXTENSION_CAPABILITIES
+      extensionCapabilities: advertisedCapabilities()
     });
   } catch (_) {}
 }
@@ -237,6 +252,7 @@ function effectiveRules(nativeRules) {
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
+    selectedTabIDs: Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
     blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
     blockNavigation: Boolean(nativeRules.blockNavigation),
     blockNewTabs: Boolean(nativeRules.blockNewTabs),
@@ -297,6 +313,7 @@ async function applyNativeRules(nativeRules) {
     await removeAlreadyBlockedTabs();
     await synchronizeStartupTabs();
     await primeAllowedTab();
+    if (Array.isArray(rules.selectedTabIDs)) await returnToAllowedTab();
   } else {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
@@ -334,6 +351,7 @@ function isFreshBlankTab(tab) {
 }
 
 function isRuntimeAllowedTab(tab) {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab?.id)) return false;
   return Boolean(
     tab?.url &&
     (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab))
@@ -521,6 +539,9 @@ async function returnToAllowedTab() {
       const lastAllowed = await getAllowedTab(lastAllowedTabId);
       if (lastAllowed) {
         await browser.tabs.update(lastAllowed.id, { active: true });
+        if (Array.isArray(rules.selectedTabIDs) && lastAllowed.windowId != null) {
+          await browser.windows?.update(lastAllowed.windowId, { focused: true }).catch(() => {});
+        }
         return;
       }
       lastAllowedTabId = null;
@@ -531,6 +552,9 @@ async function returnToAllowedTab() {
     if (allowed) {
       lastAllowedTabId = allowed.id;
       await browser.tabs.update(allowed.id, { active: true });
+      if (Array.isArray(rules.selectedTabIDs) && allowed.windowId != null) {
+        await browser.windows?.update(allowed.windowId, { focused: true }).catch(() => {});
+      }
       return;
     }
 
@@ -552,6 +576,11 @@ function shouldBlockNavigation(url) {
 }
 
 async function recoverBlockedNavigation(tabId) {
+  // Do not navigate or close an existing unselected tab. Leave it intact for after the session.
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+    await returnToAllowedTab();
+    return;
+  }
   if (tabId < 0) {
     await returnToAllowedTab();
     return;
@@ -620,7 +649,19 @@ browser.runtime.onMessage.addListener((message) => {
   return false;
 });
 
+// Focusing an existing window need not emit tabs.onActivated.
+browser.windows?.onFocusChanged?.addListener(async (windowId) => {
+  if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
+  const tabs = await browser.tabs.query({});
+  const active = tabs.find(tab => tab.windowId === windowId && tab.active);
+  if (active && !isRuntimeAllowedTab(active)) await returnToAllowedTab();
+});
+
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+    await returnToAllowedTab();
+    return;
+  }
   const tab = await browser.tabs.get(tabId).catch(() => null);
   await recordWebsiteVisit(tab);
   scheduleTabSnapshot();
@@ -650,6 +691,10 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+    if (tab.active) await returnToAllowedTab();
+    return;
+  }
   if (!changeInfo.url && changeInfo.status !== "complete") {
     return;
   }
@@ -713,6 +758,10 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab.id)) {
+    await returnToAllowedTab();
+    return;
+  }
   scheduleTabSnapshot();
   if (!rules.active) {
     return;
@@ -772,6 +821,10 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(details.tabId)) {
+      setTimeout(returnToAllowedTab, 0);
+      return { cancel: true };
+    }
     if (isPendingStartupNavigation(details.tabId, details.url)) {
       startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
       return {};

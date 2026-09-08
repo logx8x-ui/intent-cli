@@ -56,6 +56,7 @@ struct HostRequest: Codable {
 }
 
 struct HostRuleState: Codable, Equatable {
+    var selectedTabIDs: [Int]? = nil
     var active: Bool
     var accessMode: String
     var allowedWebsites: [String]
@@ -69,6 +70,8 @@ struct HostRuleState: Codable, Equatable {
 }
 
 struct HostResponse: Codable {
+    var hostCapabilities: [String] = ["quick-selection-host-v1"]
+    var selectedTabIDs: [Int]?
     var active: Bool
     var accessMode: String
     var allowedWebsites: [String]
@@ -82,6 +85,7 @@ struct HostResponse: Codable {
     var tabCommand: BrowserTabCommand?
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?) {
+        selectedTabIDs = state.selectedTabIDs
         active = state.active
         accessMode = state.accessMode
         allowedWebsites = state.allowedWebsites
@@ -397,6 +401,7 @@ private final class HostRuntime {
         let browserWebsites = rules.allowedWebsitesByBrowser[browserBundleIdentifier]
             ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
         return HostRuleState(
+            selectedTabIDs: rules.selectedTabIDsByBrowser?[browserBundleIdentifier],
             active: rules.active,
             accessMode: rules.accessMode.rawValue,
             allowedWebsites: browserWebsites,

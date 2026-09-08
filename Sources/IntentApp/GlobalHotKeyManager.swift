@@ -151,6 +151,9 @@ enum FinishShortcutStore {
 enum OverlayShortcutConflictChecker {
     static func validationMessage(for shortcut: OverlayShortcut) -> String? {
         let modifiers = shortcut.cocoaModifiers
+        if shortcut.keyCode == UInt32(kVK_ANSI_G), modifiers == [.command] {
+            return "⌘G is reserved for Quick Focus."
+        }
         let hasStrongModifier = !modifiers.intersection([.command, .option, .control]).isEmpty
         let isDefaultStyle = shortcut.keyCode == UInt32(kVK_ANSI_Grave) && modifiers == [.shift]
 
@@ -222,6 +225,9 @@ enum OverlayShortcutConflictChecker {
 final class GlobalHotKeyManager {
     private var requiredHotKeyRef: EventHotKeyRef?
     private var customHotKeyRef: EventHotKeyRef?
+    private var selectionHotKeyRef: EventHotKeyRef?
+    var selectionHandler: (() -> Void)?
+    private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
     private var nextHotKeyID: UInt32 = 2
     private let handler: () -> Void
@@ -240,6 +246,9 @@ final class GlobalHotKeyManager {
 
         registrationStatus = registerRequiredShortcut()
         guard registrationStatus == noErr else { return }
+        let selectionID = EventHotKeyID(signature: fourCharCode("IntO"), id: UInt32.max)
+        selectionRegistrationStatus = RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(cmdKey), selectionID,
+                                                        GetApplicationEventTarget(), 0, &selectionHotKeyRef)
 
         if shortcut != .defaultShortcut {
             let status = registerCustomShortcut(shortcut)
@@ -253,6 +262,7 @@ final class GlobalHotKeyManager {
     deinit {
         unregister(ref: &requiredHotKeyRef)
         unregister(ref: &customHotKeyRef)
+        unregister(ref: &selectionHotKeyRef)
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
@@ -292,10 +302,14 @@ final class GlobalHotKeyManager {
             eventKind: UInt32(kEventHotKeyPressed)
         )
 
-        let callback: EventHandlerUPP = { _, _, userData in
+        let callback: EventHandlerUPP = { _, event, userData in
             guard let userData else { return noErr }
             let manager = Unmanaged<GlobalHotKeyManager>.fromOpaque(userData).takeUnretainedValue()
-            manager.handler()
+            var identifier = EventHotKeyID()
+            guard let event, GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier) == noErr,
+                identifier.signature == fourCharCode("IntO") else { return OSStatus(eventNotHandledErr) }
+            if identifier.id == UInt32.max { manager.selectionHandler?() } else { manager.handler() }
             return noErr
         }
 

@@ -1368,7 +1368,9 @@ struct PurposeSessionSaveSheet: View {
                 }
             }
 
-            Text("Intent kept the apps and websites used for \"\(candidate.statedPurpose)\". Saving makes this setup available instantly next time.")
+            Text(candidate.intention.selectionOnly
+                 ? "Save all the apps and websites you selected. Next time, this intention opens those resources for you."
+                 : "Intent kept the apps and websites used for \"\(candidate.statedPurpose)\". Saving makes this setup available instantly next time.")
                 .font(.system(size: 13))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
                 .fixedSize(horizontal: false, vertical: true)
