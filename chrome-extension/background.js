@@ -279,8 +279,7 @@ async function publishTabSnapshot(force = false, discovery = false) {
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
   const tabs = rules.active || discovery ? await chrome.tabs.query({}) : [];
-  const snapshotTabs = tabs
-    .filter((tab) => discovery || isRuntimeAllowedTab(tab))
+  const allSnapshotTabs = tabs
     .map((tab) => ({
       id: tab.id,
       windowID: tab.windowId,
@@ -293,12 +292,15 @@ async function publishTabSnapshot(force = false, discovery = false) {
     .sort((left, right) =>
       (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id)
     );
-  const snapshotFingerprint = JSON.stringify(snapshotTabs);
+  const allowedIDs = new Set(tabs.filter(tab => discovery || isRuntimeAllowedTab(tab)).map(tab => tab.id));
+  const snapshotTabs = allSnapshotTabs.filter(tab => allowedIDs.has(tab.id));
+  const snapshotFingerprint = JSON.stringify({ tabs: snapshotTabs, allTabs: allSnapshotTabs });
   if (!force && snapshotFingerprint === lastSnapshotFingerprint) return;
   lastSnapshotFingerprint = snapshotFingerprint;
   postNative({
     type: "tabsSnapshot",
-    tabs: snapshotTabs
+    tabs: snapshotTabs,
+    allTabs: allSnapshotTabs
   });
 }
 
@@ -872,6 +874,10 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   }, NEW_TAB_GRACE_MS);
   scheduleTabSnapshot();
 });
+
+for (const event of [chrome.tabs.onMoved, chrome.tabs.onAttached, chrome.tabs.onDetached]) {
+  event?.addListener(() => { if (rules.active) scheduleTabSnapshot(true); });
+}
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   freshBlankTabIds.delete(tabId);

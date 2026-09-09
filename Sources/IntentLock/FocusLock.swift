@@ -21,6 +21,13 @@ public enum FocusLockError: Error, CustomStringConvertible {
 }
 
 public enum FocusForegroundPolicy {
+    public static func shouldRestoreVisibleWindow(visibleBundleIdentifier: String?, accessMode: IntentionAccessMode,
+                                                   controlledBundleIdentifiers: Set<String>, missionControlActive: Bool) -> Bool {
+        guard !missionControlActive else { return false }
+        guard let visibleBundleIdentifier else { return accessMode == .whitelist }
+        return accessMode == .whitelist ? !controlledBundleIdentifiers.contains(visibleBundleIdentifier)
+            : controlledBundleIdentifiers.contains(visibleBundleIdentifier)
+    }
     public static func shouldImmediatelyReject(
         bundleIdentifier: String?,
         accessMode: IntentionAccessMode,
@@ -113,6 +120,8 @@ public final class FocusLock {
     private let stopStateLock = NSLock()
     private let allowedAppSwitcher: AllowedAppSwitcher
     private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
+    private let nativeTabClickGuard = NativeBrowserTabClickGuard()
+    private let permittedWindowRecovery = PermittedWindowRecovery()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var focusTimer: Timer?
@@ -185,6 +194,7 @@ public final class FocusLock {
             installActivationObserver()
             installActiveSpaceObserver()
             startFocusTimer()
+            nativeTabClickGuard.start()
             startSpotifyTimerIfNeeded()
         }
 
@@ -356,6 +366,7 @@ public final class FocusLock {
         let mask =
             CGEventMask(1 << CGEventType.keyDown.rawValue) |
             CGEventMask(1 << CGEventType.flagsChanged.rawValue) |
+            CGEventMask(1 << CGEventType.leftMouseDragged.rawValue) |
             CGEventMask(1 << CGEventType.leftMouseDown.rawValue) |
             CGEventMask(1 << CGEventType.rightMouseDown.rawValue) |
             CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
@@ -397,9 +408,15 @@ public final class FocusLock {
             return Unmanaged.passUnretained(event)
         }
         if isStopped { return Unmanaged.passUnretained(event) }
+        if type == .leftMouseDragged {
+            nativeTabClickGuard.invalidateDuringDrag()
+            return Unmanaged.passUnretained(event)
+        }
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
             guard spec.requiresEnforcement else { return Unmanaged.passUnretained(event) }
-            if isMissionControlActive() {
+            let missionControl = isMissionControlActive()
+            nativeTabClickGuard.recordMouseDown(missionControl: missionControl)
+            if missionControl {
                 let target = clickTarget(at: event.location)
                 guard FocusClickTargetPolicy.shouldAllowMissionControlClick(
                     ownerBundleIdentifier: target.ownerBundleIdentifier,
@@ -411,6 +428,11 @@ public final class FocusLock {
                     return nil
                 }
                 return Unmanaged.passUnretained(event)
+            }
+
+            if nativeTabClickGuard.shouldBlock(event.location, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) {
+                // A forbidden native tab is a no-op: do not activate it and bounce afterward.
+                return nil
             }
 
             if spec.blockFirefoxChromeClicks,
@@ -588,28 +610,27 @@ public final class FocusLock {
     }
 
     private func scheduleSpaceRecovery() {
-        let transitionGrace: TimeInterval = 1.0
-        systemSwitcherGraceUntil = Date(timeIntervalSinceNow: transitionGrace)
+        permittedWindowRecovery.noteSpaceChange()
+        systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 0.15)
         pendingSpaceRecovery?.cancel()
+        recoverSpace(attempt: 0)
+    }
 
+    private func recoverSpace(attempt: Int) {
+        guard !isStopped else { return }
+        let visible = PermittedWindowRecovery.visibleApplication()
+        guard FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible?.bundleIdentifier,
+            accessMode: spec.accessMode, controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            missionControlActive: isMissionControlActive()) else { return }
+        refocus(ignoreSystemTransitionGrace: true, restoreWindow: true)
+        guard attempt < 8 else { return }
         let recovery = DispatchWorkItem { [weak self] in
-            guard let self, !self.isStopped else { return }
-            // Let the native Space animation finish, then make one decisive
-            // focus check. This bypasses system-UI grace that can otherwise be
-            // continually extended while Dock or WindowManager stays frontmost.
-            let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            guard FocusForegroundPolicy.shouldRecoverAfterSpaceChange(
-                bundleIdentifier: frontmostBundleIdentifier,
-                accessMode: self.spec.accessMode,
-                controlledBundleIdentifiers: self.spec.allowedBundleIdentifiers
-            ) else { return }
-            self.refocus(ignoreSystemTransitionGrace: true)
+            self?.recoverSpace(attempt: attempt + 1)
         }
         pendingSpaceRecovery = recovery
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + transitionGrace + 0.1,
-            execute: recovery
-        )
+        // The first attempt is immediate; bounded retries cover the OS transition
+        // settling after an activation request. Never synthesize reverse gestures.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: recovery)
     }
 
     private func handleLaunched(_ app: NSRunningApplication) {
@@ -630,6 +651,7 @@ public final class FocusLock {
            spec.permitsApplication(id),
            id != "com.spotify.client" || spec.allowSpotifyForeground || spec.accessMode == .blacklist {
             lastPermittedApplication = app
+            permittedWindowRecovery.remember(app)
             allowedAppSwitcher.recordActivation(bundleIdentifier: id)
             return
         }
@@ -711,6 +733,16 @@ public final class FocusLock {
 
         if frontmost.bundleIdentifier == Bundle.main.bundleIdentifier { return }
 
+        // Space swipes can leave NSWorkspace reporting the old permitted app while
+        // a forbidden window is visibly occupying the new Space.
+        if let visible = PermittedWindowRecovery.visibleApplication(),
+           FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible.bundleIdentifier,
+                accessMode: spec.accessMode, controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+                missionControlActive: isMissionControlActive()) {
+            refocus(ignoreSystemTransitionGrace: true, restoreWindow: true)
+            return
+        }
+
         if FocusForegroundPolicy.shouldImmediatelyReject(
             bundleIdentifier: frontmost.bundleIdentifier,
             accessMode: spec.accessMode,
@@ -739,6 +771,7 @@ public final class FocusLock {
                 refocus()
                 return
             }
+            permittedWindowRecovery.remember(frontmost)
             return
         }
 
@@ -755,17 +788,21 @@ public final class FocusLock {
         }
 
         lastPermittedApplication = frontmost
+        permittedWindowRecovery.remember(frontmost)
         allowedAppSwitcher.recordActivation(bundleIdentifier: bundleIdentifier)
     }
 
-    private func refocus(ignoreSystemTransitionGrace: Bool = false) {
+    private func refocus(ignoreSystemTransitionGrace: Bool = false, restoreWindow: Bool = false) {
         guard !isStopped else { return }
         if !ignoreSystemTransitionGrace,
            shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
             return
         }
 
+        if restoreWindow, permittedWindowRecovery.restore() { return }
+
         if spec.strictSingleApp {
+            if permittedWindowRecovery.restore() { return }
             activateFallbackApp()
             return
         }
@@ -779,6 +816,7 @@ public final class FocusLock {
     }
 
     private func activateBestPermittedApplication() {
+        if permittedWindowRecovery.restore() { return }
         if let lastPermittedApplication,
            let bundleIdentifier = lastPermittedApplication.bundleIdentifier,
            spec.permitsApplication(bundleIdentifier),
@@ -1006,6 +1044,8 @@ public final class FocusLock {
     }
 
     private func cleanup() {
+        nativeTabClickGuard.stop()
+        permittedWindowRecovery.stop()
         pendingSpaceRecovery?.cancel()
         pendingSpaceRecovery = nil
         allowedAppSwitcher.cancel()

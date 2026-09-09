@@ -236,6 +236,9 @@ async function run() {
   assert.deepEqual(Array.from(selectedOnly.sessionRules.find(rule => rule.id === 23000).condition.excludedTabIds), [7],
     "Chrome blocks main-frame network navigation outside selected tab IDs");
   assert.equal(selectedOnly.tabs.get(7).active, true, "Starting Quick Focus selects an allowed tab");
+  const nativeSnapshot = selectedOnly.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
+  assert.ok(nativeSnapshot.allTabs.some(tab => tab.id === 8), "Native click geometry gets complete tab ordering including forbidden tabs");
+  assert.equal(nativeSnapshot.tabs.some(tab => tab.id === 8), false, "Forbidden tabs never enter the allowed Ctrl+Tab switcher snapshot");
   await selectedOnly.activate(8);
   assert.equal(selectedOnly.tabs.get(7).active, true, "Unselected same-URL tabs must not become allowed");
   assert.equal(selectedOnly.tabs.get(8).url, "https://example.org/work", "Existing unselected tabs are preserved");

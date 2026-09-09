@@ -31,15 +31,18 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
 public struct BrowserTabSnapshot: Codable, Equatable {
     public var browserBundleIdentifier: String
     public var tabs: [BrowserTabItem]
+    public var allTabs: [BrowserTabItem]?
     public var updatedAt: Date
 
     public init(
         browserBundleIdentifier: String,
         tabs: [BrowserTabItem],
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        allTabs: [BrowserTabItem]? = nil
     ) {
         self.browserBundleIdentifier = browserBundleIdentifier
         self.tabs = tabs
+        self.allTabs = allTabs
         self.updatedAt = updatedAt
     }
 }

@@ -25,6 +25,17 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    let clickTabs = [
+        BrowserTabItem(id: 11, windowID: 1, index: 0, title: "Same title", url: "https://example.com", active: true),
+        BrowserTabItem(id: 12, windowID: 1, index: 1, title: "Same title", url: "https://example.com", active: false),
+        BrowserTabItem(id: 13, windowID: 1, index: 2, title: "Third", url: "https://example.org", active: false)
+    ]
+    try expect(NativeTabClickPolicy.blockedIndices(nativeCount: 3, tabs: clickTabs, allowedIDs: [11, 13]) == [1], "Native clicks distinguish same-title/same-URL tabs by exact tab identity and position")
+    try expect(NativeTabClickPolicy.blockedIndices(nativeCount: 2, tabs: clickTabs, allowedIDs: [11]) == nil, "Collapsed or incomplete native tab lists must not guess indices")
+    try expect(FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "blocked.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: false), "Visible forbidden Space requires restoration even if foreground app reporting is stale")
+    try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "blocked.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: true), "Mission Control must retain its separate click prevention behavior")
+    try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "allowed.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: false), "Swiping onto an allowed window is permitted")
+    try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: nil, accessMode: .blacklist, controlledBundleIdentifiers: ["blocked.app"], missionControlActive: false), "Blacklist must not reject empty desktops")
     for count in [1, 2, 4, 9, 16, 30, 50] {
         let bounds = CGRect(x: 32, y: 98, width: 1300, height: 620)
         let sizes = (0..<count).map { CGSize(width: $0 % 3 == 0 ? 600 : 1400, height: $0 % 3 == 0 ? 1000 : 850) }

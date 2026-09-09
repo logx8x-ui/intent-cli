@@ -238,8 +238,7 @@ async function publishTabSnapshot(force = false, discovery = false) {
   if (!commandPort) connectCommandPort();
   if (!commandPort) return;
   const tabs = rules.active || discovery ? await browser.tabs.query({}) : [];
-  const snapshotTabs = tabs
-    .filter((tab) => discovery || isRuntimeAllowedTab(tab))
+  const allSnapshotTabs = tabs
       .map((tab) => ({
         id: tab.id,
         windowID: tab.windowId,
@@ -250,9 +249,11 @@ async function publishTabSnapshot(force = false, discovery = false) {
         faviconURL: tab.favIconUrl || null
       }))
       .sort((left, right) => left.id - right.id);
-  const nextFingerprint = JSON.stringify(snapshotTabs);
+  const allowedIDs = new Set(tabs.filter(tab => discovery || isRuntimeAllowedTab(tab)).map(tab => tab.id));
+  const snapshotTabs = allSnapshotTabs.filter(tab => allowedIDs.has(tab.id));
+  const nextFingerprint = JSON.stringify({ tabs: snapshotTabs, allTabs: allSnapshotTabs });
   if (!force && nextFingerprint === lastSnapshotFingerprint) return;
-  if (postCommandPort({ type: "tabsSnapshot", tabs: snapshotTabs })) {
+  if (postCommandPort({ type: "tabsSnapshot", tabs: snapshotTabs, allTabs: allSnapshotTabs })) {
     lastSnapshotFingerprint = nextFingerprint;
   }
 }
@@ -841,6 +842,10 @@ browser.tabs.onCreated.addListener(async (tab) => {
   }, NEW_TAB_GRACE_MS);
   scheduleTabSnapshot();
 });
+
+for (const event of [browser.tabs.onMoved, browser.tabs.onAttached, browser.tabs.onDetached]) {
+  event?.addListener(() => { if (rules.active) scheduleTabSnapshot(true); });
+}
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
   scheduleTabSnapshot();

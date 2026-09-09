@@ -53,6 +53,7 @@ struct HostRequest: Codable {
     var extensionVersion: String?
     var extensionCapabilities: [String]?
     var tabs: [HostTab]?
+    var allTabs: [HostTab]?
     var url: String?
     var title: String?
 }
@@ -249,7 +250,7 @@ private final class HostRuntime {
                 }
             case "tabsSnapshot":
                 if let tabs = request.tabs {
-                    persistSnapshot(tabs, browserBundleIdentifier: browser)
+                    persistSnapshot(tabs, allTabs: request.allTabs, browserBundleIdentifier: browser)
                 }
             case "recordWebsiteVisit":
                 if let url = request.url {
@@ -318,7 +319,8 @@ private final class HostRuntime {
         }
     }
 
-    private func persistSnapshot(_ tabs: [HostTab], browserBundleIdentifier: String) {
+    private var lastSnapshotAllTabs: [BrowserTabItem]?
+    private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserBundleIdentifier: String) {
         let items = tabs.map {
             BrowserTabItem(
                 id: $0.id,
@@ -330,15 +332,18 @@ private final class HostRuntime {
                 faviconURL: $0.faviconURL
             )
         }
-        guard items != lastSnapshotTabs else { return }
+        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL) }
+        guard items != lastSnapshotTabs || allItems != lastSnapshotAllTabs else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
-            tabs: items
+            tabs: items,
+            allTabs: allItems
         )
         let store = BrowserTabSnapshotStore(fileURL: paths.snapshot(for: browserBundleIdentifier))
         if (try? store.write(snapshot)) != nil {
             metrics.snapshotWrites += 1
             lastSnapshotTabs = items
+            lastSnapshotAllTabs = allItems
         }
     }
 

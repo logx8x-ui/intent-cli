@@ -99,6 +99,7 @@ try {
     browserBundleIdentifier: "com.google.Chrome",
     extensionVersion: "0.2.2",
     extensionCapabilities: ["single-startup-launch-v1"],
+    allTabs: [{ id: 99, windowID: 3, index: 0, title: "Unselected tab", url: "https://example.com/", active: false }],
     tabs: [{
       id: 14,
       windowID: 3,
@@ -120,6 +121,7 @@ try {
   const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
   assert.equal(snapshot.browserBundleIdentifier, "com.google.Chrome");
   assert.equal(snapshot.tabs[0].id, 14, "Native host should persist allowed browser tabs for Ctrl+Tab");
+  assert.equal(snapshot.allTabs[0].id, 99, "Full tab metadata is separate from allowed-switcher entries");
   assert.equal(snapshot.tabs[0].faviconURL, "https://instagram.com/favicon.ico", "Native bridge preserves the actual tab favicon");
   callHost([{ type: "tabPreview", browserBundleIdentifier: "com.google.Chrome", preview: { requestID: "preview-spec", image: "data:image/jpeg;base64,dGVzdA==" } }]);
   const preview = JSON.parse(fs.readFileSync(path.join(intentDir, "browser-preview-com-google-Chrome.json"), "utf8"));
