@@ -533,7 +533,15 @@ struct IntentQuickGuideView: View {
         purposeFocused = false
         isGenerating = true
         errorMessage = nil
-        let installed = catalog.map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
+        let installed = AppCatalog.mostUsed(in: catalog).map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
+
+        guard !installed.isEmpty else {
+            drafts = fallbackSuggestions().map(OnboardingDraft.init)
+            isGenerating = false
+            errorMessage = "This Mac has no reliable frequent-app history yet. Choose the apps you actually use; Intent won't guess."
+            withAnimation(.easeOut(duration: 0.2)) { page = 1 }
+            return
+        }
 
         Task {
             do {
@@ -566,7 +574,10 @@ struct IntentQuickGuideView: View {
         guard splittingID == nil else { return }
         splittingID = draft.id
         errorMessage = nil
-        let installed = catalog.map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
+        let confirmedIDs = Set(draft.suggestion.appBundleIdentifiers)
+        let frequentIDs = Set(AppCatalog.mostUsed(in: catalog).map(\.bundleIdentifier))
+        let installed = catalog.filter { frequentIDs.contains($0.bundleIdentifier) || confirmedIDs.contains($0.bundleIdentifier) }
+            .map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
         let description = "The person said: \(cleanPurpose)\nSplit this broad intention into smaller choices: \(draft.suggestion.name) — \(draft.suggestion.purpose)"
 
         Task {
@@ -657,11 +668,12 @@ struct IntentQuickGuideView: View {
                 allowBrowserSearches: false
             ))
         }
-        if suggestions.isEmpty, let first = catalog.first {
+        suggestions.removeAll { $0.appBundleIdentifiers.isEmpty }
+        if suggestions.isEmpty {
             suggestions.append(.init(
                 name: "Focused session",
                 purpose: cleanPurpose,
-                appBundleIdentifiers: [first.bundleIdentifier],
+                appBundleIdentifiers: AppCatalog.mostUsed(in: catalog).first.map { [$0.bundleIdentifier] } ?? [],
                 websites: [],
                 allowBrowserSearches: false
             ))
@@ -671,7 +683,7 @@ struct IntentQuickGuideView: View {
 
     private func identifiers(namedLike names: [String]) -> [String] {
         Array(Set(names.compactMap { name in
-            catalog.first { $0.name.localizedCaseInsensitiveContains(name) }?.bundleIdentifier
+            AppCatalog.mostUsed(in: catalog).first { $0.name.localizedCaseInsensitiveContains(name) }?.bundleIdentifier
         }))
     }
 

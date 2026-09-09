@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import IntentLock
+import IntentCore
+import CoreServices
 
 struct InstalledApp: Identifiable, Hashable {
     var id: String { bundleIdentifier }
@@ -25,35 +27,27 @@ struct InstalledApp: Identifiable, Hashable {
 }
 
 enum AppCatalog {
-    static let preferredBundleIdentifiers = [
-        "com.apple.finder",
-        "com.apple.MobileSMS",
-        "org.mozilla.firefox",
-        "com.google.Chrome",
-        "com.apple.mail",
-        "com.apple.iCal",
-        "com.apple.Notes",
-        "com.apple.reminders",
-        "com.openai.codex",
-        "com.spotify.client",
-        "net.ankiweb.dtop",
-        "com.todesktop.230313mzl4w4u92",
-        "com.microsoft.VSCode",
-        "com.rstudio.desktop",
-        "io.remnote",
-        "com.remnote.desktop",
-        "net.whatsapp.WhatsApp",
-        "com.hnc.Discord",
-        "com.tinyspeck.slackmacgap",
-        "us.zoom.xos"
-    ]
-
+    private static var usageCache: (date: Date, catalogIDs: Set<String>, frequentIDs: [String])?
     static func mostUsed(in catalog: [InstalledApp]) -> [InstalledApp] {
         let appsByIdentifier = Dictionary(
             catalog.map { ($0.bundleIdentifier, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        return preferredBundleIdentifiers.compactMap { appsByIdentifier[$0] }
+        let ids = Set(appsByIdentifier.keys)
+        if let cache = usageCache, cache.catalogIDs == ids, Date().timeIntervalSince(cache.date) < 60 {
+            return cache.frequentIDs.compactMap { appsByIdentifier[$0] }
+        }
+        let evidence = catalog.map { app -> AppUsageEvidence in
+            guard let item = MDItemCreate(kCFAllocatorDefault, app.url.path as CFString) else {
+                return .init(bundleIdentifier: app.bundleIdentifier, useCount: 0, lastUsedAt: nil)
+            }
+            return .init(bundleIdentifier: app.bundleIdentifier,
+                         useCount: (MDItemCopyAttribute(item, "kMDItemUseCount" as CFString) as? NSNumber)?.intValue ?? 0,
+                         lastUsedAt: MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date)
+        }
+        let frequent = AppUsageEvidence.frequentIdentifiers(in: evidence)
+        usageCache = (Date(), ids, frequent)
+        return frequent.compactMap { appsByIdentifier[$0] }
     }
 
     static func load() -> [InstalledApp] {

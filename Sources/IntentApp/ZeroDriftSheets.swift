@@ -25,7 +25,7 @@ struct ZeroDriftWarningSheet: View {
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Zero Drift cannot be ended early through Intent. Force Quit, restarting the Mac, or administrator tools remain outside this app's control.")
+            Text("Need to recover? Press ⌃⌥⌘Esc for Safety Stop to release all restrictions immediately. Restarting Intent or your Mac also ends Zero Drift; it never resumes automatically.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -33,6 +33,8 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var isLeisure: Bool
     public var accessMode: IntentionAccessMode
     public var selectionOnly: Bool = false
+    // Derived from this Mac's presets on load/start; not another visible restriction node.
+    public var presetStartupExcludedResourceIDs: Set<String> = []
 
     public init(
         id: String = UUID().uuidString,

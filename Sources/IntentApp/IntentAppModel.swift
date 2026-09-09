@@ -53,6 +53,7 @@ final class IntentAppModel: ObservableObject {
     private let alwaysAllowedAppStore = AlwaysAllowedAppStore()
     private let cooldownStore = IntentionCooldownStore()
     private let zeroDriftStore = ZeroDriftStateStore()
+    private var hasResetRuntimeOnLaunch = false
     private let browserRulesStore = ActiveBrowserRulesStore()
     private var pendingStartIntention: Intention?
     private var pendingRuntimeEndDate: Date?
@@ -184,7 +185,17 @@ final class IntentAppModel: ObservableObject {
         } catch {
             cooldownExpirations = [:]
         }
-        restoreZeroDriftIfNeeded()
+        if !hasResetRuntimeOnLaunch {
+            hasResetRuntimeOnLaunch = true
+            // Restart is recovery, never a reason to re-lock the user's computer.
+            emergencyStop(showMessage: false)
+            for index in schedules.indices {
+                if let key = schedules[index].triggerKeyIfDue(at: Date()) {
+                    schedules[index].lastTriggeredKey = key
+                }
+            }
+            saveSchedules()
+        }
         startScheduleTimer()
     }
 
@@ -987,6 +998,29 @@ final class IntentAppModel: ObservableObject {
         activeLock?.stop()
     }
 
+    func emergencyStop(showMessage: Bool = true) {
+        cancelEndTimeSelection()
+        zeroDriftEndsAt = nil
+        zeroDriftLimitTask?.cancel()
+        zeroDriftLimitTask = nil
+        pendingZeroDriftStart = nil
+        pendingReplacementIntention = nil
+        zeroDriftIdleLock?.stopForSafety()
+        activeLock?.stopForSafety()
+        try? zeroDriftStore.clear()
+        try? browserRulesStore.clear()
+        if showMessage {
+            errorMessage = "Safety stop: all active restrictions have been released."
+            showOverlay()
+        }
+    }
+
+    func refreshFinishShortcut() {
+        let shortcut = FinishShortcutStore.load().focusShortcut
+        activeLock?.updateFinishShortcut(shortcut)
+        zeroDriftIdleLock?.updateFinishShortcut(shortcut)
+    }
+
     func activateZeroDrift(until endDate: Date) {
         guard endDate > Date() else {
             errorMessage = "Choose a Zero Drift finish time in the future."
@@ -1186,7 +1220,9 @@ final class IntentAppModel: ObservableObject {
                 let timer = DispatchSource.makeTimerSource(queue: queue)
                 timer.schedule(deadline: .now() + 2, repeating: 2)
                 timer.setEventHandler {
+                    guard !lock.isStopRequested else { return }
                     try? ActiveBrowserRulesStore().write(rules.refreshed())
+                    if lock.isStopRequested { try? ActiveBrowserRulesStore().clear() }
                 }
                 timer.resume()
                 renewalTimer = timer
@@ -1218,9 +1254,12 @@ final class IntentAppModel: ObservableObject {
                 self.sessionLimitTask = nil
                 self.activeSessionEndsAt = nil
                 self.overlayPresenter?.hideSessionTimer()
-                if failureMessage == nil {
+                if lock.didStopForSafety {
+                    self.emergencyStop()
+                } else if failureMessage == nil {
                     self.beginCooldown(for: intention)
                 } else {
+                    self.emergencyStop(showMessage: false)
                     self.errorMessage = failureMessage
                 }
                 self.activeLock = nil
@@ -1249,29 +1288,12 @@ final class IntentAppModel: ObservableObject {
                     self.purposeStatedPrompt = nil
                 }
                 self.overlayPresenter?.showOverlay(animated: true)
-                if let replacement {
+                if let replacement, !lock.didStopForSafety, failureMessage == nil {
                     self.requestStart(replacement)
                 } else {
                     self.startZeroDriftIdleLockIfNeeded()
                 }
             }
-        }
-    }
-
-    private func restoreZeroDriftIfNeeded() {
-        do {
-            guard let state = try zeroDriftStore.load() else {
-                zeroDriftEndsAt = nil
-                return
-            }
-            zeroDriftEndsAt = state.endsAt
-            scheduleZeroDriftLimit(until: state.endsAt)
-            showOverlay()
-            startZeroDriftIdleLockIfNeeded()
-        } catch {
-            try? zeroDriftStore.clear()
-            zeroDriftEndsAt = nil
-            errorMessage = "Zero Drift could not be restored: \(error)"
         }
     }
 
@@ -1331,6 +1353,11 @@ final class IntentAppModel: ObservableObject {
             Task { @MainActor in
                 guard self.zeroDriftIdleLock === lock else { return }
                 self.zeroDriftIdleLock = nil
+
+                if lock.didStopForSafety {
+                    self.emergencyStop()
+                    return
+                }
 
                 if let pending = self.pendingZeroDriftStart {
                     self.pendingZeroDriftStart = nil

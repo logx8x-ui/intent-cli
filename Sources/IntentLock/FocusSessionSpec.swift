@@ -160,10 +160,15 @@ public struct FocusSessionSpec {
     }
 
     public func permitsApplication(_ bundleIdentifier: String) -> Bool {
+        if !requiresEnforcement { return true }
         switch accessMode {
-        case .whitelist: allowedBundleIdentifiers.contains(bundleIdentifier)
-        case .blacklist: !allowedBundleIdentifiers.contains(bundleIdentifier)
+        case .whitelist: return allowedBundleIdentifiers.contains(bundleIdentifier)
+        case .blacklist: return !allowedBundleIdentifiers.contains(bundleIdentifier)
         }
+    }
+
+    public var requiresEnforcement: Bool {
+        blockAppSwitching || blockNewApps || keepFocused || blockBrowserTabEscape || blockFirefoxChromeClicks
     }
 
     private static func make(for task: ShallowTask) -> FocusSessionSpec {
@@ -263,7 +268,7 @@ public struct FocusSessionSpec {
 
 public enum IntentionStartupPlanner {
     public static func steps(for intention: Intention) -> [StartupStep] {
-        guard intention.accessMode == .whitelist else { return [] }
+        guard intention.isLeisure || intention.accessMode == .whitelist else { return [] }
         let excluded = intention.dontStartResourceIDs
         let websiteSteps = intention.allowedWebsites.compactMap { website -> StartupStep? in
             guard !excluded.contains(website.resourceID),

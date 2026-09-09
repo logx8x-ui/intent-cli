@@ -184,7 +184,7 @@ public extension Intention {
             restrictionNodes
                 .filter { $0.kind == .dontStartUp }
                 .flatMap(\.excludedResourceIDs)
-        )
+        ).union(presetStartupExcludedResourceIDs)
     }
 
     var coolDownMinutes: Int? {

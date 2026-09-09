@@ -226,6 +226,10 @@ final class GlobalHotKeyManager {
     private var requiredHotKeyRef: EventHotKeyRef?
     private var customHotKeyRef: EventHotKeyRef?
     private var selectionHotKeyRef: EventHotKeyRef?
+    private var finishHotKeyRef: EventHotKeyRef?
+    private var safetyHotKeyRef: EventHotKeyRef?
+    var safetyHandler: (() -> Void)?
+    var finishHandler: (() -> Void)?
     var selectionHandler: (() -> Void)?
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
@@ -249,6 +253,10 @@ final class GlobalHotKeyManager {
         let selectionID = EventHotKeyID(signature: fourCharCode("IntO"), id: UInt32.max)
         selectionRegistrationStatus = RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(cmdKey), selectionID,
                                                         GetApplicationEventTarget(), 0, &selectionHotKeyRef)
+        _ = updateFinishShortcut(FinishShortcutStore.load())
+        _ = register(OverlayShortcut(keyCode: UInt32(kVK_Escape),
+            modifiers: UInt32(cmdKey | controlKey | optionKey), keyLabel: "Escape"),
+            id: UInt32.max - 2, ref: &safetyHotKeyRef)
 
         if shortcut != .defaultShortcut {
             let status = registerCustomShortcut(shortcut)
@@ -263,6 +271,8 @@ final class GlobalHotKeyManager {
         unregister(ref: &requiredHotKeyRef)
         unregister(ref: &customHotKeyRef)
         unregister(ref: &selectionHotKeyRef)
+        unregister(ref: &finishHotKeyRef)
+        unregister(ref: &safetyHotKeyRef)
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
@@ -309,7 +319,10 @@ final class GlobalHotKeyManager {
             guard let event, GetEventParameter(event, EventParamName(kEventParamDirectObject),
                 EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier) == noErr,
                 identifier.signature == fourCharCode("IntO") else { return OSStatus(eventNotHandledErr) }
-            if identifier.id == UInt32.max { manager.selectionHandler?() } else { manager.handler() }
+            if identifier.id == UInt32.max { manager.selectionHandler?() }
+            else if identifier.id == UInt32.max - 1 { manager.finishHandler?() }
+            else if identifier.id == UInt32.max - 2 { manager.safetyHandler?() }
+            else { manager.handler() }
             return noErr
         }
 
@@ -325,6 +338,15 @@ final class GlobalHotKeyManager {
 
     private func registerRequiredShortcut() -> OSStatus {
         register(.defaultShortcut, id: 1, ref: &requiredHotKeyRef)
+    }
+
+    func updateFinishShortcut(_ candidate: OverlayShortcut) -> OSStatus {
+        unregister(ref: &finishHotKeyRef)
+        let status = register(candidate, id: UInt32.max - 1, ref: &finishHotKeyRef)
+        if status != noErr {
+            _ = register(FinishShortcutStore.load(), id: UInt32.max - 1, ref: &finishHotKeyRef)
+        }
+        return status
     }
 
     private func registerCustomShortcut(_ shortcut: OverlayShortcut) -> OSStatus {

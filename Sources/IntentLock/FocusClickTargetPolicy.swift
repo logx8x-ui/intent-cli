@@ -10,6 +10,8 @@ public enum FocusClickTargetPolicy {
         accessMode: IntentionAccessMode = .whitelist,
         isMenuBarClick: Bool = false
     ) -> Bool {
+        // Intent's own editor may name disallowed apps. Its controls must always work.
+        if let ownerBundleIdentifier, ownerBundleIdentifier == intentBundleIdentifier { return true }
         if isMenuBarClick {
             switch accessMode {
             case .whitelist:
@@ -31,7 +33,8 @@ public enum FocusClickTargetPolicy {
         }
 
         guard let ownerBundleIdentifier else {
-            return false
+            // Missing accessibility data is not permission to freeze the desktop.
+            return true
         }
 
         if isPermitted(
@@ -67,7 +70,11 @@ public enum FocusClickTargetPolicy {
                 accessMode: accessMode
             )
         }
-        return ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier)
+        guard let ownerBundleIdentifier else { return true }
+        if ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier) { return true }
+        return isPermitted(ownerBundleIdentifier,
+                           controlledBundleIdentifiers: controlledBundleIdentifiers,
+                           accessMode: accessMode)
     }
 
     public static func shouldAllowAuxiliaryApplication(

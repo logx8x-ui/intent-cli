@@ -602,7 +602,7 @@ struct IntentionEditorMenu: View {
     }
 
     private var presetHelp: String {
-        "GREEN MEANS: This app is always allowed in every intention. Shift-click to toggle it."
+        "GREEN MEANS: Always allowed, but not opened automatically. Shift-click to toggle it."
     }
 
     private func addFirstMatch() {

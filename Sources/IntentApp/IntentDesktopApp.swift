@@ -53,6 +53,9 @@ struct IntentDesktopApp: App {
                 CommandGroup(after: .newItem) {
                     Button("Quick Focus") { IntentRuntime.shared.toggleQuickFocus() }
                         .keyboardShortcut("g", modifiers: .command)
+                    Button("Finish Intention") { IntentRuntime.shared.model.endActiveSession() }
+                    Button("Safety Stop — Release All Restrictions") { IntentRuntime.shared.model.emergencyStop() }
+                        .keyboardShortcut(.escape, modifiers: [.command, .control, .option])
                 }
             }
     }
@@ -122,6 +125,10 @@ final class IntentStatusItemController: NSObject {
         selectionItem.target = self
         menu.addItem(selectionItem)
 
+        let safetyItem = NSMenuItem(title: "Safety Stop — Release All Restrictions", action: #selector(safetyStop), keyEquivalent: "")
+        safetyItem.target = self
+        menu.addItem(safetyItem)
+
         if let activeSessionName = model.activeSessionName {
             let activeItem = NSMenuItem(title: "Active: \(activeSessionName)", action: nil, keyEquivalent: "")
             activeItem.isEnabled = false
@@ -190,6 +197,8 @@ final class IntentStatusItemController: NSObject {
     @objc private func openQuickFocus() {
         IntentRuntime.shared.toggleQuickFocus()
     }
+
+    @objc private func safetyStop() { model.emergencyStop() }
 
     @objc private func finishIntention() {
         model.endActiveSession()
@@ -271,6 +280,12 @@ final class IntentRuntime {
         hotKeyManager?.selectionHandler = { [weak self] in
             Task { @MainActor in self?.quickSelectionController.toggle() }
         }
+        hotKeyManager?.finishHandler = { [weak self] in
+            Task { @MainActor in self?.model.endActiveSession() }
+        }
+        hotKeyManager?.safetyHandler = { [weak self] in
+            Task { @MainActor in self?.model.emergencyStop() }
+        }
         if hotKeyManager?.selectionRegistrationStatus != 0 {
             model.shortcutWarning = "⌘G is unavailable. Another app may have registered it."
         }
@@ -333,7 +348,26 @@ final class IntentRuntime {
         if let message = OverlayShortcutConflictChecker.validationMessage(for: candidate) {
             return message
         }
+        guard hotKeyManager?.updateFinishShortcut(candidate) == noErr else {
+            return "That finish shortcut is unavailable. Choose another shortcut."
+        }
         FinishShortcutStore.save(candidate)
+        model.refreshFinishShortcut()
+        return nil
+    }
+
+    func resetShortcuts() -> String? {
+        guard let hotKeyManager else { return "Intent's shortcut service is not ready yet." }
+        let previousOverlay = OverlayShortcutStore.load()
+        guard hotKeyManager.update(to: .defaultShortcut) == noErr else { return "The default open shortcut is unavailable." }
+        guard hotKeyManager.updateFinishShortcut(.defaultFinishShortcut) == noErr else {
+            _ = hotKeyManager.update(to: previousOverlay)
+            return "The default finish shortcut is unavailable. Your shortcuts were preserved."
+        }
+        OverlayShortcutStore.save(.defaultShortcut)
+        FinishShortcutStore.save(.defaultFinishShortcut)
+        model.refreshFinishShortcut()
+        model.shortcutWarning = nil
         return nil
     }
 
@@ -345,6 +379,8 @@ final class IntentRuntime {
         let shortcut = OverlayShortcutStore.load()
         guard let hotKeyManager else { return }
         let status = hotKeyManager.update(to: shortcut)
+        _ = hotKeyManager.updateFinishShortcut(FinishShortcutStore.load())
+        model.refreshFinishShortcut()
         model.shortcutWarning = status == noErr
             ? nil
             : "Synced shortcut unavailable on this Mac. Choose another shortcut in Settings."

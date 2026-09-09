@@ -45,6 +45,8 @@ public final class AlwaysAllowedAppStore {
 
         switch updated.accessMode {
         case .whitelist:
+            // Green presets grant access, never an implicit launch (including old intentions).
+            updated.presetStartupExcludedResourceIDs = Set(presets.map(\.resourceID))
             for preset in presets where !updated.allowedApps.contains(where: {
                 $0.bundleIdentifier == preset.bundleIdentifier
             }) {

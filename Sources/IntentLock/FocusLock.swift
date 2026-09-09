@@ -24,10 +24,15 @@ public enum FocusForegroundPolicy {
     public static func shouldImmediatelyReject(
         bundleIdentifier: String?,
         accessMode: IntentionAccessMode,
-        controlledBundleIdentifiers: Set<String>
+        controlledBundleIdentifiers: Set<String>,
+        isRegularApplication: Bool = true
     ) -> Bool {
-        guard accessMode == .blacklist, let bundleIdentifier else { return false }
-        return controlledBundleIdentifiers.contains(bundleIdentifier)
+        guard let bundleIdentifier, bundleIdentifier != Bundle.main.bundleIdentifier else { return false }
+        switch accessMode {
+        case .blacklist: return controlledBundleIdentifiers.contains(bundleIdentifier)
+        case .whitelist: return isRegularApplication && !shouldDeferRefocus(bundleIdentifier: bundleIdentifier)
+            && !controlledBundleIdentifiers.contains(bundleIdentifier)
+        }
     }
 
     public static func shouldHonorSystemTransitionGrace(
@@ -98,6 +103,13 @@ public final class FocusLock {
 
     private let spec: FocusSessionSpec
     private var shouldStop = false
+    private var safetyStop = false
+    private var currentFinishShortcut: FocusKeyboardShortcut
+    public var didStopForSafety: Bool {
+        stopStateLock.lock()
+        defer { stopStateLock.unlock() }
+        return safetyStop
+    }
     private let stopStateLock = NSLock()
     private let allowedAppSwitcher: AllowedAppSwitcher
     private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
@@ -116,6 +128,7 @@ public final class FocusLock {
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        currentFinishShortcut = spec.finishShortcut
         allowedAppSwitcher = AllowedAppSwitcher(
             allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
             accessMode: spec.accessMode
@@ -128,6 +141,27 @@ public final class FocusLock {
         stopStateLock.unlock()
     }
 
+    public func updateFinishShortcut(_ shortcut: FocusKeyboardShortcut) {
+        stopStateLock.lock()
+        currentFinishShortcut = shortcut
+        stopStateLock.unlock()
+    }
+
+    private var finishShortcut: FocusKeyboardShortcut {
+        stopStateLock.lock()
+        defer { stopStateLock.unlock() }
+        return currentFinishShortcut
+    }
+
+    public func stopForSafety() {
+        stopStateLock.lock()
+        safetyStop = true
+        shouldStop = true
+        stopStateLock.unlock()
+    }
+
+    public var isStopRequested: Bool { isStopped }
+
     public func run() throws {
         returnApplication = NSWorkspace.shared.frontmostApplication
         if let returnApplication,
@@ -137,30 +171,34 @@ public final class FocusLock {
         }
         allowedAppSwitcher.recordActivation(bundleIdentifier: returnApplication?.bundleIdentifier)
 
-        guard requestAccessibilityIfNeeded() else {
+        guard !spec.requiresEnforcement || requestAccessibilityIfNeeded() else {
             throw FocusLockError.accessibilityPermissionRequired
         }
 
         baselinePids = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+        defer { cleanup() }
 
-        try installEventTap()
-        installLaunchObserver()
-        installActivationObserver()
-        installActiveSpaceObserver()
-        startFocusTimer()
-        startSpotifyTimerIfNeeded()
+        // Leisure is a launch-only session. It must not install a blocking input tap.
+        if spec.requiresEnforcement {
+            try installEventTap()
+            installLaunchObserver()
+            installActivationObserver()
+            installActiveSpaceObserver()
+            startFocusTimer()
+            startSpotifyTimerIfNeeded()
+        }
 
         do {
             try runStartupSteps()
             while !isStopped {
-                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2))
+                if !RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2)) {
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
             }
         } catch {
-            cleanup()
             throw error
         }
 
-        cleanup()
         if spec.restorePreviousApplicationOnStop {
             returnApplication?.activate(options: [.activateIgnoringOtherApps])
         }
@@ -172,6 +210,7 @@ public final class FocusLock {
 
     private func runStartupSteps() throws {
         for step in spec.startupSteps {
+            guard !isStopped else { return }
             switch step {
             case .openBundle(let bundleIdentifier):
                 try open(arguments: ["-b", bundleIdentifier], label: bundleIdentifier)
@@ -189,6 +228,7 @@ public final class FocusLock {
 
         let deadline = Date(timeIntervalSinceNow: 6)
         while Date() < deadline {
+            guard !isStopped else { return }
             if activateFallbackApp() {
                 return
             }
@@ -351,7 +391,14 @@ public final class FocusLock {
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Never repeatedly re-enable an input tap that macOS disabled as unhealthy.
+            stopForSafety()
+            return Unmanaged.passUnretained(event)
+        }
+        if isStopped { return Unmanaged.passUnretained(event) }
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
+            guard spec.requiresEnforcement else { return Unmanaged.passUnretained(event) }
             if isMissionControlActive() {
                 let target = clickTarget(at: event.location)
                 guard FocusClickTargetPolicy.shouldAllowMissionControlClick(
@@ -360,10 +407,9 @@ public final class FocusLock {
                     controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
                     accessMode: spec.accessMode
                 ) else {
-                    refocus(ignoreSystemTransitionGrace: true)
+                    // Keep Mission Control open; a known forbidden tile is a no-op.
                     return nil
                 }
-                systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
                 return Unmanaged.passUnretained(event)
             }
 
@@ -405,6 +451,11 @@ public final class FocusLock {
         let control = flags.contains(.maskControl)
         let option = flags.contains(.maskAlternate)
 
+        if command && control && option && keyCode == KeyCode.escape {
+            stopForSafety()
+            return nil
+        }
+
         if command && keyCode == KeyCode.tab && (spec.blockAppSwitching || spec.keepFocused) {
             allowedBrowserTabSwitcher.cancel()
             allowedAppSwitcher.advance(reverse: shift)
@@ -437,7 +488,7 @@ public final class FocusLock {
             return nil
         }
 
-        if spec.finishShortcut.matches(
+        if finishShortcut.matches(
             keyCode: keyCode,
             command: command,
             shift: shift,
@@ -573,12 +624,21 @@ public final class FocusLock {
     }
 
     private func handleActivated(_ app: NSRunningApplication) {
-        guard spec.blockAppSwitching || spec.keepFocused else { return }
+        guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
+        if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+        if let id = app.bundleIdentifier, app.activationPolicy == .regular,
+           spec.permitsApplication(id),
+           id != "com.spotify.client" || spec.allowSpotifyForeground || spec.accessMode == .blacklist {
+            lastPermittedApplication = app
+            allowedAppSwitcher.recordActivation(bundleIdentifier: id)
+            return
+        }
 
         if FocusForegroundPolicy.shouldImmediatelyReject(
             bundleIdentifier: app.bundleIdentifier,
             accessMode: spec.accessMode,
-            controlledBundleIdentifiers: spec.allowedBundleIdentifiers
+            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            isRegularApplication: app.activationPolicy == .regular
         ) {
             refocus(ignoreSystemTransitionGrace: true)
             return
@@ -639,7 +699,7 @@ public final class FocusLock {
     }
 
     private func enforceFocus() {
-        guard spec.blockAppSwitching || spec.keepFocused else { return }
+        guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
 
         guard let frontmost = NSWorkspace.shared.frontmostApplication else {
             if shouldWaitForSystemSwitcher(bundleIdentifier: nil) {
@@ -649,10 +709,13 @@ public final class FocusLock {
             return
         }
 
+        if frontmost.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+
         if FocusForegroundPolicy.shouldImmediatelyReject(
             bundleIdentifier: frontmost.bundleIdentifier,
             accessMode: spec.accessMode,
-            controlledBundleIdentifiers: spec.allowedBundleIdentifiers
+            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            isRegularApplication: frontmost.activationPolicy == .regular
         ) {
             refocus(ignoreSystemTransitionGrace: true)
             return
@@ -696,6 +759,7 @@ public final class FocusLock {
     }
 
     private func refocus(ignoreSystemTransitionGrace: Bool = false) {
+        guard !isStopped else { return }
         if !ignoreSystemTransitionGrace,
            shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
             return
@@ -711,18 +775,15 @@ public final class FocusLock {
             return
         }
 
-        if spec.accessMode == .blacklist {
-            activateBestPermittedApplication()
-        } else {
-            activateFallbackApp()
-        }
+        activateBestPermittedApplication()
     }
 
     private func activateBestPermittedApplication() {
         if let lastPermittedApplication,
            let bundleIdentifier = lastPermittedApplication.bundleIdentifier,
            spec.permitsApplication(bundleIdentifier),
-           !lastPermittedApplication.isTerminated {
+           !lastPermittedApplication.isTerminated,
+           !lastPermittedApplication.isHidden {
             _ = lastPermittedApplication.activate(options: [.activateIgnoringOtherApps])
             return
         }
@@ -735,6 +796,7 @@ public final class FocusLock {
             return
         }
 
+        if activateFallbackApp() { return }
         guard let application = NSWorkspace.shared.runningApplications.first(where: {
             guard let bundleIdentifier = $0.bundleIdentifier else { return false }
             return $0.activationPolicy == .regular
@@ -777,6 +839,9 @@ public final class FocusLock {
         representedBundleIdentifier: String?
     ) {
         let systemWide = AXUIElementCreateSystemWide()
+        // Bound synchronous accessibility work in the input callback. A hung app
+        // must not hold every mouse click while the default AX timeout elapses.
+        AXUIElementSetMessagingTimeout(systemWide, 0.01)
         var element: AXUIElement?
         if AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) == .success,
            let element {
@@ -786,7 +851,8 @@ public final class FocusLock {
                 ?? windowOwnerBundleIdentifier(at: point)
             return (
                 ownerBundleIdentifier,
-                representedBundleIdentifier(startingAt: element)
+                ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier)
+                    ? representedBundleIdentifier(startingAt: element) : nil
             )
         }
 
@@ -796,9 +862,10 @@ public final class FocusLock {
     private func representedBundleIdentifier(startingAt element: AXUIElement) -> String? {
         var current: AXUIElement? = element
         var labels: [String] = []
+        let deadline = Date(timeIntervalSinceNow: 0.06)
 
         for _ in 0..<8 {
-            guard let currentElement = current else { break }
+            guard Date() < deadline, let currentElement = current else { break }
 
             if let url = accessibilityURL(currentElement),
                let bundleIdentifier = ApplicationBundleIdentifierResolver.resolve(from: url) {
@@ -811,12 +878,13 @@ public final class FocusLock {
                 kAXHelpAttribute,
                 kAXRoleDescriptionAttribute
             ] {
+                guard Date() < deadline else { break }
                 if let value = accessibilityString(currentElement, attribute: attribute) {
                     labels.append(value)
                 }
             }
 
-            current = accessibilityElement(currentElement, attribute: kAXParentAttribute)
+            if Date() < deadline { current = accessibilityElement(currentElement, attribute: kAXParentAttribute) }
         }
 
         var applicationNames: [String: String] = [:]
@@ -974,7 +1042,7 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
-        if spec.accessMode == .whitelist, spec.closeSessionResourcesOnFinish {
+        if !didStopForSafety, spec.accessMode == .whitelist, spec.closeSessionResourcesOnFinish {
             closeSessionResources()
         }
     }
@@ -1015,9 +1083,6 @@ public final class FocusLock {
     private func isMissionControlActive() -> Bool {
         let displayBounds = NSScreen.screens
             .map(\.frame)
-            .reduce(CGRect.null) { partialResult, frame in
-                partialResult.union(frame)
-            }
 
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
@@ -1035,12 +1100,12 @@ public final class FocusLock {
                 return false
             }
 
-            return FocusForegroundPolicy.isMissionControlOverlay(
+            return displayBounds.contains { display in FocusForegroundPolicy.isMissionControlOverlay(
                 ownerName: window[kCGWindowOwnerName as String] as? String,
                 layer: window[kCGWindowLayer as String] as? Int,
                 bounds: CGRect(x: x, y: y, width: width, height: height),
-                displayBounds: displayBounds
-            )
+                displayBounds: display
+            ) }
         }
     }
 

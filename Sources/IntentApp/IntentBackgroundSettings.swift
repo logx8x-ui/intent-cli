@@ -73,6 +73,7 @@ struct IntentSettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isDropTarget = false
     @State private var importError: String?
+    @State private var shortcutResetError: String?
 
     private let presetColumns = [
         GridItem(.flexible(), spacing: 8),
@@ -196,6 +197,19 @@ struct IntentSettingsView: View {
                 Text("Ends the active intention unless a Timer is locking it.")
                     .font(.caption2)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
+
+                Button("Reset shortcuts to defaults") {
+                    shortcutResetError = IntentRuntime.shared.resetShortcuts()
+                    if shortcutResetError == nil {
+                        overlayShortcut = .defaultShortcut
+                        finishShortcut = .defaultFinishShortcut
+                    }
+                }
+                Text("Open Intent: ⇧` · Finish: ⇧⌘M · Quick Focus: ⌘G")
+                    .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
+                Text("Safety stop: ⌃⌥⌘Esc releases all restrictions, including Zero Drift.")
+                    .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
+                if let shortcutResetError { Text(shortcutResetError).font(.caption).foregroundStyle(.red) }
             }
 
             Divider()
@@ -405,7 +419,7 @@ private struct AlwaysAllowedAppsSettingsSection: View {
                 .tracking(1.1)
                 .foregroundStyle(GraphTheme.muted(colorScheme))
 
-            Text("These apps are automatically allowed in every current and future intention.")
+            Text("These apps are allowed in every current and future intention, but never opened automatically.")
                 .font(.caption2)
                 .foregroundStyle(GraphTheme.muted(colorScheme))
 
@@ -515,7 +529,7 @@ private struct AlwaysAllowedAppsSettingsSection: View {
     }
 
     private var presetHelp: String {
-        "GREEN MEANS: This app is always allowed in every intention. Shift-click to toggle it."
+        "GREEN MEANS: Always allowed, but not opened automatically. Shift-click to toggle it."
     }
 
     private func add(_ app: InstalledApp) {

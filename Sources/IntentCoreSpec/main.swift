@@ -25,6 +25,31 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    let usageNow = Date()
+    let usageIDs = AppUsageEvidence.frequentIdentifiers(in: [
+        .init(bundleIdentifier: "frequent", useCount: 25, lastUsedAt: usageNow.addingTimeInterval(-60)),
+        .init(bundleIdentifier: "once", useCount: 1, lastUsedAt: usageNow),
+        .init(bundleIdentifier: "unknown", useCount: 0, lastUsedAt: nil),
+        .init(bundleIdentifier: "old", useCount: 200, lastUsedAt: usageNow.addingTimeInterval(-90 * 86400)),
+        .init(bundleIdentifier: "other", useCount: 5, lastUsedAt: usageNow)
+    ], now: usageNow)
+    try expect(usageIDs == ["frequent", "other"], "Onboarding must rank measured frequent use, excluding unknown, once-used, and stale apps")
+    try expect(FocusForegroundPolicy.shouldImmediatelyReject(bundleIdentifier: "unallowed.app", accessMode: .whitelist,
+        controlledBundleIdentifiers: ["allowed.app"]), "Unallowed regular apps must bypass old Space animation grace")
+    try expect(!FocusForegroundPolicy.shouldImmediatelyReject(bundleIdentifier: "menu.extra", accessMode: .whitelist,
+        controlledBundleIdentifiers: [], isRegularApplication: false), "Menu extras must remain usable")
+    try expect(FocusClickTargetPolicy.shouldAllow(ownerBundleIdentifier: "dev.loganmondi.intent",
+        representedBundleIdentifier: "unallowed.app", allowedBundleIdentifiers: ["allowed.app"],
+        intentBundleIdentifier: "dev.loganmondi.intent"), "Zero Drift must never swallow Intent controls that mention another app")
+    try expect(FocusClickTargetPolicy.shouldAllowMissionControlClick(ownerBundleIdentifier: "allowed.app",
+        representedBundleIdentifier: nil, controlledBundleIdentifiers: ["allowed.app"], accessMode: .whitelist),
+        "Mission Control must allow a known permitted owner even without a represented app label")
+    try expect(!FocusClickTargetPolicy.shouldAllowMissionControlClick(ownerBundleIdentifier: "unallowed.app",
+        representedBundleIdentifier: nil, controlledBundleIdentifiers: ["allowed.app"], accessMode: .whitelist),
+        "Mission Control must swallow a known forbidden owner")
+    try expect(FocusClickTargetPolicy.shouldAllow(ownerBundleIdentifier: nil, representedBundleIdentifier: nil,
+        allowedBundleIdentifiers: [], intentBundleIdentifier: "dev.loganmondi.intent"),
+        "Unavailable accessibility data must not freeze all clicking")
     let quickApps: [AllowedApp] = [.init(name: "Notes", bundleIdentifier: "com.apple.Notes"),
         .init(name: "Chrome", bundleIdentifier: "com.google.Chrome"),
         .init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")]
@@ -318,6 +343,18 @@ do {
     leisure.name = "Leisure"
     leisure.isLeisure = true
     let leisureSpec = FocusSessionSpec.make(for: leisure)
+    try expect(!leisureSpec.requiresEnforcement && leisureSpec.permitsApplication("any.unlisted.app"),
+        "Leisure must bypass all input filtering and permit unlisted apps")
+    var blacklistLeisure = leisure
+    blacklistLeisure.accessMode = .blacklist
+    try expect(IntentionStartupPlanner.steps(for: blacklistLeisure) == leisureSpec.startupSteps,
+        "Leisure must still open selected resources with a stale blacklist setting")
+    let safetyLock = FocusLock(spec: leisureSpec)
+    try expect(!safetyLock.isStopRequested && !safetyLock.didStopForSafety,
+        "New sessions must not inherit a previous safety stop")
+    safetyLock.stopForSafety()
+    try expect(safetyLock.isStopRequested && safetyLock.didStopForSafety,
+        "Safety stop must immediately signal both enforcement and resource cleanup to stop")
     try expect(!leisureSpec.strictSingleApp, "Leisure should not lock to one app")
     try expect(!leisureSpec.blockAppSwitching, "Leisure should allow switching to every app")
     try expect(!leisureSpec.blockNewApps, "Leisure should allow launching every app")
@@ -480,13 +517,13 @@ do {
         "Spotlight should remain available to reopen an allowed app"
     )
     try expect(
-        !FocusClickTargetPolicy.shouldAllow(
+        FocusClickTargetPolicy.shouldAllow(
             ownerBundleIdentifier: nil,
             representedBundleIdentifier: nil,
             allowedBundleIdentifiers: allowedClickBundles,
             intentBundleIdentifier: "dev.loganmondi.intent"
         ),
-        "Unknown and desktop click targets should stay blocked"
+        "Unknown click ownership must fail open; foreground enforcement handles forbidden activations"
     )
     try expect(
         FocusClickTargetPolicy.shouldAllow(
@@ -1023,6 +1060,10 @@ do {
         [AlwaysAllowedAppStore.finder],
         to: dataScience
     )
+    try expect(!IntentionStartupPlanner.steps(for: whitelistWithFinder).contains(.openBundle("com.apple.finder")),
+        "Green always-allowed presets must never be auto-launched")
+    try expect(whitelistWithFinder.restrictionNodes == dataScience.restrictionNodes,
+        "Preset launch exclusions must not clutter the graph with restriction nodes")
     try expect(
         whitelistWithFinder.allowedApps.contains { $0.bundleIdentifier == "com.apple.finder" },
         "Always-allowed apps should be added to existing whitelist intentions"
