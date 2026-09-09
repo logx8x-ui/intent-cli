@@ -49,6 +49,12 @@ struct IntentDesktopApp: App {
 
     var body: some Scene {
         Settings { EmptyView() }
+            .commands {
+                CommandGroup(after: .newItem) {
+                    Button("Quick Focus") { IntentRuntime.shared.toggleQuickFocus() }
+                        .keyboardShortcut("g", modifiers: .command)
+                }
+            }
     }
 }
 
@@ -111,6 +117,10 @@ final class IntentStatusItemController: NSObject {
         let openItem = NSMenuItem(title: "Open Intent", action: #selector(openIntent), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
+
+        let selectionItem = NSMenuItem(title: "Quick Focus", action: #selector(openQuickFocus), keyEquivalent: "g")
+        selectionItem.target = self
+        menu.addItem(selectionItem)
 
         if let activeSessionName = model.activeSessionName {
             let activeItem = NSMenuItem(title: "Active: \(activeSessionName)", action: nil, keyEquivalent: "")
@@ -177,6 +187,10 @@ final class IntentStatusItemController: NSObject {
         model.showOverlay()
     }
 
+    @objc private func openQuickFocus() {
+        IntentRuntime.shared.toggleQuickFocus()
+    }
+
     @objc private func finishIntention() {
         model.endActiveSession()
     }
@@ -236,6 +250,10 @@ final class IntentRuntime {
         accountManager.onPortablePreferencesApplied = { [weak self] in
             self?.reloadPortablePreferences()
         }
+    }
+
+    func toggleQuickFocus() {
+        quickSelectionController.toggle()
     }
 
     func start() {
