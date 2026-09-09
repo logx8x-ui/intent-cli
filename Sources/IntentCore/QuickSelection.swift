@@ -30,6 +30,16 @@ public struct QuickSelection {
         if !tabs.contains(where: { $0.browser == key.browser }) { apps.remove(key.browser) }
     }
 
+    public mutating func toggleBrowserWindow(browser: String, windowID: Int, snapshots: [BrowserTabSnapshot]) {
+        let keys = Set((snapshots.first { $0.browserBundleIdentifier == browser }?.tabs ?? [])
+            .filter { $0.windowID == windowID && Self.isSelectable($0) }
+            .map { QuickSelectionTab(browser: browser, id: $0.id) })
+        guard !keys.isEmpty else { return }
+        if keys.isSubset(of: tabs) { tabs.subtract(keys) } else { tabs.formUnion(keys) }
+        if tabs.contains(where: { $0.browser == browser }) { apps.insert(browser) }
+        else { apps.remove(browser) }
+    }
+
     public static func isSelectable(_ tab: BrowserTabItem) -> Bool {
         guard let url = URL(string: tab.url), let scheme = url.scheme?.lowercased() else { return false }
         return ["https", "http"].contains(scheme) && url.host != nil

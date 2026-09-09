@@ -25,6 +25,45 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    for count in [1, 2, 4, 9, 16, 30, 50] {
+        let bounds = CGRect(x: 32, y: 98, width: 1300, height: 620)
+        let sizes = (0..<count).map { CGSize(width: $0 % 3 == 0 ? 600 : 1400, height: $0 % 3 == 0 ? 1000 : 850) }
+        let frames = FieldOfViewLayout.frames(sizes: sizes, in: bounds)
+        try expect(frames.count == count, "Every capturable window must get a field-of-view frame")
+        for (index, frame) in frames.enumerated() {
+            try expect(bounds.insetBy(dx: -0.001, dy: -0.001).contains(frame), "Overview windows must fit inside the display (\(count): \(frame))")
+            try expect(abs(frame.width / frame.height - sizes[index].width / sizes[index].height) < 0.001,
+                "Overview must preserve real window proportions")
+            let decorated = frame.insetBy(dx: -2, dy: 0).union(CGRect(x: frame.minX - 2, y: frame.minY - 62, width: frame.width + 4, height: frame.height + 88))
+            try expect(bounds.insetBy(dx: -0.001, dy: -0.001).contains(CGPoint(x: frame.minX, y: decorated.minY)), "Tab bubbles must stay beneath the header")
+            for other in frames.dropFirst(index + 1) {
+                let otherDecorated = CGRect(x: other.minX - 2, y: other.minY - 62, width: other.width + 4, height: other.height + 88)
+                try expect(!decorated.intersects(otherDecorated), "Window tab bubbles and captions must not overlap neighbours")
+            }
+        }
+    }
+    let groupedTabs: [BrowserTabItem] = [
+        .init(id: 11, windowID: 1, index: 0, title: "First page", url: "https://example.com", active: true),
+        .init(id: 12, windowID: 1, index: 1, title: "Second page", url: "https://example.org", active: false),
+        .init(id: 21, windowID: 2, index: 0, title: "Other window", url: "https://example.net", active: true)
+    ]
+    try expect(BrowserWindowMatching.match(title: "First page - Google Chrome", tabs: groupedTabs, nativeWindowCount: 2) == 1,
+        "Browser tabs must attach to their own native window")
+    try expect(BrowserWindowMatching.match(title: "Unknown", tabs: groupedTabs, nativeWindowCount: 2) == nil,
+        "Unmatched browser windows must never borrow another window's tabs")
+    try expect(BrowserWindowMatching.match(title: "Fi…page", tabs: groupedTabs, nativeWindowCount: 2) == 1,
+        "Uniquely truncated native window titles must still match their browser tab group")
+    var ambiguousTabs = groupedTabs
+    ambiguousTabs[2].title = "First page"
+    try expect(BrowserWindowMatching.match(title: "First page", tabs: ambiguousTabs, nativeWindowCount: 2) == nil,
+        "Duplicate active titles must not guess a browser window")
+    var fieldSelection = QuickSelection()
+    let groupedSnapshot = BrowserTabSnapshot(browserBundleIdentifier: "com.google.Chrome", tabs: groupedTabs)
+    fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot])
+    try expect(fieldSelection.tabIDsByBrowser["com.google.Chrome"] == [11, 12], "Window selection must not allow other browser windows")
+    fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 2, snapshots: [groupedSnapshot])
+    fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot])
+    try expect(fieldSelection.tabIDsByBrowser["com.google.Chrome"] == [21], "Deselecting a window must preserve the other selected window")
     let usageNow = Date()
     let usageIDs = AppUsageEvidence.frequentIdentifiers(in: [
         .init(bundleIdentifier: "frequent", useCount: 25, lastUsedAt: usageNow.addingTimeInterval(-60)),
