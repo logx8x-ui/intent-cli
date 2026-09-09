@@ -105,7 +105,8 @@ try {
       index: 1,
       title: "Instagram",
       url: "https://instagram.com/direct/inbox/",
-      active: true
+      active: true,
+      faviconURL: "https://instagram.com/favicon.ico"
     }]
   }]);
   assert.equal(snapshotResponses.length, 0, "Snapshots should not generate unused native responses");
@@ -119,6 +120,10 @@ try {
   const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
   assert.equal(snapshot.browserBundleIdentifier, "com.google.Chrome");
   assert.equal(snapshot.tabs[0].id, 14, "Native host should persist allowed browser tabs for Ctrl+Tab");
+  assert.equal(snapshot.tabs[0].faviconURL, "https://instagram.com/favicon.ico", "Native bridge preserves the actual tab favicon");
+  callHost([{ type: "tabPreview", browserBundleIdentifier: "com.google.Chrome", preview: { requestID: "preview-spec", image: "data:image/jpeg;base64,dGVzdA==" } }]);
+  const preview = JSON.parse(fs.readFileSync(path.join(intentDir, "browser-preview-com-google-Chrome.json"), "utf8"));
+  assert.equal(preview.requestID, "preview-spec", "Preview replies retain request identity and use the isolated host directory");
 
   fs.writeFileSync(commandPath, JSON.stringify({
     id: "native-host-spec",

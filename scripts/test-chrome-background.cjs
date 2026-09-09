@@ -27,6 +27,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const updates = [];
   const reloads = [];
   const focusedWindows = [];
+  let interruptReturnWithTab = null;
   const intervals = [];
   let dynamicRules = [];
   let sessionRules = [];
@@ -83,7 +84,13 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       onUpdated: tabUpdated,
       onCreated: tabCreated,
       onRemoved: tabRemoved,
-      query: async () => Array.from(tabs.values()).map((tab) => ({ ...tab })),
+      query: async (query = {}) => Array.from(tabs.values())
+        .filter(tab => (query.windowId == null || tab.windowId === query.windowId) && (query.active == null || tab.active === query.active))
+        .map((tab) => ({ ...tab })),
+      captureVisibleTab: async (windowId) => {
+        const tab = Array.from(tabs.values()).find(tab => tab.windowId === windowId && tab.active);
+        return `data:image/jpeg;base64,${Buffer.from(String(tab?.id)).toString("base64")}`;
+      },
       get: async (id) => tabs.has(id) ? { ...tabs.get(id) } : Promise.reject(new Error("missing tab")),
       update: async (id, patch) => {
         const tab = tabs.get(id);
@@ -119,6 +126,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       onFocusChanged: windowFocus,
       update: async (id, patch) => {
         focusedWindows.push({ id, patch });
+        if (interruptReturnWithTab !== null) {
+          const tabId = interruptReturnWithTab; interruptReturnWithTab = null;
+          setActive(tabId);
+          for (const listener of tabActivated.listeners) await listener({ tabId });
+        }
         return { id, ...patch };
       }
     },
@@ -148,6 +160,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
+    interruptNextReturn(tabId) { interruptReturnWithTab = tabId; },
     async focusWindow(id) {
       for (const listener of windowFocus.listeners) await listener(id);
       await settle();
@@ -232,6 +245,41 @@ async function run() {
   assert.equal(selectedOnly.focusedWindows.at(-1).id, 1, "Window focus must return to a selected tab's window");
   await selectedOnly.create({ id: 9, windowId: 1, active: true, url: "https://example.org/work" });
   assert.equal(selectedOnly.tabs.get(7).active, true, "New tabs cannot bypass selected-tab scope");
+  selectedOnly.interruptNextReturn(9);
+  await selectedOnly.activate(8);
+  await selectedOnly.settle();
+  assert.equal(selectedOnly.tabs.get(7).active, true, "A blocked activation arriving inside an in-flight return must not be dropped");
+  await Promise.all([selectedOnly.activate(8), selectedOnly.activate(9), selectedOnly.activate(8)]);
+  await selectedOnly.settle();
+  assert.equal(selectedOnly.tabs.get(7).active, true, "Rapid blocked activations finish on a selected tab");
+  selectedOnly.tabs.get(7).active = false;
+  selectedOnly.tabs.get(8).active = true;
+  selectedOnly.intervals[0].callback();
+  await selectedOnly.settle();
+  assert.equal(selectedOnly.tabs.get(7).active, true, "Heartbeat repairs a missed activation event");
+  const twoSelected = createHarness({ active: true, accessMode: "whitelist", allowedWebsites: ["youtube.com"], selectedTabIDs: [31, 32], blockTabSwitching: true }, [
+    { id: 31, windowId: 4, active: true, url: "https://youtube.com/watch?v=one" },
+    { id: 32, windowId: 4, active: false, url: "https://youtube.com/watch?v=two" },
+    { id: 33, windowId: 4, active: false, url: "https://youtube.com/watch?v=three" }
+  ]);
+  await twoSelected.settle();
+  await twoSelected.activate(32);
+  assert.equal(twoSelected.tabs.get(32).active, true, "Both explicitly selected tabs remain usable");
+  await twoSelected.activate(33);
+  assert.equal(twoSelected.tabs.get(32).active, true, "An unselected video returns to the last selected video, not any same-site tab");
+
+  const preview = createHarness({ active: false }, [
+    { id: 51, windowId: 3, active: true, url: "https://example.com/", favIconUrl: "https://example.com/favicon.ico" },
+    { id: 52, windowId: 3, active: false, url: "https://example.org/" }
+  ]);
+  await preview.settle();
+  await preview.receiveNative({ active: false, tabCommand: { id: "preview-test", action: "preview", tabID: 52, windowID: 3 } });
+  await preview.settle();
+  assert.ok(preview.nativeMessages.some(message => message.preview?.requestID === "preview-test" && message.preview.image), "Hover preview captures the requested tab");
+  assert.equal(preview.tabs.get(51).active, true, "Preview restores the original active tab");
+  assert.equal(preview.focusedWindows.length, 0, "Preview never focuses a browser window");
+  await preview.receiveNative({ active: false, tabCommand: { action: "snapshot" } });
+  assert.ok(preview.nativeMessages.some(message => message.tabs?.some(tab => tab.faviconURL === "https://example.com/favicon.ico")), "Snapshot carries the actual site's icon");
 
   const idle = createHarness({ active: false }, [
     { id: 1, active: true, url: "https://youtube.com/" }

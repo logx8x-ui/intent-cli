@@ -15,9 +15,10 @@ const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
 let hostSupportsQuickSelection = false;
+let hostSupportsTabPreview = false;
 function advertisedCapabilities() {
   return hostSupportsQuickSelection
-    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1"] : EXTENSION_CAPABILITIES;
+    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1", ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : EXTENSION_CAPABILITIES;
 }
 
 const { normalizeRule, isAllowedURL, isSearchStagingURL } = IntentBrowserRules;
@@ -93,8 +94,10 @@ function connectNativeHost() {
     port.onMessage.addListener((message) => {
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
-      if (supported !== hostSupportsQuickSelection) {
+      const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
+      if (supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview) {
         hostSupportsQuickSelection = supported;
+        hostSupportsTabPreview = previewSupported;
         sendHeartbeat();
       }
       if (message?.tabCommand) handleRequestedTab(message.tabCommand);
@@ -194,11 +197,54 @@ function settleRuleRequests() {
 }
 
 function sendHeartbeat() {
+  if (rules.active && Array.isArray(rules.selectedTabIDs)) {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => {
+      if (tabs.some(tab => tab.active && !isRuntimeAllowedTab(tab))) returnToAllowedTab();
+    }).catch(() => {});
+  }
   if (!nativePort) connectNativeHost();
   postNative({ type: "heartbeat" });
 }
 
+let previewBusy = false;
+async function captureTabPreview(message) {
+  const result = { requestID: message.id };
+  if (previewBusy || rules.active) {
+    postNative({ type: "tabPreview", preview: { ...result, error: "Preview unavailable during a session." } });
+    return;
+  }
+  previewBusy = true;
+  let previous = null;
+  let tab = null;
+  try {
+    tab = await chrome.tabs.get(message.tabID);
+    if (tab.windowId !== message.windowID || tab.incognito || tab.discarded || !/^https?:\/\//.test(tab.url || "")) {
+      throw new Error("This tab cannot be previewed.");
+    }
+    previous = (await chrome.tabs.query({ windowId: tab.windowId, active: true }))[0];
+    if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
+    await new Promise(resolve => setTimeout(resolve, 180));
+    const current = await chrome.tabs.get(tab.id);
+    if (rules.active || !current.active || current.url !== tab.url) throw new Error("Tab changed");
+    result.image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 65 });
+  } catch (_) {
+    result.error = "Preview unavailable. Open the tab once, then try again.";
+  } finally {
+    // Restore only our temporary activation; never overwrite a user's intervening choice.
+    if (previous && tab && previous.id !== tab.id) {
+      const current = await chrome.tabs.get(tab.id).catch(() => null);
+      if (current?.active && !rules.active) await chrome.tabs.update(previous.id, { active: true }).catch(() => {});
+    }
+    previewBusy = false;
+  }
+  postNative({ type: "tabPreview", preview: result });
+}
+
 async function handleRequestedTab(message) {
+  if (message.action === "preview") {
+    await captureTabPreview(message);
+    return;
+  }
   if (message.action === "snapshot") {
     await publishTabSnapshot(true, true);
     return;
@@ -241,7 +287,8 @@ async function publishTabSnapshot(force = false, discovery = false) {
       index: tab.index,
       title: tab.title || tab.url || "New Tab",
       url: tab.url || "",
-      active: Boolean(tab.active)
+        active: Boolean(tab.active),
+        faviconURL: tab.favIconUrl || null
     }))
     .sort((left, right) =>
       (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id)
@@ -624,8 +671,9 @@ async function getAllowedTab(tabId) {
   return tab && isRuntimeAllowedTab(tab) ? tab : null;
 }
 
+let enforcementPending = false;
 async function returnToAllowedTab() {
-  if (enforcing) return;
+  if (enforcing) { enforcementPending = true; return; }
   enforcing = true;
   try {
     if (lastAllowedTabId !== null) {
@@ -652,6 +700,10 @@ async function returnToAllowedTab() {
     }
   } finally {
     enforcing = false;
+    if (enforcementPending) {
+      enforcementPending = false;
+      if (rules.active && Array.isArray(rules.selectedTabIDs)) setTimeout(returnToAllowedTab, 0);
+    }
   }
 }
 
@@ -716,6 +768,7 @@ chrome.windows?.onFocusChanged?.addListener(async (windowId) => {
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  if (previewBusy && !rules.active) return; // Preview activations are not user browsing history.
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
     await returnToAllowedTab();
     return;

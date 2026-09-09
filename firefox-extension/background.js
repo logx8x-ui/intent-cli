@@ -10,9 +10,10 @@ const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
 let hostSupportsQuickSelection = false;
+let hostSupportsTabPreview = false;
 function advertisedCapabilities() {
   return hostSupportsQuickSelection
-    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1"] : EXTENSION_CAPABILITIES;
+    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1", ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : EXTENSION_CAPABILITIES;
 }
 
 const {
@@ -95,8 +96,10 @@ function connectCommandPort() {
     port.onMessage.addListener(async (message) => {
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
-      if (supported !== hostSupportsQuickSelection) {
+      const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
+      if (supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview) {
         hostSupportsQuickSelection = supported;
+        hostSupportsTabPreview = previewSupported;
         sendHeartbeat();
       }
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
@@ -175,7 +178,33 @@ async function recordWebsiteVisit(tab) {
   } catch (_) {}
 }
 
+let previewBusy = false;
+async function captureTabPreview(message) {
+  const result = { requestID: message.id };
+  if (previewBusy || rules.active) {
+    postCommandPort({ type: "tabPreview", preview: { ...result, error: "Preview unavailable during a session." } });
+    return;
+  }
+  previewBusy = true;
+  try {
+    const tab = await browser.tabs.get(message.tabID);
+    if (tab.windowId !== message.windowID || tab.incognito || tab.discarded || !/^https?:\/\//.test(tab.url || "")) {
+      throw new Error("This tab cannot be previewed.");
+    }
+    result.image = await browser.tabs.captureTab(tab.id, { format: "jpeg", quality: 65 });
+  } catch (_) {
+    result.error = "Preview unavailable. Open the tab once, then try again.";
+  } finally {
+    previewBusy = false;
+  }
+  postCommandPort({ type: "tabPreview", preview: result });
+}
+
 async function handleRequestedTab(message) {
+  if (message.action === "preview") {
+    await captureTabPreview(message);
+    return;
+  }
   if (message.action === "snapshot") {
     await publishTabSnapshot(true, true);
     return;
@@ -217,7 +246,8 @@ async function publishTabSnapshot(force = false, discovery = false) {
         index: tab.index,
         title: tab.title || tab.url || "New Tab",
         url: tab.url || "",
-        active: Boolean(tab.active)
+        active: Boolean(tab.active),
+        faviconURL: tab.favIconUrl || null
       }))
       .sort((left, right) => left.id - right.id);
   const nextFingerprint = JSON.stringify(snapshotTabs);
@@ -296,6 +326,11 @@ function settlePendingRuleRefresh() {
 }
 
 function sendHeartbeat() {
+  if (rules.active && Array.isArray(rules.selectedTabIDs)) {
+    browser.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => {
+      if (tabs.some(tab => tab.active && !isRuntimeAllowedTab(tab))) returnToAllowedTab();
+    }).catch(() => {});
+  }
   if (!commandPort) connectCommandPort();
   postCommandPort({ type: "heartbeat" });
 }
@@ -528,8 +563,10 @@ async function rememberIfAllowed(tabId) {
   }
 }
 
+let enforcementPending = false;
 async function returnToAllowedTab() {
   if (enforcing) {
+    enforcementPending = true;
     return;
   }
 
@@ -562,6 +599,10 @@ async function returnToAllowedTab() {
     lastAllowedTabId = null;
   } finally {
     enforcing = false;
+    if (enforcementPending) {
+      enforcementPending = false;
+      if (rules.active && Array.isArray(rules.selectedTabIDs)) setTimeout(returnToAllowedTab, 0);
+    }
   }
 }
 

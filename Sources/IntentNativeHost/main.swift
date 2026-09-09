@@ -36,6 +36,7 @@ func writeMessage<T: Encodable>(_ value: T) throws {
 }
 
 struct HostTab: Codable {
+    var faviconURL: String?
     var id: Int
     var windowID: Int
     var index: Int
@@ -45,6 +46,7 @@ struct HostTab: Codable {
 }
 
 struct HostRequest: Codable {
+    var preview: BrowserTabPreview?
     var type: String?
     var enabled: Bool?
     var browserBundleIdentifier: String?
@@ -70,7 +72,7 @@ struct HostRuleState: Codable, Equatable {
 }
 
 struct HostResponse: Codable {
-    var hostCapabilities: [String] = ["quick-selection-host-v1"]
+    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1"]
     var selectedTabIDs: [Int]?
     var active: Bool
     var accessMode: String
@@ -229,6 +231,17 @@ private final class HostRuntime {
             }
 
             switch request.type ?? "getRules" {
+            case "tabPreview":
+                if let preview = request.preview,
+                   let data = try? JSONEncoder().encode(preview), data.count < 8_000_000 {
+                    let url = paths.directory.appendingPathComponent(BrowserTabPreview.fileURL(browser: browser).lastPathComponent)
+                    try? data.write(to: url, options: .atomic)
+                    queue.asyncAfter(deadline: .now() + 10) {
+                        if let current = try? Data(contentsOf: url),
+                           let item = try? JSONDecoder().decode(BrowserTabPreview.self, from: current),
+                           item.requestID == preview.requestID { try? FileManager.default.removeItem(at: url) }
+                    }
+                }
             case "setGuardEnabled":
                 if let enabled = request.enabled, enabled != guardEnabled {
                     guardEnabled = enabled
@@ -313,7 +326,8 @@ private final class HostRuntime {
                 index: $0.index,
                 title: $0.title,
                 url: $0.url,
-                active: $0.active
+                active: $0.active,
+                faviconURL: $0.faviconURL
             )
         }
         guard items != lastSnapshotTabs else { return }

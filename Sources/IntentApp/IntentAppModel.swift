@@ -78,6 +78,10 @@ final class IntentAppModel: ObservableObject {
         do {
             let intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
             for browser in selection.apps.intersection(QuickSelection.browsers) {
+                guard BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
+                    errorMessage = "Turn on Intent Browser Guard before starting a selected-tab intention."
+                    return false
+                }
                 guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
                     .supports(.quickSelection, maxAge: 5) else {
                     errorMessage = "Update Intent Browser Guard for selected-tab sessions, then try again."
@@ -1190,6 +1194,13 @@ final class IntentAppModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard !Task.isCancelled, let self, self.activeSessionID == intention.id else { return }
                     for (browser, selected) in tabIDs {
+                        guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5),
+                              BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
+                            self.endActiveSession()
+                            self.errorMessage = "The selected-tab intention stopped because Browser Guard disconnected or was turned off."
+                            self.showOverlay()
+                            return
+                        }
                         if let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
                            snapshot.updatedAt > Date().addingTimeInterval(-3),
                            !snapshot.tabs.contains(where: { selected.contains($0.id) }) {

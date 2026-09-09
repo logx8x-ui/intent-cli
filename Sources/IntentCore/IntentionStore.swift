@@ -234,6 +234,7 @@ public struct BrowserGuardHeartbeat: Codable, Equatable {
 public enum BrowserGuardCapability: String, Codable, Equatable {
     case singleStartupLaunch = "single-startup-launch-v1"
     case quickSelection = "quick-selection-tabs-v1"
+    case tabPreview = "tab-preview-v1"
 }
 
 public struct BrowserGuardState: Codable, Equatable {

@@ -28,6 +28,12 @@ final class QuickSelectionController: ObservableObject {
     @Published var expanded = false
     @Published var loading = false
     @Published var closing = false
+    @Published var focusedBrowserWindow: CGWindowID?
+    @Published var hoveredTab: BrowserTabItem?
+    @Published var tabPreview: NSImage?
+    @Published var tabPreviewError: String?
+    @Published var tabPreviewLoading = false
+    private var hoverTask: Task<Void, Never>?
     private(set) var displayFrame = CGRect.zero
     private let model: IntentAppModel
     private var panel: NSPanel?
@@ -51,7 +57,7 @@ final class QuickSelectionController: ObservableObject {
             model.errorMessage = "Finish the current intention and save or dismiss its result before opening the field of view."
             model.showOverlay(); return
         }
-        selection = QuickSelection(); message = nil; expanded = false; closing = false; windows = []
+        selection = QuickSelection(); message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
         previousApp = NSWorkspace.shared.frontmostApplication
         wasOverlayVisible = model.overlayPresenter?.isOverlayVisible == true
         refresh(); generation = UUID()
@@ -118,10 +124,11 @@ final class QuickSelectionController: ObservableObject {
     func selectWindow(_ window: WindowItem) {
         guard !closing else { return }
         if QuickSelection.browsers.contains(window.appID) {
-            guard let id = browserWindowID(for: window), tabs(for: window).contains(where: QuickSelection.isSelectable) else {
+            guard browserWindowID(for: window) != nil, tabs(for: window).contains(where: QuickSelection.isSelectable) else {
                 message = "Tabs could not be matched to this window. Connect Browser Guard, or give duplicate browser windows distinct active tabs and reopen ⌘G."; return
             }
-            selection.toggleBrowserWindow(browser: window.appID, windowID: id, snapshots: snapshots); message = nil
+            focusedBrowserWindow = window.id
+            message = "Choose individual tabs above this window. Clicking the window does not select its tabs."
         } else if let app = apps.first(where: { $0.id == window.appID }) { selectApp(app) }
     }
     func selectApp(_ app: AppItem) {
@@ -131,7 +138,7 @@ final class QuickSelectionController: ObservableObject {
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
     }
     func runSelection() {
-        guard !closing, !loading, !selection.apps.isEmpty else { return }
+        guard !closing, !loading, !tabPreviewLoading, !selection.apps.isEmpty else { return }
         refresh()
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
@@ -160,6 +167,8 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        hoverTask?.cancel(); hoverTask = nil; hoveredTab = nil; tabPreview = nil; tabPreviewLoading = false
+        for browser in QuickSelection.browsers { try? FileManager.default.removeItem(at: BrowserTabPreview.fileURL(browser: browser)) }
         generation = UUID(); previewTask?.cancel(); previewTask = nil
         refreshTimer?.invalidate(); refreshTimer = nil
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
@@ -170,6 +179,39 @@ final class QuickSelectionController: ObservableObject {
         hasPreviewPermission = CGRequestScreenCaptureAccess()
         if hasPreviewPermission { loadPreviews() }
         else { message = "Allow Screen Recording for Intent in System Settings, then reopen ⌘G. Previews stay on this Mac and are discarded when you close the overview." }
+    }
+    func hoverTab(_ tab: BrowserTabItem, browser: String, entered: Bool) {
+        hoverTask?.cancel(); hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
+        guard entered else { return }
+        hoverTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            guard let self, !self.closing, self.panel?.isVisible == true else { return }
+            self.hoveredTab = tab
+            let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
+            guard heartbeat.supports(.tabPreview, maxAge: 5) else {
+                self.tabPreviewError = "Reload Browser Guard to enable tab previews."; return
+            }
+            self.tabPreviewLoading = true
+            defer { self.tabPreviewLoading = false }
+            let command = BrowserTabCommand(tabID: tab.id, windowID: tab.windowID, action: .preview)
+            let url = BrowserTabPreview.fileURL(browser: browser)
+            try? FileManager.default.removeItem(at: url)
+            try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(command)
+            for _ in 0..<40 {
+                do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
+                guard !self.closing else { return }
+                if let data = try? Data(contentsOf: url),
+                   let result = try? JSONDecoder().decode(BrowserTabPreview.self, from: data), result.requestID == command.id {
+                    try? FileManager.default.removeItem(at: url)
+                    if let encoded = result.image?.split(separator: ",", maxSplits: 1).last,
+                       let imageData = Data(base64Encoded: String(encoded)), let image = NSImage(data: imageData) {
+                        self.tabPreview = image
+                    } else { self.tabPreviewError = result.error ?? "Preview unavailable." }
+                    return
+                }
+            }
+            self.tabPreviewError = "Preview timed out. Try hovering again."
+        }
     }
     private func loadPreviews() {
         guard !loading, !closing else { return }
@@ -275,6 +317,22 @@ private struct QuickSelectionView: View {
                     }
                     footer
                 }
+                if let tab = controller.hoveredTab {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(tab.title).font(.headline).lineLimit(2)
+                        Text(URL(string: tab.url)?.host ?? tab.url).font(.caption).foregroundStyle(.secondary)
+                        Group {
+                            if let image = controller.tabPreview {
+                                Image(nsImage: image).resizable().scaledToFit()
+                            } else if let error = controller.tabPreviewError {
+                                Text(error).padding(30)
+                            } else { ProgressView("Loading tab preview…").padding(30) }
+                        }.frame(maxWidth: .infinity, maxHeight: 380)
+                    }.padding(16).frame(width: min(640, geometry.size.width - 80))
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .shadow(radius: 22).position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                        .allowsHitTesting(false)
+                }
             }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
                 .foregroundStyle(.white).preferredColorScheme(.dark)
         }
@@ -312,13 +370,15 @@ private struct QuickSelectionView: View {
             }.buttonStyle(.plain)
                 .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }
                 .accessibilityLabel("\(app?.app.name ?? window.appID): \(window.title), \(selected ? "selected" : "not selected")")
-                .help(isBrowser ? "Select the website tabs in this window" : "Allow \(app?.app.name ?? window.appID)—all its windows")
+                .help(isBrowser ? "Choose tabs—no tabs are automatically selected" : "Allow \(app?.app.name ?? window.appID)—all its windows")
             if controller.expanded {
                 if isBrowser {
                     if !tabs.isEmpty {
                         ScrollView(.horizontal, showsIndicators: true) {
                             HStack(spacing: 5) { ForEach(tabs) { tab in tabBubble(tab, browser: window.appID, width: min(156, max(70, target.width * 0.36))) } }.padding(4)
-                        }.frame(width: target.width, height: 58).offset(y: -60)
+                        }.frame(width: target.width, height: 58)
+                            .background(controller.focusedBrowserWindow == window.id ? .white.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 12))
+                            .offset(y: -60)
                     } else {
                         Text("Tabs unavailable · reconnect Browser Guard").font(.system(size: 10)).lineLimit(2).padding(5)
                             .frame(width: target.width).background(.black.opacity(0.6), in: Capsule()).offset(y: -38)
@@ -341,14 +401,18 @@ private struct QuickSelectionView: View {
         let selected = controller.selection.tabs.contains(key)
         return Button { controller.message = nil; controller.selection.toggleTab(key) } label: {
             HStack(spacing: 5) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "globe").foregroundStyle(selected ? green : .white.opacity(0.7))
+                TabSiteIcon(url: tab.faviconURL)
+                    .overlay(alignment: .bottomTrailing) {
+                        if selected { Image(systemName: "checkmark.circle.fill").font(.system(size: 9)).foregroundStyle(green).offset(x: 4, y: 4) }
+                    }
                 Text(tab.title).font(.system(size: 11, weight: .medium)).lineLimit(2)
             }.padding(.horizontal, 8).frame(width: width, height: 43)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11))
                 .overlay(RoundedRectangle(cornerRadius: 11).stroke(selected ? green : .white.opacity(0.25), lineWidth: selected ? 3 : 1))
                 .shadow(color: selected ? green.opacity(0.45) : .clear, radius: 5)
         }.buttonStyle(.plain).disabled(!QuickSelection.isSelectable(tab)).opacity(QuickSelection.isSelectable(tab) ? 1 : 0.45)
-            .help(tab.url).accessibilityLabel("Tab: \(tab.title), \(selected ? "selected" : "not selected")")
+            .onHover { controller.hoverTab(tab, browser: browser, entered: $0) }
+            .accessibilityLabel("Tab: \(tab.title), \(selected ? "selected" : "not selected")")
     }
     private var footer: some View {
         VStack(spacing: 9) {
@@ -373,8 +437,29 @@ private struct QuickSelectionView: View {
                 Text("Apps \(controller.selection.apps.count) · Tabs \(controller.selection.tabs.count)").foregroundStyle(.white.opacity(0.7))
                 Button("Clear") { controller.selection = QuickSelection(); controller.message = nil }.buttonStyle(.plain)
                 Button("Start · ⌘G") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(green).foregroundStyle(.black)
-                    .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing)
+                    .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing || controller.tabPreviewLoading)
             }.font(.system(size: 13, weight: .medium))
         }.padding(.horizontal, 28).padding(.vertical, 14).background(.black.opacity(0.25))
+    }
+}
+
+private struct TabSiteIcon: View {
+    let url: String?
+    @State private var icon: NSImage?
+    var body: some View {
+        Group {
+            if let icon { Image(nsImage: icon).resizable().scaledToFit() }
+            else { Image(systemName: "globe").foregroundStyle(.secondary) }
+        }.frame(width: 18, height: 18).task(id: url) {
+            icon = nil
+            guard let url, let address = URL(string: url) else { return }
+            if address.scheme == "data", let encoded = url.split(separator: ",", maxSplits: 1).last,
+               let data = Data(base64Encoded: String(encoded)) { icon = NSImage(data: data); return }
+            guard ["https", "http"].contains(address.scheme ?? "") else { return }
+            var request = URLRequest(url: address); request.timeoutInterval = 5
+            if let (data, _) = try? await URLSession.shared.data(for: request), data.count < 1_000_000, !Task.isCancelled {
+                icon = NSImage(data: data)
+            }
+        }
     }
 }

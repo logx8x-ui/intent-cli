@@ -7,6 +7,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
     public var title: String
     public var url: String
     public var active: Bool
+    public var faviconURL: String?
 
     public init(
         id: Int,
@@ -14,7 +15,8 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         index: Int,
         title: String,
         url: String,
-        active: Bool
+        active: Bool,
+        faviconURL: String? = nil
     ) {
         self.id = id
         self.windowID = windowID
@@ -22,6 +24,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         self.title = title
         self.url = url
         self.active = active
+        self.faviconURL = faviconURL
     }
 }
 
@@ -67,6 +70,16 @@ public enum BrowserTabCommandAction: String, Codable, Equatable {
     case activate
     case close
     case snapshot
+    case preview
+}
+
+public struct BrowserTabPreview: Codable, Sendable {
+    public var requestID: String
+    public var image: String?
+    public var error: String?
+    public static func fileURL(browser: String) -> URL {
+        intentDirectory.appendingPathComponent("browser-preview-\(safeBrowserFileComponent(browser)).json")
+    }
 }
 
 public final class BrowserTabSnapshotStore {
