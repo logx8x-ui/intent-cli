@@ -32,6 +32,9 @@ do {
     ]
     try expect(NativeTabClickPolicy.blockedIndices(nativeCount: 3, tabs: clickTabs, allowedIDs: [11, 13]) == [1], "Native clicks distinguish same-title/same-URL tabs by exact tab identity and position")
     try expect(NativeTabClickPolicy.blockedIndices(nativeCount: 2, tabs: clickTabs, allowedIDs: [11]) == nil, "Collapsed or incomplete native tab lists must not guess indices")
+    try expect(NativeTabClickPolicy.blocksSidebarTitle("Same title", tabs: clickTabs, allowedIDs: [11]), "Ambiguous sidebar labels cannot grant a forbidden duplicate tab")
+    try expect(!NativeTabClickPolicy.blocksSidebarTitle("Third", tabs: clickTabs, allowedIDs: [13]), "Allowed sidebar tab remains clickable")
+    try expect(!NativeTabClickPolicy.blocksSidebarTitle("Page content", tabs: clickTabs, allowedIDs: []), "Non-tab sidebar labels are not inferred as tabs")
     try expect(FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "blocked.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: false), "Visible forbidden Space requires restoration even if foreground app reporting is stale")
     try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "blocked.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: true), "Mission Control must retain its separate click prevention behavior")
     try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "allowed.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: false), "Swiping onto an allowed window is permitted")

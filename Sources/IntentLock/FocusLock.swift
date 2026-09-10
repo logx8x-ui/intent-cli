@@ -123,6 +123,7 @@ public final class FocusLock {
     private let nativeTabClickGuard = NativeBrowserTabClickGuard()
     private let permittedWindowRecovery = PermittedWindowRecovery()
     private var eventTap: CFMachPort?
+    private var suppressedTabButtons: Set<Int64> = []
     private var runLoopSource: CFRunLoopSource?
     private var focusTimer: Timer?
     private var spotifyTimer: Timer?
@@ -363,13 +364,10 @@ public final class FocusLock {
     }
 
     private func installEventTap() throws {
-        let mask =
-            CGEventMask(1 << CGEventType.keyDown.rawValue) |
-            CGEventMask(1 << CGEventType.flagsChanged.rawValue) |
-            CGEventMask(1 << CGEventType.leftMouseDragged.rawValue) |
-            CGEventMask(1 << CGEventType.leftMouseDown.rawValue) |
-            CGEventMask(1 << CGEventType.rightMouseDown.rawValue) |
-            CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
+        let types: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDragged,
+                                   .leftMouseUp, .rightMouseUp, .otherMouseUp,
+                                   .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
             guard let userInfo else {
                 return Unmanaged.passUnretained(event)
@@ -408,7 +406,12 @@ public final class FocusLock {
             return Unmanaged.passUnretained(event)
         }
         if isStopped { return Unmanaged.passUnretained(event) }
+        if [.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(type) {
+            if suppressedTabButtons.remove(event.getIntegerValueField(.mouseEventButtonNumber)) != nil { return nil }
+            return Unmanaged.passUnretained(event)
+        }
         if type == .leftMouseDragged {
+            if suppressedTabButtons.contains(0) { return nil }
             nativeTabClickGuard.invalidateDuringDrag()
             return Unmanaged.passUnretained(event)
         }
@@ -432,6 +435,7 @@ public final class FocusLock {
 
             if nativeTabClickGuard.shouldBlock(event.location, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) {
                 // A forbidden native tab is a no-op: do not activate it and bounce afterward.
+                suppressedTabButtons.insert(event.getIntegerValueField(.mouseEventButtonNumber))
                 return nil
             }
 

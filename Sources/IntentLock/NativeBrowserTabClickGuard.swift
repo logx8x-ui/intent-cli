@@ -3,6 +3,11 @@ import ApplicationServices
 import IntentCore
 
 public enum NativeTabClickPolicy {
+    public static func blocksSidebarTitle(_ title: String, tabs: [BrowserTabItem], allowedIDs: Set<Int>) -> Bool {
+        let matches = tabs.filter { $0.title == title }
+        // Ambiguous duplicate labels must never grant access to a forbidden tab.
+        return !matches.isEmpty && matches.contains { !allowedIDs.contains($0.id) }
+    }
     public static func blockedIndices(nativeCount: Int, tabs: [BrowserTabItem], allowedIDs: Set<Int>) -> Set<Int>? {
         guard nativeCount > 0, tabs.count == nativeCount,
               tabs.map(\.index).sorted() == Array(0..<nativeCount) else { return nil }
@@ -24,6 +29,9 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var missionControlEvents = 0
     private var lastDiagnostics = ""
     private var ignoreUntil = Date.distantPast
+    private var sidebarLabels = 0
+    private var sidebarMatches = 0
+    private var sidebarRoles: [String: Int] = [:]
 
     func recordMouseDown(missionControl: Bool) {
         mutex.lock(); mouseDownEvents += 1
@@ -66,17 +74,18 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         mutex.unlock()
         // Counts only: no titles, URLs, click positions, or screenshots. Disk IO
         // stays on the scanner queue, outside both the input callback and its mutex.
-        let fingerprint = "\(clicks):\(rectangles.count):\(events):\(missionControl)"
+        let fingerprint = "\(clicks):\(rectangles.count):\(events):\(missionControl):\(sidebarLabels):\(sidebarMatches)"
         if fingerprint != lastDiagnostics {
             lastDiagnostics = fingerprint
             let url = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("native-tab-click-diagnostics.json")
-            if let data = try? JSONSerialization.data(withJSONObject: ["blockedClicks": clicks, "blockedRegions": rectangles.count, "mouseDownEvents": events, "missionControlEvents": missionControl]) {
+            if let data = try? JSONSerialization.data(withJSONObject: ["blockedClicks": clicks, "blockedRegions": rectangles.count, "mouseDownEvents": events, "missionControlEvents": missionControl, "sidebarLabels": sidebarLabels, "sidebarMatches": sidebarMatches, "sidebarRoles": sidebarRoles]) {
                 try? data.write(to: url, options: .atomic)
             }
         }
     }
 
     private func refresh() {
+        sidebarLabels = 0; sidebarMatches = 0; sidebarRoles = [:]
         guard let app = NSWorkspace.shared.frontmostApplication,
               let browser = app.bundleIdentifier, QuickSelection.browsers.contains(browser),
               let data = try? Data(contentsOf: ActiveBrowserRulesStore.defaultFileURL()),
@@ -95,15 +104,48 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             guard let windowID = BrowserWindowMatching.match(title: title, tabs: allTabs, nativeWindowCount: windows.count) else { continue }
             let windowTabs = allTabs.filter { $0.windowID == windowID }
             let allowedIDs = Set(rules.selectedTabIDsByBrowser?[browser] ?? snapshot.tabs.map(\.id))
-            var pending = [window]
+            var pending: [(AXUIElement, CGRect?)] = [(window, nil)]
             var visited = 0
-            while !pending.isEmpty, visited < 100, Date() < deadline {
-                let element = pending.removeFirst(); visited += 1
+            var seen: [CFHashCode: [AXUIElement]] = [:]
+            while !pending.isEmpty, visited < 1600, Date() < deadline {
+                let (element, inheritedSidebar) = pending.removeFirst()
+                let hash = CFHash(element)
+                if seen[hash, default: []].contains(where: { CFEqual($0, element) }) { continue }
+                seen[hash, default: []].append(element)
+                visited += 1
                 let role = string(element, kAXRoleAttribute, deadline) ?? ""
+                // SVG favicon descendants can exhaust the bounded scan before
+                // Firefox's actual tab-label leaves are reached.
+                if role == kAXImageRole { continue }
+                var sidebar = inheritedSidebar
                 // Page controls (including ARIA tabs) must never be treated as browser chrome.
-                if role == "AXWebArea" || role == kAXToolbarRole { continue }
+                if role == "AXWebArea" {
+                    let url = value(element, kAXURLAttribute, deadline).map { String(describing: $0) }
+                        ?? string(element, kAXValueAttribute, deadline)
+                        ?? string(element, kAXTitleAttribute, deadline) ?? ""
+                    if browser == "org.mozilla.firefox", url == "chrome://browser/content/webext-panels.xhtml" {
+                        sidebar = bounds(element, deadline)
+                    } else if sidebar == nil { continue }
+                }
                 let children = elements(element, kAXChildrenAttribute, deadline)
-                if role == kAXTabGroupRole {
+                if sidebar != nil { sidebarRoles[role, default: 0] += 1 }
+                // Firefox exposes some sidebar text as non-static leaf roles.
+                // Match exact extension tab titles, not a particular text role.
+                let sidebarLabel = children.isEmpty && role != kAXImageRole
+                if sidebar != nil, sidebarLabel { sidebarLabels += 1 }
+                if let sidebar, sidebarLabel,
+                   [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute].contains(where: { attribute in
+                       guard let title = string(element, attribute, deadline), !title.isEmpty else { return false }
+                       return NativeTabClickPolicy.blocksSidebarTitle(title, tabs: windowTabs, allowedIDs: allowedIDs)
+                   }),
+                   let label = bounds(element, deadline) {
+                    sidebarMatches += 1
+                    let row = CGRect(x: sidebar.minX, y: label.minY - 3, width: sidebar.width, height: label.height + 6).intersection(sidebar)
+                    if !row.isEmpty { blocked.append(row) }
+                }
+                // Sidebar tab groups contain nested rows, not native radio-button
+                // tabs. Keep traversing them rather than stopping at the group.
+                if role == kAXTabGroupRole && sidebar == nil {
                     let tabs = children.filter {
                         let role = string($0, kAXRoleAttribute, deadline)
                         return role == kAXRadioButtonRole || role == "AXTab"
@@ -112,11 +154,12 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
                     for (index, tab) in tabs.enumerated() where blockedIndices.contains(index) {
                         if let rect = bounds(tab, deadline), rect.width > 5, rect.height > 5 { blocked.append(rect) }
                     }
-                } else { pending.append(contentsOf: children.prefix(100 - visited)) }
+                } else { pending.append(contentsOf: children.prefix(1600 - visited).map { ($0, sidebar) }) }
             }
         }
-        // An incomplete scan must not infer tab indices from a truncated list.
-        publish(Date() < deadline ? blocked : [], pid: app.processIdentifier)
+        // Each completed rectangle is independently validated. Preserve those
+        // checks if another branch runs out of time; never infer missing rows.
+        publish(blocked, pid: app.processIdentifier)
     }
 
     private func value(_ element: AXUIElement, _ attribute: String, _ deadline: Date) -> CFTypeRef? {
@@ -130,7 +173,11 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         value(element, attribute, deadline) as? String
     }
     private func elements(_ element: AXUIElement, _ attribute: String, _ deadline: Date) -> [AXUIElement] {
-        value(element, attribute, deadline) as? [AXUIElement] ?? []
+        let children = value(element, attribute, deadline) as? [AXUIElement] ?? []
+        if children.isEmpty, attribute == kAXChildrenAttribute {
+            return value(element, kAXVisibleChildrenAttribute, deadline) as? [AXUIElement] ?? []
+        }
+        return children
     }
     private func bounds(_ element: AXUIElement, _ deadline: Date) -> CGRect? {
         guard let position = value(element, kAXPositionAttribute, deadline), CFGetTypeID(position) == AXValueGetTypeID(),

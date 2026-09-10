@@ -35,6 +35,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var tabPreviewLoading = false
     private var hoverTask: Task<Void, Never>?
     private(set) var displayFrame = CGRect.zero
+    private(set) var topSafeInset: CGFloat = 0
     private let model: IntentAppModel
     private var panel: NSPanel?
     private var monitor: Any?
@@ -65,6 +66,7 @@ final class QuickSelectionController: ObservableObject {
         // Capture coordinates are top-left; AppKit screens are bottom-left.
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
         displayFrame = CGRect(x: screen.frame.minX, y: primaryTop - screen.frame.maxY, width: screen.frame.width, height: screen.frame.height)
+        topSafeInset = screen.safeAreaInsets.top
         wallpaper = NSWorkspace.shared.desktopImageURL(for: screen).flatMap { NSImage(contentsOf: $0) }
         let panel = SelectionPanel(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         panel.title = "intent field of view"
@@ -111,6 +113,14 @@ final class QuickSelectionController: ObservableObject {
         // Never attach the same tab strip to two windows with ambiguous titles.
         guard siblings.filter({ BrowserWindowMatching.match(title: $0.title, tabs: snapshot.tabs, nativeWindowCount: siblings.count) == id }).count == 1 else { return nil }
         return id
+    }
+    func unavailableTabsMessage(for browser: String) -> String {
+        let store = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
+        if store.isFresh(maxAge: 5), !store.supports(.quickSelection, maxAge: 5) {
+            return "Browser Guard update required · connected version cannot select tabs"
+        }
+        if store.supports(.quickSelection, maxAge: 5) { return "Waiting for tabs · reopen ⌘G if this persists" }
+        return "Tabs unavailable · connect Browser Guard"
     }
     func tabs(for window: WindowItem) -> [BrowserTabItem] {
         guard let id = browserWindowID(for: window) else { return [] }
@@ -252,17 +262,21 @@ final class QuickSelectionController: ObservableObject {
                     return $0.windowID < $1.windowID
                 }
                 var items: [WindowItem] = []
-                for window in candidates {
+                // Bound capture concurrency: avoid serial per-window latency without
+                // flooding WindowServer or changing the stable overview ordering.
+                for offset in stride(from: 0, to: candidates.count, by: 3) {
                     guard !Task.isCancelled, self.generation == token else { return }
-                    guard let pid = window.owningApplication?.processID, let appID = appByPID[pid] else { continue }
-                    let config = SCStreamConfiguration()
-                    let scale = min(1, 1000 / max(window.frame.width, window.frame.height))
-                    config.width = max(1, Int(window.frame.width * scale))
-                    config.height = max(1, Int(window.frame.height * scale))
-                    config.showsCursor = false; config.ignoreShadowsSingleWindow = true
-                    let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
-                    items.append(.init(id: window.windowID, appID: appID, title: window.title ?? "", sourceFrame: window.frame,
-                                       preview: image.map { NSImage(cgImage: $0, size: .zero) }))
+                    let batch = await withTaskGroup(of: (Int, WindowItem?).self) { group in
+                        for index in offset..<min(offset + 3, candidates.count) {
+                            let window = candidates[index]
+                            guard let pid = window.owningApplication?.processID, let appID = appByPID[pid] else { continue }
+                            group.addTask { (index, await Self.captureWindow(window, appID: appID)) }
+                        }
+                        var results: [(Int, WindowItem?)] = []
+                        for await result in group { results.append(result) }
+                        return results.sorted { $0.0 < $1.0 }.compactMap { $0.1 }
+                    }
+                    items.append(contentsOf: batch)
                 }
                 guard !Task.isCancelled, self.generation == token else { return }
                 self.windows = items; self.loading = false; self.refresh()
@@ -275,6 +289,19 @@ final class QuickSelectionController: ObservableObject {
                 self.loading = false; self.message = "Couldn't capture your windows. Check Screen Recording access and reopen ⌘G."
             }
         }
+    }
+    @available(macOS 14.0, *)
+    private static func captureWindow(_ window: SCWindow, appID: String) async -> WindowItem? {
+        guard !Task.isCancelled else { return nil }
+        let config = SCStreamConfiguration()
+        let scale = min(1, 1000 / max(window.frame.width, window.frame.height))
+        config.width = max(1, Int(window.frame.width * scale))
+        config.height = max(1, Int(window.frame.height * scale))
+        config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
+        guard !Task.isCancelled else { return nil }
+        return .init(id: window.windowID, appID: appID, title: window.title ?? "", sourceFrame: window.frame,
+                     preview: image.map { NSImage(cgImage: $0, size: .zero) })
     }
 }
 
@@ -290,7 +317,8 @@ private struct QuickSelectionView: View {
     var body: some View {
         GeometryReader { geometry in
             let footerHeight: CGFloat = controller.windowlessApps.isEmpty ? 72 : 132
-            let area = CGRect(x: 32, y: 98, width: max(1, geometry.size.width - 64), height: max(1, geometry.size.height - 98 - footerHeight))
+            let headerHeight = controller.topSafeInset + 88
+            let area = CGRect(x: 32, y: headerHeight + 22, width: max(1, geometry.size.width - 64), height: max(1, geometry.size.height - headerHeight - 22 - footerHeight))
             let frames = FieldOfViewLayout.frames(sizes: controller.windows.map { $0.sourceFrame.size }, in: area)
             ZStack(alignment: .topLeading) {
                 wallpaper(size: geometry.size)
@@ -299,8 +327,10 @@ private struct QuickSelectionView: View {
                     if index < frames.count { windowView(window, target: frames[index]) }
                 }
                 VStack(spacing: 0) {
-                    Text("intent field of view").font(.system(size: 19, weight: .medium))
-                        .frame(maxWidth: .infinity).frame(height: 76).background(.black.opacity(0.24))
+                    Text("intent field of view").font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .tracking(-0.4)
+                        .frame(maxWidth: .infinity).frame(height: 88)
+                        .padding(.top, controller.topSafeInset).background(.black.opacity(0.24))
                     Spacer()
                     if controller.loading {
                         ProgressView("Gathering windows…").padding(18).background(.ultraThinMaterial, in: Capsule())
@@ -380,7 +410,7 @@ private struct QuickSelectionView: View {
                             .background(controller.focusedBrowserWindow == window.id ? .white.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 12))
                             .offset(y: -60)
                     } else {
-                        Text("Tabs unavailable · reconnect Browser Guard").font(.system(size: 10)).lineLimit(2).padding(5)
+                        Text(controller.unavailableTabsMessage(for: window.appID)).font(.system(size: 10)).lineLimit(2).padding(5)
                             .frame(width: target.width).background(.black.opacity(0.6), in: Capsule()).offset(y: -38)
                     }
                 }
