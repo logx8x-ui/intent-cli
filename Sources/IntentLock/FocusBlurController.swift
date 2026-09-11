@@ -2,8 +2,12 @@ import AppKit
 import ApplicationServices
 import IntentCore
 import CoreImage
+import ScreenCaptureKit
 
 public enum FocusBlurPolicy {
+    /// Moderate spatial blur. This changes detail, never brightness or opacity.
+    public static func radius(for height: CGFloat) -> CGFloat { min(6, height * 0.12) }
+
     public static func appKitFrame(_ rect: CGRect, primaryDisplayHeight: CGFloat) -> CGRect {
         CGRect(x: rect.minX, y: primaryDisplayHeight - rect.maxY, width: rect.width, height: rect.height)
     }
@@ -34,7 +38,6 @@ final class FocusBlurController: @unchecked Sendable {
     // Main queue only.
     private var panels: [NSPanel] = []
     private var expiry: DispatchWorkItem?
-    private let captureQueue = DispatchQueue(label: "intent.focus-blur-images", qos: .utility)
     private var captureInFlight = false // main queue only
     private var displayedRectangles: [CGRect] = []
     private var displayRevision = 0
@@ -102,27 +105,44 @@ final class FocusBlurController: @unchecked Sendable {
             guard !self.captureInFlight, !validRectangles.isEmpty else { return }
             self.captureInFlight = true
             let revision = self.displayRevision
-            self.captureQueue.async { [weak self] in
+            Task.detached(priority: .utility) { [weak self] in
                 guard let self else { return }
-                let images: [CGImage?] = validRectangles.map { rect in
-                    guard self.current(token), CGPreflightScreenCaptureAccess(),
-                          let capture = CGImage(windowListFromArrayScreenBounds: rect, windowArray: sourceWindows as CFArray, imageOption: [.bestResolution]) else { return nil }
+                let content = CGPreflightScreenCaptureAccess() ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) : nil
+                var images: [CGImage?] = []
+                for rect in validRectangles {
+                    guard self.current(token), let capture = await self.capture(rect, content: content, legacyWindows: sourceWindows) else { images.append(nil); continue }
                     let source = CIImage(cgImage: capture)
                     let scale = CGFloat(capture.width) / rect.width
-                    let blurred = source.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: min(10, rect.height * 0.18) * scale]).cropped(to: source.extent)
-                    return self.imageContext.createCGImage(blurred, from: source.extent)
+                    let blurred = source.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: FocusBlurPolicy.radius(for: rect.height) * scale]).cropped(to: source.extent)
+                    images.append(self.imageContext.createCGImage(blurred, from: source.extent))
                 }
-                DispatchQueue.main.async { [weak self] in
+                let renderedImages = images
+                await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.captureInFlight = false
                     guard self.current(token), self.displayRevision == revision,
                           NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID else { return }
-                    for (panel, image) in zip(self.panels, images) {
+                    for (panel, image) in zip(self.panels, renderedImages) {
                         (panel.contentView as? FocusBlurView)?.update(image, moved: false)
                     }
                 }
             }
         }
+    }
+
+    private func capture(_ rect: CGRect, content: SCShareableContent?, legacyWindows: [NSNumber]) async -> CGImage? {
+        guard CGPreflightScreenCaptureAccess() else { return nil }
+        if #available(macOS 14.0, *), let content,
+           let display = content.displays.first(where: { $0.frame.contains(rect) }) {
+            let ownWindows = content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
+            let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
+            let config = SCStreamConfiguration()
+            config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+            config.width = max(1, Int(rect.width * 2)); config.height = max(1, Int(rect.height * 2))
+            config.showsCursor = false
+            return try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        }
+        return CGImage(windowListFromArrayScreenBounds: rect, windowArray: legacyWindows as CFArray, imageOption: [.bestResolution])
     }
 
     private func missionControlRegions() -> [CGRect] {
@@ -242,19 +262,12 @@ final class FocusBlurController: @unchecked Sendable {
 
 /// Untinted source pixels: no border, badge, shadow, or material animation.
 private final class FocusBlurView: NSView {
-    private let fallback = NSVisualEffectView()
     private let imageLayer = CALayer()
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = true
         imageLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "hidden": NSNull()]
-        // Keep a permission-free fallback; never prompt during enforcement.
-        fallback.blendingMode = .behindWindow
-        fallback.material = .underWindowBackground
-        fallback.state = .active
-        fallback.alphaValue = 0.45
-        addSubview(fallback)
         layer?.addSublayer(imageLayer)
         setAccessibilityElement(false)
     }
@@ -266,12 +279,10 @@ private final class FocusBlurView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         imageLayer.contents = image
-        fallback.isHidden = image != nil
         CATransaction.commit()
     }
     override func layout() {
         super.layout()
-        fallback.frame = bounds
         imageLayer.frame = bounds
     }
 }

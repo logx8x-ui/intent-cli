@@ -152,6 +152,21 @@ do {
                "Always Allowed must not silently expand green selections")
     let quickRoundTrip = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(quickIntention))
     try expect(quickRoundTrip.selectionOnly, "Saved Quick Focus preserves selection-only behavior")
+    var blacklist = quick
+    blacklist.accessMode = .blacklist
+    let blockedSelection = try blacklist.makeIntention(apps: quickApps, snapshots: quickSnapshots)
+    try expect(blockedSelection.accessMode == .blacklist, "Quick Block builds blacklist rules")
+    try expect(!blockedSelection.permitsApplication("com.apple.Notes"), "Selected ordinary apps are blocked")
+    try expect(blockedSelection.permitsApplication("com.apple.TextEdit"), "Unselected apps remain available")
+    try expect(blockedSelection.permitsApplication("com.google.Chrome"), "Blocking selected websites must not block the browser app")
+    try expect(blockedSelection.allowedWebsites.count == 2, "Blocked websites retain their browser scopes")
+    let blockedRoundTrip = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(blockedSelection))
+    try expect(blockedRoundTrip.accessMode == .blacklist && blockedRoundTrip.selectionOnly, "Saving preserves Quick Block semantics")
+    var wholeBrowser = QuickSelection(); wholeBrowser.accessMode = .blacklist
+    wholeBrowser.toggleApp("com.google.Chrome", snapshots: quickSnapshots)
+    let browserBlock = try wholeBrowser.makeIntention(apps: quickApps, snapshots: [])
+    try expect(wholeBrowser.tabs.isEmpty && !browserBlock.permitsApplication("com.google.Chrome"), "Whole-browser blocking needs no extension snapshot")
+    try expect(FocusBlurPolicy.radius(for: 30) < 4 && FocusBlurPolicy.radius(for: 400) == 6, "Windows and tabs use moderate spatial blur")
     let quickRules = ActiveBrowserRules(active: true, allowedWebsites: [], selectedTabIDsByBrowser: quick.tabIDsByBrowser,
                                        blockTabSwitching: true, blockNavigation: true, blockNewTabs: true)
     let decodedQuickRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: JSONEncoder().encode(quickRules.refreshed()))

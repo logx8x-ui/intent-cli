@@ -8,6 +8,7 @@ public struct QuickSelectionTab: Hashable {
 }
 
 public struct QuickSelection {
+    public var accessMode: IntentionAccessMode = .whitelist
     public var apps: Set<String> = []
     public var tabs: Set<QuickSelectionTab> = []
     public init() {}
@@ -19,7 +20,7 @@ public struct QuickSelection {
             tabs = tabs.filter { $0.browser != identifier }
         } else {
             apps.insert(identifier)
-            for tab in snapshots.first(where: { $0.browserBundleIdentifier == identifier })?.tabs ?? [] {
+            for tab in (accessMode == .blacklist ? [] : snapshots.first(where: { $0.browserBundleIdentifier == identifier })?.tabs ?? []) {
                 if Self.isSelectable(tab) { tabs.insert(.init(browser: identifier, id: tab.id)) }
             }
         }
@@ -53,6 +54,7 @@ public struct QuickSelection {
         var websites: [AllowedWebsite] = []
         var foundTabs: Set<QuickSelectionTab> = []
         for browser in apps.intersection(Self.browsers) {
+            if accessMode == .blacklist, !tabs.contains(where: { $0.browser == browser }) { continue }
             guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == browser }) else {
                 throw QuickSelectionError.browserUnavailable
             }
@@ -67,12 +69,13 @@ public struct QuickSelection {
         }
         guard foundTabs == tabs else { throw QuickSelectionError.changedTabs }
         var intention = Intention(
-            name: "Quick Focus", icon: "square.grid.2x2", colorHex: "#34C759", folder: "",
+            name: accessMode == .blacklist ? "Quick Block" : "Quick Focus", icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
             allowedApps: chosen, allowedWebsites: websites,
             startupActions: [], restrictions: .init(),
             restrictionNodes: [.init(kind: .dontStartUp, position: .init(x: 220, y: 170),
                                     excludedResourceIDs: chosen.map(\.resourceID) + websites.map(\.resourceID))]
         )
+        intention.accessMode = accessMode
         intention.selectionOnly = true
         return intention
     }

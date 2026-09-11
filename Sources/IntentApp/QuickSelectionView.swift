@@ -81,6 +81,10 @@ final class QuickSelectionController: ObservableObject {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel?.isVisible == true else { return event }
             if event.keyCode == 53 { self.cancel(); return nil }
+            if event.charactersIgnoringModifiers == "/", event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+                if !event.isARepeat { self.toggleAccessMode() }
+                return nil
+            }
             return event
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -88,6 +92,16 @@ final class QuickSelectionController: ObservableObject {
             Task { @MainActor in self.refresh() }
         }
         loadPreviews()
+    }
+    func toggleAccessMode() {
+        guard !closing else { return }
+        selection.accessMode = selection.accessMode == .whitelist ? .blacklist : .whitelist
+        // A whole-browser block has no tab selection; do not silently turn that
+        // into an allow-all browser when returning to Allow mode.
+        if selection.accessMode == .whitelist {
+            for browser in QuickSelection.browsers where !selection.tabs.contains(where: { $0.browser == browser }) { selection.apps.remove(browser) }
+        }
+        message = nil
     }
     func refresh() {
         if model.hasActiveSession, panel?.isVisible == true, !closing { close(); return }
@@ -128,11 +142,13 @@ final class QuickSelectionController: ObservableObject {
     }
     func isSelected(_ window: WindowItem) -> Bool {
         guard QuickSelection.browsers.contains(window.appID) else { return selection.apps.contains(window.appID) }
+        if selection.accessMode == .blacklist, selection.apps.contains(window.appID), !selection.tabs.contains(where: { $0.browser == window.appID }) { return true }
         let selectable = tabs(for: window).filter(QuickSelection.isSelectable)
         return !selectable.isEmpty && selectable.allSatisfy { selection.tabs.contains(.init(browser: window.appID, id: $0.id)) }
     }
     func selectWindow(_ window: WindowItem) {
         guard !closing else { return }
+        if selection.accessMode == .blacklist, let app = apps.first(where: { $0.id == window.appID }) { selectApp(app); return }
         if QuickSelection.browsers.contains(window.appID) {
             guard browserWindowID(for: window) != nil, tabs(for: window).contains(where: QuickSelection.isSelectable) else {
                 message = "Tabs could not be matched to this window. Connect Browser Guard, or give duplicate browser windows distinct active tabs and reopen ⌘G."; return
@@ -142,7 +158,7 @@ final class QuickSelectionController: ObservableObject {
         } else if let app = apps.first(where: { $0.id == window.appID }) { selectApp(app) }
     }
     func selectApp(_ app: AppItem) {
-        if app.app.isBrowser {
+        if app.app.isBrowser && selection.accessMode == .whitelist {
             message = "Select website tabs above a Chrome or Firefox window."; return
         }
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
@@ -313,7 +329,7 @@ private final class SelectionPanel: NSPanel {
 private struct QuickSelectionView: View {
     @ObservedObject var controller: QuickSelectionController
     @State private var hoveredWindow: CGWindowID?
-    private let green = Color(red: 0.20, green: 0.91, blue: 0.42)
+    private var green: Color { controller.selection.accessMode == .blacklist ? Color(red: 1, green: 0.27, blue: 0.23) : Color(red: 0.20, green: 0.91, blue: 0.42) }
     var body: some View {
         GeometryReader { geometry in
             let footerHeight: CGFloat = controller.windowlessApps.isEmpty ? 72 : 132
@@ -400,7 +416,7 @@ private struct QuickSelectionView: View {
             }.buttonStyle(.plain)
                 .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }
                 .accessibilityLabel("\(app?.app.name ?? window.appID): \(window.title), \(selected ? "selected" : "not selected")")
-                .help(isBrowser ? "Choose tabs—no tabs are automatically selected" : "Allow \(app?.app.name ?? window.appID)—all its windows")
+                .help(controller.selection.accessMode == .blacklist ? "Block \(app?.app.name ?? window.appID)—all its windows. Or select individual website tabs." : (isBrowser ? "Choose tabs—no tabs are automatically selected" : "Allow \(app?.app.name ?? window.appID)—all its windows"))
             if controller.expanded {
                 if isBrowser {
                     if !tabs.isEmpty {
@@ -433,7 +449,7 @@ private struct QuickSelectionView: View {
             HStack(spacing: 5) {
                 TabSiteIcon(url: tab.faviconURL)
                     .overlay(alignment: .bottomTrailing) {
-                        if selected { Image(systemName: "checkmark.circle.fill").font(.system(size: 9)).foregroundStyle(green).offset(x: 4, y: 4) }
+                        if selected { Image(systemName: controller.selection.accessMode == .blacklist ? "minus.circle.fill" : "checkmark.circle.fill").font(.system(size: 9)).foregroundStyle(green).offset(x: 4, y: 4) }
                     }
                 Text(tab.title).font(.system(size: 11, weight: .medium)).lineLimit(2)
             }.padding(.horizontal, 8).frame(width: width, height: 43)
@@ -460,12 +476,17 @@ private struct QuickSelectionView: View {
                     }.padding(.horizontal, 4)
                 }.frame(height: 46)
             }
+            Text(controller.selection.accessMode == .blacklist ? "Red selections are blocked. Everything else stays available. Tabs block their websites in this browser." : "Only green selections are allowed. Press / to switch to Block.")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.8))
             if let message = controller.message { Text(message).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3) }
             HStack(spacing: 18) {
                 Button("Cancel · Esc") { controller.cancel() }.buttonStyle(.plain)
+                Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }
+                    .buttonStyle(.plain).foregroundStyle(green)
+                    .help("Press / to switch between Allow and Block. Selections are preserved.")
                 Spacer()
                 Text("Apps \(controller.selection.apps.count) · Tabs \(controller.selection.tabs.count)").foregroundStyle(.white.opacity(0.7))
-                Button("Clear") { controller.selection = QuickSelection(); controller.message = nil }.buttonStyle(.plain)
+                Button("Clear") { controller.selection.apps.removeAll(); controller.selection.tabs.removeAll(); controller.message = nil }.buttonStyle(.plain)
                 Button("Start · ⌘G") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(green).foregroundStyle(.black)
                     .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing || controller.tabPreviewLoading)
             }.font(.system(size: 13, weight: .medium))

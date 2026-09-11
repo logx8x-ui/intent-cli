@@ -1,0 +1,11 @@
+# Quick Block and lighter blur
+
+Cmd+G opens in Allow mode. Slash toggles Allow/Block without starting. Selection outlines, tab badges, and the Start accent become red in Block mode. Clear preserves the mode. Clicking an ordinary app blocks all its windows. In Block mode, clicking a browser window selects the browser app; clicking individual tab chips instead builds browser-scoped website rules. Switching back to Allow removes whole-browser selections that have no explicit tabs.
+
+Quick Block uses the existing blacklist engine. Selected websites follow its existing behavior (including closing already blocked tabs); these are website rules, not persistent browser tab IDs. Exact allow-list tab IDs are never sent for a blacklist session. Whole-browser blocking does not require a tab snapshot or enabled Browser Guard. Saving retains blacklist and selection-only semantics.
+
+Runtime blur uses a moderate Gaussian radius (maximum 6 points, 12% of region height for compact tabs) with no brightness adjustment, dark fill, material, badge, or outline. macOS 14+ uses ScreenCaptureKit display-region capture excluding the overlay process, while older systems retain the CoreGraphics capture path. Missing screen capture access no longer substitutes a dark material. The image layer stays unchanged during a missed capture at unchanged geometry. Captures remain in memory.
+
+Validation: IntentCoreSpec passed, including app/site/whole-browser blacklist construction, browser scoping, saved mode round trip, and moderate blur radius. Firefox and Chrome extension test suites passed. Production install and picker UI checks are tracked in the task. Frame-by-frame Mission Control/browser blur acceptance must not be inferred from those automated tests.
+
+Installed UI check: Cmd+G opened; slash changed the helper and toggle to Block. Selected Reminders plus a Chrome tab; screenshot showed red outlines and a red tab badge, with Apps 2 / Tabs 1 and Start enabled. Clear reset both counts and disabled Start while retaining Block. Slash returned to Allow, and Escape closed the picker. Firefox Browser Guard became unavailable during the picker check, so no Firefox live session was started. This was selection UI verification, not native restriction/blur acceptance. Installed signature verified and the IntentApp UUID matched the production build.

@@ -77,7 +77,7 @@ final class IntentAppModel: ObservableObject {
         }
         do {
             let intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
-            for browser in selection.apps.intersection(QuickSelection.browsers) {
+            for browser in Set(selection.tabs.map(\.browser)) {
                 guard BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
                     errorMessage = "Turn on Intent Browser Guard before starting a selected-tab intention."
                     return false
@@ -90,7 +90,7 @@ final class IntentAppModel: ObservableObject {
             }
             errorMessage = nil
             quickSelectionIntentionID = intention.id
-            quickSelectionTabIDs = selection.tabIDsByBrowser
+            quickSelectionTabIDs = selection.accessMode == .whitelist ? selection.tabIDsByBrowser : nil
             purposeTemporaryIntention = intention
             purposeStatedPrompt = "your Quick Focus selection"
             // Deliberately bypass Always Allowed additions: only green selections belong here.
