@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import IntentCore
+import CoreImage
 
 public enum FocusBlurPolicy {
     public static func appKitFrame(_ rect: CGRect, primaryDisplayHeight: CGFloat) -> CGRect {
@@ -18,7 +19,7 @@ public enum FocusBlurPolicy {
     }
 }
 
-/// Visual-only panels: no event taps, activation, window mutation, or screen capture.
+/// Visual-only panels: no event taps, activation, window mutation, or input interception. Captures stay in memory and exclude our own overlays.
 /// All Dock accessibility queries have a deadline on a dedicated worker queue.
 final class FocusBlurController: @unchecked Sendable {
     private let spec: FocusSessionSpec
@@ -29,6 +30,7 @@ final class FocusBlurController: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var lastDiagnostics = ""
     private var scanDetails: [String: Int] = [:]
+    private let imageContext = CIContext(options: [.cacheIntermediates: false])
     // Main queue only.
     private var panels: [NSPanel] = []
     private var expiry: DispatchWorkItem?
@@ -66,12 +68,14 @@ final class FocusBlurController: @unchecked Sendable {
             ($0[kCGWindowOwnerName as String] as? String) == "Dock"
                 && ($0[kCGWindowLayer as String] as? Int) == 20
         }
+        let sampledAt = Date()
+        let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         scanDetails = [:]
         let rectangles: [CGRect]
         if dockOverlay {
             rectangles = missionControlRegions()
         } else {
-            rectangles = tabGuard.blurRegions(frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+            rectangles = tabGuard.blurRegions(frontmostPID: foregroundPID)
         }
         scanDetails["dockOverlay"] = dockOverlay ? 1 : 0
         scanDetails["mappedRegions"] = rectangles.count
@@ -81,10 +85,25 @@ final class FocusBlurController: @unchecked Sendable {
             let url = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("focus-blur-diagnostics.json")
             if let data = try? JSONSerialization.data(withJSONObject: scanDetails) { try? data.write(to: url, options: .atomic) }
         }
-        let sampledAt = Date()
+        // Capture only the mapped regions, excluding Intent so the blur never feeds
+        // back into itself. No images are persisted or sent to the browser.
+        let sourceWindows = windows.compactMap { window -> NSNumber? in
+            guard window[kCGWindowOwnerPID as String] as? pid_t != ProcessInfo.processInfo.processIdentifier else { return nil }
+            return window[kCGWindowNumber as String] as? NSNumber
+        }
+        let validRectangles = rectangles.filter(FocusBlurPolicy.valid)
+        let images: [CGImage?] = validRectangles.map { rect in
+            guard CGPreflightScreenCaptureAccess(),
+                  let capture = CGImage(windowListFromArrayScreenBounds: rect, windowArray: sourceWindows as CFArray, imageOption: [.bestResolution]) else { return nil }
+            let source = CIImage(cgImage: capture)
+            let scale = CGFloat(capture.width) / rect.width
+            let blurred = source.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: min(10, rect.height * 0.18) * scale]).cropped(to: source.extent)
+            return imageContext.createCGImage(blurred, from: source.extent)
+        }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.current(token), Date().timeIntervalSince(sampledAt) < 0.25 else { return }
-            self.show(rectangles.filter(FocusBlurPolicy.valid))
+            guard let self, self.current(token), Date().timeIntervalSince(sampledAt) < 0.35,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID else { return }
+            self.show(validRectangles, images: images)
         }
     }
 
@@ -163,7 +182,7 @@ final class FocusBlurController: @unchecked Sendable {
         return CGRect(origin: point, size: dimensions)
     }
 
-    private func show(_ rectangles: [CGRect]) {
+    private func show(_ rectangles: [CGRect], images: [CGImage?]) {
         expiry?.cancel()
         while panels.count > rectangles.count { panels.removeLast().orderOut(nil) }
         let height = CGDisplayBounds(CGMainDisplayID()).height
@@ -179,8 +198,11 @@ final class FocusBlurController: @unchecked Sendable {
                 panels.append(panel)
             }
             let panel = panels[index]
-            panel.setFrame(FocusBlurPolicy.appKitFrame(rect, primaryDisplayHeight: height), display: true)
-            panel.orderFrontRegardless()
+            let frame = FocusBlurPolicy.appKitFrame(rect, primaryDisplayHeight: height)
+            let moved = panel.frame != frame
+            if moved { panel.setFrame(frame, display: false) }
+            (panel.contentView as? FocusBlurView)?.update(images[index], moved: moved)
+            if !panel.isVisible { panel.orderFrontRegardless() }
         }
         // A stalled scanner can never leave old masks over unrelated content.
         let expiry = DispatchWorkItem { [weak self] in self?.clear() }
@@ -195,40 +217,35 @@ final class FocusBlurController: @unchecked Sendable {
     }
 }
 
-/// Keep the source recognisable. The restriction cue is an outline/badge, not a dark fill.
+/// Untinted source pixels: no border, badge, shadow, or material animation.
 private final class FocusBlurView: NSView {
-    private let effect = NSVisualEffectView()
-    private let badge = NSTextField(labelWithString: "Not allowed")
-
+    private let fallback = NSVisualEffectView()
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = 6
         layer?.masksToBounds = true
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.55).cgColor
-        effect.blendingMode = .behindWindow
-        effect.material = .underWindowBackground
-        effect.state = .active
-        effect.appearance = NSAppearance(named: .aqua)
-        effect.alphaValue = 0.64
-        addSubview(effect)
-        badge.font = .systemFont(ofSize: 11, weight: .medium)
-        badge.textColor = .systemRed
-        badge.alignment = .center
-        badge.drawsBackground = true
-        badge.backgroundColor = NSColor.white.withAlphaComponent(0.78)
-        badge.wantsLayer = true
-        badge.layer?.cornerRadius = 5
-        badge.layer?.masksToBounds = true
-        addSubview(badge)
+        layer?.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        // Keep a permission-free fallback; never prompt during enforcement.
+        fallback.blendingMode = .behindWindow
+        fallback.material = .underWindowBackground
+        fallback.state = .active
+        fallback.alphaValue = 0.45
+        addSubview(fallback)
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { nil }
+    func update(_ image: CGImage?, moved: Bool) {
+        // A single failed capture must not flash the material fallback. Never
+        // retain an old image after the region moves to different content.
+        if image == nil, !moved, layer?.contents != nil { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.contents = image
+        fallback.isHidden = image != nil
+        CATransaction.commit()
+    }
     override func layout() {
         super.layout()
-        effect.frame = bounds
-        badge.isHidden = bounds.height < 70 || bounds.width < 110
-        badge.frame = CGRect(x: (bounds.width - 82) / 2, y: 8, width: 82, height: 19)
+        fallback.frame = bounds
     }
 }

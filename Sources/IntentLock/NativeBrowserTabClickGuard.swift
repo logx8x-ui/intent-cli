@@ -85,7 +85,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     func blurRegions(frontmostPID: pid_t?) -> [CGRect] {
         mutex.lock(); defer { mutex.unlock() }
         guard !stopped, Date() >= ignoreUntil, frontmostPID == pid,
-              Date().timeIntervalSince(updatedAt) < 0.30 else { return [] }
+              Date().timeIntervalSince(updatedAt) < 0.45 else { return [] }
         return visualRectangles
     }
 

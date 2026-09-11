@@ -45,3 +45,11 @@ Changes in this follow-up:
 Final core tests passed, including partial native-tab label mapping, ambiguous-title exclusion, and Chrome profile suffix regression cases. Browser extension regression tests passed. The updated appearance and grouped/partial strip handling still need physical visual acceptance; the earlier user confirmation applies to the previous window mask only. No claim that every hidden/background tab is covered is made.
 
 Final follow-up development installation completed successfully. Strict deep signature verification passed; installed and production app UUIDs both equal `7801389F-06EB-33D4-854F-9CB75ACA2DCB`. CUA opened the updated app and its normal controls were available. No test restriction session was left active in this follow-up. The new frosted appearance is installed but has not been physically visually accepted. This remains a development source change, not a signed public release or complete all-background-window coverage claim.
+
+## Pure blur follow-up
+
+Logan confirmed the previous installed blur works, but reported a panel-like appearance and flashing. Removed the outline and badge and replaced the normal material rendering with in-memory Gaussian-blurred source pixels. Captures are restricted to mapped rectangles and exclude Intent windows to avoid recursive overlay capture. The filter clamps edges before blurring to avoid dark borders. When Screen Recording access is unavailable, a plain, lighter system blur remains as a fallback; enforcement never opens a permission prompt.
+
+Unchanged panels are no longer reordered or resized every scan. Layer updates disable implicit animation, and a missed image capture retains the previous image only while the rectangle remains unchanged. Tab visual freshness now matches the existing 450 ms click snapshot lifetime. Foreground identity and sample age are checked before displaying results; the existing overlay expiry and click-through behavior remain.
+
+Validation: IntentCoreSpec passed. Production build/install and installed-app checks are recorded in the accompanying task. This revision's physical Mission Control appearance and absence of flashing have not yet been visually verified; the user's working confirmation applies to the preceding revision.
