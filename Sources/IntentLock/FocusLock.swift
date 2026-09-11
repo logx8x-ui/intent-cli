@@ -121,6 +121,7 @@ public final class FocusLock {
     private let allowedAppSwitcher: AllowedAppSwitcher
     private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
     private let nativeTabClickGuard = NativeBrowserTabClickGuard()
+    private lazy var blurController = FocusBlurController(spec: spec, tabGuard: nativeTabClickGuard)
     private let permittedWindowRecovery = PermittedWindowRecovery()
     private var eventTap: CFMachPort?
     private var suppressedTabButtons: Set<Int64> = []
@@ -196,6 +197,7 @@ public final class FocusLock {
             installActiveSpaceObserver()
             startFocusTimer()
             nativeTabClickGuard.start()
+            blurController.start()
             startSpotifyTimerIfNeeded()
         }
 
@@ -1048,6 +1050,7 @@ public final class FocusLock {
     }
 
     private func cleanup() {
+        blurController.stop()
         nativeTabClickGuard.stop()
         permittedWindowRecovery.stop()
         pendingSpaceRecovery?.cancel()

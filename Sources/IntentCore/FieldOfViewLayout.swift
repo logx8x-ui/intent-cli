@@ -60,6 +60,14 @@ public enum BrowserWindowMatching {
 
     private static func normalize(_ title: String) -> String {
         var value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Chrome's AX window title may include its profile after the browser name.
+        // Without this, multi-window mapping fails even though every tab is present.
+        for marker in [" — Google Chrome – ", " - Google Chrome – "] {
+            if let range = value.range(of: marker, options: .backwards), !value[range.upperBound...].isEmpty {
+                value = String(value[..<range.lowerBound])
+                break
+            }
+        }
         for suffix in [" — Mozilla Firefox", " - Mozilla Firefox", " — Google Chrome", " - Google Chrome"] {
             if value.hasSuffix(suffix) { value.removeLast(suffix.count) }
         }

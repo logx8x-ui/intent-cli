@@ -56,11 +56,24 @@ do {
             }
         }
     }
+    try expect(!FocusBlurPolicy.shouldBlur(matches: []), "Unknown Mission Control tiles stay clear")
+    try expect(!FocusBlurPolicy.shouldBlur(matches: [true, false]), "Duplicate titles must not blur permitted windows")
+    try expect(FocusBlurPolicy.shouldBlur(matches: [true, true]), "Only definitely forbidden tiles blur")
+    try expect(FocusBlurPolicy.appKitFrame(CGRect(x: -500, y: 100, width: 200, height: 150), primaryDisplayHeight: 900)
+        == CGRect(x: -500, y: 650, width: 200, height: 150), "Blur coordinates preserve secondary display offsets")
+    try expect(!FocusBlurPolicy.valid(CGRect(x: 0, y: 0, width: 0, height: 10)), "Empty blur regions are rejected")
+    try expect(!FocusBlurPolicy.valid(CGRect(x: CGFloat.infinity, y: 0, width: 10, height: 10)), "Invalid AX positions are rejected")
     let groupedTabs: [BrowserTabItem] = [
         .init(id: 11, windowID: 1, index: 0, title: "First page", url: "https://example.com", active: true),
         .init(id: 12, windowID: 1, index: 1, title: "Second page", url: "https://example.org", active: false),
         .init(id: 21, windowID: 2, index: 0, title: "Other window", url: "https://example.net", active: true)
     ]
+    try expect(NativeTabClickPolicy.visualBlockedPositions(labels: [["Second page - Memory usage - 200 MB"], ["First page"], ["Unknown"]], tabs: groupedTabs, allowedIDs: [11, 21]) == [0], "Partial native tab strips match labels without shifting permission indices")
+    var duplicateBlurTabs = groupedTabs
+    duplicateBlurTabs.append(.init(id: 99, windowID: 1, index: 2, title: "First page", url: "https://example.org", active: false))
+    try expect(NativeTabClickPolicy.visualBlockedPositions(labels: [["First page"]], tabs: duplicateBlurTabs, allowedIDs: [11]).isEmpty, "Ambiguous duplicate labels must leave allowed tabs clear")
+    try expect(BrowserWindowMatching.match(title: "First page - Google Chrome – Work", tabs: groupedTabs, nativeWindowCount: 2) == 1,
+        "Chrome profile suffix must not prevent tab blur matching across windows")
     try expect(BrowserWindowMatching.match(title: "First page - Google Chrome", tabs: groupedTabs, nativeWindowCount: 2) == 1,
         "Browser tabs must attach to their own native window")
     try expect(BrowserWindowMatching.match(title: "Unknown", tabs: groupedTabs, nativeWindowCount: 2) == nil,

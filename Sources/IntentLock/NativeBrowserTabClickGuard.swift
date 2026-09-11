@@ -8,6 +8,19 @@ public enum NativeTabClickPolicy {
         // Ambiguous duplicate labels must never grant access to a forbidden tab.
         return !matches.isEmpty && matches.contains { !allowedIDs.contains($0.id) }
     }
+    /// Collapsed groups/pinned strips may expose only part of the tab list.
+    /// In that case use explicit labels, never an index into the full browser list.
+    public static func visualBlockedPositions(labels: [[String]], tabs: [BrowserTabItem], allowedIDs: Set<Int>) -> Set<Int> {
+        Set(labels.indices.filter { position in
+            let matches = tabs.filter { tab in
+                !tab.title.isEmpty && labels[position].contains { label in
+                    label == tab.title || label.hasPrefix(tab.title + " - Memory usage - ")
+                }
+            }
+            return !matches.isEmpty && matches.allSatisfy { !allowedIDs.contains($0.id) }
+        })
+    }
+
     public static func blockedIndices(nativeCount: Int, tabs: [BrowserTabItem], allowedIDs: Set<Int>) -> Set<Int>? {
         guard nativeCount > 0, tabs.count == nativeCount,
               tabs.map(\.index).sorted() == Array(0..<nativeCount) else { return nil }
@@ -23,6 +36,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var stopped = true
     private var pid: pid_t = 0
     private var rectangles: [CGRect] = []
+    private var visualRectangles: [CGRect] = []
     private var updatedAt = Date.distantPast
     private var blockedClicks = 0
     private var mouseDownEvents = 0
@@ -32,6 +46,9 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var sidebarLabels = 0
     private var sidebarMatches = 0
     private var sidebarRoles: [String: Int] = [:]
+    private var scanState = "idle"
+    private var windowMatches = 0
+    private var tabGroups = 0
 
     func recordMouseDown(missionControl: Bool) {
         mutex.lock(); mouseDownEvents += 1
@@ -53,7 +70,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
 
     func stop() {
         timer?.cancel(); timer = nil
-        mutex.lock(); stopped = true; rectangles = []; mutex.unlock()
+        mutex.lock(); stopped = true; rectangles = []; visualRectangles = []; mutex.unlock()
     }
 
     func shouldBlock(_ point: CGPoint, frontmostPID: pid_t?) -> Bool {
@@ -64,21 +81,29 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         return blocked
     }
 
-    private func publish(_ rectangles: [CGRect], pid: pid_t) {
+    /// A separate visual consumer; never performs AX work on the main thread.
+    func blurRegions(frontmostPID: pid_t?) -> [CGRect] {
+        mutex.lock(); defer { mutex.unlock() }
+        guard !stopped, Date() >= ignoreUntil, frontmostPID == pid,
+              Date().timeIntervalSince(updatedAt) < 0.30 else { return [] }
+        return visualRectangles
+    }
+
+    private func publish(_ rectangles: [CGRect], pid: pid_t, visualRectangles: [CGRect] = []) {
         mutex.lock()
         guard !stopped else { mutex.unlock(); return }
-        self.rectangles = rectangles; self.pid = pid; updatedAt = Date()
+        self.rectangles = rectangles; self.visualRectangles = visualRectangles; self.pid = pid; updatedAt = Date()
         let clicks = blockedClicks
         let events = mouseDownEvents
         let missionControl = missionControlEvents
         mutex.unlock()
         // Counts only: no titles, URLs, click positions, or screenshots. Disk IO
         // stays on the scanner queue, outside both the input callback and its mutex.
-        let fingerprint = "\(clicks):\(rectangles.count):\(events):\(missionControl):\(sidebarLabels):\(sidebarMatches)"
+        let fingerprint = "\(clicks):\(rectangles.count):\(events):\(missionControl):\(sidebarLabels):\(sidebarMatches):\(scanState):\(windowMatches):\(tabGroups):\(visualRectangles.count)"
         if fingerprint != lastDiagnostics {
             lastDiagnostics = fingerprint
             let url = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("native-tab-click-diagnostics.json")
-            if let data = try? JSONSerialization.data(withJSONObject: ["blockedClicks": clicks, "blockedRegions": rectangles.count, "mouseDownEvents": events, "missionControlEvents": missionControl, "sidebarLabels": sidebarLabels, "sidebarMatches": sidebarMatches, "sidebarRoles": sidebarRoles]) {
+            if let data = try? JSONSerialization.data(withJSONObject: ["scanState": scanState, "windowMatches": windowMatches, "tabGroups": tabGroups, "blurRegions": visualRectangles.count, "blockedClicks": clicks, "blockedRegions": rectangles.count, "mouseDownEvents": events, "missionControlEvents": missionControl, "sidebarLabels": sidebarLabels, "sidebarMatches": sidebarMatches, "sidebarRoles": sidebarRoles]) {
                 try? data.write(to: url, options: .atomic)
             }
         }
@@ -86,22 +111,39 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
 
     private func refresh() {
         sidebarLabels = 0; sidebarMatches = 0; sidebarRoles = [:]
+        windowMatches = 0; tabGroups = 0
+        scanState = "not-frontmost-browser"
         guard let app = NSWorkspace.shared.frontmostApplication,
-              let browser = app.bundleIdentifier, QuickSelection.browsers.contains(browser),
+              let browser = app.bundleIdentifier, QuickSelection.browsers.contains(browser) else {
+            publish([], pid: 0); return
+        }
+        scanState = "rules-or-snapshot-unavailable"
+        guard
               let data = try? Data(contentsOf: ActiveBrowserRulesStore.defaultFileURL()),
               let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data), rules.active, rules.isFresh(),
               let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
               let allTabs = snapshot.allTabs else {
             publish([], pid: 0); return
         }
+        scanState = "scanning"
         let deadline = Date(timeIntervalSinceNow: 0.10)
         let application = AXUIElementCreateApplication(app.processIdentifier)
-        let windows = elements(application, kAXWindowsAttribute, deadline)
+        let focused = value(application, kAXFocusedWindowAttribute, deadline)
+            ?? value(application, kAXMainWindowAttribute, deadline)
+        let windows = elements(application, kAXWindowsAttribute, deadline).sorted {
+            lhs, rhs in
+            let left = focused.map { CFEqual($0, lhs) } ?? false
+            let right = focused.map { CFEqual($0, rhs) } ?? false
+            return left && !right
+        }
         var blocked: [CGRect] = []
+        var visual: [CGRect] = []
         for window in windows {
             guard Date() < deadline else { break }
+            let isFocused = focused.map { CFEqual($0, window) } ?? false
             let title = string(window, kAXTitleAttribute, deadline) ?? ""
             guard let windowID = BrowserWindowMatching.match(title: title, tabs: allTabs, nativeWindowCount: windows.count) else { continue }
+            windowMatches += 1
             let windowTabs = allTabs.filter { $0.windowID == windowID }
             let allowedIDs = Set(rules.selectedTabIDsByBrowser?[browser] ?? snapshot.tabs.map(\.id))
             var pending: [(AXUIElement, CGRect?)] = [(window, nil)]
@@ -133,33 +175,63 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
                 // Match exact extension tab titles, not a particular text role.
                 let sidebarLabel = children.isEmpty && role != kAXImageRole
                 if sidebar != nil, sidebarLabel { sidebarLabels += 1 }
+                var unambiguousBlur = false
                 if let sidebar, sidebarLabel,
                    [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute].contains(where: { attribute in
                        guard let title = string(element, attribute, deadline), !title.isEmpty else { return false }
+                       let matches = windowTabs.filter { $0.title == title }
+                       unambiguousBlur = !matches.isEmpty && matches.allSatisfy { !allowedIDs.contains($0.id) }
                        return NativeTabClickPolicy.blocksSidebarTitle(title, tabs: windowTabs, allowedIDs: allowedIDs)
                    }),
                    let label = bounds(element, deadline) {
                     sidebarMatches += 1
                     let row = CGRect(x: sidebar.minX, y: label.minY - 3, width: sidebar.width, height: label.height + 6).intersection(sidebar)
-                    if !row.isEmpty { blocked.append(row) }
+                    if !row.isEmpty {
+                        blocked.append(row)
+                        if isFocused, unambiguousBlur { visual.append(row) }
+                    }
                 }
                 // Sidebar tab groups contain nested rows, not native radio-button
                 // tabs. Keep traversing them rather than stopping at the group.
                 if role == kAXTabGroupRole && sidebar == nil {
-                    let tabs = children.filter {
-                        let role = string($0, kAXRoleAttribute, deadline)
-                        return role == kAXRadioButtonRole || role == "AXTab"
+                    tabGroups += 1
+                    let tabs = nativeTabs(in: children, deadline: deadline)
+                    let blockedIndices = NativeTabClickPolicy.blockedIndices(nativeCount: tabs.count, tabs: windowTabs, allowedIDs: allowedIDs)
+                    let visualIndices: Set<Int>
+                    if let blockedIndices {
+                        visualIndices = blockedIndices
+                    } else {
+                        let labels = tabs.map { tab in
+                            [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute].compactMap { string(tab, $0, deadline) }
+                        }
+                        visualIndices = NativeTabClickPolicy.visualBlockedPositions(labels: labels, tabs: windowTabs, allowedIDs: allowedIDs)
                     }
-                    guard let blockedIndices = NativeTabClickPolicy.blockedIndices(nativeCount: tabs.count, tabs: windowTabs, allowedIDs: allowedIDs) else { continue }
-                    for (index, tab) in tabs.enumerated() where blockedIndices.contains(index) {
-                        if let rect = bounds(tab, deadline), rect.width > 5, rect.height > 5 { blocked.append(rect) }
+                    for (index, tab) in tabs.enumerated() {
+                        guard (blockedIndices?.contains(index) ?? false) || (isFocused && visualIndices.contains(index)),
+                              let rect = bounds(tab, deadline), rect.width > 5, rect.height > 5 else { continue }
+                        if blockedIndices?.contains(index) == true { blocked.append(rect) }
+                        if isFocused && visualIndices.contains(index) { visual.append(rect.insetBy(dx: 1, dy: 1)) }
                     }
                 } else { pending.append(contentsOf: children.prefix(1600 - visited).map { ($0, sidebar) }) }
             }
         }
         // Each completed rectangle is independently validated. Preserve those
         // checks if another branch runs out of time; never infer missing rows.
-        publish(blocked, pid: app.processIdentifier)
+        publish(blocked, pid: app.processIdentifier, visualRectangles: visual)
+    }
+
+    private func nativeTabs(in children: [AXUIElement], deadline: Date) -> [AXUIElement] {
+        var pending = children.reversed().map { ($0, 0) }
+        var tabs: [AXUIElement] = []
+        var visited = 0
+        while let (element, depth) = pending.popLast(), visited < 200, Date() < deadline {
+            visited += 1
+            let role = string(element, kAXRoleAttribute, deadline)
+            if role == kAXRadioButtonRole || role == "AXTab" { tabs.append(element); continue }
+            guard depth < 4, role != "AXWebArea", role != kAXImageRole else { continue }
+            pending.append(contentsOf: elements(element, kAXChildrenAttribute, deadline).reversed().map { ($0, depth + 1) })
+        }
+        return tabs
     }
 
     private func value(_ element: AXUIElement, _ attribute: String, _ deadline: Date) -> CFTypeRef? {
