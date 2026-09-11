@@ -63,6 +63,19 @@ do {
         == CGRect(x: -500, y: 650, width: 200, height: 150), "Blur coordinates preserve secondary display offsets")
     try expect(!FocusBlurPolicy.valid(CGRect(x: 0, y: 0, width: 0, height: 10)), "Empty blur regions are rejected")
     try expect(!FocusBlurPolicy.valid(CGRect(x: CGFloat.infinity, y: 0, width: 10, height: 10)), "Invalid AX positions are rejected")
+    for browser in ["org.mozilla.firefox", "com.google.Chrome"] {
+        var continuity = TabBlurContinuity()
+        let now = Date()
+        let region = CGRect(x: 10, y: 10, width: 90, height: 24)
+        try expect(continuity.update([region], context: browser, complete: true, now: now) == [region], "Valid blur scan is displayed")
+        try expect(continuity.update([], context: browser, complete: false, now: now.addingTimeInterval(0.15)) == [region], "Incomplete browser scan must not flash clear")
+        try expect(continuity.update([], context: browser, complete: false, now: now.addingTimeInterval(0.45)) == [region], "Repeated incomplete scans retain a bounded visual snapshot")
+        try expect(continuity.update([], context: browser, complete: false, now: now.addingTimeInterval(0.61)).isEmpty, "Incomplete scans cannot renew stale blur forever")
+        _ = continuity.update([region], context: browser, complete: true, now: now)
+        try expect(continuity.update([], context: browser + ":changed-window", complete: false, now: now.addingTimeInterval(0.1)).isEmpty, "Window or permission changes clear old blur immediately")
+        _ = continuity.update([region], context: browser, complete: true, now: now)
+        try expect(continuity.update([], context: browser, complete: true, now: now.addingTimeInterval(0.1)).isEmpty, "A complete empty scan clears allowed tabs immediately")
+    }
     let groupedTabs: [BrowserTabItem] = [
         .init(id: 11, windowID: 1, index: 0, title: "First page", url: "https://example.com", active: true),
         .init(id: 12, windowID: 1, index: 1, title: "Second page", url: "https://example.org", active: false),

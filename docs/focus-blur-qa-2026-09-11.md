@@ -53,3 +53,15 @@ Logan confirmed the previous installed blur works, but reported a panel-like app
 Unchanged panels are no longer reordered or resized every scan. Layer updates disable implicit animation, and a missed image capture retains the previous image only while the rectangle remains unchanged. Tab visual freshness now matches the existing 450 ms click snapshot lifetime. Foreground identity and sample age are checked before displaying results; the existing overlay expiry and click-through behavior remain.
 
 Validation: IntentCoreSpec passed. Production build/install and installed-app checks are recorded in the accompanying task. This revision's physical Mission Control appearance and absence of flashing have not yet been visually verified; the user's working confirmation applies to the preceding revision.
+
+## Remaining flashing: Firefox and Chrome
+
+Computer History was running. The requested recent interval contained the Chrome Quick Focus test at 12:33 UTC: start, repeated clicks/selection while the same tab remained active, then the end/save prompt. Its AX/event stream does not contain video frames and does not establish the precise visual flashing; no Firefox test was present in that interval.
+
+Fixed the shared native path:
+- Geometry refresh and its watchdog no longer wait for screen capture/Gaussian rendering. A separate serial image queue permits one capture batch at a time, rejects obsolete geometry/session results, and leaves the current image visible while rendering.
+- Blur pixels now live on a dedicated image sublayer, so AppKit backing-view redraws cannot replace their contents.
+- Incomplete AX traversals retain the last validated visual regions for up to 600 ms only with identical foreground window, bounds, tab state and permission context. Complete empty scans and context changes clear immediately. This cache never extends click-blocking geometry.
+- Page-selection drags no longer blank the visual regions; click hit testing retains its drag invalidation.
+
+Validation: IntentCoreSpec passed, including complete/incomplete/expired/context-change continuity cases for Firefox and Chrome. Both browsers' extension rule/background/reconnect tests passed. Native physical flashing acceptance remains unverified by the event stream or automated tests.

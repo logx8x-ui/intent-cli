@@ -34,6 +34,10 @@ final class FocusBlurController: @unchecked Sendable {
     // Main queue only.
     private var panels: [NSPanel] = []
     private var expiry: DispatchWorkItem?
+    private let captureQueue = DispatchQueue(label: "intent.focus-blur-images", qos: .utility)
+    private var captureInFlight = false // main queue only
+    private var displayedRectangles: [CGRect] = []
+    private var displayRevision = 0
 
     init(spec: FocusSessionSpec, tabGuard: NativeBrowserTabClickGuard) {
         self.spec = spec
@@ -85,25 +89,39 @@ final class FocusBlurController: @unchecked Sendable {
             let url = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("focus-blur-diagnostics.json")
             if let data = try? JSONSerialization.data(withJSONObject: scanDetails) { try? data.write(to: url, options: .atomic) }
         }
-        // Capture only the mapped regions, excluding Intent so the blur never feeds
-        // back into itself. No images are persisted or sent to the browser.
+        let validRectangles = rectangles.filter(FocusBlurPolicy.valid)
         let sourceWindows = windows.compactMap { window -> NSNumber? in
             guard window[kCGWindowOwnerPID as String] as? pid_t != ProcessInfo.processInfo.processIdentifier else { return nil }
             return window[kCGWindowNumber as String] as? NSNumber
         }
-        let validRectangles = rectangles.filter(FocusBlurPolicy.valid)
-        let images: [CGImage?] = validRectangles.map { rect in
-            guard CGPreflightScreenCaptureAccess(),
-                  let capture = CGImage(windowListFromArrayScreenBounds: rect, windowArray: sourceWindows as CFArray, imageOption: [.bestResolution]) else { return nil }
-            let source = CIImage(cgImage: capture)
-            let scale = CGFloat(capture.width) / rect.width
-            let blurred = source.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: min(10, rect.height * 0.18) * scale]).cropped(to: source.extent)
-            return imageContext.createCGImage(blurred, from: source.extent)
-        }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.current(token), Date().timeIntervalSince(sampledAt) < 0.35,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID else { return }
-            self.show(validRectangles, images: images)
+            // Geometry renews the watchdog independently of slow WindowServer/GPU work.
+            self.show(validRectangles)
+            guard !self.captureInFlight, !validRectangles.isEmpty else { return }
+            self.captureInFlight = true
+            let revision = self.displayRevision
+            self.captureQueue.async { [weak self] in
+                guard let self else { return }
+                let images: [CGImage?] = validRectangles.map { rect in
+                    guard self.current(token), CGPreflightScreenCaptureAccess(),
+                          let capture = CGImage(windowListFromArrayScreenBounds: rect, windowArray: sourceWindows as CFArray, imageOption: [.bestResolution]) else { return nil }
+                    let source = CIImage(cgImage: capture)
+                    let scale = CGFloat(capture.width) / rect.width
+                    let blurred = source.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: min(10, rect.height * 0.18) * scale]).cropped(to: source.extent)
+                    return self.imageContext.createCGImage(blurred, from: source.extent)
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.captureInFlight = false
+                    guard self.current(token), self.displayRevision == revision,
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID else { return }
+                    for (panel, image) in zip(self.panels, images) {
+                        (panel.contentView as? FocusBlurView)?.update(image, moved: false)
+                    }
+                }
+            }
         }
     }
 
@@ -182,8 +200,12 @@ final class FocusBlurController: @unchecked Sendable {
         return CGRect(origin: point, size: dimensions)
     }
 
-    private func show(_ rectangles: [CGRect], images: [CGImage?]) {
+    private func show(_ rectangles: [CGRect]) {
         expiry?.cancel()
+        if displayedRectangles != rectangles {
+            displayedRectangles = rectangles
+            displayRevision += 1
+        }
         while panels.count > rectangles.count { panels.removeLast().orderOut(nil) }
         let height = CGDisplayBounds(CGMainDisplayID()).height
         for (index, rect) in rectangles.enumerated() {
@@ -201,7 +223,7 @@ final class FocusBlurController: @unchecked Sendable {
             let frame = FocusBlurPolicy.appKitFrame(rect, primaryDisplayHeight: height)
             let moved = panel.frame != frame
             if moved { panel.setFrame(frame, display: false) }
-            (panel.contentView as? FocusBlurView)?.update(images[index], moved: moved)
+            (panel.contentView as? FocusBlurView)?.update(nil, moved: moved)
             if !panel.isVisible { panel.orderFrontRegardless() }
         }
         // A stalled scanner can never leave old masks over unrelated content.
@@ -211,6 +233,7 @@ final class FocusBlurController: @unchecked Sendable {
     }
 
     private func clear() {
+        displayedRectangles = []; displayRevision += 1
         expiry?.cancel(); expiry = nil
         panels.forEach { $0.orderOut(nil) }
         panels.removeAll()
@@ -220,32 +243,35 @@ final class FocusBlurController: @unchecked Sendable {
 /// Untinted source pixels: no border, badge, shadow, or material animation.
 private final class FocusBlurView: NSView {
     private let fallback = NSVisualEffectView()
+    private let imageLayer = CALayer()
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = true
-        layer?.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        imageLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "hidden": NSNull()]
         // Keep a permission-free fallback; never prompt during enforcement.
         fallback.blendingMode = .behindWindow
         fallback.material = .underWindowBackground
         fallback.state = .active
         fallback.alphaValue = 0.45
         addSubview(fallback)
+        layer?.addSublayer(imageLayer)
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { nil }
     func update(_ image: CGImage?, moved: Bool) {
         // A single failed capture must not flash the material fallback. Never
         // retain an old image after the region moves to different content.
-        if image == nil, !moved, layer?.contents != nil { return }
+        if image == nil, !moved, imageLayer.contents != nil { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer?.contents = image
+        imageLayer.contents = image
         fallback.isHidden = image != nil
         CATransaction.commit()
     }
     override func layout() {
         super.layout()
         fallback.frame = bounds
+        imageLayer.frame = bounds
     }
 }

@@ -28,6 +28,23 @@ public enum NativeTabClickPolicy {
     }
 }
 
+/// An incomplete scan is not evidence that previously mapped tabs disappeared.
+/// Reuse is bounded and only valid for the same window, geometry and permissions.
+public struct TabBlurContinuity {
+    private var context = ""
+    private var regions: [CGRect] = []
+    private var validatedAt = Date.distantPast
+    public init() {}
+    public mutating func update(_ sample: [CGRect], context: String, complete: Bool, now: Date) -> [CGRect] {
+        if complete || self.context != context || now.timeIntervalSince(validatedAt) >= 0.6 {
+            regions = sample
+            self.context = context
+            validatedAt = complete ? now : .distantPast
+        }
+        return regions
+    }
+}
+
 /// The event tap only reads this short-lived geometry cache. AX work never runs in it.
 final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private let queue = DispatchQueue(label: "intent.native-tab-hit-regions", qos: .userInteractive)
@@ -49,6 +66,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var scanState = "idle"
     private var windowMatches = 0
     private var tabGroups = 0
+    private var blurContinuity = TabBlurContinuity()
 
     func recordMouseDown(missionControl: Bool) {
         mutex.lock(); mouseDownEvents += 1
@@ -84,7 +102,9 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     /// A separate visual consumer; never performs AX work on the main thread.
     func blurRegions(frontmostPID: pid_t?) -> [CGRect] {
         mutex.lock(); defer { mutex.unlock() }
-        guard !stopped, Date() >= ignoreUntil, frontmostPID == pid,
+        // Page-selection drags invalidate click hit testing, not visual content.
+        // The scanner continues to validate geometry while the mouse is held.
+        guard !stopped, frontmostPID == pid,
               Date().timeIntervalSince(updatedAt) < 0.45 else { return [] }
         return visualRectangles
     }
@@ -115,7 +135,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         scanState = "not-frontmost-browser"
         guard let app = NSWorkspace.shared.frontmostApplication,
               let browser = app.bundleIdentifier, QuickSelection.browsers.contains(browser) else {
-            publish([], pid: 0); return
+            blurContinuity = TabBlurContinuity(); publish([], pid: 0); return
         }
         scanState = "rules-or-snapshot-unavailable"
         guard
@@ -123,7 +143,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
               let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data), rules.active, rules.isFresh(),
               let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
               let allTabs = snapshot.allTabs else {
-            publish([], pid: 0); return
+            blurContinuity = TabBlurContinuity(); publish([], pid: 0); return
         }
         scanState = "scanning"
         let deadline = Date(timeIntervalSinceNow: 0.10)
@@ -138,6 +158,11 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         }
         var blocked: [CGRect] = []
         var visual: [CGRect] = []
+        var visualComplete = false
+        var visualContext = ""
+        if let focused, let frame = bounds(unsafeBitCast(focused, to: AXUIElement.self), deadline) {
+            visualContext = "\(app.processIdentifier):\(CFHash(focused)):\(frame):\(allTabs):\(rules.selectedTabIDsByBrowser?[browser] ?? snapshot.tabs.map(\.id))"
+        }
         for window in windows {
             guard Date() < deadline else { break }
             let isFocused = focused.map { CFEqual($0, window) } ?? false
@@ -214,6 +239,12 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
                     }
                 } else { pending.append(contentsOf: children.prefix(1600 - visited).map { ($0, sidebar) }) }
             }
+            if isFocused { visualComplete = pending.isEmpty && Date() < deadline && (tabGroups > 0 || sidebarLabels > 0) }
+        }
+        if !visualContext.isEmpty {
+            visual = blurContinuity.update(visual, context: visualContext, complete: visualComplete, now: Date())
+        } else {
+            blurContinuity = TabBlurContinuity()
         }
         // Each completed rectangle is independently validated. Preserve those
         // checks if another branch runs out of time; never infer missing rows.
