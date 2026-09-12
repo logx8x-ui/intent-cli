@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import ApplicationServices
 import SwiftUI
 import IntentCore
@@ -23,9 +24,18 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
             coordinator.dismiss = onDismiss
             panel.delegate = coordinator
             panel.contentView = NSHostingView(rootView: IntentQuickGuideView(model: model, onFinish: onFinish, onDismiss: onDismiss, resize: { size in
-                let center = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
-                panel.setContentSize(size)
-                panel.setFrameOrigin(NSPoint(x: center.x - panel.frame.width / 2, y: center.y - panel.frame.height / 2))
+                let screen = panel.screen ?? NSScreen.main
+                let desktop = size.width > 800
+                panel.titleVisibility = desktop ? .hidden : .visible
+                panel.titlebarAppearsTransparent = desktop
+                let bounds = screen?.visibleFrame ?? panel.frame
+                let target = desktop ? bounds : panel.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+                let frame = NSRect(x: bounds.midX - target.width / 2, y: bounds.midY - target.height / 2, width: target.width, height: target.height)
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.38
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    panel.animator().setFrame(frame, display: true)
+                }
             }))
             coordinator.panel = panel
             panel.center()
@@ -67,6 +77,10 @@ struct IntentQuickGuideView: View {
     @State private var connectedBrowsers: Set<String> = []
     @State private var error: String?
     @State private var starting = false
+    @State private var expandedBrowser: String?
+    @State private var openedAccessibility = false
+    @State private var overviewVisible = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var nameFocused: Bool
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private static let draftKey = "intentFirstIntentionDraftV1"
@@ -95,19 +109,30 @@ struct IntentQuickGuideView: View {
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.regularMaterial)
+        .background {
+            if draft.step == 1 {
+                ZStack {
+                    if let screen = NSScreen.main, let url = NSWorkspace.shared.desktopImageURL(for: screen), let wallpaper = NSImage(contentsOf: url) {
+                        Image(nsImage: wallpaper).resizable().scaledToFill().blur(radius: 24)
+                    }
+                    Color.black.opacity(0.65)
+                }.clipped()
+            } else { Rectangle().fill(.regularMaterial) }
+        }
+        .preferredColorScheme(draft.step == 1 ? .dark : nil)
         .onAppear {
             if draft.step == 3 && !model.hasActiveSession { draft.step = 4 }
-            refresh(); updateSize(); nameFocused = true
+            refresh(); updateSize(); openRequiredPermission(); nameFocused = true
         }
-        .onChange(of: draft) { _ in persist(); updateSize() }
+        .onChange(of: draft) { _ in persist() }
+        .onChange(of: draft.step) { _ in updateSize(); openRequiredPermission() }
         .onReceive(clock) { _ in refreshPermissions() }
         .onChange(of: model.installedApps) { _ in refresh() }
         .onChange(of: model.hasActiveSession) { active in
             if starting && active { starting = false; draft.step = 3; error = nil }
             else if draft.step == 3 && !active {
                 if let message = model.errorMessage { error = message; draft.step = 2 }
-                else { draft.step = 4 }
+                else { UserDefaults.standard.removeObject(forKey: Self.draftKey); onFinish() }
             }
         }
         .onChange(of: model.errorMessage) { value in
@@ -122,53 +147,110 @@ struct IntentQuickGuideView: View {
                 .textFieldStyle(.roundedBorder).font(.title3).focused($nameFocused)
                 .onSubmit { if !cleanName.isEmpty { advanceToResources() } }
             Text("That will be the name of your first intention.").font(.callout).foregroundStyle(.secondary)
+            Text("⌘G  Choose apps anytime     ·     \(FinishShortcutStore.load().displayName)  Finish a session")
+                .font(.caption).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Choose apps →", action: advanceToResources).buttonStyle(.borderedProminent).disabled(cleanName.isEmpty) }
         }
     }
     private var resources: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("What do you need for “\(cleanName)”?").font(.title2.weight(.semibold)).lineLimit(2)
-            Text("Click the apps and websites you want to use.").foregroundStyle(.secondary)
-            TextField("Find an app", text: $query).textFieldStyle(.roundedBorder)
+        VStack(spacing: 24) {
+            VStack(spacing: 12) {
+                Text("Make room for “\(cleanName)”").font(.system(size: 28, weight: .semibold)).lineLimit(1)
+                Text("Choose what belongs in this moment.").foregroundStyle(.secondary)
+                VStack(spacing: 10) {
+                    TextField("Search your apps", text: $query).textFieldStyle(.plain)
+                        .font(.system(size: 22, weight: .light)).multilineTextAlignment(.center)
+                        .accessibilityLabel("Search your apps")
+                    Rectangle().fill(Color.white.opacity(0.35)).frame(height: 1)
+                }.frame(maxWidth: 360).padding(.top, 10)
+            }
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(query.isEmpty ? "OPEN & FREQUENTLY USED" : "INSTALLED APPS").font(.caption).foregroundStyle(.secondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 125))], spacing: 8) {
-                        ForEach(displayedApps) { app in
-                            Button { toggleApp(app.bundleIdentifier) } label: {
-                                HStack {
-                                    Image(nsImage: app.icon).resizable().frame(width: 25, height: 25)
-                                    Text(app.name).lineLimit(1)
-                                    Spacer(minLength: 0)
-                                    if draft.appIDs.contains(app.id) { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                                }.padding(8).frame(maxWidth: .infinity)
-                                    .background(draft.appIDs.contains(app.id) ? Color.green.opacity(0.12) : Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-                            }.buttonStyle(.plain).accessibilityLabel("\(app.name), \(draft.appIDs.contains(app.id) ? "selected" : "not selected")")
+                VStack(alignment: .leading, spacing: 28) {
+                    if query.isEmpty {
+                        appRow("Open on your Mac", apps: displayedApps.filter { runningAppIDs.contains($0.id) })
+                        appRow("Your familiar apps", apps: displayedApps.filter { !runningAppIDs.contains($0.id) })
+                    } else {
+                        appRow("Search results", apps: displayedApps)
+                        if displayedApps.isEmpty { Text("No apps found. Try another name.").foregroundStyle(.secondary) }
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Your websites").font(.title3.weight(.semibold))
+                        Text("Open a browser below to choose its websites. Selecting a site also selects its browser.").font(.callout).foregroundStyle(.secondary)
+                        ForEach(model.installedApps.filter { QuickSelection.browsers.contains($0.id) }) { app in
+                            browserGroup(app)
                         }
-                    }
-                    Text("BROWSER TABS & WEBSITES").font(.caption).foregroundStyle(.secondary)
-                    if suggestedSites.isEmpty {
-                        Text("No tabs shared yet. Add a website below; we’ll connect your browser in the next step.").font(.callout).foregroundStyle(.secondary)
-                    }
-                    ForEach(suggestedSites, id: \.resourceID) { site in siteButton(site) }
-                    ForEach(draft.websites.filter { selected in !suggestedSites.contains(where: { $0.resourceID == selected.resourceID }) }, id: \.resourceID) { site in siteButton(site) }
-                }
+                    }.frame(maxWidth: 760, alignment: .leading)
+                }.padding(.horizontal, 8).padding(.vertical, 8)
             }
             HStack {
-                Picker("Browser", selection: $browser) { Text("Chrome").tag("com.google.Chrome"); Text("Firefox").tag("org.mozilla.firefox") }.labelsHidden().frame(width: 100)
-                TextField("Add a website, e.g. docs.google.com", text: $website).textFieldStyle(.roundedBorder).onSubmit(addWebsite)
-                Button("Add", action: addWebsite).disabled(website.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            HStack {
-                Button("Back") { draft.step = 0 }
+                Button("← Back") { draft.step = 0 }.buttonStyle(.plain)
                 Spacer()
-                Text("\(draft.appIDs.count) apps · \(draft.websites.count) websites").font(.caption).foregroundStyle(.secondary)
+                Text("\(draft.appIDs.count) apps · \(draft.websites.count) websites").foregroundStyle(.secondary)
                 Button("Continue →") {
                     do { _ = try draft.makeIntention(availableApps: availableApps); error = nil; draft.step = 2 }
                     catch { self.error = error.localizedDescription }
-                }.buttonStyle(.borderedProminent).disabled(draft.appIDs.isEmpty)
+                }.buttonStyle(.borderedProminent).controlSize(.large).disabled(draft.appIDs.isEmpty)
+            }
+            Text("⌘G opens the app picker · \(FinishShortcutStore.load().displayName) finishes your intention")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 28)
+        .opacity(overviewVisible ? 1 : 0).scaleEffect(overviewVisible ? 1 : 0.96)
+        .onAppear {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.45).delay(0.12)) { overviewVisible = true }
+        }
+        .onDisappear { overviewVisible = false }
+    }
+    private var runningAppIDs: Set<String> {
+        Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleIdentifier))
+    }
+    @ViewBuilder private func appRow(_ title: String, apps: [InstalledApp]) -> some View {
+        if !apps.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).font(.title3.weight(.semibold))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 16) { ForEach(apps) { app in appTile(app) } }.padding(4)
+                }
             }
         }
+    }
+    private func appTile(_ app: InstalledApp) -> some View {
+        let selected = draft.appIDs.contains(app.id)
+        return Button { toggleApp(app.id) } label: {
+            VStack(spacing: 14) {
+                Image(nsImage: app.icon).resizable().frame(width: 76, height: 76).shadow(color: .black.opacity(0.2), radius: 10, y: 5)
+                Text(app.name).font(.system(size: 15, weight: .medium)).lineLimit(1)
+            }
+            .frame(width: 196, height: 158)
+            .background(LinearGradient(colors: [Color.white.opacity(selected ? 0.19 : 0.10), Color.white.opacity(0.035)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(selected ? Color.green : Color.white.opacity(0.13), lineWidth: selected ? 2 : 1))
+            .overlay(alignment: .topTrailing) {
+                if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.title3).padding(12) }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 20))
+        }.buttonStyle(.plain).accessibilityLabel("\(app.name), \(selected ? "selected" : "not selected")")
+    }
+    private func browserGroup(_ app: InstalledApp) -> some View {
+        let sites = suggestedSites.filter { $0.browserBundleIdentifier == app.id }
+            + draft.websites.filter { $0.browserBundleIdentifier == app.id && !suggestedSites.contains($0) }
+        return DisclosureGroup(isExpanded: Binding(get: { expandedBrowser == app.id }, set: { expandedBrowser = $0 ? app.id : nil; browser = app.id; website = "" })) {
+            VStack(alignment: .leading, spacing: 8) {
+                if sites.isEmpty { Text("No shared tabs yet. Add a website to get started.").foregroundStyle(.secondary).font(.callout) }
+                ForEach(sites, id: \.resourceID) { site in siteButton(site) }
+                HStack {
+                    TextField("Add a website, e.g. docs.google.com", text: $website).textFieldStyle(.plain)
+                        .onSubmit { browser = app.id; addWebsite() }
+                    Button("Add") { browser = app.id; addWebsite() }.disabled(website.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.padding(12).background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+            }.padding(.top, 12)
+        } label: {
+            HStack(spacing: 10) {
+                Image(nsImage: app.icon).resizable().frame(width: 28, height: 28)
+                Text(app.name).fontWeight(.medium)
+                Spacer()
+                Text("\(draft.websites.filter { $0.browserBundleIdentifier == app.id }.count) selected").font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(16).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
     }
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -218,7 +300,7 @@ struct IntentQuickGuideView: View {
     private var completed: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("That’s your first intention.").font(.title.weight(.semibold))
-            Text("“\(cleanName)” is saved. Run it again from your desktop, or press ⌘G to choose a new set of apps and tabs.")
+            Text("You can save your intention from the session’s save prompt, or keep it as a one-off.")
             Button("Done") { UserDefaults.standard.removeObject(forKey: Self.draftKey); onFinish() }.buttonStyle(.borderedProminent)
         }
     }
@@ -234,7 +316,12 @@ struct IntentQuickGuideView: View {
         let catalog = model.installedApps.filter { !$0.bundleIdentifier.hasPrefix("dev.loganmondi.intent") && (!$0.name.isEmpty) }
         if !query.isEmpty { return catalog.filter { $0.matchesSearch(query) } }
         let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let ids = suggestedAppIDs + draft.appIDs.sorted()
+        // Background macOS helpers are searchable, but do not belong in the suggested row.
+        let suggested = suggestedAppIDs.filter { id in
+            guard let app = byID[id] else { return false }
+            return !app.url.path.hasPrefix("/System/Library/") || runningAppIDs.contains(id)
+        }
+        let ids = suggested + draft.appIDs.sorted()
         var seen = Set<String>()
         let recommended = ids.compactMap { id -> InstalledApp? in guard seen.insert(id).inserted else { return nil }; return byID[id] }
         return recommended.isEmpty ? Array(catalog.prefix(24)) : recommended
@@ -256,7 +343,10 @@ struct IntentQuickGuideView: View {
     }
     private func toggleApp(_ id: String) {
         if draft.appIDs.remove(id) != nil { draft.websites.removeAll { $0.browserBundleIdentifier == id } }
-        else { draft.appIDs.insert(id) }
+        else {
+            draft.appIDs.insert(id)
+            if QuickSelection.browsers.contains(id) { expandedBrowser = id; browser = id; website = "" }
+        }
         error = nil
     }
     private func addWebsite() {
@@ -305,22 +395,20 @@ struct IntentQuickGuideView: View {
         refreshPermissions(); guard ready else { return }
         do {
             let intention = try draft.makeIntention(availableApps: availableApps)
-            let id: String
-            if let saved = draft.savedIntentionID, let original = model.intentions.first(where: { $0.id == saved }) {
-                var updated = intention; updated.id = saved; updated.graphPosition = original.graphPosition
-                model.updateIntention(updated); id = saved
-            }
-            else {
-                guard let saved = model.addDraftIntention(intention, at: .init(x: 100, y: 100)) else { error = "Couldn’t save your intention. Try again."; return }
-                draft.savedIntentionID = saved; id = saved
-            }
             persist(); starting = true; error = nil; model.errorMessage = nil
-            model.requestStart(intentionID: id)
+            _ = model.startFirstIntention(intention)
             if model.hasActiveSession { starting = false; draft.step = 3 }
-            else if let message = model.errorMessage { starting = false; error = message }
+            else { starting = false; error = model.errorMessage ?? "Couldn’t start. Try again." }
         } catch { self.error = error.localizedDescription }
     }
-    private func updateSize() { resize(NSSize(width: draft.step == 1 ? 620 : 540, height: draft.step == 1 ? 610 : draft.step == 2 ? CGFloat(430 + selectedBrowsers.count * 80) : 340)) }
+    private func openRequiredPermission() {
+        guard draft.step == 2, !trusted, !openedAccessibility else { return }
+        openedAccessibility = true
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        openSettings("Privacy_Accessibility")
+    }
+    private func updateSize() { resize(NSSize(width: draft.step == 1 ? 1200 : 540, height: draft.step == 1 ? 800 : draft.step == 2 ? CGFloat(430 + selectedBrowsers.count * 80) : 380)) }
     private func persist() { if let data = try? JSONEncoder().encode(draft) { UserDefaults.standard.set(data, forKey: Self.draftKey) } }
     private static func loadDraft() -> FirstIntentionDraft {
         guard let data = UserDefaults.standard.data(forKey: draftKey), let draft = try? JSONDecoder().decode(FirstIntentionDraft.self, from: data) else { return .init() }

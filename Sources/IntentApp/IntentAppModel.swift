@@ -68,7 +68,28 @@ final class IntentAppModel: ObservableObject {
     private var purposeUsageTracker: PurposeSessionUsageTracker?
     private var quickSelectionTabIDs: [String: [Int]]?
     private var quickSelectionIntentionID: String?
+    private var firstIntentionID: String?
     private var quickSelectionMonitor: Task<Void, Never>?
+
+    /// Run an unsaved first intention and offer the usual save sheet only after completion.
+    func startFirstIntention(_ intention: Intention) -> Bool {
+        guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil else {
+            errorMessage = "Finish the current intention and save or dismiss its result first."
+            return false
+        }
+        errorMessage = nil
+        firstIntentionID = intention.id
+        quickSelectionTabIDs = nil
+        purposeTemporaryIntention = intention
+        purposeStatedPrompt = intention.name
+        start(intention)
+        if !hasActiveSession {
+            firstIntentionID = nil
+            purposeTemporaryIntention = nil
+            purposeStatedPrompt = nil
+        }
+        return hasActiveSession
+    }
 
     func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot]) -> Bool {
         guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil else {
@@ -1284,7 +1305,7 @@ final class IntentAppModel: ObservableObject {
                    wasPurposeSession,
                    let purposeUsage,
                    let statedPurpose {
-                    self.pendingPurposeSessionSave = self.quickSelectionIntentionID == intention.id
+                    self.pendingPurposeSessionSave = (self.quickSelectionIntentionID == intention.id || self.firstIntentionID == intention.id)
                         ? PurposeSessionSaveCandidate(intention: intention, statedPurpose: statedPurpose)
                         : self.makePurposeSaveCandidate(
                         from: intention,
@@ -1293,6 +1314,7 @@ final class IntentAppModel: ObservableObject {
                     )
                 }
                 if wasPurposeSession {
+                    self.firstIntentionID = nil
                     self.quickSelectionIntentionID = nil
                     self.quickSelectionTabIDs = nil
                     self.purposeTemporaryIntention = nil
