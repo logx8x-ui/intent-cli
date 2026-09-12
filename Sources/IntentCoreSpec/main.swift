@@ -138,6 +138,21 @@ do {
             .init(id: 8, windowID: 1, index: 1, title: "Duplicate", url: "https://example.org/work", active: false),
             .init(id: 9, windowID: 1, index: 2, title: "Settings", url: "about:preferences", active: false)])
     }
+    var firstDraft = FirstIntentionDraft()
+    firstDraft.name = "  Finish my assignment  "
+    firstDraft.appIDs = ["com.apple.Notes"]
+    let firstIntention = try firstDraft.makeIntention(availableApps: quickApps)
+    try expect(firstIntention.name == "Finish my assignment" && firstIntention.selectionOnly, "Onboarding preserves the user's purpose and exact app selection")
+    try expect(firstIntention.accessMode == .whitelist && firstIntention.restrictionNodes.isEmpty, "The first run has no surprise lock or friction")
+    firstDraft.appIDs.insert("org.mozilla.firefox")
+    do { _ = try firstDraft.makeIntention(availableApps: quickApps); throw SpecFailure(description: "Browser without a website must not start") }
+    catch is FirstIntentionDraft.DraftError {}
+    firstDraft.websites = [.init("https://example.org/work", browserBundleIdentifier: "org.mozilla.firefox")]
+    let firstBrowserIntention = try firstDraft.makeIntention(availableApps: quickApps)
+    try expect(firstBrowserIntention.allowedWebsites.first?.browserBundleIdentifier == "org.mozilla.firefox", "Onboarding websites stay attached to the chosen browser")
+    firstDraft.step = 2; firstDraft.savedIntentionID = "saved-once"
+    let resumedDraft = try JSONDecoder().decode(FirstIntentionDraft.self, from: JSONEncoder().encode(firstDraft))
+    try expect(resumedDraft == firstDraft, "Permission restart preserves selections, name, step and saved intention identity")
     var quick = QuickSelection()
     quick.toggleApp("com.apple.Notes", snapshots: quickSnapshots)
     quick.toggleApp("com.google.Chrome", snapshots: quickSnapshots)

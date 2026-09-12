@@ -189,16 +189,10 @@ struct IntentGraphView: View {
                 }
 
                 if showQuickGuide {
-                    IntentQuickGuideView(
-                        catalog: model.installedApps,
-                        onAdd: { suggestions in
-                            _ = model.addAIIntentions(suggestions)
-                        },
-                        onFinish: {
-                            didCompleteOnboarding = true
-                            showQuickGuide = false
-                        }
-                    )
+                    IntentQuickGuidePresenter(model: model, onFinish: {
+                        didCompleteOnboarding = true
+                        showQuickGuide = false
+                    }, onDismiss: { showQuickGuide = false })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
@@ -1264,7 +1258,6 @@ struct IntentGraphView: View {
 
         if showQuickGuide {
             if key == .escape {
-                didCompleteOnboarding = true
                 showQuickGuide = false
             }
             return
