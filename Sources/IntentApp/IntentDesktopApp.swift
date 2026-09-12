@@ -306,12 +306,13 @@ final class IntentRuntime {
             Task { @MainActor in
                 IntentRuntime.shared.calendarSync.appBecameActive()
                 IntentRuntime.shared.accountManager.appBecameActive()
+                IntentUpdateManager.shared.appBecameActive()
             }
         }
 
         model.load()
         Task { await accountManager.start() }
-        IntentUpdateManager.shared.checkForUpdates()
+        IntentUpdateManager.shared.startAutomaticChecks()
         if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
             || !UserDefaults.standard.bool(forKey: "intentAccountChoiceMade")
             || PurposeModePreference.isEnabled {

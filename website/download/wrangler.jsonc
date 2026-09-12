@@ -1,0 +1,11 @@
+{
+  "name": "intent-friends-k8m4",
+  "account_id": "95ccf457466c696ddfb68d0e780a2103",
+  "compatibility_date": "2026-09-12",
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  },
+  "workers_dev": true,
+  "preview_urls": false
+}

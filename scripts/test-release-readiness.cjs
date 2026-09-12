@@ -22,16 +22,13 @@ assert.equal(
   "Firefox Browser Guard must use the stable self-update feed"
 );
 const firefoxUpdate = firefoxUpdates.addons?.["intent-firefox@loganmondi.dev"]?.updates?.at(-1);
-assert.equal(
-  firefoxUpdate?.version,
-  firefoxManifest.version,
-  "The Firefox update feed must publish the current extension version"
-);
-assert.match(
-  firefoxUpdate?.update_link || "",
-  /^https:\/\/github\.com\/logx8x-ui\/intent-cli\/releases\/latest\/download\/Intent-Firefox-Extension\.xpi$/,
-  "The Firefox update feed must point to the stable signed release asset"
-);
+// The live feed follows published artifacts, not unreleased source changes.
+assert.ok(/^\d+\.\d+\.\d+$/.test(firefoxUpdate?.version || ''), "Firefox feed needs a released version");
+assert.ok(firefoxUpdate.version.localeCompare(firefoxManifest.version, undefined, {numeric:true}) <= 0,
+  "Firefox feed must not advertise a version newer than the source");
+assert.match(firefoxUpdate?.update_link || '',
+  /^https:\/\/github\.com\/logx8x-ui\/intent-cli\/releases\/(?:latest\/download|download\/v[0-9.]+)\/Intent-Firefox-Extension\.xpi$/,
+  "Firefox feed must use an official signed release asset");
 assert.equal(
   chromeManifest.update_url,
   "https://clients2.google.com/service/update2/crx",

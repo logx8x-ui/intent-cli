@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {kitForRelease} from '../website/download/public/release.mjs';
+const make=choice=>({tag_name:'v1.0.0',draft:false,prerelease:false,assets:[{name:'release-manifest.json'},{name:`Intent-${choice}.zip`,browser_download_url:`https://github.com/logx8x-ui/intent-cli/releases/download/v1.0.0/Intent-${choice}.zip`}]});
+for(const choice of ['Firefox','Chrome','Both'])assert.ok(kitForRelease(make(choice),choice.toLowerCase()));
+assert.equal(kitForRelease({...make('Both'),draft:true},'both'),null);
+assert.equal(kitForRelease({...make('Both'),prerelease:true},'both'),null);
+assert.equal(kitForRelease({assets:[]},'both'),null);
+const bad=make('Both');bad.assets[1].browser_download_url='https://example.org/Intent-Both.zip';assert.equal(kitForRelease(bad,'both'),null);
+assert.equal(kitForRelease(make('Firefox'),'chrome'),null);
+console.log('Download catalog checks passed');

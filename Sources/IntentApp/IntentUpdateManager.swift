@@ -64,7 +64,24 @@ final class IntentUpdateManager: ObservableObject {
         string: "https://api.github.com/repos/logx8x-ui/intent-cli/releases/latest"
     )!
 
+    private var periodicCheck: Timer?
+    private var lastCheckedAt: Date?
+
     private init() {}
+
+    func startAutomaticChecks() {
+        guard periodicCheck == nil else { return }
+        checkForUpdates()
+        periodicCheck = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { _ in
+            Task { @MainActor in IntentUpdateManager.shared.checkForUpdates() }
+        }
+    }
+
+    func appBecameActive() {
+        if lastCheckedAt.map({ Date().timeIntervalSince($0) >= 6 * 60 * 60 }) ?? true {
+            checkForUpdates()
+        }
+    }
 
     var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
@@ -75,6 +92,7 @@ final class IntentUpdateManager: ObservableObject {
         if availableRelease != nil, !force { return }
 
         isChecking = true
+        lastCheckedAt = Date()
         errorMessage = nil
 
         Task {

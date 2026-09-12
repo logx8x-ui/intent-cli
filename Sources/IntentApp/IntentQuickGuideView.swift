@@ -18,12 +18,14 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
             let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 540, height: 340),
                                 styleMask: [.titled, .closable], backing: .buffered, defer: false)
             panel.title = "Your first intention"
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
             panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
             panel.isReleasedWhenClosed = false
             panel.hidesOnDeactivate = false
             coordinator.dismiss = onDismiss
             panel.delegate = coordinator
-            panel.contentView = NSHostingView(rootView: IntentQuickGuideView(model: model, onFinish: onFinish, onDismiss: onDismiss, resize: { size in
+            panel.contentView = NSHostingView(rootView: IntentQuickGuideView(model: model, onFinish: onFinish, onDismiss: onDismiss, desktopScreen: { panel.screen ?? NSScreen.main }, resize: { size in
                 let screen = panel.screen ?? NSScreen.main
                 let desktop = size.width > 800
                 panel.titleVisibility = desktop ? .hidden : .visible
@@ -64,6 +66,7 @@ struct IntentQuickGuideView: View {
     @ObservedObject var model: IntentAppModel
     let onFinish: () -> Void
     let onDismiss: () -> Void
+    let desktopScreen: () -> NSScreen?
     let resize: (NSSize) -> Void
     @State private var draft = Self.loadDraft()
     @State private var query = ""
@@ -80,6 +83,7 @@ struct IntentQuickGuideView: View {
     @State private var expandedBrowser: String?
     @State private var openedAccessibility = false
     @State private var overviewVisible = false
+    @State private var desktopWallpaper: NSImage?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var nameFocused: Bool
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -112,14 +116,23 @@ struct IntentQuickGuideView: View {
         .background {
             if draft.step == 1 {
                 ZStack {
-                    if let screen = NSScreen.main, let url = NSWorkspace.shared.desktopImageURL(for: screen), let wallpaper = NSImage(contentsOf: url) {
-                        Image(nsImage: wallpaper).resizable().scaledToFill().blur(radius: 24)
+                    if let desktopWallpaper {
+                        GeometryReader { geometry in
+                            Image(nsImage: desktopWallpaper).resizable().scaledToFill()
+                                .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                        }
+                    } else {
+                        Rectangle().fill(.ultraThinMaterial)
                     }
-                    Color.black.opacity(0.65)
+                    Color.black.opacity(0.22)
                 }.clipped()
             } else { Rectangle().fill(.regularMaterial) }
         }
         .preferredColorScheme(draft.step == 1 ? .dark : nil)
+        .task(id: draft.step == 1) {
+            guard draft.step == 1, let screen = desktopScreen() else { return }
+            desktopWallpaper = await OnboardingDesktopBackground.load(for: screen)
+        }
         .onAppear {
             if draft.step == 3 && !model.hasActiveSession { draft.step = 4 }
             refresh(); updateSize(); openRequiredPermission(); nameFocused = true
@@ -155,7 +168,7 @@ struct IntentQuickGuideView: View {
     private var resources: some View {
         VStack(spacing: 24) {
             VStack(spacing: 12) {
-                Text("Make room for “\(cleanName)”").font(.system(size: 28, weight: .semibold)).lineLimit(1)
+                Text("Make room for “\(cleanName)”").font(.system(size: 28, weight: .semibold)).lineLimit(1).shadow(color: .black.opacity(0.5), radius: 8)
                 Text("Choose what belongs in this moment.").foregroundStyle(.secondary)
                 VStack(spacing: 10) {
                     TextField("Search your apps", text: $query).textFieldStyle(.plain)
@@ -222,7 +235,7 @@ struct IntentQuickGuideView: View {
                 Text(app.name).font(.system(size: 15, weight: .medium)).lineLimit(1)
             }
             .frame(width: 196, height: 158)
-            .background(LinearGradient(colors: [Color.white.opacity(selected ? 0.19 : 0.10), Color.white.opacity(0.035)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 20))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(selected ? Color.green : Color.white.opacity(0.13), lineWidth: selected ? 2 : 1))
             .overlay(alignment: .topTrailing) {
                 if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.title3).padding(12) }

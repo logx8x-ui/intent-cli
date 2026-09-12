@@ -257,6 +257,7 @@ final class IntentAccountManager: ObservableObject {
             isBusy = false
         }
         do {
+            try await checkGoogleAccountService()
             let authorizationURL = try client.auth.getOAuthSignInURL(
                 provider: .google,
                 redirectTo: Self.redirectURL
@@ -274,6 +275,29 @@ final class IntentAccountManager: ObservableObject {
         } catch {
             errorMessage = Self.humanReadable(error)
         }
+    }
+
+    /// Avoid sending people to a broken browser page when the hosted account
+    /// project is unavailable or its Google provider has been switched off.
+    private func checkGoogleAccountService() async throws {
+        guard let configuration else { throw IntentAccountError.notConfigured }
+        var request = URLRequest(url: configuration.url.appendingPathComponent("auth/v1/settings"))
+        request.setValue(configuration.publishableKey, forHTTPHeaderField: "apikey")
+        request.timeoutInterval = 12
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await URLSession.shared.data(for: request) }
+        catch {
+            throw IntentAccountError.serviceUnavailable
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw IntentAccountError.serviceUnavailable
+        }
+        struct Settings: Decodable { let external: [String: Bool] }
+        guard let settings = try? JSONDecoder().decode(Settings.self, from: data) else {
+            throw IntentAccountError.serviceUnavailable
+        }
+        guard settings.external["google"] == true else { throw IntentAccountError.googleUnavailable }
     }
 
     func sendPasswordReset(email: String) async {
@@ -865,6 +889,8 @@ private struct IntentSupabaseConfiguration {
 private enum IntentAccountError: LocalizedError {
     case activeSession
     case couldNotOpenBrowser
+    case serviceUnavailable
+    case googleUnavailable
     case firstDeviceRequiresCloud
     case notConfigured
 
@@ -872,6 +898,10 @@ private enum IntentAccountError: LocalizedError {
         switch self {
         case .activeSession:
             return "Finish the active intention before switching accounts."
+        case .serviceUnavailable:
+            return "Intent couldn’t reach its account service. Check your connection and try again. You can keep using Intent as a guest; your intentions are safe."
+        case .googleUnavailable:
+            return "Google sign-in is temporarily unavailable. Try email sign-in, or continue as a guest."
         case .couldNotOpenBrowser:
             return "Intent could not open your browser for Google sign-in. Try again after opening a browser."
         case .firstDeviceRequiresCloud:
