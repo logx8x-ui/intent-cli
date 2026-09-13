@@ -18,10 +18,17 @@ APPLICATION_IDENTITY="${INTENT_APPLICATION_IDENTITY:-}"
 INSTALLER_IDENTITY="${INTENT_INSTALLER_IDENTITY:-}"
 NOTARY_PROFILE="${INTENT_NOTARY_PROFILE:-}"
 ALLOW_UNSIGNED_LOCAL="${INTENT_ALLOW_UNSIGNED_LOCAL:-0}"
+TESTER_PRERELEASE="${INTENT_TESTER_PRERELEASE:-0}"
+if [[ "$TESTER_PRERELEASE" == "1" ]]; then
+  ALLOW_UNSIGNED_LOCAL=1
+  DIST="$ROOT/dist/tester-release"
+  ARM_BUILD="$ROOT/.build"
+  X86_BUILD="$ROOT/.build"
+fi
 MINIMUM_MACOS="13.0"
 GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
 
-if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
+if [[ -z "$GOOGLE_CLIENT_SECRET" && "$TESTER_PRERELEASE" != "1" ]]; then
   GOOGLE_CLIENT_SECRET="$(
     security find-generic-password \
       -s "dev.loganmondi.intent.build" \
@@ -222,7 +229,9 @@ fi
 xattr -cr "$PKG_ROOT"
 dot_clean -m "$PKG_ROOT" >/dev/null 2>&1 || true
 
-if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
+if [[ "$TESTER_PRERELEASE" == "1" ]]; then
+  DMG="$DIST/Intent-Tester-unsigned.dmg"
+elif [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
   DMG="$DIST/Intent-local-unsigned.dmg"
 else
   DMG="$DIST/Intent.dmg"
@@ -259,6 +268,8 @@ if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
   xcrun stapler staple "$WORK_DMG"
   xcrun stapler validate "$WORK_DMG"
   spctl --assess --type open --context context:primary-signature --verbose=2 "$WORK_DMG"
+elif [[ "$TESTER_PRERELEASE" == "1" ]]; then
+  echo "TESTER PRERELEASE: unsigned and unnotarized; publish only as an explicitly labelled GitHub prerelease, never as a stable update." >&2
 else
   echo "LOCAL QA ONLY: built an unsigned, unnotarized DMG that must not be published." >&2
 fi
