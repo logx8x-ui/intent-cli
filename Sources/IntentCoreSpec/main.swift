@@ -167,6 +167,37 @@ do {
                "Always Allowed must not silently expand green selections")
     let quickRoundTrip = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(quickIntention))
     try expect(quickRoundTrip.selectionOnly, "Saved Quick Focus preserves selection-only behavior")
+    var configuredQuick = quick
+    configuredQuick.restrictionNodes = [
+        .init(kind: .timer, position: .init(x: 220, y: 260), durationMinutes: 12, locksSessionUntilTimerEnds: false),
+        .init(kind: .coolDown, position: .init(x: 220, y: 390), durationMinutes: 30),
+        .init(kind: .endTime, position: .init(x: 220, y: 520), locksSessionUntilTimerEnds: false),
+        .init(kind: .allowBrowserSearches, position: .init(x: 220, y: 650)),
+        .init(kind: .dontStartUp, position: .init(x: 220, y: 780))
+    ]
+    configuredQuick.frictionNodes = [
+        .init(friction: .typedPhrase("focus / now"), position: .init(x: -220, y: 260)),
+        .init(friction: .countdown(seconds: 3), position: .init(x: -220, y: 390)),
+        .init(friction: .taskChecklist(["Open notes", "Get water"]), position: .init(x: -220, y: 520))
+    ]
+    for mode in [IntentionAccessMode.whitelist, .blacklist] {
+        configuredQuick.accessMode = mode
+        let configured = try configuredQuick.makeIntention(apps: quickApps, snapshots: quickSnapshots)
+        let restored = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(configured))
+        try expect(restored.timerMinutes == 12 && !restored.sessionLocksManualFinish && restored.requiresRuntimeEndTime,
+                   "Quick sessions retain explicit timer, end-time and manual-finish settings in both modes")
+        try expect(restored.coolDownMinutes == 30 && restored.frictionNodes == configuredQuick.frictionNodes,
+                   "Saving and loading preserves cooldown and the complete ordered friction chain")
+        try expect(restored.orderedFrictionNodes.map(\.friction) == configuredQuick.frictionNodes.map(\.friction),
+                   "Pre-start frictions run in selection order")
+        try expect(restored.restrictionNodes.filter { $0.kind == .dontStartUp }.count == 2 &&
+                   restored.restrictionNodes.contains { $0.id == QuickSelection.startupSuppressionID },
+                   "Explicit replay startup preferences are distinct from automatic first-run suppression")
+        try expect(IntentionStartupPlanner.steps(for: restored).isEmpty, "Settings never launch duplicate current windows")
+    }
+    configuredQuick.frictionNodes[0].friction = .typedPhrase("  ")
+    do { _ = try configuredQuick.makeIntention(apps: quickApps, snapshots: quickSnapshots); throw SpecFailure(description: "Empty friction must not silently pass") }
+    catch QuickSelectionError.emptyFriction {}
     var blacklist = quick
     blacklist.accessMode = .blacklist
     let blockedSelection = try blacklist.makeIntention(apps: quickApps, snapshots: quickSnapshots)

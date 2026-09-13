@@ -22,6 +22,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var windows: [WindowItem] = []
     @Published var snapshots: [BrowserTabSnapshot] = []
     @Published var selection = QuickSelection()
+    @Published var optionsSection: QuickSelectionOptionsSection?
     @Published var message: String?
     @Published var hasPreviewPermission = CGPreflightScreenCaptureAccess()
     @Published var wallpaper: NSImage?
@@ -58,7 +59,7 @@ final class QuickSelectionController: ObservableObject {
             model.errorMessage = "Finish the current intention and save or dismiss its result before opening the field of view."
             model.showOverlay(); return
         }
-        selection = QuickSelection(); message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
+        selection = QuickSelection(); optionsSection = nil; message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
         previousApp = NSWorkspace.shared.frontmostApplication
         wasOverlayVisible = model.overlayPresenter?.isOverlayVisible == true
         refresh(); generation = UUID()
@@ -80,7 +81,12 @@ final class QuickSelectionController: ObservableObject {
         NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel?.isVisible == true else { return event }
-            if event.keyCode == 53 { self.cancel(); return nil }
+            if event.keyCode == 53 {
+                if self.optionsSection != nil { self.optionsSection = nil } else { self.cancel() }
+                return nil
+            }
+            // Phrase/checklist editing must not switch Allow/Block when typing '/'.
+            if self.panel?.firstResponder is NSTextView { return event }
             if event.charactersIgnoringModifiers == "/", event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
                 if !event.isARepeat { self.toggleAccessMode() }
                 return nil
@@ -186,6 +192,7 @@ final class QuickSelectionController: ObservableObject {
                     withAnimation(.easeOut(duration: 0.2)) { self.expanded = true }; return
                 }
                 self.close()
+                if self.model.pendingFriction != nil || self.model.pendingEndTimeRequest != nil { self.model.showOverlay() }
             } else {
                 self.close()
                 if self.wasOverlayVisible { self.model.showOverlay() } else { self.previousApp?.activate(options: []) }
@@ -332,15 +339,23 @@ private struct QuickSelectionView: View {
     private var green: Color { controller.selection.accessMode == .blacklist ? Color(red: 1, green: 0.27, blue: 0.23) : Color(red: 0.20, green: 0.91, blue: 0.42) }
     var body: some View {
         GeometryReader { geometry in
-            let footerHeight: CGFloat = controller.windowlessApps.isEmpty ? 72 : 132
+            let footerHeight: CGFloat = (controller.windowlessApps.isEmpty ? 128 : 188) + (controller.message == nil ? 0 : 44)
             let headerHeight = controller.topSafeInset + 88
-            let area = CGRect(x: 32, y: headerHeight + 22, width: max(1, geometry.size.width - 64), height: max(1, geometry.size.height - headerHeight - 22 - footerHeight))
+            let sidebarWidth = min(320.0, geometry.size.width * 0.34)
+            let sidebarSpace = controller.optionsSection == nil ? 0 : sidebarWidth + 24
+            let area = CGRect(x: 32 + sidebarSpace, y: headerHeight + 22, width: max(1, geometry.size.width - 64 - sidebarSpace), height: max(1, geometry.size.height - headerHeight - 22 - footerHeight))
             let frames = FieldOfViewLayout.frames(sizes: controller.windows.map { $0.sourceFrame.size }, in: area)
             ZStack(alignment: .topLeading) {
                 wallpaper(size: geometry.size)
                 Color.black.opacity(0.14).ignoresSafeArea()
                 ForEach(Array(controller.windows.enumerated()), id: \.element.id) { index, window in
                     if index < frames.count { windowView(window, target: frames[index]) }
+                }
+                if let section = controller.optionsSection {
+                    QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.optionsSection = nil }
+                        .frame(width: sidebarWidth, height: max(180, geometry.size.height - headerHeight - footerHeight - 24))
+                        .offset(x: 20, y: headerHeight + 12)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 VStack(spacing: 0) {
                     Text("intent field of view").font(.system(size: 22, weight: .semibold, design: .rounded))
@@ -381,6 +396,7 @@ private struct QuickSelectionView: View {
                 }
             }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
                 .foregroundStyle(.white).preferredColorScheme(.dark)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.22), value: controller.optionsSection)
         }
     }
     private func wallpaper(size: CGSize) -> some View {
@@ -462,6 +478,11 @@ private struct QuickSelectionView: View {
     }
     private var footer: some View {
         VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                optionsButton(.restrictions, count: controller.selection.restrictionNodes.count)
+                optionsButton(.frictions, count: controller.selection.frictionNodes.count)
+                Spacer()
+            }
             if !controller.windowlessApps.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
@@ -486,11 +507,28 @@ private struct QuickSelectionView: View {
                     .help("Press / to switch between Allow and Block. Selections are preserved.")
                 Spacer()
                 Text("Apps \(controller.selection.apps.count) · Tabs \(controller.selection.tabs.count)").foregroundStyle(.white.opacity(0.7))
-                Button("Clear") { controller.selection.apps.removeAll(); controller.selection.tabs.removeAll(); controller.message = nil }.buttonStyle(.plain)
+                Button("Clear") {
+                    let mode = controller.selection.accessMode
+                    controller.selection = QuickSelection(); controller.selection.accessMode = mode; controller.message = nil
+                }.buttonStyle(.plain).help("Clear apps, tabs, restrictions and frictions")
                 Button("Start · ⌘G") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(green).foregroundStyle(.black)
                     .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing || controller.tabPreviewLoading)
             }.font(.system(size: 13, weight: .medium))
         }.padding(.horizontal, 28).padding(.vertical, 14).background(.black.opacity(0.25))
+    }
+    private func optionsButton(_ section: QuickSelectionOptionsSection, count: Int) -> some View {
+        Button {
+            controller.optionsSection = controller.optionsSection == section ? nil : section
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: section.symbol)
+                Text(section.rawValue)
+                if count > 0 { Text("\(count)").font(.system(size: 11, weight: .bold)).padding(.horizontal, 6).padding(.vertical, 2).background(section.tint.opacity(0.25), in: Capsule()) }
+                Image(systemName: controller.optionsSection == section ? "chevron.down" : "chevron.up").font(.system(size: 9, weight: .bold))
+            }.font(.system(size: 12, weight: .medium)).padding(.horizontal, 14).padding(.vertical, 9)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(controller.optionsSection == section || count > 0 ? section.tint.opacity(0.7) : .white.opacity(0.18)))
+        }.buttonStyle(.plain).accessibilityLabel("\(section.rawValue), \(count) selected")
     }
 }
 

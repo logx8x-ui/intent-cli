@@ -284,6 +284,7 @@ struct IntentGraphView: View {
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .sheet(item: $model.pendingFriction) { pending in
             FrictionSheet(pending: pending)
+                .id(pending.id)
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }

@@ -92,7 +92,8 @@ final class IntentAppModel: ObservableObject {
     }
 
     func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot]) -> Bool {
-        guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil else {
+        guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil,
+              pendingFriction == nil, pendingEndTimeRequest == nil else {
             errorMessage = "Finish the current intention and save or dismiss its result first."
             return false
         }
@@ -115,14 +116,15 @@ final class IntentAppModel: ObservableObject {
             purposeTemporaryIntention = intention
             purposeStatedPrompt = "your Quick Focus selection"
             // Deliberately bypass Always Allowed additions: only green selections belong here.
-            start(intention)
-            if !hasActiveSession {
+            requestStart(intention)
+            let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil
+            if !accepted {
                 quickSelectionIntentionID = nil
                 quickSelectionTabIDs = nil
                 purposeTemporaryIntention = nil
                 purposeStatedPrompt = nil
             }
-            return hasActiveSession
+            return accepted
         } catch {
             errorMessage = error.localizedDescription
             return false
@@ -552,7 +554,7 @@ final class IntentAppModel: ObservableObject {
         guard var intention = pendingPurposeSessionSave?.intention else { return }
         if intention.selectionOnly {
             // Only the first, already-running session suppresses resource startup.
-            intention.restrictionNodes.removeAll { $0.kind == .dontStartUp }
+            intention.restrictionNodes.removeAll { $0.id == QuickSelection.startupSuppressionID }
         }
         let position = availableAIPosition(index: 0, occupied: intentions.map(\.graphPosition))
         let deltaX = position.x - intention.graphPosition.x
@@ -1118,9 +1120,29 @@ final class IntentAppModel: ObservableObject {
         pendingStartIntention = nil
         pendingRuntimeEndDate = nil
         start(intention, runtimeEndDate: runtimeEndDate)
+        if quickSelectionIntentionID == intention.id, !hasActiveSession,
+           pendingZeroDriftStart?.intention.id != intention.id {
+            quickSelectionIntentionID = nil
+            quickSelectionTabIDs = nil
+            purposeTemporaryIntention = nil
+            purposeStatedPrompt = nil
+        }
     }
 
     private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
+        // Frictions may take time. Revalidate exact tabs before enabling any lock.
+        if quickSelectionIntentionID == intention.id, let tabIDs = quickSelectionTabIDs {
+            for (browser, ids) in tabIDs {
+                guard let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+                      ids.allSatisfy({ id in snapshot.tabs.contains { tab in
+                          tab.id == id && QuickSelection.isSelectable(tab)
+                              && intention.allowedWebsites.contains(AllowedWebsite(tab.url, browserBundleIdentifier: browser))
+                      } }) else {
+                    errorMessage = "A selected tab changed while you were getting ready. Reopen ⌘G and choose your tabs again."
+                    return
+                }
+            }
+        }
         if let zeroDriftIdleLock {
             pendingZeroDriftStart = (intention, runtimeEndDate)
             zeroDriftIdleLock.stop()
@@ -1217,7 +1239,8 @@ final class IntentAppModel: ObservableObject {
                     for (browser, selected) in tabIDs {
                         guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5),
                               BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
-                            self.endActiveSession()
+                            // Safety failures must release even a user-locked timer.
+                            self.activeLock?.stop()
                             self.errorMessage = "The selected-tab intention stopped because Browser Guard disconnected or was turned off."
                             self.showOverlay()
                             return
@@ -1226,7 +1249,7 @@ final class IntentAppModel: ObservableObject {
                            snapshot.updatedAt > Date().addingTimeInterval(-3),
                            !snapshot.tabs.contains(where: { selected.contains($0.id) }) {
                             self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
-                            self.endActiveSession()
+                            self.activeLock?.stop()
                             return
                         }
                     }
@@ -1686,6 +1709,8 @@ final class IntentAppModel: ObservableObject {
         }
         purposeTemporaryIntention = nil
         purposeStatedPrompt = nil
+        quickSelectionIntentionID = nil
+        quickSelectionTabIDs = nil
     }
 
     private func availableAIPosition(index: Int, occupied: [GraphPoint]) -> GraphPoint {

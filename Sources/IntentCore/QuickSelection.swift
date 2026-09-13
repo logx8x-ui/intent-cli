@@ -11,6 +11,9 @@ public struct QuickSelection {
     public var accessMode: IntentionAccessMode = .whitelist
     public var apps: Set<String> = []
     public var tabs: Set<QuickSelectionTab> = []
+    public var restrictionNodes: [RestrictionNode] = []
+    public var frictionNodes: [FrictionNode] = []
+    public static let startupSuppressionID = "quick-selection-current-session-startup"
     public init() {}
 
     public static let browsers: Set<String> = ["org.mozilla.firefox", "com.google.Chrome"]
@@ -68,12 +71,29 @@ public struct QuickSelection {
             }
         }
         guard foundTabs == tabs else { throw QuickSelectionError.changedTabs }
+        for node in frictionNodes {
+            switch node.friction {
+            case .typedPhrase(let text), .reasonPrompt(let text):
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw QuickSelectionError.emptyFriction }
+            case .taskChecklist(let tasks):
+                guard !tasks.isEmpty, tasks.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw QuickSelectionError.emptyFriction }
+            default: break
+            }
+        }
+        let resources = chosen.map(\.resourceID) + websites.map(\.resourceID)
+        var configuredRestrictions = restrictionNodes
+        // Explicit Don't start up choices survive saving; the automatic node below
+        // only suppresses duplicate launches for this already-running selection.
+        for index in configuredRestrictions.indices where configuredRestrictions[index].kind == .dontStartUp {
+            configuredRestrictions[index].excludedResourceIDs = resources
+        }
         var intention = Intention(
             name: accessMode == .blacklist ? "Quick Block" : "Quick Focus", icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
             allowedApps: chosen, allowedWebsites: websites,
             startupActions: [], restrictions: .init(),
-            restrictionNodes: [.init(kind: .dontStartUp, position: .init(x: 220, y: 170),
-                                    excludedResourceIDs: chosen.map(\.resourceID) + websites.map(\.resourceID))]
+            restrictionNodes: configuredRestrictions + [.init(id: Self.startupSuppressionID, kind: .dontStartUp, position: .init(x: 220, y: 170),
+                                    excludedResourceIDs: resources)],
+            frictionNodes: frictionNodes
         )
         intention.accessMode = accessMode
         intention.selectionOnly = true
@@ -86,13 +106,14 @@ public struct QuickSelection {
 }
 
 public enum QuickSelectionError: LocalizedError {
-    case changedApps, changedTabs, browserUnavailable, chooseTabs
+    case changedApps, changedTabs, browserUnavailable, chooseTabs, emptyFriction
     public var errorDescription: String? {
         switch self {
         case .changedApps: "Choose at least one running app. If an app has quit, refresh your selection."
         case .changedTabs: "A selected tab has changed or closed. Review your tabs and try again."
         case .browserUnavailable: "Browser tabs are unavailable. Connect the latest Intent Browser Guard and refresh."
         case .chooseTabs: "Choose at least one website tab for each selected browser."
+        case .emptyFriction: "Add the phrase, prompt, or checklist text before starting."
         }
     }
 }

@@ -1369,7 +1369,7 @@ struct PurposeSessionSaveSheet: View {
             }
 
             Text(candidate.intention.selectionOnly
-                 ? "Save all the apps and websites you selected. Next time, this intention opens those resources for you."
+                 ? "Save your selected apps and websites, along with their restrictions, frictions and startup choices."
                  : "Intent kept the apps and websites used for \"\(candidate.statedPurpose)\". Saving makes this setup available instantly next time.")
                 .font(.system(size: 13))
                 .foregroundStyle(GraphTheme.muted(colorScheme))
@@ -1386,6 +1386,16 @@ struct PurposeSessionSaveSheet: View {
                     label: candidate.intention.allowedWebsites.count == 1 ? "website" : "websites",
                     icon: "globe"
                 )
+            }
+            let restrictions = candidate.intention.restrictionNodes.filter { $0.id != QuickSelection.startupSuppressionID }.count
+            if restrictions > 0 || !candidate.intention.frictionNodes.isEmpty {
+                HStack(spacing: 8) {
+                    if restrictions > 0 { resourceCount(restrictions, label: restrictions == 1 ? "restriction" : "restrictions", icon: "slider.horizontal.3") }
+                    if !candidate.intention.frictionNodes.isEmpty {
+                        resourceCount(candidate.intention.frictionNodes.count,
+                                      label: candidate.intention.frictionNodes.count == 1 ? "friction" : "frictions", icon: "hand.raised")
+                    }
+                }
             }
 
             HStack {
