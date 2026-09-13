@@ -184,6 +184,10 @@ open "$APP_BUNDLE"
 for _ in {1..30}; do
   if pgrep -f "^${APP_BUNDLE}/Contents/MacOS/IntentApp$" >/dev/null; then
     echo "Intent is running in the menu bar."
+    if ! python3 "$ROOT/scripts/check-firefox-installation.py"; then
+      echo "Firefox setup remains incomplete: install the matching Mozilla-signed XPI and verify tabs after restarting Firefox." >&2
+      echo "A temporary about:debugging add-on is session-only recovery, not a permanent fix." >&2
+    fi
     exit 0
   fi
   sleep 0.1

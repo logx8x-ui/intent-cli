@@ -6,7 +6,7 @@
   "scripts": {
     "test": "npm run test:swift && npm run test:extensions && npm run test:native-host && npm run test:ai && npm run test:release-readiness && npm run extension:lint",
     "test:swift": "swift run IntentCoreSpec && swift run PurposeMatcherSpec && swift run IntentAccountSpec",
-    "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs",
+    "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs && python3 scripts/test-firefox-installation.py",
     "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
     "test:extensions": "npm run test:firefox && npm run test:chrome && node scripts/test-browser-idle-work.cjs",
     "test:native-host": "swift build -c release --product IntentNativeHost && node scripts/test-native-host.cjs && node scripts/test-native-host-performance.cjs",
