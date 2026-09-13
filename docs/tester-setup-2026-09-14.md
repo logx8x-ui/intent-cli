@@ -3,11 +3,13 @@
 This build includes the current Cmd+G desktop picker, app and browser-tab selection,
 Allow/Block mode, blur, first-intention onboarding, and restriction/friction panels.
 It is an unsigned, unnotarized prerelease for testing, not a production release.
-Supports Apple Silicon and Intel Macs running macOS 13 or newer.
+This first tester download supports Apple Silicon Macs (M1 or newer) running
+macOS 13 or newer. It does not support Intel Macs.
 
 ## Install
 
-1. Download `Intent-Tester-unsigned.dmg` from this prerelease's Assets.
+1. Download and extract `Intent-Tester-Mac.zip` from this prerelease's Assets.
+   It contains `Intent-Tester-unsigned.dmg`, both extension folders, and this guide.
 2. Open it and run `Install Intent.pkg`. This installs the app and browser bridge.
 3. If macOS blocks the installer, use System Settings → Privacy & Security →
    Open Anyway after attempting to open it. Approve only this Intent installer;
@@ -25,14 +27,14 @@ copy before installing. This prerelease does not enable automatic beta updates.
 
 ## Chrome
 
-Download `Intent-Chrome-Extension.zip`, extract it, and keep the extracted folder.
+Use the `Chrome` folder in the tester bundle and keep it after installation.
 Open `chrome://extensions`, enable Developer mode, choose Load unpacked, and
 select the folder containing `manifest.json`. If an older unpacked copy is already
 installed, remove that copy first. The included Browser Guard version is 0.2.8.
 
 ## Firefox
 
-Download `Intent-Firefox-Extension.zip` and extract it. Open
+Use the `Firefox` folder in the tester bundle. Open
 `about:debugging#/runtime/this-firefox`, choose Load Temporary Add-on, and select
 the extracted `manifest.json`. The included Browser Guard version is 0.2.8.
 

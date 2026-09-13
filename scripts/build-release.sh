@@ -19,11 +19,16 @@ INSTALLER_IDENTITY="${INTENT_INSTALLER_IDENTITY:-}"
 NOTARY_PROFILE="${INTENT_NOTARY_PROFILE:-}"
 ALLOW_UNSIGNED_LOCAL="${INTENT_ALLOW_UNSIGNED_LOCAL:-0}"
 TESTER_PRERELEASE="${INTENT_TESTER_PRERELEASE:-0}"
+CURRENT_ARM_TESTER="${INTENT_TESTER_USE_CURRENT_ARM_BUILD:-0}"
+ARCHITECTURES='["arm64", "x86_64"]'
 if [[ "$TESTER_PRERELEASE" == "1" ]]; then
   ALLOW_UNSIGNED_LOCAL=1
   DIST="$ROOT/dist/tester-release"
+fi
+if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
+  [[ "$TESTER_PRERELEASE" == "1" ]] || { echo "Existing binaries are allowed only for an explicit tester prerelease." >&2; exit 4; }
   ARM_BUILD="$ROOT/.build"
-  X86_BUILD="$ROOT/.build"
+  ARCHITECTURES='["arm64"]'
 fi
 MINIMUM_MACOS="13.0"
 GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
@@ -64,10 +69,12 @@ rm -rf "$DIST"
 mkdir -p "$PKG_SCRIPTS" "$DMG_ROOT" "$DIST"
 
 cd "$ROOT"
+if [[ "$CURRENT_ARM_TESTER" != "1" ]]; then
 for product in Intent IntentApp IntentNativeHost; do
   swift build --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple "arm64-apple-macosx${MINIMUM_MACOS}" --product "$product"
   swift build --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
 done
+fi
 if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
   npm run extension:build
 else
@@ -76,6 +83,11 @@ else
 fi
 npm run extension:build:chrome
 
+if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
+  cp "$ARM_BUILD/arm64-apple-macosx/release/IntentApp" "$APP/Contents/MacOS/IntentApp"
+  cp "$ARM_BUILD/arm64-apple-macosx/release/Intent" "$SUPPORT_DIR/Intent"
+  cp "$ARM_BUILD/arm64-apple-macosx/release/IntentNativeHost" "$SUPPORT_DIR/IntentNativeHost"
+else
 lipo -create \
   "$ARM_BUILD/arm64-apple-macosx/release/IntentApp" \
   "$X86_BUILD/x86_64-apple-macosx/release/IntentApp" \
@@ -88,6 +100,7 @@ lipo -create \
   "$ARM_BUILD/arm64-apple-macosx/release/IntentNativeHost" \
   "$X86_BUILD/x86_64-apple-macosx/release/IntentNativeHost" \
   -output "$SUPPORT_DIR/IntentNativeHost"
+fi
 cp -R "$ARM_BUILD/arm64-apple-macosx/release/Intent_IntentApp.bundle" "$APP/Contents/Resources/Intent_IntentApp.bundle"
 "$ROOT/scripts/configure-supabase-bundle.sh" \
   "$APP/Contents/Resources/Intent_IntentApp.bundle" \
@@ -313,7 +326,7 @@ cat > "$DIST/release-manifest.json" <<JSON
   "asset_url": "${ASSET_URL}",
   "sha256": "${DMG_SHA256}",
   "minimum_macos": "${MINIMUM_MACOS}",
-  "architectures": ["arm64", "x86_64"],
+  "architectures": ${ARCHITECTURES},
   "team_id": "${TEAM_ID}",
   "notarized": ${NOTARIZED},
   "firefox_extension_version": "${FIREFOX_VERSION}",
