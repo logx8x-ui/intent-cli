@@ -88,9 +88,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     </dict>
   </array>
   <key>CFBundleShortVersionString</key>
-  <string>0.9.1</string>
+  <string>0.9.3-beta</string>
   <key>CFBundleVersion</key>
-  <string>29</string>
+  <string>202609140001</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -114,6 +114,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+"$ROOT/scripts/embed-update-components.sh" "$APP_BUNDLE"
 
 codesign \
   --force \

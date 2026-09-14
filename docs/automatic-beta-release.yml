@@ -1,0 +1,48 @@
+name: Intent automatic beta updates
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: intent-beta-publish
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      INTENT_SUPABASE_URL: ${{ secrets.INTENT_SUPABASE_URL }}
+      INTENT_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.INTENT_SUPABASE_PUBLISHABLE_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Verify and package
+        run: |
+          npm ci
+          npm run test:swift
+          npm run test:extensions
+          npm run test:native-host
+          swiftc -parse-as-library Sources/IntentApp/IntentFreshInstallation.swift scripts/test-fresh-install.swift -o /tmp/intent-fresh-spec
+          /tmp/intent-fresh-spec
+          BUILD="$(date -u +%Y%m%d%H%M%S)"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          scripts/package-beta.sh "0.9.3-beta.$GITHUB_RUN_NUMBER" "$BUILD"
+          python3 scripts/test-beta-installer.py "dist/beta/$BUILD/kit"
+      - name: Sign update archive and feed
+        env:
+          SIGNING_KEY: ${{ secrets.INTENT_SPARKLE_PRIVATE_KEY }}
+        run: |
+          test -n "$SIGNING_KEY" || { echo "Missing update signing key"; exit 1; }
+          umask 077
+          printf '%s' "$SIGNING_KEY" > "$RUNNER_TEMP/intent-update-key"
+          trap 'rm -f "$RUNNER_TEMP/intent-update-key"' EXIT
+          .build/artifacts/sparkle/Sparkle/bin/generate_appcast --ed-key-file "$RUNNER_TEMP/intent-update-key" --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/beta-$BUILD/" "dist/beta/$BUILD/updates"
+      - name: Publish immutable build, then advance signed feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "beta-$BUILD" "dist/beta/$BUILD/updates/Intent-$BUILD.zip" "dist/beta/$BUILD/Intent-Tester-Mac.zip" "dist/beta/$BUILD/SHA256SUMS.txt" --target "$GITHUB_SHA" --prerelease --title "Intent beta $BUILD" --notes "Automatic update build from $GITHUB_SHA. Apple Silicon, macOS 13+. This beta is not yet Apple-notarized. Existing updater-enabled copies download this release automatically; finish your session before restarting."
+          gh release view intent-beta-feed >/dev/null 2>&1 || gh release create intent-beta-feed --target "$GITHUB_SHA" --prerelease --title "Intent beta update channel" --notes "Signed updater feed and current bootstrap installer."
+          gh release upload intent-beta-feed "dist/beta/$BUILD/Intent-Tester-Mac.zip" --clobber
+          gh release upload intent-beta-feed "dist/beta/$BUILD/updates/appcast.xml" --clobber

@@ -225,7 +225,12 @@ exit 0
 SCRIPT
 chmod +x "$PKG_SCRIPTS/preinstall" "$PKG_SCRIPTS/postinstall"
 
+"$ROOT/scripts/embed-update-components.sh" "$APP" "$ARM_BUILD"
+cp "$SUPPORT_DIR/IntentNativeHost" "$APP/Contents/Helpers/IntentNativeHost"
+
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
+  codesign --force --deep --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework"
+  codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$APP/Contents/Helpers/IntentNativeHost"
   codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$SUPPORT_DIR/Intent"
   codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$SUPPORT_DIR/IntentNativeHost"
   codesign --force --options runtime --timestamp --sign "$APPLICATION_IDENTITY" "$APP/Contents/MacOS/IntentApp"

@@ -93,6 +93,14 @@ function connectNativeHost() {
     hostSupportsQuickSelection = false;
     port.onMessage.addListener((message) => {
       reconnectDelayMs = RECONNECT_MS;
+      if (message?.active !== true && message?.bundledExtensionVersion && message.bundledExtensionVersion !== chrome.runtime.getManifest().version) {
+        const version = message.bundledExtensionVersion;
+        chrome.storage.local.get("lastBundleReload").then((stored) => {
+          if (stored.lastBundleReload !== version) {
+            chrome.storage.local.set({lastBundleReload: version}).then(() => chrome.runtime.reload());
+          }
+        }).catch(() => {});
+      }
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
       if (supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview) {

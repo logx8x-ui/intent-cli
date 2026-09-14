@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import IntentCore
 import ScreenCaptureKit
 import SwiftUI
@@ -58,6 +59,18 @@ final class QuickSelectionController: ObservableObject {
               model.pendingEndTimeRequest == nil else {
             model.errorMessage = "Finish the current intention and save or dismiss its result before opening the field of view."
             model.showOverlay(); return
+        }
+        guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
+            let screenMissing = !CGPreflightScreenCaptureAccess()
+            let alert = NSAlert()
+            alert.messageText = screenMissing ? "One step before ⌘G: show your windows" : "One step before ⌘G: allow Accessibility"
+            alert.informativeText = "In System Settings, turn on Intent. If it is missing, use + and choose Intent from Applications. Return here and press ⌘G again. If macOS asks to quit and reopen, accept it. Your selections and saved intentions stay safe."
+            alert.addButton(withTitle: "Open System Settings"); alert.addButton(withTitle: "Later")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            if screenMissing { _ = CGRequestScreenCaptureAccess() }
+            else { _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) }
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?" + (screenMissing ? "Privacy_ScreenCapture" : "Privacy_Accessibility"))!)
+            return
         }
         selection = QuickSelection(); optionsSection = nil; message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
         previousApp = NSWorkspace.shared.frontmostApplication
@@ -211,7 +224,11 @@ final class QuickSelectionController: ObservableObject {
     func enablePreviews() {
         hasPreviewPermission = CGRequestScreenCaptureAccess()
         if hasPreviewPermission { loadPreviews() }
-        else { message = "Allow Screen Recording for Intent in System Settings, then reopen ⌘G. Previews stay on this Mac and are discarded when you close the overview." }
+        else {
+            panel?.orderOut(nil)
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+            message = "Turn on Intent in Screen Recording, then reopen ⌘G."
+        }
     }
     func hoverTab(_ tab: BrowserTabItem, browser: String, entered: Bool) {
         hoverTask?.cancel(); hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
@@ -239,7 +256,7 @@ final class QuickSelectionController: ObservableObject {
                     if let encoded = result.image?.split(separator: ",", maxSplits: 1).last,
                        let imageData = Data(base64Encoded: String(encoded)), let image = NSImage(data: imageData) {
                         self.tabPreview = image
-                    } else { self.tabPreviewError = result.error ?? "Preview unavailable." }
+                    } else { self.tabPreviewError = "This tab’s title and website are shown below." }
                     return
                 }
             }
@@ -250,7 +267,7 @@ final class QuickSelectionController: ObservableObject {
         guard !loading, !closing else { return }
         hasPreviewPermission = CGPreflightScreenCaptureAccess()
         guard hasPreviewPermission else { return }
-        guard #available(macOS 14.0, *) else { message = "Window previews require macOS 14 or newer."; return }
+
         let token = generation
         loading = true
         previewTask = Task { [weak self] in
@@ -259,7 +276,7 @@ final class QuickSelectionController: ObservableObject {
                 guard let self, !Task.isCancelled, self.generation == token else { return }
                 // Capture only the desktop behind all ordinary windows. A private
                 // background-layer window can be transparent/black when captured alone.
-                if self.wallpaper == nil, let display = content.displays.first(where: { $0.frame == self.displayFrame }) {
+                if #available(macOS 14.0, *), self.wallpaper == nil, let display = content.displays.first(where: { $0.frame == self.displayFrame }) {
                     let config = SCStreamConfiguration()
                     config.width = Int(self.displayFrame.width); config.height = Int(self.displayFrame.height)
                     config.showsCursor = false
@@ -274,8 +291,10 @@ final class QuickSelectionController: ObservableObject {
                     }
                 }
                 let appByPID = Dictionary(uniqueKeysWithValues: self.apps.map { ($0.pid, $0.id) })
+                var seenWindowIDs = Set<CGWindowID>()
                 let candidates = content.windows.filter {
-                    $0.windowLayer == 0 && $0.frame.width > 140 && $0.frame.height > 140
+                    $0.isOnScreen && $0.windowLayer == 0 && $0.frame.width > 140 && $0.frame.height > 140
+                        && seenWindowIDs.insert($0.windowID).inserted
                         && !($0.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         && $0.owningApplication.flatMap { appByPID[$0.processID] } != nil
                 }.sorted {
@@ -313,15 +332,24 @@ final class QuickSelectionController: ObservableObject {
             }
         }
     }
-    @available(macOS 14.0, *)
     private static func captureWindow(_ window: SCWindow, appID: String) async -> WindowItem? {
         guard !Task.isCancelled else { return nil }
-        let config = SCStreamConfiguration()
-        let scale = min(1, 1000 / max(window.frame.width, window.frame.height))
-        config.width = max(1, Int(window.frame.width * scale))
-        config.height = max(1, Int(window.frame.height * scale))
-        config.showsCursor = false; config.ignoreShadowsSingleWindow = true
-        let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
+        var image: CGImage?
+        if #available(macOS 14.0, *) {
+            let config = SCStreamConfiguration()
+            let scale = min(1, 1000 / max(window.frame.width, window.frame.height))
+            config.width = max(1, Int(window.frame.width * scale))
+            config.height = max(1, Int(window.frame.height * scale))
+            config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            if image == nil, !Task.isCancelled {
+                image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            }
+        }
+        if image == nil {
+            image = CGWindowListCreateImage(.null, .optionIncludingWindow, window.windowID, [.boundsIgnoreFraming, .bestResolution])
+        }
         guard !Task.isCancelled else { return nil }
         return .init(id: window.windowID, appID: appID, title: window.title ?? "", sourceFrame: window.frame,
                      preview: image.map { NSImage(cgImage: $0, size: .zero) })
@@ -421,7 +449,8 @@ private struct QuickSelectionView: View {
                             Color.black.opacity(0.4)
                             VStack(spacing: 7) {
                                 if let app { Image(nsImage: app.icon).resizable().frame(width: 32, height: 32) }
-                                Text("Preview unavailable").font(.caption)
+                                Text(app?.app.name ?? window.appID).font(.headline)
+                                Text(window.title.isEmpty ? "App window" : window.title).font(.caption).lineLimit(3).multilineTextAlignment(.center).padding(.horizontal, 12)
                             }
                         }
                     }

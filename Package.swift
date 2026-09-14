@@ -16,6 +16,7 @@ let package = Package(
         .library(name: "IntentLock", targets: ["IntentLock"])
     ],
     dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
         .package(
             url: "https://github.com/supabase/supabase-swift.git",
             exact: "2.49.0"
@@ -42,9 +43,11 @@ let package = Package(
             dependencies: [
                 "IntentCore",
                 "IntentLock",
-                .product(name: "Supabase", package: "supabase-swift")
+                .product(name: "Supabase", package: "supabase-swift"),
+                .product(name: "Sparkle", package: "Sparkle")
             ],
-            resources: [.process("Resources")]
+            resources: [.process("Resources")],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(
             name: "IntentNativeHost",

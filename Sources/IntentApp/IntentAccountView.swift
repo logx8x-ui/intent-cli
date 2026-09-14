@@ -5,6 +5,7 @@ struct IntentAccountGate: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var emailMode: EmailMode?
     @State private var email = ""
+    @State private var verificationCode = ""
     @State private var password = ""
     @State private var confirmation = ""
     @FocusState private var focusedField: Field?
@@ -168,25 +169,6 @@ struct IntentAccountGate: View {
     private var choiceView: some View {
         VStack(spacing: 11) {
             Button {
-                Task { await accountManager.signInWithGoogle() }
-            } label: {
-                HStack(spacing: 11) {
-                    GoogleMark()
-                    Text("Continue with Google")
-                        .font(.system(size: 14, weight: .semibold))
-                    Spacer()
-                    Image(systemName: "arrow.right")
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-                .padding(.horizontal, 15)
-                .frame(height: 48)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accountChoiceStyle(colorScheme: colorScheme)
-            .disabled(accountManager.isBusy || !accountManager.isConfigured)
-
-            Button {
                 emailMode = .signIn
                 DispatchQueue.main.async { focusedField = .email }
             } label: {
@@ -252,75 +234,33 @@ struct IntentAccountGate: View {
     }
 
     private var emailView: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Picker("Email action", selection: Binding(
-                get: { emailMode ?? .signIn },
-                set: { emailMode = $0 }
-            )) {
-                Text("Sign in").tag(EmailMode.signIn)
-                Text("Create account").tag(EmailMode.create)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            VStack(spacing: 10) {
-                TextField("Email", text: $email)
+        VStack(alignment: .leading, spacing: 14) {
+            if let address = accountManager.verificationEmail {
+                Text("Check \(address)").font(.headline)
+                Text("Enter your email code, or open the verification link in your email.").font(.caption).foregroundStyle(.secondary)
+                TextField("Email code", text: $verificationCode).textFieldStyle(.roundedBorder)
+                    .onSubmit { Task { await accountManager.verifyEmailCode(verificationCode) } }
+                Button(accountManager.isBusy ? "Verifying…" : "Verify & continue") {
+                    Task { await accountManager.verifyEmailCode(verificationCode) }
+                }.buttonStyle(.borderedProminent).disabled(accountManager.isBusy)
+                HStack {
+                    Button("Use another email") { accountManager.changeVerificationEmail(); verificationCode = "" }
+                    Spacer()
+                    Button("Resend email") { Task { await accountManager.requestEmailCode(email: address) } }
+                }.disabled(accountManager.isBusy)
+            } else {
+                TextField("Email address", text: $email).textFieldStyle(.roundedBorder)
                     .focused($focusedField, equals: .email)
-                    .onSubmit { focusedField = .password }
-
-                SecureField("Password", text: $password)
-                    .focused($focusedField, equals: .password)
-                    .onSubmit {
-                        if emailMode == .create {
-                            focusedField = .confirmation
-                        } else {
-                            submitEmail()
-                        }
-                    }
-
-                if emailMode == .create {
-                    SecureField("Confirm password", text: $confirmation)
-                        .focused($focusedField, equals: .confirmation)
-                        .onSubmit { submitEmail() }
+                    .onSubmit { Task { await accountManager.requestEmailCode(email: email) } }
+                Text("Gmail or any email address. We’ll send a code or verification link. There’s no password to create.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Back") { emailMode = nil }
+                    Spacer()
+                    Button(accountManager.isBusy ? "Sending…" : "Send verification email") {
+                        Task { await accountManager.requestEmailCode(email: email) }
+                    }.buttonStyle(.borderedProminent).disabled(accountManager.isBusy || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-            }
-            .textFieldStyle(.plain)
-            .padding(13)
-            .background(GraphTheme.surface(colorScheme))
-            .overlay(RoundedRectangle(cornerRadius: 11).stroke(GraphTheme.stroke(colorScheme)))
-            .clipShape(RoundedRectangle(cornerRadius: 11))
-
-            HStack {
-                Button("Back") {
-                    emailMode = nil
-                    password = ""
-                    confirmation = ""
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(GraphTheme.muted(colorScheme))
-
-                if emailMode == .signIn {
-                    Button("Forgot password?") {
-                        Task { await accountManager.sendPasswordReset(email: email) }
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-
-                Spacer()
-
-                Button(accountManager.isBusy ? "Please wait" : emailMode!.rawValue) {
-                    submitEmail()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.28, green: 0.76, blue: 0.44))
-                .disabled(accountManager.isBusy)
-            }
-
-            if emailMode == .create {
-                Text("Use at least 8 characters. A new account begins with a clean, empty Intent canvas.")
-                    .font(.caption2)
-                    .foregroundStyle(GraphTheme.muted(colorScheme))
             }
         }
     }

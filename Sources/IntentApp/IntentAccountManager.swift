@@ -207,6 +207,42 @@ final class IntentAccountManager: ObservableObject {
         isPresentingAccount = false
     }
 
+    @Published private(set) var verificationEmail: String?
+    @Published private(set) var emailCodeSentAt: Date?
+
+    func requestEmailCode(email: String) async {
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard address.contains("@"), address.split(separator: "@").count == 2,
+              !address.contains(where: { $0.isWhitespace }) else {
+            errorMessage = "Enter your email address."; return
+        }
+        guard let client else { errorMessage = configurationMessage; return }
+        if verificationEmail == address, let sent = emailCodeSentAt, Date().timeIntervalSince(sent) < 60 {
+            errorMessage = "Wait a minute before requesting another email."; return
+        }
+        await performAccountAction {
+            try await client.auth.signInWithOTP(email: address, redirectTo: Self.redirectURL, shouldCreateUser: true)
+            self.verificationEmail = address
+            self.emailCodeSentAt = Date()
+            self.noticeMessage = "Check \(address) for your sign-in code or verification link. No password needed."
+        }
+    }
+    func verifyEmailCode(_ code: String) async {
+        guard let client, let email = verificationEmail else { return }
+        let token = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (6...8).contains(token.count), token.allSatisfy({ $0.isNumber }) else {
+            errorMessage = "Enter the code from your email."; return
+        }
+        await performAccountAction {
+            let response = try await client.auth.verifyOTP(email: email, token: token, type: .email)
+            guard let session = response.session else { throw NSError(domain: "IntentAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Verification did not create a session. Request a new code."]) }
+            try await self.activateAccount(session: session)
+            self.verificationEmail = nil
+            self.isPresentingAccount = false
+        }
+    }
+    func changeVerificationEmail() { verificationEmail = nil; noticeMessage = nil; errorMessage = nil }
+
     func signUp(email: String, password: String, confirmation: String) async {
         guard validate(email: email, password: password, confirmation: confirmation) else { return }
         guard let client else {
@@ -280,7 +316,7 @@ final class IntentAccountManager: ObservableObject {
     /// Avoid sending people to a broken browser page when the hosted account
     /// project is unavailable or its Google provider has been switched off.
     private func checkGoogleAccountService() async throws {
-        guard let configuration else { throw IntentAccountError.notConfigured }
+        guard let configuration else { throw NSError(domain: "IntentAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Verification did not create a session. Request a new code."]) }
         var request = URLRequest(url: configuration.url.appendingPathComponent("auth/v1/settings"))
         request.setValue(configuration.publishableKey, forHTTPHeaderField: "apikey")
         request.timeoutInterval = 12
@@ -502,7 +538,7 @@ final class IntentAccountManager: ObservableObject {
     }
 
     private func requireClient() throws -> SupabaseClient {
-        guard let client else { throw IntentAccountError.notConfigured }
+        guard let client else { throw NSError(domain: "IntentAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Verification did not create a session. Request a new code."]) }
         return client
     }
 

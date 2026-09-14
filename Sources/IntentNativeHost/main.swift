@@ -73,6 +73,7 @@ struct HostRuleState: Codable, Equatable {
 }
 
 struct HostResponse: Codable {
+    var bundledExtensionVersion: String = "0.2.9"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1"]
     var selectedTabIDs: [Int]?
     var active: Bool

@@ -7,6 +7,11 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: IntentStatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        do { try IntentFreshInstallation.prepare() } catch {
+            let alert = NSAlert(); alert.messageText = "Fresh setup needs attention"; alert.informativeText = error.localizedDescription; alert.runModal()
+            NSApp.terminate(nil); return
+        }
+        do { try IntentBrowserSetup.register() } catch { NSLog("Browser Guard registration failed: %@", error.localizedDescription) }
         try? IntentLocalDataSecurity.hardenDefaultDirectory()
         NSApp.setActivationPolicy(.accessory)
         LaunchAtLoginController.applySavedPreference()

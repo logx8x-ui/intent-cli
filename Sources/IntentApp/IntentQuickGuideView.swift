@@ -82,6 +82,7 @@ struct IntentQuickGuideView: View {
     @State private var starting = false
     @State private var expandedBrowser: String?
     @State private var openedAccessibility = false
+    @State private var openedScreenCapture = false
     @State private var overviewVisible = false
     @State private var desktopWallpaper: NSImage?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -91,7 +92,7 @@ struct IntentQuickGuideView: View {
     private var cleanName: String { draft.name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var selectedBrowsers: Set<String> { draft.appIDs.intersection(QuickSelection.browsers) }
     private var availableApps: [AllowedApp] { model.installedApps.map { AllowedApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) } }
-    private var ready: Bool { trusted && selectedBrowsers.isSubset(of: connectedBrowsers) }
+    private var ready: Bool { trusted && screenAccess && selectedBrowsers.isSubset(of: connectedBrowsers) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -285,7 +286,7 @@ struct IntentQuickGuideView: View {
                     openBrowserSetup(id)
                 })
             }
-            permissionRow("Window previews & blur", detail: "Optional. Screen Recording lets Intent show and blur window previews.", granted: screenAccess, action: {
+            permissionRow("Window previews & blur", detail: "Required for ⌘G. Turn on Intent in Screen & System Audio Recording. Previews stay on this Mac.", granted: screenAccess, action: {
                 _ = CGRequestScreenCaptureAccess()
                 openSettings("Privacy_ScreenCapture")
             })
@@ -391,16 +392,13 @@ struct IntentQuickGuideView: View {
     private func refreshPermissions() {
         trusted = AXIsProcessTrusted(); screenAccess = CGPreflightScreenCaptureAccess()
         connectedBrowsers = Set(QuickSelection.browsers.filter {
-            BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: $0)).supports(.singleStartupLaunch, maxAge: 5)
+            BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: $0)).supports(.quickSelection, maxAge: 5)
                 && BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: $0)).isEnabled()
         })
+        openRequiredPermission()
     }
     private func openBrowserSetup(_ id: String) {
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return }
-        let link = id == "org.mozilla.firefox"
-            ? "https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi"
-            : "https://github.com/logx8x-ui/intent-cli#chrome"
-        NSWorkspace.shared.open([URL(string: link)!], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+        persist(); IntentBrowserSetup.open(id)
     }
     private func openSettings(_ pane: String) { persist(); NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?" + pane)!) }
     private func browserName(_ id: String) -> String { id == "org.mozilla.firefox" ? "Firefox" : "Chrome" }
@@ -415,11 +413,17 @@ struct IntentQuickGuideView: View {
         } catch { self.error = error.localizedDescription }
     }
     private func openRequiredPermission() {
-        guard draft.step == 2, !trusted, !openedAccessibility else { return }
-        openedAccessibility = true
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        openSettings("Privacy_Accessibility")
+        guard draft.step == 2 else { return }
+        if !trusted, !openedAccessibility {
+            openedAccessibility = true
+            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+            openSettings("Privacy_Accessibility")
+        } else if trusted, !screenAccess, !openedScreenCapture {
+            openedScreenCapture = true
+            _ = CGRequestScreenCaptureAccess()
+            openSettings("Privacy_ScreenCapture")
+        }
     }
     private func updateSize() { resize(NSSize(width: draft.step == 1 ? 1200 : 540, height: draft.step == 1 ? 800 : draft.step == 2 ? CGFloat(430 + selectedBrowsers.count * 80) : 380)) }
     private func persist() { if let data = try? JSONEncoder().encode(draft) { UserDefaults.standard.set(data, forKey: Self.draftKey) } }

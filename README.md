@@ -7,16 +7,21 @@ builder while every generated app and website remains editable before import.
 
 ## Download
 
-> **Release safety:** public binary installation is enabled only for a Developer ID
-> signed and Apple-notarized release. Intent deliberately refuses unsigned GitHub
-> binaries. The current source is available now; the next binary release requires
-> the Apple signing credentials described in [Releasing](docs/RELEASING.md).
->
-> **Tester status (September 5, 2026):** the latest GitHub binary release, v0.8.1,
-> has no verification manifest, so the installer below cannot install it.
-> Firefox Browser Guard 0.2.5 is Mozilla-signed and available through the Firefox
-> download below. The complete updated Mac release is still pending.
-> See [tester readiness](docs/TESTER_READINESS.md) for verified checks and remaining blockers.
+**Friends beta:** [Download the current Intent tester](https://github.com/logx8x-ui/intent-cli/releases/download/intent-beta-feed/Intent-Tester-Mac.zip).
+
+Extract the ZIP and open **Install Intent.command**. Apple Silicon Macs, macOS 13+.
+This beta is not yet Apple-notarized; macOS may require approval in Privacy & Security.
+The kit includes matching Chrome and Firefox setup, guided inside Intent.
+
+After this one bootstrap installation, Intent checks the signed beta feed hourly,
+downloads updates automatically, and applies them when it can safely restart.
+Every successful `main` push builds and publishes the next beta through GitHub Actions.
+An active intention delays restart. Failed builds never advance the update feed.
+Normal updates preserve your workspace; reinstalling with the kit after removing Intent
+resets local intentions, account choice and onboarding. Cloud account data is not deleted.
+Firefox's temporary tester extension must be loaded again after restarting Firefox.
+
+The stable notarized installer below remains separate; it is not the friends beta.
 
 ### One-command install
 

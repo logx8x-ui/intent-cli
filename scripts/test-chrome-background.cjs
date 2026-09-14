@@ -26,6 +26,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const removedTabs = [];
   const updates = [];
   const reloads = [];
+  const extensionReloads = [];
   const focusedWindows = [];
   let interruptReturnWithTab = null;
   const intervals = [];
@@ -58,6 +59,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const chrome = {
     runtime: {
       connectNative: () => port,
+      reload: () => extensionReloads.push(true),
       getManifest: () => require("../chrome-extension/manifest.json"),
       onMessage: runtimeMessage,
       onStartup: event(),
@@ -156,7 +158,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   }
 
   return {
-    tabs, storage, nativeMessages, dynamicUpdates, sessionUpdates, removedTabs, focusedWindows, intervals, updates, reloads,
+    extensionReloads, tabs, storage, nativeMessages, dynamicUpdates, sessionUpdates, removedTabs, focusedWindows, intervals, updates, reloads,
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
@@ -696,6 +698,19 @@ async function run() {
   documentListeners.click(allowedClick);
   assert.equal(allowedClick.prevented, false, "Allowed links should remain clickable");
 
+  // A bundled update asks an old unpacked extension to reload once, never in a loop.
+  const upgrade = createHarness({active: false, guardEnabled: true}, []);
+  await upgrade.settle();
+  const update = {active: false, guardEnabled: true, bundledExtensionVersion: "99.0.0"};
+  await upgrade.receiveNative({...update, active: true});
+  assert.equal(upgrade.extensionReloads.length, 0, "Never reload the guard during an active intention");
+  await upgrade.receiveNative(update);
+  await upgrade.receiveNative(update);
+  assert.equal(upgrade.extensionReloads.length, 1, "A stale extension must reload once per new bundle version");
+  const current = createHarness({active: false, guardEnabled: true}, []);
+  await current.settle();
+  await current.receiveNative({active: false, guardEnabled: true, bundledExtensionVersion: require('../chrome-extension/manifest.json').version});
+  assert.equal(current.extensionReloads.length, 0, "Matching extensions must not reload");
   console.log("Chrome background behavior spec passed");
 }
 
