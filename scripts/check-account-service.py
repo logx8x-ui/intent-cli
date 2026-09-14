@@ -11,8 +11,9 @@ if not url or not key: sys.exit('Account service configuration is missing.')
 try:
     request = urllib.request.Request(url.rstrip('/') + '/auth/v1/settings', headers={'apikey': key})
     with urllib.request.urlopen(request, timeout=12) as response: settings = json.load(response)
-    if settings.get('external', {}).get('google') is not True: sys.exit('Google provider is disabled.')
+    if settings.get('external', {}).get('email') is not True: sys.exit('Email sign-in is disabled.')
     if settings.get('disable_signup') is True: sys.exit('New account creation is disabled.')
-    print('Account service reachable; Google provider and new account creation enabled. OAuth consent/callback still requires live acceptance.')
+    if settings.get('mailer_autoconfirm') is not False: sys.exit('Email verification must be required.')
+    print('Account service reachable; email signup and verification enabled. Email delivery, code verification, and account sync still require live acceptance.')
 except (OSError, ValueError):
     sys.exit('Account service is unavailable. Restore the configured Supabase project before releasing.')

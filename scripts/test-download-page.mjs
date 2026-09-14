@@ -8,3 +8,9 @@ assert.equal(kitForRelease({assets:[]},'both'),null);
 const bad=make('Both');bad.assets[1].browser_download_url='https://example.org/Intent-Both.zip';assert.equal(kitForRelease(bad,'both'),null);
 assert.equal(kitForRelease(make('Firefox'),'chrome'),null);
 console.log('Download catalog checks passed');
+
+const beta={tag_name:'intent-beta-feed',draft:false,prerelease:true,assets:[{name:'appcast.xml'},{name:'Intent-Tester-Mac.zip',browser_download_url:'https://github.com/logx8x-ui/intent-cli/releases/download/intent-beta-feed/Intent-Tester-Mac.zip'}]};
+for(const choice of ['firefox','chrome','both']) assert.ok(kitForRelease(beta,choice));
+assert.equal(kitForRelease({...beta,tag_name:'other-beta'},'both'),null);
+assert.equal(kitForRelease({...beta,assets:beta.assets.slice(1)},'both'),null);
+console.log('Current beta catalog checks passed');
