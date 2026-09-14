@@ -13,7 +13,7 @@ Download the [current tester](https://github.com/logx8x-ui/intent-cli/releases/d
 
 Older testers need this one manual installation to gain the new Sparkle updater. Afterward, Intent checks for signed releases each hour and downloads updates in the background. Finish your intention before restarting to apply an update. The download/install/relaunch path was verified on Logan’s Mac with saved intention data preserved.
 
-Push-triggered GitHub publication still requires workflow activation; see `tester-verification-2026-09-14.md` for the verified state and remaining blockers. A push alone is not yet a promise that a new release exists.
+Every push to main now runs the tests, builds and publishes a signed beta if checks pass; the complete CI-to-installed-app path was verified. A failed build does not replace the working release. Email signup still requires an email-sending provider: the current Supabase default sender cannot email ordinary testers, so use guest mode until that service is connected.
 
 ## First test
 
