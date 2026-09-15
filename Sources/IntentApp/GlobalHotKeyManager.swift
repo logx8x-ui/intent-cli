@@ -9,6 +9,18 @@ struct OverlayShortcut: Codable, Equatable {
     let keyLabel: String
 
     static let defaultShortcut = OverlayShortcut(
+        keyCode: UInt32(kVK_ANSI_G),
+        modifiers: UInt32(cmdKey),
+        keyLabel: "G"
+    )
+
+    static let quickSelectionShortcut = OverlayShortcut(
+        keyCode: UInt32(kVK_ANSI_Grave),
+        modifiers: 0,
+        keyLabel: "`"
+    )
+
+    static let legacyDefaultShortcut = OverlayShortcut(
         keyCode: UInt32(kVK_ANSI_Grave),
         modifiers: UInt32(shiftKey),
         keyLabel: "~"
@@ -122,6 +134,10 @@ enum OverlayShortcutStore {
               let shortcut = try? JSONDecoder().decode(OverlayShortcut.self, from: data) else {
             return .defaultShortcut
         }
+        if shortcut == .legacyDefaultShortcut {
+            save(.defaultShortcut)
+            return .defaultShortcut
+        }
         return shortcut
     }
 
@@ -151,11 +167,11 @@ enum FinishShortcutStore {
 enum OverlayShortcutConflictChecker {
     static func validationMessage(for shortcut: OverlayShortcut) -> String? {
         let modifiers = shortcut.cocoaModifiers
-        if shortcut.keyCode == UInt32(kVK_ANSI_G), modifiers == [.command] {
-            return "⌘G is reserved for Quick Focus."
+        if shortcut == .quickSelectionShortcut {
+            return "` is reserved for Quick Focus."
         }
         let hasStrongModifier = !modifiers.intersection([.command, .option, .control]).isEmpty
-        let isDefaultStyle = shortcut.keyCode == UInt32(kVK_ANSI_Grave) && modifiers == [.shift]
+        let isDefaultStyle = shortcut == .defaultShortcut
 
         if !hasStrongModifier && !isDefaultStyle {
             return "Add Command, Option, or Control so normal typing is never intercepted."
@@ -251,7 +267,8 @@ final class GlobalHotKeyManager {
         registrationStatus = registerRequiredShortcut()
         guard registrationStatus == noErr else { return }
         let selectionID = EventHotKeyID(signature: fourCharCode("IntO"), id: UInt32.max)
-        selectionRegistrationStatus = RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(cmdKey), selectionID,
+        selectionRegistrationStatus = RegisterEventHotKey(OverlayShortcut.quickSelectionShortcut.keyCode,
+                                                        OverlayShortcut.quickSelectionShortcut.modifiers, selectionID,
                                                         GetApplicationEventTarget(), 0, &selectionHotKeyRef)
         _ = updateFinishShortcut(FinishShortcutStore.load())
         _ = register(OverlayShortcut(keyCode: UInt32(kVK_Escape),

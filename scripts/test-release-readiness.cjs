@@ -98,9 +98,20 @@ assert.ok(
 
 const hotKeyManager = read("Sources/IntentApp/GlobalHotKeyManager.swift");
 assert.ok(
+  !desktopApp.includes('.keyboardShortcut("`", modifiers: [])'),
+  "Quick Focus must not double-register its global bare-grave shortcut in the app menu"
+);
+assert.ok(
   hotKeyManager.includes("registerRequiredShortcut()") &&
-    hotKeyManager.includes("register(.defaultShortcut, id: 1"),
-  "Shift+grave must remain registered even when a custom shortcut is configured"
+    hotKeyManager.includes("register(.defaultShortcut, id: 1") &&
+    hotKeyManager.includes("OverlayShortcut.quickSelectionShortcut.keyCode") &&
+    hotKeyManager.includes("OverlayShortcut.quickSelectionShortcut.modifiers"),
+  "Command-G must open Intent and bare grave must open Quick Focus globally"
+);
+assert.ok(
+  hotKeyManager.includes("shortcut == .legacyDefaultShortcut") &&
+    hotKeyManager.includes("save(.defaultShortcut)"),
+  "The former Shift-grave default must migrate to Command-G"
 );
 
 const developmentInstaller = read("scripts/install-dev.sh");

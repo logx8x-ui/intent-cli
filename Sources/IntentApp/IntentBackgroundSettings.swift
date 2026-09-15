@@ -205,7 +205,7 @@ struct IntentSettingsView: View {
                         finishShortcut = .defaultFinishShortcut
                     }
                 }
-                Text("Open Intent: ⇧` · Finish: ⇧⌘M · Quick Focus: ⌘G")
+                Text("Open Intent: ⌘G · Finish: ⇧⌘M · Quick Focus: `")
                     .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
                 Text("Safety stop: ⌃⌥⌘Esc releases all restrictions, including Zero Drift.")
                     .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))

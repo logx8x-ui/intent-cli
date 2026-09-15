@@ -1,6 +1,6 @@
 # Quick Focus
 
-Press **Command-G** while Intent is running to open a full-screen overview of running apps. Chrome and Firefox tabs appear across the very top. Click an app or tab to toggle its green outline, then press **Command-G** again (or click **Start intention**) to run only the selection. **Escape** cancels without starting anything.
+Press <kbd>`</kbd> while Intent is running to open a full-screen overview of running apps. Chrome and Firefox tabs appear across the very top. Click an app or tab to toggle its green outline, then press <kbd>`</kbd> again (or click **Start intention**) to run only the selection. **Escape** cancels without starting anything.
 
 Selecting a browser selects its currently open HTTP/HTTPS tabs. Deselect individual tabs in the top strip to narrow it down. Selecting a single tab also selects its browser. Browser settings, extension pages, local files, and empty new-tab pages are visible but cannot be selected. Other browser engines are not supported by Browser Guard.
 
@@ -12,10 +12,10 @@ During the temporary session, Browser Guard restricts tab IDs separately for eac
 
 Finish with your configured finish shortcut (default **Command-Shift-M**). Intent offers to save or discard the complete selection. Saving stores apps and website resources, not transient browser tab IDs; future runs use normal saved-intention website rules. Quick Focus selections are not expanded by Always Allowed presets. The picker does not open duplicate tabs or save an intention before you choose to save.
 
-Command-G is reserved while Intent is running and therefore replaces apps' usual Find Next shortcut. If another application has registered that global shortcut, Intent reports its unavailability in the menu-bar warning. Intent's settings reject assigning Command-G to its other shortcuts.
+The bare <kbd>`</kbd> key is reserved while Intent is running. If another application has registered that global shortcut, Intent reports its unavailability in the menu-bar warning. Intent's settings reject assigning <kbd>`</kbd> to its other shortcuts. **Command-G** opens or hides Intent globally.
 
 ## Verification
 
 Automated regression cases cover browser-specific tab identity, duplicate URLs, implicit browser selection, privileged-page exclusion, closed/disconnected resources, selection-only persistence, no duplicate startup resources, rules renewal, and preserving unselected tabs. Native-host tests verify forwarding tab IDs. Browser idle-work tests continue to check that idle events do not enumerate tabs.
 
-Physical acceptance still requires the installed matching app, native host and both extensions: opening with Command-G; selecting/deselecting across browsers; cancellation; app enforcement across Spaces; allowed-tab switching; finishing and saving/discarding; and visual layout on the user's displays. A release build alone does not establish these results.
+Physical acceptance still requires the installed matching app, native host and both extensions: opening with <kbd>`</kbd>; selecting/deselecting across browsers; cancellation; app enforcement across Spaces; allowed-tab switching; finishing and saving/discarding; and visual layout on the user's displays. A release build alone does not establish these results.

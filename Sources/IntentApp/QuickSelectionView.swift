@@ -63,8 +63,8 @@ final class QuickSelectionController: ObservableObject {
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
             let screenMissing = !CGPreflightScreenCaptureAccess()
             let alert = NSAlert()
-            alert.messageText = screenMissing ? "One step before ⌘G: show your windows" : "One step before ⌘G: allow Accessibility"
-            alert.informativeText = "In System Settings, turn on Intent. If it is missing, use + and choose Intent from Applications. Return here and press ⌘G again. If macOS asks to quit and reopen, accept it. Your selections and saved intentions stay safe."
+            alert.messageText = screenMissing ? "One step before `: show your windows" : "One step before `: allow Accessibility"
+            alert.informativeText = "In System Settings, turn on Intent. If it is missing, use + and choose Intent from Applications. Return here and press ` again. If macOS asks to quit and reopen, accept it. Your selections and saved intentions stay safe."
             alert.addButton(withTitle: "Open System Settings"); alert.addButton(withTitle: "Later")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             if screenMissing { _ = CGRequestScreenCaptureAccess() }
@@ -152,7 +152,7 @@ final class QuickSelectionController: ObservableObject {
         if store.isFresh(maxAge: 5), !store.supports(.quickSelection, maxAge: 5) {
             return "Browser Guard update required · connected version cannot select tabs"
         }
-        if store.supports(.quickSelection, maxAge: 5) { return "Waiting for tabs · reopen ⌘G if this persists" }
+        if store.supports(.quickSelection, maxAge: 5) { return "Waiting for tabs · reopen ` if this persists" }
         return "Tabs unavailable · connect Browser Guard"
     }
     func tabs(for window: WindowItem) -> [BrowserTabItem] {
@@ -170,7 +170,7 @@ final class QuickSelectionController: ObservableObject {
         if selection.accessMode == .blacklist, let app = apps.first(where: { $0.id == window.appID }) { selectApp(app); return }
         if QuickSelection.browsers.contains(window.appID) {
             guard browserWindowID(for: window) != nil, tabs(for: window).contains(where: QuickSelection.isSelectable) else {
-                message = "Tabs could not be matched to this window. Connect Browser Guard, or give duplicate browser windows distinct active tabs and reopen ⌘G."; return
+                message = "Tabs could not be matched to this window. Connect Browser Guard, or give duplicate browser windows distinct active tabs and reopen `."; return
             }
             focusedBrowserWindow = window.id
             message = "Choose individual tabs above this window. Clicking the window does not select its tabs."
@@ -227,7 +227,7 @@ final class QuickSelectionController: ObservableObject {
         else {
             panel?.orderOut(nil)
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
-            message = "Turn on Intent in Screen Recording, then reopen ⌘G."
+            message = "Turn on Intent in Screen Recording, then reopen `."
         }
     }
     func hoverTab(_ tab: BrowserTabItem, browser: String, entered: Bool) {
@@ -328,7 +328,7 @@ final class QuickSelectionController: ObservableObject {
                 withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: 0.46, dampingFraction: 0.88)) { self.expanded = true }
             } catch {
                 guard let self, self.generation == token else { return }
-                self.loading = false; self.message = "Couldn't capture your windows. Check Screen Recording access and reopen ⌘G."
+                self.loading = false; self.message = "Couldn't capture your windows. Check Screen Recording access and reopen `."
             }
         }
     }
@@ -540,7 +540,7 @@ private struct QuickSelectionView: View {
                     let mode = controller.selection.accessMode
                     controller.selection = QuickSelection(); controller.selection.accessMode = mode; controller.message = nil
                 }.buttonStyle(.plain).help("Clear apps, tabs, restrictions and frictions")
-                Button("Start · ⌘G") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(green).foregroundStyle(.black)
+                Button("Start · `") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(green).foregroundStyle(.black)
                     .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing || controller.tabPreviewLoading)
             }.font(.system(size: 13, weight: .medium))
         }.padding(.horizontal, 28).padding(.vertical, 14).background(.black.opacity(0.25))

@@ -1138,7 +1138,7 @@ final class IntentAppModel: ObservableObject {
                           tab.id == id && QuickSelection.isSelectable(tab)
                               && intention.allowedWebsites.contains(AllowedWebsite(tab.url, browserBundleIdentifier: browser))
                       } }) else {
-                    errorMessage = "A selected tab changed while you were getting ready. Reopen ⌘G and choose your tabs again."
+                    errorMessage = "A selected tab changed while you were getting ready. Reopen ` and choose your tabs again."
                     return
                 }
             }

@@ -57,7 +57,6 @@ struct IntentDesktopApp: App {
             .commands {
                 CommandGroup(after: .newItem) {
                     Button("Quick Focus") { IntentRuntime.shared.toggleQuickFocus() }
-                        .keyboardShortcut("g", modifiers: .command)
                     Button("Finish Intention") { IntentRuntime.shared.model.endActiveSession() }
                     Button("Safety Stop — Release All Restrictions") { IntentRuntime.shared.model.emergencyStop() }
                         .keyboardShortcut(.escape, modifiers: [.command, .control, .option])
@@ -122,12 +121,13 @@ final class IntentStatusItemController: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let openItem = NSMenuItem(title: "Open Intent", action: #selector(openIntent), keyEquivalent: "")
+        let openItem = NSMenuItem(title: "Open Intent", action: #selector(openIntent), keyEquivalent: "g")
         openItem.target = self
         menu.addItem(openItem)
 
-        let selectionItem = NSMenuItem(title: "Quick Focus", action: #selector(openQuickFocus), keyEquivalent: "g")
+        let selectionItem = NSMenuItem(title: "Quick Focus", action: #selector(openQuickFocus), keyEquivalent: "`")
         selectionItem.target = self
+        selectionItem.keyEquivalentModifierMask = []
         menu.addItem(selectionItem)
 
         let safetyItem = NSMenuItem(title: "Safety Stop — Release All Restrictions", action: #selector(safetyStop), keyEquivalent: "")
@@ -292,7 +292,7 @@ final class IntentRuntime {
             Task { @MainActor in self?.model.emergencyStop() }
         }
         if hotKeyManager?.selectionRegistrationStatus != 0 {
-            model.shortcutWarning = "⌘G is unavailable. Another app may have registered it."
+            model.shortcutWarning = "` is unavailable. Another app may have registered it."
         }
         showOverlayObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("dev.loganmondi.intent.showOverlay"),

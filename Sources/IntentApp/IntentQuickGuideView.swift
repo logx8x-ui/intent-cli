@@ -161,7 +161,7 @@ struct IntentQuickGuideView: View {
                 .textFieldStyle(.roundedBorder).font(.title3).focused($nameFocused)
                 .onSubmit { if !cleanName.isEmpty { advanceToResources() } }
             Text("That will be the name of your first intention.").font(.callout).foregroundStyle(.secondary)
-            Text("⌘G  Choose apps anytime     ·     \(FinishShortcutStore.load().displayName)  Finish a session")
+            Text("`  Choose apps anytime     ·     \(FinishShortcutStore.load().displayName)  Finish a session")
                 .font(.caption).foregroundStyle(.secondary)
             HStack { Spacer(); Button("Choose apps →", action: advanceToResources).buttonStyle(.borderedProminent).disabled(cleanName.isEmpty) }
         }
@@ -205,7 +205,7 @@ struct IntentQuickGuideView: View {
                     catch { self.error = error.localizedDescription }
                 }.buttonStyle(.borderedProminent).controlSize(.large).disabled(draft.appIDs.isEmpty)
             }
-            Text("⌘G opens the app picker · \(FinishShortcutStore.load().displayName) finishes your intention")
+            Text("` opens the app picker · \(FinishShortcutStore.load().displayName) finishes your intention")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 28)
@@ -286,7 +286,7 @@ struct IntentQuickGuideView: View {
                     openBrowserSetup(id)
                 })
             }
-            permissionRow("Window previews & blur", detail: "Required for ⌘G. Turn on Intent in Screen & System Audio Recording. Previews stay on this Mac.", granted: screenAccess, action: {
+            permissionRow("Window previews & blur", detail: "Required for `. Turn on Intent in Screen & System Audio Recording. Previews stay on this Mac.", granted: screenAccess, action: {
                 _ = CGRequestScreenCaptureAccess()
                 openSettings("Privacy_ScreenCapture")
             })
