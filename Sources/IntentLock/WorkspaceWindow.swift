@@ -77,6 +77,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private var selection = QuickSelection()
     private var timer: DispatchSourceTimer?
     private var revision = 0
+    private var lastSnapshotRequest = Date.distantPast // worker queue only
     private var panels: [NSPanel] = [] // main queue only
     public init() {}
     public func update(_ selection: QuickSelection) {
@@ -95,6 +96,14 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     }
     private func refresh() {
         mutex.lock(); let selection = self.selection; let token = revision; mutex.unlock()
+        // Idle browser extensions intentionally publish no spontaneous snapshots.
+        // While marks are displayed, refresh so the border follows tab changes.
+        if Date().timeIntervalSince(lastSnapshotRequest) >= 0.35 {
+            lastSnapshotRequest = Date()
+            for browser in Set(selection.tabs.map(\.browser)) {
+                try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot))
+            }
+        }
         let windows = WorkspaceWindow.list(onScreen: false)
         let selected = windows.filter { window in
             if QuickSelection.browsers.contains(window.bundle) {

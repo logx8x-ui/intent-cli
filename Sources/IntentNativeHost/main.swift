@@ -193,6 +193,7 @@ private final class HostRuntime {
     private var lastHeartbeatWriteAt: Date?
     private var lastMessageReceivedAt: Date?
     private var lastSnapshotTabs: [BrowserTabItem]?
+    private var requestedSnapshotRefresh = false
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
     private var directoryRefreshWorkItem: DispatchWorkItem?
@@ -334,7 +335,9 @@ private final class HostRuntime {
             )
         }
         let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL) }
-        guard items != lastSnapshotTabs || allItems != lastSnapshotAllTabs else { return }
+        // Explicit discovery is also a freshness acknowledgment. Preserve idle
+        // deduplication, but refresh the timestamp even if requested tabs did not change.
+        guard requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
             tabs: items,
@@ -342,6 +345,7 @@ private final class HostRuntime {
         )
         let store = BrowserTabSnapshotStore(fileURL: paths.snapshot(for: browserBundleIdentifier))
         if (try? store.write(snapshot)) != nil {
+            requestedSnapshotRefresh = false
             metrics.snapshotWrites += 1
             lastSnapshotTabs = items
             lastSnapshotAllTabs = allItems
@@ -446,6 +450,7 @@ private final class HostRuntime {
         let state = makeRuleState()
         guard force || tabCommand != nil || state != lastPushedState else { return }
         if (try? writeMessage(HostResponse(state: state, tabCommand: tabCommand))) != nil {
+            if tabCommand?.action == .snapshot { requestedSnapshotRefresh = true }
             metrics.sentMessages += 1
             if tabCommand != nil {
                 metrics.commandPushes += 1

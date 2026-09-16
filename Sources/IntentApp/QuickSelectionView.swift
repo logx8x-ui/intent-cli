@@ -38,34 +38,81 @@ final class QuickSelectionController: ObservableObject {
     @Published var tabPreviewLoading = false
     private let workspaceOutlines = WorkspaceOutlineController()
     private var hasStagedSelection = false
+    private var markTask: Task<Void, Never>?
+    private var runMarkedTask: Task<Void, Never>?
+    private func freshSnapshots(for browsers: Set<String>) async -> Bool {
+        guard !browsers.isEmpty else { return true }
+        let requestedAt = Date()
+        for browser in browsers {
+            guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5) else { return false }
+            do { try BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot)) }
+            catch { return false }
+        }
+        for _ in 0..<30 {
+            guard !Task.isCancelled else { return false }
+            let current = browsers.compactMap { BrowserTabSnapshotStore(browserBundleIdentifier: $0).load() }
+            if current.count == browsers.count, current.allSatisfy({ $0.updatedAt >= requestedAt }) {
+                snapshots.removeAll { browsers.contains($0.browserBundleIdentifier) }
+                snapshots.append(contentsOf: current)
+                return true
+            }
+            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return false }
+        }
+        return false
+    }
     func markForeground() {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { toggle(); return }
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
-        if !hasStagedSelection { selection = QuickSelection() }
-        refresh()
-        if QuickSelection.browsers.contains(window.bundle) {
-            guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
-                  let browserWindow = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == window.bundle }.count),
-                  let tab = snapshot.tabs.first(where: { $0.windowID == browserWindow && $0.active }), QuickSelection.isSelectable(tab) else {
-                model.errorMessage = "Connect Browser Guard and open a website tab before marking it."; model.showOverlay(); return
+        let previous = markTask
+        markTask = Task { [weak self] in
+            await previous?.value
+            guard let self, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+            self.refresh()
+            if QuickSelection.browsers.contains(window.bundle) {
+                let fresh = await self.freshSnapshots(for: [window.bundle])
+                guard !Task.isCancelled, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+                guard fresh,
+                      let stillFocused = WorkspaceWindow.focused(), stillFocused.id == window.id, stillFocused.title == window.title,
+                      let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
+                      let browserWindow = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == window.bundle }.count),
+                      let tab = snapshot.tabs.first(where: { $0.windowID == browserWindow && $0.active }), QuickSelection.isSelectable(tab) else {
+                    self.model.errorMessage = "Couldn't confirm the current tab. Keep it open, check Browser Guard, then double-press ` again."; self.model.showOverlay(); return
+                }
+                guard !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+                if !self.hasStagedSelection { self.selection = QuickSelection() }
+                self.selection.toggleTab(.init(browser: window.bundle, id: tab.id))
+            } else {
+                if !self.hasStagedSelection { self.selection = QuickSelection() }
+                self.selection.toggleWindow(window.id, app: window.bundle)
             }
-            selection.toggleTab(.init(browser: window.bundle, id: tab.id))
-        } else { selection.toggleWindow(window.id, app: window.bundle) }
-        hasStagedSelection = true
-        workspaceOutlines.update(selection)
+            self.hasStagedSelection = true
+            self.workspaceOutlines.update(self.selection)
+        }
     }
     func runMarked() {
         if panel?.isVisible == true { runSelection(); return }
-        guard !model.hasActiveSession, hasStagedSelection, !selection.apps.isEmpty else { return }
-        refresh()
-        let current = Set(WorkspaceWindow.list(onScreen: false).map(\.id))
-        guard selection.windowIDsByApp.values.allSatisfy({ $0.isSubset(of: current) }) else {
-            model.errorMessage = "A marked window closed. Open ` and review your selection."; model.showOverlay(); return
+        guard runMarkedTask == nil else { return }
+        runMarkedTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.runMarkedTask = nil }
+            await self.markTask?.value
+            guard !self.model.hasActiveSession, self.hasStagedSelection, !self.selection.apps.isEmpty else { return }
+            self.refresh()
+            let fresh = await self.freshSnapshots(for: Set(self.selection.tabs.map(\.browser)))
+            guard !Task.isCancelled, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+            guard fresh else {
+                self.model.errorMessage = "Couldn't refresh the marked tabs. Check Browser Guard and try again."; self.model.showOverlay(); return
+            }
+            guard self.panel?.isVisible != true else { return }
+            let current = Set(WorkspaceWindow.list(onScreen: false).map(\.id))
+            guard self.selection.windowIDsByApp.values.allSatisfy({ $0.isSubset(of: current) }) else {
+                self.model.errorMessage = "A marked window closed. Open ` and review your selection."; self.model.showOverlay(); return
+            }
+            if self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots) {
+                self.workspaceOutlines.stop(); self.hasStagedSelection = false
+            } else { self.model.showOverlay() }
         }
-        if model.startQuickSelection(selection, apps: apps.map(\.app), snapshots: snapshots) {
-            workspaceOutlines.stop(); hasStagedSelection = false
-        } else { model.showOverlay() }
     }
     func toggleMarkedMode() {
         guard !model.hasActiveSession else { return }
