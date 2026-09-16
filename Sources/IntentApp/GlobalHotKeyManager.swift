@@ -27,9 +27,9 @@ struct OverlayShortcut: Codable, Equatable {
     )
 
     static let defaultFinishShortcut = OverlayShortcut(
-        keyCode: UInt32(kVK_ANSI_M),
-        modifiers: UInt32(cmdKey | shiftKey),
-        keyLabel: "M"
+        keyCode: UInt32(kVK_ANSI_Grave),
+        modifiers: UInt32(shiftKey),
+        keyLabel: "`"
     )
 
     init(keyCode: UInt32, modifiers: UInt32, keyLabel: String) {
@@ -155,6 +155,10 @@ enum FinishShortcutStore {
               let shortcut = try? JSONDecoder().decode(OverlayShortcut.self, from: data) else {
             return .defaultFinishShortcut
         }
+        if shortcut.keyCode == UInt32(kVK_ANSI_M) && shortcut.modifiers == UInt32(cmdKey | shiftKey) {
+            save(.defaultFinishShortcut)
+            return .defaultFinishShortcut
+        }
         return shortcut
     }
 
@@ -170,8 +174,11 @@ enum OverlayShortcutConflictChecker {
         if shortcut == .quickSelectionShortcut {
             return "` is reserved for Quick Focus."
         }
+        if shortcut.keyCode == UInt32(kVK_ANSI_Grave) && shortcut.modifiers == UInt32(cmdKey | shiftKey) {
+            return "⌘⇧` is reserved for finishing and saving your intention."
+        }
         let hasStrongModifier = !modifiers.intersection([.command, .option, .control]).isEmpty
-        let isDefaultStyle = shortcut == .defaultShortcut
+        let isDefaultStyle = shortcut == .defaultShortcut || shortcut == .defaultFinishShortcut
 
         if !hasStrongModifier && !isDefaultStyle {
             return "Add Command, Option, or Control so normal typing is never intercepted."
@@ -243,6 +250,8 @@ final class GlobalHotKeyManager {
     private var customHotKeyRef: EventHotKeyRef?
     private var selectionHotKeyRef: EventHotKeyRef?
     private var finishHotKeyRef: EventHotKeyRef?
+    private var saveHotKeyRef: EventHotKeyRef?
+    var saveHandler: (() -> Void)?
     private var safetyHotKeyRef: EventHotKeyRef?
     var safetyHandler: (() -> Void)?
     var finishHandler: (() -> Void)?
@@ -271,6 +280,7 @@ final class GlobalHotKeyManager {
                                                         OverlayShortcut.quickSelectionShortcut.modifiers, selectionID,
                                                         GetApplicationEventTarget(), 0, &selectionHotKeyRef)
         _ = updateFinishShortcut(FinishShortcutStore.load())
+        _ = register(OverlayShortcut(keyCode: UInt32(kVK_ANSI_Grave), modifiers: UInt32(cmdKey | shiftKey), keyLabel: "`"), id: UInt32.max - 3, ref: &saveHotKeyRef)
         _ = register(OverlayShortcut(keyCode: UInt32(kVK_Escape),
             modifiers: UInt32(cmdKey | controlKey | optionKey), keyLabel: "Escape"),
             id: UInt32.max - 2, ref: &safetyHotKeyRef)
@@ -290,6 +300,7 @@ final class GlobalHotKeyManager {
         unregister(ref: &selectionHotKeyRef)
         unregister(ref: &finishHotKeyRef)
         unregister(ref: &safetyHotKeyRef)
+        unregister(ref: &saveHotKeyRef)
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
@@ -337,6 +348,7 @@ final class GlobalHotKeyManager {
                 EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier) == noErr,
                 identifier.signature == fourCharCode("IntO") else { return OSStatus(eventNotHandledErr) }
             if identifier.id == UInt32.max { manager.selectionHandler?() }
+            else if identifier.id == UInt32.max - 3 { manager.saveHandler?() }
             else if identifier.id == UInt32.max - 1 { manager.finishHandler?() }
             else if identifier.id == UInt32.max - 2 { manager.safetyHandler?() }
             else { manager.handler() }

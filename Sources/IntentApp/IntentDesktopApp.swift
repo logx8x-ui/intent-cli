@@ -283,10 +283,17 @@ final class IntentRuntime {
             model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
         }
         hotKeyManager?.selectionHandler = { [weak self] in
-            Task { @MainActor in self?.quickSelectionController.toggle() }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.model.hasActiveSession { self.model.toggleSessionControls() }
+                else { self.quickSelectionController.toggle() }
+            }
         }
         hotKeyManager?.finishHandler = { [weak self] in
             Task { @MainActor in self?.model.endActiveSession() }
+        }
+        hotKeyManager?.saveHandler = { [weak self] in
+            Task { @MainActor in self?.model.endAndSaveActiveSession() }
         }
         hotKeyManager?.safetyHandler = { [weak self] in
             Task { @MainActor in self?.model.emergencyStop() }

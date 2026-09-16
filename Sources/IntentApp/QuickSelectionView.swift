@@ -53,7 +53,7 @@ final class QuickSelectionController: ObservableObject {
         return apps.filter { app in !windows.contains { $0.appID == app.id } }
     }
     func toggle() {
-        if panel?.isVisible == true { runSelection(); return }
+        if panel?.isVisible == true { cancel(); return }
         guard !model.hasActiveSession, !model.isZeroDriftActive,
               model.pendingPurposeSessionSave == nil, model.pendingFriction == nil,
               model.pendingEndTimeRequest == nil else {
@@ -83,7 +83,7 @@ final class QuickSelectionController: ObservableObject {
         topSafeInset = screen.safeAreaInsets.top
         wallpaper = NSWorkspace.shared.desktopImageURL(for: screen).flatMap { NSImage(contentsOf: $0) }
         let panel = SelectionPanel(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        panel.title = "intent field of view"
+        panel.title = "Intent"
         panel.isReleasedWhenClosed = false; panel.hidesOnDeactivate = false
         panel.level = .popUpMenu
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -100,6 +100,7 @@ final class QuickSelectionController: ObservableObject {
             }
             // Phrase/checklist editing must not switch Allow/Block when typing '/'.
             if self.panel?.firstResponder is NSTextView { return event }
+            if event.keyCode == 36 || event.keyCode == 76 { self.runSelection(); return nil }
             if event.charactersIgnoringModifiers == "/", event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
                 if !event.isARepeat { self.toggleAccessMode() }
                 return nil
@@ -167,13 +168,13 @@ final class QuickSelectionController: ObservableObject {
     }
     func selectWindow(_ window: WindowItem) {
         guard !closing else { return }
-        if selection.accessMode == .blacklist, let app = apps.first(where: { $0.id == window.appID }) { selectApp(app); return }
         if QuickSelection.browsers.contains(window.appID) {
-            guard browserWindowID(for: window) != nil, tabs(for: window).contains(where: QuickSelection.isSelectable) else {
-                message = "Tabs could not be matched to this window. Connect Browser Guard, or give duplicate browser windows distinct active tabs and reopen `."; return
+            guard let id = browserWindowID(for: window), tabs(for: window).contains(where: QuickSelection.isSelectable) else {
+                message = unavailableTabsMessage(for: window.appID); return
             }
             focusedBrowserWindow = window.id
-            message = "Choose individual tabs above this window. Clicking the window does not select its tabs."
+            selection.toggleBrowserWindow(browser: window.appID, windowID: id, snapshots: snapshots)
+            message = nil
         } else if let app = apps.first(where: { $0.id == window.appID }) { selectApp(app) }
     }
     func selectApp(_ app: AppItem) {
@@ -183,7 +184,7 @@ final class QuickSelectionController: ObservableObject {
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
     }
     func runSelection() {
-        guard !closing, !loading, !tabPreviewLoading, !selection.apps.isEmpty else { return }
+        guard !closing, !loading, !selection.apps.isEmpty else { return }
         refresh()
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
@@ -234,7 +235,7 @@ final class QuickSelectionController: ObservableObject {
         hoverTask?.cancel(); hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
         guard entered else { return }
         hoverTask = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             guard let self, !self.closing, self.panel?.isVisible == true else { return }
             self.hoveredTab = tab
             let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
@@ -321,14 +322,24 @@ final class QuickSelectionController: ObservableObject {
                     items.append(contentsOf: batch)
                 }
                 guard !Task.isCancelled, self.generation == token else { return }
+                for app in self.apps where !items.contains(where: { $0.appID == app.id }) {
+                    items.append(.init(id: UInt32.max - UInt32(app.pid), appID: app.id, title: app.app.name,
+                        sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
+                }
                 self.windows = items; self.loading = false; self.refresh()
                 // Mount at desktop positions before animating into the overview.
                 try? await Task.sleep(nanoseconds: 30_000_000)
                 guard self.generation == token, !self.closing else { return }
-                withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: 0.46, dampingFraction: 0.88)) { self.expanded = true }
+                withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: 0.24, dampingFraction: 1)) { self.expanded = true }
             } catch {
                 guard let self, self.generation == token else { return }
-                self.loading = false; self.message = "Couldn't capture your windows. Check Screen Recording access and reopen `."
+                self.loading = false
+                self.windows = self.apps.map { app in
+                    .init(id: UInt32.max - UInt32(app.pid), appID: app.id, title: app.app.name,
+                          sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil)
+                }
+                self.expanded = true
+                self.message = "Window images are temporarily unavailable. You can still choose your apps."
             }
         }
     }
@@ -363,201 +374,113 @@ private final class SelectionPanel: NSPanel {
 
 private struct QuickSelectionView: View {
     @ObservedObject var controller: QuickSelectionController
-    @State private var hoveredWindow: CGWindowID?
-    private var green: Color { controller.selection.accessMode == .blacklist ? Color(red: 1, green: 0.27, blue: 0.23) : Color(red: 0.20, green: 0.91, blue: 0.42) }
+    private var accent: Color { controller.selection.accessMode == .blacklist ? .red : .green }
     var body: some View {
         GeometryReader { geometry in
-            let footerHeight: CGFloat = (controller.windowlessApps.isEmpty ? 128 : 188) + (controller.message == nil ? 0 : 44)
-            let headerHeight = controller.topSafeInset + 88
-            let sidebarWidth = min(320.0, geometry.size.width * 0.34)
-            let sidebarSpace = controller.optionsSection == nil ? 0 : sidebarWidth + 24
-            let area = CGRect(x: 32 + sidebarSpace, y: headerHeight + 22, width: max(1, geometry.size.width - 64 - sidebarSpace), height: max(1, geometry.size.height - headerHeight - 22 - footerHeight))
-            let frames = FieldOfViewLayout.frames(sizes: controller.windows.map { $0.sourceFrame.size }, in: area)
-            ZStack(alignment: .topLeading) {
-                wallpaper(size: geometry.size)
-                Color.black.opacity(0.14).ignoresSafeArea()
+            let focused = controller.windows.first { $0.id == controller.focusedBrowserWindow }
+            let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
+            let header = controller.topSafeInset + 56
+            let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - 80))
+            let frames = FieldOfViewLayout.frames(sizes: controller.windows.map { $0.sourceFrame.size }, in: area, tabHeight: 0)
+            ZStack {
+                Group {
+                    if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
+                    else { Color.black }
+                }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                Color.black.opacity(0.12)
                 ForEach(Array(controller.windows.enumerated()), id: \.element.id) { index, window in
-                    if index < frames.count { windowView(window, target: frames[index]) }
+                    if index < frames.count { windowCard(window, frame: frames[index]) }
                 }
-                if let section = controller.optionsSection {
-                    QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.optionsSection = nil }
-                        .frame(width: sidebarWidth, height: max(180, geometry.size.height - headerHeight - footerHeight - 24))
-                        .offset(x: 20, y: headerHeight + 12)
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-                VStack(spacing: 0) {
-                    Text("intent field of view").font(.system(size: 22, weight: .semibold, design: .rounded))
-                        .tracking(-0.4)
-                        .frame(maxWidth: .infinity).frame(height: 88)
-                        .padding(.top, controller.topSafeInset).background(.black.opacity(0.24))
+                VStack {
+                    HStack {
+                        Text("Intent").font(.system(size: 23, weight: .medium, design: .serif))
+                        Spacer()
+                        Button { controller.optionsSection = .session } label: { Label("Session", systemImage: "slider.horizontal.3") }
+                            .buttonStyle(.bordered)
+                            .popover(isPresented: Binding(get: { controller.optionsSection != nil }, set: { if !$0 { controller.optionsSection = nil } })) {
+                                QuickSelectionOptionsView(selection: $controller.selection) { controller.optionsSection = nil }.frame(width: 340, height: 490)
+                            }
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(context.date, style: .time).monospacedDigit().font(.system(size: 14, weight: .medium)).frame(minWidth: 80)
+                        }
+                    }.padding(.horizontal, 28).frame(height: 52).padding(.top, controller.topSafeInset)
                     Spacer()
-                    if controller.loading {
-                        ProgressView("Gathering windows…").padding(18).background(.ultraThinMaterial, in: Capsule())
+                    if let message = controller.message { Text(message).font(.callout).foregroundStyle(.orange).padding(8).background(.regularMaterial, in: Capsule()) }
+                    HStack {
+                        Button("Close · ` / Esc") { controller.cancel() }.buttonStyle(.plain)
                         Spacer()
-                    } else if !controller.hasPreviewPermission {
-                        VStack(spacing: 14) {
-                            Image(systemName: "macwindow.on.rectangle").font(.system(size: 36))
-                            Text("See your actual windows").font(.title2)
-                            Text("Allow Screen Recording to show previews here.\nLocal previews only—no video recording or upload.")
-                                .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                            Button("Enable window previews") { controller.enablePreviews() }.buttonStyle(.borderedProminent)
-                        }.padding(28).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                        Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
                         Spacer()
-                    }
-                    footer
+                        Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
+                            .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing)
+                    }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
                 }
-                if let tab = controller.hoveredTab {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(tab.title).font(.headline).lineLimit(2)
-                        Text(URL(string: tab.url)?.host ?? tab.url).font(.caption).foregroundStyle(.secondary)
-                        Group {
-                            if let image = controller.tabPreview {
-                                Image(nsImage: image).resizable().scaledToFit()
-                            } else if let error = controller.tabPreviewError {
-                                Text(error).padding(30)
-                            } else { ProgressView("Loading tab preview…").padding(30) }
-                        }.frame(maxWidth: .infinity, maxHeight: 380)
-                    }.padding(16).frame(width: min(640, geometry.size.width - 80))
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-                        .shadow(radius: 22).position(x: geometry.size.width / 2, y: geometry.size.height / 2)
-                        .allowsHitTesting(false)
+                if controller.loading { ProgressView("Gathering your apps…").padding(18).background(.regularMaterial, in: Capsule()) }
+                if let focused {
+                    tabGrid(focused).frame(width: tabWidth - 20, height: max(160, geometry.size.height - header - 84))
+                        .position(x: geometry.size.width - tabWidth / 2 - 12, y: header + (geometry.size.height - header - 84) / 2)
                 }
-            }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                .foregroundStyle(.white).preferredColorScheme(.dark)
-                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.22), value: controller.optionsSection)
+                RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
+                    .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)
+            }.foregroundStyle(.white).preferredColorScheme(.dark)
         }
     }
-    private func wallpaper(size: CGSize) -> some View {
-        Group {
-            if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
-            else { LinearGradient(colors: [Color(red: 0.16, green: 0.25, blue: 0.32), .black], startPoint: .top, endPoint: .bottom) }
-        }.frame(width: size.width, height: size.height).clipped().ignoresSafeArea()
-    }
-    private func windowView(_ window: QuickSelectionController.WindowItem, target: CGRect) -> some View {
-        let original = window.sourceFrame.offsetBy(dx: -controller.displayFrame.minX, dy: -controller.displayFrame.minY)
-        let frame = controller.expanded ? target : original
-        let selected = controller.isSelected(window)
+    private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect) -> some View {
         let app = controller.apps.first { $0.id == window.appID }
-        let tabs = controller.tabs(for: window)
-        let isBrowser = QuickSelection.browsers.contains(window.appID)
-        return ZStack(alignment: .top) {
+        let selected = controller.isSelected(window)
+        let browser = QuickSelection.browsers.contains(window.appID)
+        let isHovered = controller.focusedBrowserWindow == window.id && controller.hoveredTab != nil
+        return VStack(spacing: 7) {
             Button { controller.selectWindow(window) } label: {
-                Group {
-                    if let preview = window.preview { Image(nsImage: preview).resizable().scaledToFit() }
+                ZStack {
+                    if isHovered, let image = controller.tabPreview { Image(nsImage: image).resizable().scaledToFit() }
+                    else if let image = window.preview { Image(nsImage: image).resizable().scaledToFit() }
                     else {
-                        ZStack {
-                            Color.black.opacity(0.4)
-                            VStack(spacing: 7) {
-                                if let app { Image(nsImage: app.icon).resizable().frame(width: 32, height: 32) }
-                                Text(app?.app.name ?? window.appID).font(.headline)
-                                Text(window.title.isEmpty ? "App window" : window.title).font(.caption).lineLimit(3).multilineTextAlignment(.center).padding(.horizontal, 12)
-                            }
+                        RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial)
+                        VStack(spacing: 12) {
+                            if let app { Image(nsImage: app.icon).resizable().frame(width: 64, height: 64) }
+                            Text(app?.app.name ?? window.appID).font(.headline)
                         }
                     }
-                }.frame(width: frame.width, height: frame.height)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? green : .white.opacity(0.18), lineWidth: selected ? 4 : 1))
-                    .shadow(color: selected ? green.opacity(0.65) : .black.opacity(0.35), radius: selected ? 12 : 8, y: selected ? 0 : 5)
-            }.buttonStyle(.plain)
-                .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }
-                .accessibilityLabel("\(app?.app.name ?? window.appID): \(window.title), \(selected ? "selected" : "not selected")")
-                .help(controller.selection.accessMode == .blacklist ? "Block \(app?.app.name ?? window.appID)—all its windows. Or select individual website tabs." : (isBrowser ? "Choose tabs—no tabs are automatically selected" : "Allow \(app?.app.name ?? window.appID)—all its windows"))
-            if controller.expanded {
-                if isBrowser {
-                    if !tabs.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: true) {
-                            HStack(spacing: 5) { ForEach(tabs) { tab in tabBubble(tab, browser: window.appID, width: min(156, max(70, target.width * 0.36))) } }.padding(4)
-                        }.frame(width: target.width, height: 58)
-                            .background(controller.focusedBrowserWindow == window.id ? .white.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 12))
-                            .offset(y: -60)
-                    } else {
-                        Text(controller.unavailableTabsMessage(for: window.appID)).font(.system(size: 10)).lineLimit(2).padding(5)
-                            .frame(width: target.width).background(.black.opacity(0.6), in: Capsule()).offset(y: -38)
+                    if isHovered {
+                        VStack { Spacer(); Text(controller.hoveredTab?.title ?? "").font(.caption).lineLimit(2).padding(8).frame(maxWidth: .infinity).background(.black.opacity(0.65)) }
                     }
+                }.frame(width: frame.width, height: frame.height).clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? accent : .white.opacity(0.25), lineWidth: selected ? 3 : 1))
+                    .shadow(color: selected ? accent.opacity(0.4) : .black.opacity(0.3), radius: 8)
+            }.buttonStyle(.plain).accessibilityLabel("\(app?.app.name ?? window.appID): \(window.title), \(selected ? "selected" : "not selected")")
+            HStack(spacing: 6) {
+                Text(window.title.isEmpty ? (app?.app.name ?? window.appID) : window.title).lineLimit(1)
+                if browser {
+                    Button { controller.focusedBrowserWindow = controller.focusedBrowserWindow == window.id ? nil : window.id } label: { Label("Tabs", systemImage: "square.grid.2x2") }.buttonStyle(.plain).foregroundStyle(.white)
                 }
-                HStack(spacing: 5) {
-                    if let app { Image(nsImage: app.icon).resizable().frame(width: 17, height: 17) }
-                    Text(window.title.isEmpty ? (app?.app.name ?? window.appID) : window.title).lineLimit(1)
-                }.font(.system(size: 11, weight: .medium)).padding(.horizontal, 8).padding(.vertical, 3)
-                    .frame(maxWidth: target.width).background(.black.opacity(0.42), in: Capsule())
-                    .offset(y: target.height * 0.48).opacity(hoveredWindow == window.id ? 1 : 0).allowsHitTesting(false)
-            }
-        }.frame(width: frame.width, height: frame.height)
-            .padding(.top, 62).padding(.bottom, 26)
-            .position(x: frame.midX, y: frame.midY - 18)
-            .allowsHitTesting(controller.expanded && !controller.closing)
+            }.font(.system(size: 12)).padding(.horizontal, 6)
+        }.frame(width: frame.width).position(x: frame.midX, y: frame.midY)
+            .opacity(controller.expanded ? 1 : 0).allowsHitTesting(controller.expanded && !controller.closing)
     }
-    private func tabBubble(_ tab: BrowserTabItem, browser: String, width: CGFloat) -> some View {
-        let key = QuickSelectionTab(browser: browser, id: tab.id)
-        let selected = controller.selection.tabs.contains(key)
-        return Button { controller.message = nil; controller.selection.toggleTab(key) } label: {
-            HStack(spacing: 5) {
-                TabSiteIcon(url: tab.faviconURL)
-                    .overlay(alignment: .bottomTrailing) {
-                        if selected { Image(systemName: controller.selection.accessMode == .blacklist ? "minus.circle.fill" : "checkmark.circle.fill").font(.system(size: 9)).foregroundStyle(green).offset(x: 4, y: 4) }
+    private func tabGrid(_ window: QuickSelectionController.WindowItem) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack { Text("Browser tabs").font(.headline); Spacer(); Button { controller.focusedBrowserWindow = nil; controller.hoveredTab = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }
+            Text("Click the window to select all. Hover a tab to preview it there.").font(.caption).foregroundStyle(.secondary)
+            let tabs = controller.tabs(for: window)
+            if tabs.isEmpty { Text(controller.unavailableTabsMessage(for: window.appID)).font(.callout) }
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                    ForEach(tabs) { tab in
+                        let key = QuickSelectionTab(browser: window.appID, id: tab.id)
+                        let selected = controller.selection.tabs.contains(key)
+                        Button { controller.message = nil; controller.selection.toggleTab(key) } label: {
+                            HStack(spacing: 8) { TabSiteIcon(url: tab.faviconURL); Text(tab.title).font(.system(size: 12, weight: .medium)).lineLimit(3); Spacer(minLength: 0) }
+                                .padding(10).frame(maxWidth: .infinity, minHeight: 65)
+                                .background(selected ? accent.opacity(0.18) : .white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? accent : .white.opacity(0.18), lineWidth: selected ? 2 : 1))
+                        }.buttonStyle(.plain).disabled(!QuickSelection.isSelectable(tab))
+                            .onHover { controller.hoverTab(tab, browser: window.appID, entered: $0) }
+                            .accessibilityLabel("Tab: \(tab.title), \(selected ? "selected" : "not selected")")
                     }
-                Text(tab.title).font(.system(size: 11, weight: .medium)).lineLimit(2)
-            }.padding(.horizontal, 8).frame(width: width, height: 43)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).stroke(selected ? green : .white.opacity(0.25), lineWidth: selected ? 3 : 1))
-                .shadow(color: selected ? green.opacity(0.45) : .clear, radius: 5)
-        }.buttonStyle(.plain).disabled(!QuickSelection.isSelectable(tab)).opacity(QuickSelection.isSelectable(tab) ? 1 : 0.45)
-            .onHover { controller.hoverTab(tab, browser: browser, entered: $0) }
-            .accessibilityLabel("Tab: \(tab.title), \(selected ? "selected" : "not selected")")
-    }
-    private var footer: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 10) {
-                optionsButton(.restrictions, count: controller.selection.restrictionNodes.count)
-                optionsButton(.frictions, count: controller.selection.frictionNodes.count)
-                Spacer()
+                }.padding(3)
             }
-            if !controller.windowlessApps.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        Text("No window").font(.caption).foregroundStyle(.secondary)
-                        ForEach(controller.windowlessApps) { app in
-                            Button { controller.selectApp(app) } label: {
-                                Image(nsImage: app.icon).resizable().frame(width: 30, height: 30).padding(5)
-                                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(controller.selection.apps.contains(app.id) ? green : .clear, lineWidth: 3))
-                            }.buttonStyle(.plain).help(app.app.name)
-                                .accessibilityLabel("\(app.app.name), no window, \(controller.selection.apps.contains(app.id) ? "selected" : "not selected")")
-                        }
-                    }.padding(.horizontal, 4)
-                }.frame(height: 46)
-            }
-            Text(controller.selection.accessMode == .blacklist ? "Red selections are blocked. Everything else stays available. Tabs block their websites in this browser." : "Only green selections are allowed. Press / to switch to Block.")
-                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.8))
-            if let message = controller.message { Text(message).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3) }
-            HStack(spacing: 18) {
-                Button("Cancel · Esc") { controller.cancel() }.buttonStyle(.plain)
-                Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }
-                    .buttonStyle(.plain).foregroundStyle(green)
-                    .help("Press / to switch between Allow and Block. Selections are preserved.")
-                Spacer()
-                Text("Apps \(controller.selection.apps.count) · Tabs \(controller.selection.tabs.count)").foregroundStyle(.white.opacity(0.7))
-                Button("Clear") {
-                    let mode = controller.selection.accessMode
-                    controller.selection = QuickSelection(); controller.selection.accessMode = mode; controller.message = nil
-                }.buttonStyle(.plain).help("Clear apps, tabs, restrictions and frictions")
-                Button("Start · `") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(green).foregroundStyle(.black)
-                    .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing || controller.tabPreviewLoading)
-            }.font(.system(size: 13, weight: .medium))
-        }.padding(.horizontal, 28).padding(.vertical, 14).background(.black.opacity(0.25))
-    }
-    private func optionsButton(_ section: QuickSelectionOptionsSection, count: Int) -> some View {
-        Button {
-            controller.optionsSection = controller.optionsSection == section ? nil : section
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: section.symbol)
-                Text(section.rawValue)
-                if count > 0 { Text("\(count)").font(.system(size: 11, weight: .bold)).padding(.horizontal, 6).padding(.vertical, 2).background(section.tint.opacity(0.25), in: Capsule()) }
-                Image(systemName: controller.optionsSection == section ? "chevron.down" : "chevron.up").font(.system(size: 9, weight: .bold))
-            }.font(.system(size: 12, weight: .medium)).padding(.horizontal, 14).padding(.vertical, 9)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().stroke(controller.optionsSection == section || count > 0 ? section.tint.opacity(0.7) : .white.opacity(0.18)))
-        }.buttonStyle(.plain).accessibilityLabel("\(section.rawValue), \(count) selected")
+        }.padding(16).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
     }
 }
 

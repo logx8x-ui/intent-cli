@@ -10,6 +10,7 @@ protocol IntentOverlayPresenting: AnyObject {
     func hideOverlay(animated: Bool)
     func toggleOverlay()
     func showSessionTimer(name: String, endsAt: Date, displaysEndTime: Bool)
+    func toggleSessionControls()
     func hideSessionTimer()
 }
 
@@ -19,6 +20,9 @@ final class IntentAppModel: ObservableObject {
 
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
+    @Published var activeChecklist: [String] = []
+    @Published var completedChecklist: Set<Int> = []
+    private var saveSessionOnFinish = false
     @Published var activeSessionName: String?
     @Published var activeSessionIsLeisure = false
     @Published var activeSessionEndsAt: Date?
@@ -940,7 +944,7 @@ final class IntentAppModel: ObservableObject {
     private func beginStartFlow(for intention: Intention) {
         pendingStartIntention = intention
         pendingRuntimeEndDate = nil
-        remainingFrictions = intention.orderedFrictionNodes
+        remainingFrictions = intention.orderedFrictionNodes.filter { if case .taskChecklist = $0.friction { return false }; return true }
 
         if intention.requiresRuntimeEndTime {
             pendingEndTimeRequest = PendingEndTimeRequest(intention: intention)
@@ -1012,6 +1016,20 @@ final class IntentAppModel: ObservableObject {
         pendingStartIntention = nil
         pendingRuntimeEndDate = nil
         remainingFrictions = []
+    }
+
+    func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
+
+    func setTaskCompleted(_ index: Int, completed: Bool) {
+        guard hasActiveSession, activeChecklist.indices.contains(index) else { return }
+        if completed { completedChecklist.insert(index) } else { completedChecklist.remove(index) }
+        if !activeChecklist.isEmpty && completedChecklist.count == activeChecklist.count { activeLock?.stop() }
+    }
+
+    func endAndSaveActiveSession() {
+        guard hasActiveSession, activeSessionCanFinishManually else { return }
+        saveSessionOnFinish = true
+        endActiveSession()
     }
 
     func endActiveSession() {
@@ -1261,7 +1279,14 @@ final class IntentAppModel: ObservableObject {
             purposeUsageTracker = tracker
             tracker.start()
         }
+        saveSessionOnFinish = false
+        activeChecklist = intention.orderedFrictionNodes.flatMap { node -> [String] in
+            if case .taskChecklist(let tasks) = node.friction { return tasks.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } }
+            return []
+        }
+        completedChecklist = []
         scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
+        if activeSessionEndsAt == nil { overlayPresenter?.showSessionTimer(name: intention.name, endsAt: Date(), displaysEndTime: false) }
         overlayPresenter?.hideOverlay(animated: true)
 
         Thread.detachNewThread {
@@ -1326,6 +1351,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeSessionIsLeisure = false
                 if failureMessage == nil,
                    wasPurposeSession,
+                   self.saveSessionOnFinish,
                    let purposeUsage,
                    let statedPurpose {
                     self.pendingPurposeSessionSave = (self.quickSelectionIntentionID == intention.id || self.firstIntentionID == intention.id)
@@ -1336,6 +1362,7 @@ final class IntentAppModel: ObservableObject {
                         usage: purposeUsage
                     )
                 }
+                if self.saveSessionOnFinish, self.pendingPurposeSessionSave != nil { self.savePurposeSessionCandidate() }
                 if wasPurposeSession {
                     self.firstIntentionID = nil
                     self.quickSelectionIntentionID = nil
@@ -1343,7 +1370,10 @@ final class IntentAppModel: ObservableObject {
                     self.purposeTemporaryIntention = nil
                     self.purposeStatedPrompt = nil
                 }
-                self.overlayPresenter?.showOverlay(animated: true)
+                self.activeChecklist = []
+                self.completedChecklist = []
+                if self.saveSessionOnFinish || failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
+                self.saveSessionOnFinish = false
                 if let replacement, !lock.didStopForSafety, failureMessage == nil {
                     self.requestStart(replacement)
                 } else {

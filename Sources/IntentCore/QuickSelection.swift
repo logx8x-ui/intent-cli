@@ -71,7 +71,13 @@ public struct QuickSelection {
             }
         }
         guard foundTabs == tabs else { throw QuickSelectionError.changedTabs }
-        for node in frictionNodes {
+        let sessionFrictions = frictionNodes.compactMap { node -> FrictionNode? in
+            guard case .taskChecklist(let tasks) = node.friction else { return nil }
+            var result = node
+            result.friction = .taskChecklist(tasks.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+            return result
+        }
+        for node in sessionFrictions {
             switch node.friction {
             case .typedPhrase(let text), .reasonPrompt(let text):
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw QuickSelectionError.emptyFriction }
@@ -93,7 +99,7 @@ public struct QuickSelection {
             startupActions: [], restrictions: .init(),
             restrictionNodes: configuredRestrictions + [.init(id: Self.startupSuppressionID, kind: .dontStartUp, position: .init(x: 220, y: 170),
                                     excludedResourceIDs: resources)],
-            frictionNodes: frictionNodes
+            frictionNodes: sessionFrictions
         )
         intention.accessMode = accessMode
         intention.selectionOnly = true

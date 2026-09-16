@@ -9,10 +9,6 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private let accountManager: IntentAccountManager
     private var panel: NSPanel?
     private var sessionTimerPanel: NSPanel?
-    private var sessionTimerName = ""
-    private var sessionTimerEndsAt = Date()
-    private var sessionTimerDisplaysEndTime = false
-    private var sessionTimerCollapsed = false
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
 
@@ -119,10 +115,6 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     func showSessionTimer(name: String, endsAt: Date, displaysEndTime: Bool) {
         let timerPanel = sessionTimerPanel ?? makeSessionTimerPanel()
         sessionTimerPanel = timerPanel
-        sessionTimerName = name
-        sessionTimerEndsAt = endsAt
-        sessionTimerDisplaysEndTime = displaysEndTime
-        sessionTimerCollapsed = false
         installSessionTimerContent()
 
         let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
@@ -206,140 +198,18 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         return panel
     }
 
+    func toggleSessionControls() {
+        guard model.hasActiveSession else { return }
+        if sessionTimerPanel?.isVisible == true { sessionTimerPanel?.orderOut(nil) }
+        else { sessionTimerPanel?.orderFrontRegardless() }
+    }
+
     private var sessionTimerSize: NSSize {
-        sessionTimerCollapsed
-            ? NSSize(width: 76, height: 30)
-            : (sessionTimerDisplaysEndTime
-                ? NSSize(width: 230, height: 68)
-                : NSSize(width: 204, height: 56))
+        NSSize(width: 300, height: model.activeChecklist.isEmpty ? 115 : min(440, 140 + CGFloat(model.activeChecklist.count) * 38))
     }
 
     private func installSessionTimerContent() {
-        sessionTimerPanel?.contentViewController = NSHostingController(
-            rootView: SessionTimerView(
-                name: sessionTimerName,
-                endsAt: sessionTimerEndsAt,
-                displaysEndTime: sessionTimerDisplaysEndTime,
-                isCollapsed: sessionTimerCollapsed,
-                onToggleCollapsed: { [weak self] in
-                    self?.toggleSessionTimerCollapsed()
-                }
-            )
-        )
-    }
-
-    private func toggleSessionTimerCollapsed() {
-        guard let panel = sessionTimerPanel else { return }
-        let oldFrame = panel.frame
-        sessionTimerCollapsed.toggle()
-        installSessionTimerContent()
-
-        let size = sessionTimerSize
-        var frame = NSRect(
-            x: oldFrame.midX - size.width / 2,
-            y: oldFrame.maxY - size.height,
-            width: size.width,
-            height: size.height
-        )
-        if let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
-            frame.origin.x = min(max(frame.origin.x, visibleFrame.minX), visibleFrame.maxX - size.width)
-            frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), visibleFrame.maxY - size.height)
-        }
-        panel.setFrame(frame, display: true, animate: true)
-    }
-
-}
-
-private struct SessionTimerView: View {
-    let name: String
-    let endsAt: Date
-    let displaysEndTime: Bool
-    let isCollapsed: Bool
-    let onToggleCollapsed: () -> Void
-
-    @AppStorage("intentAppearance") private var appearance = "dark"
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            Group {
-                if isCollapsed {
-                    HStack(spacing: 0) {
-                        ZStack {
-                            Image(systemName: "line.3.horizontal")
-                                .font(.system(size: 11, weight: .semibold))
-                                .allowsHitTesting(false)
-                            SessionTimerDragRegion()
-                        }
-                        .frame(width: 40, height: 30)
-                        Button(action: onToggleCollapsed) {
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 11, weight: .bold))
-                                .frame(width: 36, height: 30)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Show timer")
-                    }
-                    .frame(width: 76, height: 30)
-                } else {
-                    HStack(spacing: 0) {
-                        ZStack {
-                            HStack(spacing: 10) {
-                                Image(systemName: displaysEndTime ? "clock.badge.checkmark" : "timer")
-                                    .font(.system(size: 14, weight: .semibold))
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(name)
-                                        .font(.system(size: 10, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                    if displaysEndTime {
-                                        Text("Ends at \(endsAt.formatted(date: .omitted, time: .shortened))")
-                                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                        Text("\(remainingClockText(at: context.date)) left")
-                                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                                            .foregroundStyle(.secondary)
-                                            .monospacedDigit()
-                                    } else {
-                                        Text(remainingClockText(at: context.date))
-                                            .font(.system(size: 17, weight: .semibold, design: .rounded))
-                                            .monospacedDigit()
-                                    }
-                                }
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.leading, 15)
-                            .padding(.trailing, 4)
-                            .allowsHitTesting(false)
-                            SessionTimerDragRegion()
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        Button(action: onToggleCollapsed) {
-                            Image(systemName: "chevron.up")
-                                .font(.system(size: 10, weight: .bold))
-                                .frame(width: 32, height: 28)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Hide timer")
-                    }
-                    .padding(.trailing, 4)
-                    .frame(
-                        width: displaysEndTime ? 230 : 204,
-                        height: displaysEndTime ? 68 : 56
-                    )
-                }
-            }
-            .foregroundStyle(Color.primary)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: isCollapsed ? 11 : 16, style: .continuous))
-            .background(Color.black.opacity(0.10), in: RoundedRectangle(cornerRadius: isCollapsed ? 11 : 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: isCollapsed ? 11 : 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.20), lineWidth: 0.8)
-            )
-        }
-        .preferredColorScheme(appearance == "light" ? .light : .dark)
-    }
-
-    private func remainingClockText(at date: Date) -> String {
-        SessionTimerFormatter.countdownText(until: endsAt, now: date)
+        sessionTimerPanel?.contentViewController = NSHostingController(rootView: SessionControlsView(model: model))
     }
 
 }
@@ -361,4 +231,31 @@ private struct SessionTimerDragRegion: NSViewRepresentable {
 private final class IntentOverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+}
+
+private struct SessionControlsView: View {
+    @ObservedObject var model: IntentAppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack { ZStack(alignment: .leading) { Text(model.activeSessionName ?? "Intent").font(.headline).lineLimit(1).allowsHitTesting(false); SessionTimerDragRegion() }.frame(height: 24); Spacer(); Button { model.toggleSessionControls() } label: { Image(systemName: "chevron.up") }.buttonStyle(.plain) }
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack {
+                    if let end = model.activeSessionEndsAt { Text(SessionTimerFormatter.countdownText(until: end, now: context.date)).monospacedDigit() }
+                    Spacer()
+                    Text(context.date, style: .time).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            if !model.activeChecklist.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(model.activeChecklist.enumerated()), id: \.offset) { index, task in
+                            Toggle(task, isOn: Binding(get: { model.completedChecklist.contains(index) }, set: { model.setTaskCompleted(index, completed: $0) }))
+                                .toggleStyle(.checkbox).strikethrough(model.completedChecklist.contains(index)).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            Text(verbatim: "` hide · ~ finish · ⌘⇧` finish & save").font(.system(size: 11)).foregroundStyle(.secondary)
+        }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.15))).preferredColorScheme(.dark)
+    }
 }
