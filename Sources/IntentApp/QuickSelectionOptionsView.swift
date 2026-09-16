@@ -11,7 +11,7 @@ struct QuickSelectionOptionsView: View {
     private var checklistIndex: Int? { selection.frictionNodes.firstIndex { if case .taskChecklist = $0.friction { return true }; return false } }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("Session").font(.title2); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
+            HStack { Text("Modifications").font(.title2); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
             Text("A little structure. Only what you need.").font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -19,10 +19,11 @@ struct QuickSelectionOptionsView: View {
                         selection.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
                         if enabled { selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: false)) }
                     }))
+                    .help("Finish after a duration or at a time you choose.")
                     if let index = timerIndex {
                         HStack(spacing: 8) {
                             timerModeButton("Duration", clock: false, index: index)
-                            timerModeButton("End time", clock: true, index: index)
+                            timerModeButton("Set end time", clock: true, index: index)
                         }
                         if selection.restrictionNodes[index].kind == .timer {
                             HStack { TextField("Minutes", value: Binding(get: { selection.restrictionNodes[index].durationMinutes ?? 25 }, set: { selection.restrictionNodes[index].durationMinutes = min(1440, max(1, $0)) }), format: .number).textFieldStyle(.roundedBorder); Text("minutes").foregroundStyle(.secondary) }
@@ -39,6 +40,7 @@ struct QuickSelectionOptionsView: View {
                         selection.frictionNodes.removeAll { if case .taskChecklist = $0.friction { return true }; return false }
                         if enabled { selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260))) }
                     }))
+                    .help("Check off your tasks during the intention; completing them all ends it.")
                     if let index = checklistIndex {
                         Text("Check tasks off during your session; the last check finishes it.").font(.caption).foregroundStyle(.secondary)
                         if case .taskChecklist(let tasks) = selection.frictionNodes[index].friction {
@@ -59,8 +61,8 @@ struct QuickSelectionOptionsView: View {
                         }
                     }
                     Divider()
-                    Toggle("Allow browser searches", isOn: option(.allowBrowserSearches))
-                    Toggle("Cooldown before replay", isOn: option(.coolDown))
+                    Toggle("Allow browser searches", isOn: option(.allowBrowserSearches)).help("Allow search results while keeping other website rules in place.")
+                    Toggle("Cooldown before replay", isOn: option(.coolDown)).help("Wait before starting this saved intention again.")
                     if let index = selection.restrictionNodes.firstIndex(where: { $0.kind == .coolDown }) {
                         HStack { TextField("Minutes", value: Binding(get: { selection.restrictionNodes[index].durationMinutes ?? 30 }, set: { selection.restrictionNodes[index].durationMinutes = min(1440, max(1, $0)) }), format: .number).textFieldStyle(.roundedBorder); Text("minutes") }
                     }

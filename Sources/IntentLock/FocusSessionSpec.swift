@@ -2,6 +2,7 @@ import Foundation
 import IntentCore
 
 public struct FocusSessionSpec {
+    public var selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
     public let accessMode: IntentionAccessMode
     public let displayName: String
     public let startupSteps: [StartupStep]
@@ -41,8 +42,10 @@ public struct FocusSessionSpec {
         allowsManualFinish: Bool = true,
         closeSessionResourcesOnFinish: Bool = false,
         restorePreviousApplicationOnStop: Bool = true,
-        allowedWebsitesByBrowser: [String: [String]] = [:]
+        allowedWebsitesByBrowser: [String: [String]] = [:],
+        selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
     ) {
+        self.selectedWindowIDsByApp = selectedWindowIDsByApp
         self.displayName = displayName
         self.accessMode = accessMode
         self.startupSteps = startupSteps
@@ -155,12 +158,23 @@ public struct FocusSessionSpec {
             allowsManualFinish: allowsManualFinish,
             closeSessionResourcesOnFinish: closeSessionResourcesOnFinish,
             restorePreviousApplicationOnStop: restorePreviousApplicationOnStop,
-            allowedWebsitesByBrowser: allowedWebsitesByBrowser
+            allowedWebsitesByBrowser: allowedWebsitesByBrowser,
+            selectedWindowIDsByApp: selectedWindowIDsByApp
         )
+    }
+
+    public var applicationWideControlledBundleIdentifiers: Set<String> {
+        accessMode == .blacklist ? allowedBundleIdentifiers.subtracting(selectedWindowIDsByApp.keys) : allowedBundleIdentifiers
+    }
+
+    public func permitsWindow(_ id: UInt32, bundleIdentifier: String) -> Bool {
+        guard let ids = selectedWindowIDsByApp[bundleIdentifier] else { return permitsApplication(bundleIdentifier) }
+        return accessMode == .whitelist ? ids.contains(id) : !ids.contains(id)
     }
 
     public func permitsApplication(_ bundleIdentifier: String) -> Bool {
         if !requiresEnforcement { return true }
+        if selectedWindowIDsByApp[bundleIdentifier] != nil { return true }
         switch accessMode {
         case .whitelist: return allowedBundleIdentifiers.contains(bundleIdentifier)
         case .blacklist: return !allowedBundleIdentifiers.contains(bundleIdentifier)

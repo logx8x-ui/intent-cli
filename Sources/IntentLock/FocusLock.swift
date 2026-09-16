@@ -141,7 +141,7 @@ public final class FocusLock {
         self.spec = spec
         currentFinishShortcut = spec.finishShortcut
         allowedAppSwitcher = AllowedAppSwitcher(
-            allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
+            allowedBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             accessMode: spec.accessMode
         )
     }
@@ -426,7 +426,7 @@ public final class FocusLock {
                 guard FocusClickTargetPolicy.shouldAllowMissionControlClick(
                     ownerBundleIdentifier: target.ownerBundleIdentifier,
                     representedBundleIdentifier: target.representedBundleIdentifier,
-                    controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+                    controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
                     accessMode: spec.accessMode
                 ) else {
                     // Keep Mission Control open; a known forbidden tile is a no-op.
@@ -626,7 +626,7 @@ public final class FocusLock {
         guard !isStopped else { return }
         let visible = PermittedWindowRecovery.visibleApplication()
         guard FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible?.bundleIdentifier,
-            accessMode: spec.accessMode, controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            accessMode: spec.accessMode, controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             missionControlActive: isMissionControlActive()) else { return }
         refocus(ignoreSystemTransitionGrace: true, restoreWindow: true)
         guard attempt < 8 else { return }
@@ -653,6 +653,13 @@ public final class FocusLock {
     private func handleActivated(_ app: NSRunningApplication) {
         guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+        if let id = app.bundleIdentifier, spec.selectedWindowIDsByApp[id] != nil,
+           let window = WorkspaceWindow.focused(), window.bundle == id,
+           !spec.permitsWindow(window.id, bundleIdentifier: id) {
+            // Let the window-scoped focus pass restore a permitted target; never
+            // remember this blocked window as our recovery destination.
+            return
+        }
         if let id = app.bundleIdentifier, app.activationPolicy == .regular,
            spec.permitsApplication(id),
            id != "com.spotify.client" || spec.allowSpotifyForeground || spec.accessMode == .blacklist {
@@ -665,7 +672,7 @@ public final class FocusLock {
         if FocusForegroundPolicy.shouldImmediatelyReject(
             bundleIdentifier: app.bundleIdentifier,
             accessMode: spec.accessMode,
-            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             isRegularApplication: app.activationPolicy == .regular
         ) {
             refocus(ignoreSystemTransitionGrace: true)
@@ -675,7 +682,7 @@ public final class FocusLock {
         if FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
             bundleIdentifier: app.bundleIdentifier,
             isRegularApplication: app.activationPolicy == .regular,
-            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             accessMode: spec.accessMode
         ) {
             return
@@ -743,7 +750,7 @@ public final class FocusLock {
         // a forbidden window is visibly occupying the new Space.
         if let visible = PermittedWindowRecovery.visibleApplication(),
            FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible.bundleIdentifier,
-                accessMode: spec.accessMode, controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+                accessMode: spec.accessMode, controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
                 missionControlActive: isMissionControlActive()) {
             refocus(ignoreSystemTransitionGrace: true, restoreWindow: true)
             return
@@ -752,7 +759,7 @@ public final class FocusLock {
         if FocusForegroundPolicy.shouldImmediatelyReject(
             bundleIdentifier: frontmost.bundleIdentifier,
             accessMode: spec.accessMode,
-            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             isRegularApplication: frontmost.activationPolicy == .regular
         ) {
             refocus(ignoreSystemTransitionGrace: true)
@@ -762,13 +769,30 @@ public final class FocusLock {
         if FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
             bundleIdentifier: frontmost.bundleIdentifier,
             isRegularApplication: frontmost.activationPolicy == .regular,
-            controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+            controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             accessMode: spec.accessMode
         ) {
             return
         }
 
         if shouldWaitForSystemSwitcher(bundleIdentifier: frontmost.bundleIdentifier) {
+            return
+        }
+
+        if let bundle = frontmost.bundleIdentifier, spec.selectedWindowIDsByApp[bundle] != nil,
+           let window = WorkspaceWindow.focused(), !spec.permitsWindow(window.id, bundleIdentifier: bundle) {
+            let candidates: Set<UInt32>
+            if spec.accessMode == .whitelist { candidates = spec.selectedWindowIDsByApp[bundle] ?? [] }
+            else { candidates = Set(WorkspaceWindow.list().filter { $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle) }.map(\.id)) }
+            if WorkspaceWindow.raise(ids: candidates, bundle: bundle) { return }
+            // A blacklist may exclude the only window in this application.
+            // Recover to another permitted application without ending the lock.
+            if let fallback = WorkspaceWindow.list(onScreen: false).first(where: {
+                $0.bundle != Bundle.main.bundleIdentifier && $0.id != window.id
+                    && spec.permitsWindow($0.id, bundleIdentifier: $0.bundle)
+            }), WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle) { return }
+            // No usable destination: release instead of trapping the computer.
+            stopForSafety()
             return
         }
 
@@ -863,7 +887,7 @@ public final class FocusLock {
            FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
                bundleIdentifier: ownerBundleIdentifier,
                isRegularApplication: owner.activationPolicy == .regular,
-               controlledBundleIdentifiers: spec.allowedBundleIdentifiers,
+               controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
                accessMode: spec.accessMode
            ) {
             return true
@@ -871,7 +895,7 @@ public final class FocusLock {
         return FocusClickTargetPolicy.shouldAllow(
             ownerBundleIdentifier: target.ownerBundleIdentifier,
             representedBundleIdentifier: target.representedBundleIdentifier,
-            allowedBundleIdentifiers: spec.allowedBundleIdentifiers,
+            allowedBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             intentBundleIdentifier: Bundle.main.bundleIdentifier,
             accessMode: spec.accessMode,
             isMenuBarClick: isMenuBarClick(point)

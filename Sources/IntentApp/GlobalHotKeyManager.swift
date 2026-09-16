@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Foundation
 import IntentLock
+import IntentCore
 
 struct OverlayShortcut: Codable, Equatable {
     let keyCode: UInt32
@@ -256,6 +257,10 @@ final class GlobalHotKeyManager {
     var safetyHandler: (() -> Void)?
     var finishHandler: (() -> Void)?
     var selectionHandler: (() -> Void)?
+    var markHandler: (() -> Void)?
+    var runMarkedHandler: (() -> Void)?
+    var markedModeHandler: (() -> Void)?
+    private let markMonitor = QuickMarkKeyMonitor()
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
     private var nextHotKeyID: UInt32 = 2
@@ -279,6 +284,18 @@ final class GlobalHotKeyManager {
         selectionRegistrationStatus = RegisterEventHotKey(OverlayShortcut.quickSelectionShortcut.keyCode,
                                                         OverlayShortcut.quickSelectionShortcut.modifiers, selectionID,
                                                         GetApplicationEventTarget(), 0, &selectionHotKeyRef)
+        markMonitor.onAction = { [weak self] action in
+            switch action {
+            case .single: self?.selectionHandler?()
+            case .mark: self?.markHandler?()
+            case .run: self?.runMarkedHandler?()
+            case .toggleMode: self?.markedModeHandler?()
+            }
+        }
+        if markMonitor.start() {
+            unregister(ref: &selectionHotKeyRef)
+            selectionRegistrationStatus = noErr
+        }
         _ = updateFinishShortcut(FinishShortcutStore.load())
         _ = register(OverlayShortcut(keyCode: UInt32(kVK_ANSI_Grave), modifiers: UInt32(cmdKey | shiftKey), keyLabel: "`"), id: UInt32.max - 3, ref: &saveHotKeyRef)
         _ = register(OverlayShortcut(keyCode: UInt32(kVK_Escape),

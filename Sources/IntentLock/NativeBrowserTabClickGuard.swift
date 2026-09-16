@@ -32,16 +32,20 @@ public enum NativeTabClickPolicy {
 /// Reuse is bounded and only valid for the same window, geometry and permissions.
 public struct TabBlurContinuity {
     private var context = ""
-    private var regions: [CGRect] = []
-    private var validatedAt = Date.distantPast
+    private var entries: [(rect: CGRect, seen: Date)] = []
     public init() {}
     public mutating func update(_ sample: [CGRect], context: String, complete: Bool, now: Date) -> [CGRect] {
-        if complete || self.context != context || now.timeIntervalSince(validatedAt) >= 0.6 {
-            regions = sample
-            self.context = context
-            validatedAt = complete ? now : .distantPast
+        if self.context != context || complete { entries = [] }
+        self.context = context
+        entries.removeAll { now.timeIntervalSince($0.seen) >= 0.6 }
+        // A bounded AX scan often reaches only some Firefox sidebar rows.
+        // Renew each validated row independently instead of dropping/recreating
+        // the entire strip whenever a later branch hits its deadline.
+        for rect in sample {
+            if let index = entries.firstIndex(where: { $0.rect == rect }) { entries[index].seen = now }
+            else { entries.append((rect, now)) }
         }
-        return regions
+        return entries.map(\.rect)
     }
 }
 
@@ -105,7 +109,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         // Page-selection drags invalidate click hit testing, not visual content.
         // The scanner continues to validate geometry while the mouse is held.
         guard !stopped, frontmostPID == pid,
-              Date().timeIntervalSince(updatedAt) < 0.45 else { return [] }
+              Date().timeIntervalSince(updatedAt) < 0.8 else { return [] }
         return visualRectangles
     }
 

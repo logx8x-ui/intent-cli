@@ -289,6 +289,9 @@ final class IntentRuntime {
                 else { self.quickSelectionController.toggle() }
             }
         }
+        hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground() } }
+        hotKeyManager?.runMarkedHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.runMarked() } }
+        hotKeyManager?.markedModeHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.toggleMarkedMode() } }
         hotKeyManager?.finishHandler = { [weak self] in
             Task { @MainActor in self?.model.endActiveSession() }
         }

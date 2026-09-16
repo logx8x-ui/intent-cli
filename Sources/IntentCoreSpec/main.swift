@@ -25,6 +25,49 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    do {
+        var gesture = QuickMarkGesture()
+        try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0).consume, "Backtick is owned by Intent")
+        _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.05)
+        try expect(gesture.expire(now: 0.2) == nil, "First press waits for a double press")
+        try expect(gesture.expire(now: 0.34) == .single, "Single press opens picker exactly once")
+        try expect(gesture.expire(now: 0.5) == nil, "Single action cannot repeat")
+        gesture.reset()
+        _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
+        _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.05)
+        try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0.17).action == .mark, "Double backtick marks without opening picker")
+        _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
+        try expect(gesture.expire(now: 1) == nil, "Double press cancels single action")
+        for code in [36, 76, 44] {
+            gesture.reset()
+            _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
+            let result = gesture.key(code: code, down: true, modified: false, repeatKey: false, now: 0.1)
+            try expect(result.consume && result.action == (code == 44 ? .toggleMode : .run), "Held backtick chord dispatches once")
+            try expect(gesture.key(code: code, down: true, modified: false, repeatKey: true, now: 0.11).action == nil, "Held chord does not repeat")
+            try expect(gesture.key(code: code, down: false, modified: false, repeatKey: false, now: 0.12).consume, "Chord key-up cannot leak to the application")
+            _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
+            try expect(gesture.expire(now: 1) == nil, "Chord never opens picker afterward")
+        }
+        gesture.reset()
+        try expect(!gesture.key(code: 50, down: true, modified: true, repeatKey: false, now: 0).consume, "Finish/save shortcuts pass to Carbon")
+        try expect(!gesture.key(code: 36, down: true, modified: false, repeatKey: false, now: 0.1).consume, "Return alone stays normal")
+        var marked = QuickSelection()
+        marked.toggleWindow(42, app: "test.app"); marked.toggleWindow(43, app: "test.app")
+        try expect(marked.apps == ["test.app"] && marked.windowIDsByApp["test.app"] == [42, 43], "Multiple windows belong to one application")
+        marked.toggleWindow(42, app: "test.app")
+        try expect(marked.windowIDsByApp["test.app"] == [43], "Double mark removes only that window")
+        var spec = FocusSessionSpec.make(for: try marked.makeIntention(apps: [.init(name: "Test", bundleIdentifier: "test.app")], snapshots: []))
+        spec.selectedWindowIDsByApp = marked.windowIDsByApp
+        try expect(spec.permitsWindow(43, bundleIdentifier: "test.app") && !spec.permitsWindow(42, bundleIdentifier: "test.app"), "Whitelist uses exact marked window IDs")
+        try expect(spec.deferringBrowserWebsiteStartupToGuard().selectedWindowIDsByApp == spec.selectedWindowIDsByApp, "Browser startup deferral preserves window scope")
+        marked.accessMode = .blacklist
+        var blocked = FocusSessionSpec.make(for: try marked.makeIntention(apps: [.init(name: "Test", bundleIdentifier: "test.app")], snapshots: []))
+        blocked.selectedWindowIDsByApp = marked.windowIDsByApp
+        try expect(!blocked.permitsWindow(43, bundleIdentifier: "test.app") && blocked.permitsWindow(42, bundleIdentifier: "test.app"), "Blacklist only blocks the marked window")
+        try expect(blocked.applicationWideControlledBundleIdentifiers.isEmpty, "Window-only blacklisting never blocks the entire app")
+        marked.toggleWindow(43, app: "test.app")
+        try expect(marked.apps.isEmpty && marked.windowIDsByApp.isEmpty, "Removing final window clears its application")
+    }
     let clickTabs = [
         BrowserTabItem(id: 11, windowID: 1, index: 0, title: "Same title", url: "https://example.com", active: true),
         BrowserTabItem(id: 12, windowID: 1, index: 1, title: "Same title", url: "https://example.com", active: false),
@@ -64,6 +107,14 @@ do {
     try expect(!FocusBlurPolicy.valid(CGRect(x: 0, y: 0, width: 0, height: 10)), "Empty blur regions are rejected")
     try expect(!FocusBlurPolicy.valid(CGRect(x: CGFloat.infinity, y: 0, width: 10, height: 10)), "Invalid AX positions are rejected")
     for browser in ["org.mozilla.firefox", "com.google.Chrome"] {
+        var partial = TabBlurContinuity()
+        let partialTime = Date()
+        let firstRow = CGRect(x: 0, y: 0, width: 200, height: 28)
+        let secondRow = firstRow.offsetBy(dx: 0, dy: 30)
+        _ = partial.update([firstRow, secondRow], context: browser, complete: true, now: partialTime)
+        try expect(partial.update([firstRow], context: browser, complete: false, now: partialTime.addingTimeInterval(0.2)).count == 2, "Partial sidebar scans preserve other recently verified rows")
+        _ = partial.update([firstRow], context: browser, complete: false, now: partialTime.addingTimeInterval(0.5))
+        try expect(partial.update([], context: browser, complete: false, now: partialTime.addingTimeInterval(0.7)) == [firstRow], "Each validated row has its own bounded lifetime")
         var continuity = TabBlurContinuity()
         let now = Date()
         let region = CGRect(x: 10, y: 10, width: 90, height: 24)

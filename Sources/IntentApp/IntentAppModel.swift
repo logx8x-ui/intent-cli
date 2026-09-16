@@ -70,6 +70,7 @@ final class IntentAppModel: ObservableObject {
     private var purposeTemporaryIntention: Intention?
     private var purposeStatedPrompt: String?
     private var purposeUsageTracker: PurposeSessionUsageTracker?
+    private var quickSelectionWindowIDs: [String: Set<UInt32>] = [:]
     private var quickSelectionTabIDs: [String: [Int]]?
     private var quickSelectionIntentionID: String?
     private var firstIntentionID: String?
@@ -116,6 +117,7 @@ final class IntentAppModel: ObservableObject {
             }
             errorMessage = nil
             quickSelectionIntentionID = intention.id
+            quickSelectionWindowIDs = selection.windowIDsByApp
             quickSelectionTabIDs = selection.accessMode == .whitelist ? selection.tabIDsByBrowser : nil
             purposeTemporaryIntention = intention
             purposeStatedPrompt = "your Quick Focus selection"
@@ -1242,18 +1244,26 @@ final class IntentAppModel: ObservableObject {
 
         // Browser Guard owns website-tab creation once its rules are active. The lock
         // only activates each browser so two independent launch paths cannot race.
-        let lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
+        var lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
+        if quickSelectionIntentionID == intention.id { lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs }
         let lock = FocusLock(spec: lockSpec)
         activeLock = lock
         activeSessionID = intention.id
         activeSessionIntention = intention
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
-        if quickSelectionIntentionID == intention.id, let tabIDs = quickSelectionTabIDs, !tabIDs.isEmpty {
+        if quickSelectionIntentionID == intention.id, !(quickSelectionTabIDs ?? [:]).isEmpty || !quickSelectionWindowIDs.isEmpty {
+            let tabIDs = quickSelectionTabIDs ?? [:]
+            let windowIDs = Set(quickSelectionWindowIDs.values.flatMap { $0 })
             quickSelectionMonitor = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard !Task.isCancelled, let self, self.activeSessionID == intention.id else { return }
+                    if !windowIDs.isEmpty, !windowIDs.isSubset(of: Set(WorkspaceWindow.list(onScreen: false).map(\.id))) {
+                        self.activeLock?.stop()
+                        self.errorMessage = "A marked window closed, so the intention ended safely."
+                        return
+                    }
                     for (browser, selected) in tabIDs {
                         guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5),
                               BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {

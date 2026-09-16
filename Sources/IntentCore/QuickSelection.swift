@@ -11,6 +11,13 @@ public struct QuickSelection {
     public var accessMode: IntentionAccessMode = .whitelist
     public var apps: Set<String> = []
     public var tabs: Set<QuickSelectionTab> = []
+    public var windowIDsByApp: [String: Set<UInt32>] = [:]
+    public mutating func toggleWindow(_ id: UInt32, app: String) {
+        var ids = windowIDsByApp[app] ?? []
+        if ids.remove(id) == nil { ids.insert(id) }
+        if ids.isEmpty { windowIDsByApp.removeValue(forKey: app); apps.remove(app) }
+        else { windowIDsByApp[app] = ids; apps.insert(app) }
+    }
     public var restrictionNodes: [RestrictionNode] = []
     public var frictionNodes: [FrictionNode] = []
     public static let startupSuppressionID = "quick-selection-current-session-startup"
@@ -19,6 +26,7 @@ public struct QuickSelection {
     public static let browsers: Set<String> = ["org.mozilla.firefox", "com.google.Chrome"]
 
     public mutating func toggleApp(_ identifier: String, snapshots: [BrowserTabSnapshot]) {
+        windowIDsByApp.removeValue(forKey: identifier)
         if apps.remove(identifier) != nil {
             tabs = tabs.filter { $0.browser != identifier }
         } else {

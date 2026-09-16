@@ -41,6 +41,7 @@ final class FocusBlurController: @unchecked Sendable {
     private var captureInFlight = false // main queue only
     private var displayedRectangles: [CGRect] = []
     private var displayRevision = 0
+    private var displayContext = ""
 
     init(spec: FocusSessionSpec, tabGuard: NativeBrowserTabClickGuard) {
         self.spec = spec
@@ -82,7 +83,11 @@ final class FocusBlurController: @unchecked Sendable {
         if dockOverlay {
             rectangles = missionControlRegions()
         } else {
-            rectangles = tabGuard.blurRegions(frontmostPID: foregroundPID)
+            // Other windows of an allowed application can still be excluded by
+            // a quick workspace selection. Only cover the actual foreground one.
+            if let front = WorkspaceWindow.focused(), !spec.permitsWindow(front.id, bundleIdentifier: front.bundle) {
+                rectangles = [front.frame]
+            } else { rectangles = tabGuard.blurRegions(frontmostPID: foregroundPID) }
         }
         scanDetails["dockOverlay"] = dockOverlay ? 1 : 0
         scanDetails["mappedRegions"] = rectangles.count
@@ -92,7 +97,7 @@ final class FocusBlurController: @unchecked Sendable {
             let url = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("focus-blur-diagnostics.json")
             if let data = try? JSONSerialization.data(withJSONObject: scanDetails) { try? data.write(to: url, options: .atomic) }
         }
-        let validRectangles = rectangles.filter(FocusBlurPolicy.valid)
+        let validRectangles = rectangles.filter(FocusBlurPolicy.valid).sorted { $0.minY == $1.minY ? $0.minX < $1.minX : $0.minY < $1.minY }
         let sourceWindows = windows.compactMap { window -> NSNumber? in
             guard window[kCGWindowOwnerPID as String] as? pid_t != ProcessInfo.processInfo.processIdentifier else { return nil }
             return window[kCGWindowNumber as String] as? NSNumber
@@ -101,6 +106,8 @@ final class FocusBlurController: @unchecked Sendable {
             guard let self, self.current(token), Date().timeIntervalSince(sampledAt) < 0.35,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID else { return }
             // Geometry renews the watchdog independently of slow WindowServer/GPU work.
+            let context = "\(foregroundPID ?? 0):\(dockOverlay)"
+            if self.displayContext != context { self.clear(); self.displayContext = context }
             self.show(validRectangles)
             guard !self.captureInFlight, !validRectangles.isEmpty else { return }
             self.captureInFlight = true
@@ -108,9 +115,20 @@ final class FocusBlurController: @unchecked Sendable {
             Task.detached(priority: .utility) { [weak self] in
                 guard let self else { return }
                 let content = CGPreflightScreenCaptureAccess() ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) : nil
+                // Capture the tab strip once, rather than one WindowServer/GPU
+                // round-trip per tab. All rows now come from the same frame.
+                let union = validRectangles.reduce(CGRect.null) { $0.union($1) }
+                let shared = await self.capture(union, content: content, legacyWindows: sourceWindows)
                 var images: [CGImage?] = []
                 for rect in validRectangles {
-                    guard self.current(token), let capture = await self.capture(rect, content: content, legacyWindows: sourceWindows) else { images.append(nil); continue }
+                    guard self.current(token) else { images.append(nil); continue }
+                    let capture: CGImage?
+                    if let shared {
+                        let sx = CGFloat(shared.width) / union.width
+                        let sy = CGFloat(shared.height) / union.height
+                        capture = shared.cropping(to: CGRect(x: (rect.minX - union.minX) * sx, y: (rect.minY - union.minY) * sy, width: rect.width * sx, height: rect.height * sy))
+                    } else { capture = await self.capture(rect, content: content, legacyWindows: sourceWindows) }
+                    guard let capture else { images.append(nil); continue }
                     let source = CIImage(cgImage: capture)
                     let scale = CGFloat(capture.width) / rect.width
                     let blurred = source.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: FocusBlurPolicy.radius(for: rect.height) * scale]).cropped(to: source.extent)
@@ -124,6 +142,7 @@ final class FocusBlurController: @unchecked Sendable {
                           NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID else { return }
                     for (panel, image) in zip(self.panels, renderedImages) {
                         (panel.contentView as? FocusBlurView)?.update(image, moved: false)
+                        if image != nil && !panel.isVisible { panel.orderFrontRegardless() }
                     }
                 }
             }
@@ -163,7 +182,7 @@ final class FocusBlurController: @unchecked Sendable {
                   let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
                   let bundle = app.bundleIdentifier,
                   let title = window[kCGWindowName as String] as? String, !title.isEmpty else { continue }
-            var blocked = !spec.permitsApplication(bundle)
+            var blocked = !spec.permitsWindow(window[kCGWindowNumber as String] as? UInt32 ?? 0, bundleIdentifier: bundle)
             if !blocked, QuickSelection.browsers.contains(bundle),
                let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: bundle).load(),
                let allTabs = snapshot.allTabs,
@@ -244,12 +263,12 @@ final class FocusBlurController: @unchecked Sendable {
             let moved = panel.frame != frame
             if moved { panel.setFrame(frame, display: false) }
             (panel.contentView as? FocusBlurView)?.update(nil, moved: moved)
-            if !panel.isVisible { panel.orderFrontRegardless() }
+            if (panel.contentView as? FocusBlurView)?.hasImage == true && !panel.isVisible { panel.orderFrontRegardless() }
         }
         // A stalled scanner can never leave old masks over unrelated content.
         let expiry = DispatchWorkItem { [weak self] in self?.clear() }
         self.expiry = expiry
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: expiry)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: expiry)
     }
 
     private func clear() {
@@ -272,10 +291,12 @@ private final class FocusBlurView: NSView {
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { nil }
+    var hasImage: Bool { imageLayer.contents != nil }
     func update(_ image: CGImage?, moved: Bool) {
-        // A single failed capture must not flash the material fallback. Never
-        // retain an old image after the region moves to different content.
-        if image == nil, !moved, imageLayer.contents != nil { return }
+        // Keep the last blurred pixels during geometry/capture refresh. The
+        // controller clears all panels on a browser/Mission Control context change.
+        // Never alternate clear pixels and blur while a window animates.
+        guard let image else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         imageLayer.contents = image
