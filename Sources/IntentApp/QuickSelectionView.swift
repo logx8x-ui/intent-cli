@@ -44,15 +44,24 @@ final class QuickSelectionController: ObservableObject {
     private func freshSnapshots(for browsers: Set<String>) async -> Bool {
         guard !browsers.isEmpty else { return true }
         let requestedAt = Date()
-        for browser in browsers {
-            guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5) else { return false }
-            do { try BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot)) }
-            catch { return false }
-        }
-        for _ in 0..<30 {
+        // Reconnects and a busy native host must get a bounded chance to recover.
+        // Resend lost discovery commands, but never accept an old cached snapshot.
+        for attempt in 0..<60 {
             guard !Task.isCancelled else { return false }
+            var allReady = true
+            for browser in browsers {
+                let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).heartbeat()
+                switch QuickMarkRecovery.connection(heartbeat) {
+                case .updateRequired: return false
+                case .reconnecting: allReady = false
+                case .ready:
+                    if attempt % 20 == 0 || attempt == 1 {
+                        try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot))
+                    }
+                }
+            }
             let current = browsers.compactMap { BrowserTabSnapshotStore(browserBundleIdentifier: $0).load() }
-            if current.count == browsers.count, current.allSatisfy({ $0.updatedAt >= requestedAt }) {
+            if allReady, current.count == browsers.count, current.allSatisfy({ QuickMarkRecovery.accepts($0, requestedAt: requestedAt) }) {
                 snapshots.removeAll { browsers.contains($0.browserBundleIdentifier) }
                 snapshots.append(contentsOf: current)
                 return true
@@ -74,11 +83,14 @@ final class QuickSelectionController: ObservableObject {
             if QuickSelection.browsers.contains(window.bundle) {
                 let fresh = await self.freshSnapshots(for: [window.bundle])
                 guard !Task.isCancelled, self.markGeneration == markToken, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
-                guard fresh,
-                      let stillFocused = WorkspaceWindow.focused(), stillFocused.id == window.id, stillFocused.title == window.title,
-                      let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
-                      let browserWindow = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == window.bundle }.count) else {
-                    self.model.errorMessage = "Couldn't confirm the current tab. Keep it open, check Browser Guard, then double-press ` again."; self.model.showOverlay(); return
+                let stillFocused = WorkspaceWindow.focused()
+                guard QuickMarkRecovery.matchesTarget(originalID: window.id, originalPID: window.pid,
+                                                      currentID: stillFocused?.id, currentPID: stillFocused?.pid) else { return }
+                guard fresh, let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
+                      let browserWindow = BrowserWindowMatching.match(title: stillFocused?.title ?? window.title, tabs: snapshot.tabs,
+                          nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == window.bundle }.count) else {
+                    self.showMarkRecovery(for: window.bundle, fresh: fresh)
+                    return
                 }
                 guard !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
                 if !self.hasStagedSelection { self.selection = QuickSelection() }
@@ -93,6 +105,7 @@ final class QuickSelectionController: ObservableObject {
                 if !self.hasStagedSelection { self.selection = QuickSelection() }
                 self.selection.toggleWindow(window.id, app: window.bundle)
             }
+            self.dismissMarkNotice()
             self.hasStagedSelection = true
             self.workspaceOutlines.update(self.selection)
         }
@@ -121,8 +134,40 @@ final class QuickSelectionController: ObservableObject {
             } else { self.model.showOverlay() }
         }
     }
+    private var markNoticePanel: NSPanel?
+    private var markNoticeDismissal: DispatchWorkItem?
+    private func dismissMarkNotice() {
+        markNoticeDismissal?.cancel(); markNoticeDismissal = nil
+        markNoticePanel?.orderOut(nil); markNoticePanel = nil
+    }
+    private func showMarkRecovery(for browser: String, fresh: Bool) {
+        // A failed quick mark must never open the dashboard or a blocking alert.
+        let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).heartbeat()
+        let connection = QuickMarkRecovery.connection(heartbeat)
+        let name = browser == "com.google.Chrome" ? "Chrome" : "Firefox"
+        let text: String
+        switch connection {
+        case .updateRequired: text = "\(name) Browser Guard needs an update to select tabs."
+        case .reconnecting: text = "\(name) Browser Guard is disconnected. Your selections are safe."
+        case .ready: text = fresh ? "This tab is still changing. Try marking it once it settles." : "\(name) is taking longer to respond. Try marking again."
+        }
+        dismissMarkNotice()
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
+        let frame = CGRect(x: screen.visibleFrame.midX - 210, y: screen.visibleFrame.minY + 24, width: 420, height: 90)
+        let notice = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        notice.isOpaque = false; notice.backgroundColor = .clear; notice.hasShadow = true; notice.hidesOnDeactivate = false
+        notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        notice.contentView = NSHostingView(rootView: QuickMarkRecoveryNotice(text: text, needsSetup: connection != .ready, setup: { [weak self] in
+            self?.dismissMarkNotice(); IntentBrowserSetup.open(browser)
+        }, close: { [weak self] in self?.dismissMarkNotice() }))
+        markNoticePanel = notice; notice.orderFrontRegardless()
+        let dismissal = DispatchWorkItem { [weak self] in self?.dismissMarkNotice() }
+        markNoticeDismissal = dismissal
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: dismissal)
+    }
     func clearMarks() {
         guard !model.hasActiveSession else { return }
+        dismissMarkNotice()
         markGeneration = UUID()
         markTask?.cancel(); markTask = nil
         runMarkedTask?.cancel()
@@ -692,5 +737,24 @@ private struct TabSiteIcon: View {
                 icon = NSImage(data: data)
             }
         }
+    }
+}
+
+private struct QuickMarkRecoveryNotice: View {
+    let text: String
+    let needsSetup: Bool
+    let setup: () -> Void
+    let close: () -> Void
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(text).font(.system(size: 13, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                if needsSetup { Button("Browser Guard setup", action: setup).buttonStyle(.plain).foregroundStyle(.green) }
+            }
+            Spacer(minLength: 0)
+            Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Dismiss")
+        }.padding(16).frame(width: 420, height: 90).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .preferredColorScheme(.dark)
     }
 }

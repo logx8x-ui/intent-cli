@@ -68,6 +68,18 @@ do {
         marked.toggleWindow(43, app: "test.app")
         try expect(marked.apps.isEmpty && marked.windowIDsByApp.isEmpty, "Removing final window clears its application")
     }
+    let recoveryNow = Date()
+    try expect(QuickMarkRecovery.connection(nil, now: recoveryNow) == .reconnecting, "Missing bridge gets a reconnect opportunity")
+    try expect(QuickMarkRecovery.connection(.init(lastSeenAt: recoveryNow, extensionVersion: "0.2.5"), now: recoveryNow) == .updateRequired, "Old Firefox is identified as an update issue, not a tab error")
+    try expect(QuickMarkRecovery.connection(.init(lastSeenAt: recoveryNow, capabilities: [BrowserGuardCapability.quickSelection.rawValue]), now: recoveryNow) == .ready, "Capable current bridge is ready")
+    try expect(QuickMarkRecovery.connection(.init(lastSeenAt: recoveryNow.addingTimeInterval(-10), capabilities: [BrowserGuardCapability.quickSelection.rawValue]), now: recoveryNow) == .reconnecting, "Stale heartbeat must not authorize stale tab data")
+    try expect(QuickMarkRecovery.matchesTarget(originalID: 42, originalPID: 7, currentID: 42, currentPID: 7), "Unchanged window remains valid when its document title changes")
+    try expect(!QuickMarkRecovery.matchesTarget(originalID: 42, originalPID: 7, currentID: 43, currentPID: 7), "Focus moving to another window cancels the mark")
+    try expect(!QuickMarkRecovery.matchesTarget(originalID: 42, originalPID: 7, currentID: nil, currentPID: nil), "Lost focus cancels safely")
+    let recoveryTab = BrowserTabItem(id: 1, windowID: 2, index: 0, title: "Test", url: "https://example.com", active: true)
+    try expect(!QuickMarkRecovery.accepts(.init(browserBundleIdentifier: "com.google.Chrome", tabs: [], updatedAt: recoveryNow), requestedAt: recoveryNow), "Empty idle snapshot cannot complete discovery")
+    try expect(!QuickMarkRecovery.accepts(.init(browserBundleIdentifier: "com.google.Chrome", tabs: [recoveryTab], updatedAt: recoveryNow.addingTimeInterval(-1)), requestedAt: recoveryNow), "Stale tab snapshot is rejected")
+    try expect(QuickMarkRecovery.accepts(.init(browserBundleIdentifier: "com.google.Chrome", tabs: [recoveryTab], updatedAt: recoveryNow), requestedAt: recoveryNow), "Fresh discovery with an active tab is accepted")
     let clickTabs = [
         BrowserTabItem(id: 11, windowID: 1, index: 0, title: "Same title", url: "https://example.com", active: true),
         BrowserTabItem(id: 12, windowID: 1, index: 1, title: "Same title", url: "https://example.com", active: false),

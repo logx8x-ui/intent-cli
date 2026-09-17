@@ -75,6 +75,11 @@ assert.ok(
   "Release verification must check the Mozilla signature"
 );
 
+const quickSelectionUI = read("Sources/IntentApp/QuickSelectionView.swift");
+assert.ok(!quickSelectionUI.includes("Couldn't confirm the current tab."), "Quick marks must not resurrect the blocking tab-confirmation alert");
+const markRecovery = quickSelectionUI.slice(quickSelectionUI.indexOf("private func showMarkRecovery"), quickSelectionUI.indexOf("func clearMarks"));
+assert.ok(!/runModal|errorMessage|showOverlay/.test(markRecovery), "Quick-mark recovery must remain nonmodal and leave the dashboard alone");
+
 const desktopApp = read("Sources/IntentApp/IntentDesktopApp.swift");
 assert.ok(
   desktopApp.includes("IntentMenuBarIcon.makeImage()"),
