@@ -257,6 +257,7 @@ final class GlobalHotKeyManager {
     var safetyHandler: (() -> Void)?
     var finishHandler: (() -> Void)?
     var selectionHandler: (() -> Void)?
+    var markWindowHandler: (() -> Void)?
     var markHandler: (() -> Void)?
     var runMarkedHandler: (() -> Void)?
     var clearMarksHandler: (() -> Void)?
@@ -288,6 +289,7 @@ final class GlobalHotKeyManager {
         markMonitor.onAction = { [weak self] action in
             switch action {
             case .single: self?.selectionHandler?()
+            case .markWindow: self?.markWindowHandler?()
             case .mark: self?.markHandler?()
             case .run: self?.runMarkedHandler?()
             case .clear: self?.clearMarksHandler?()

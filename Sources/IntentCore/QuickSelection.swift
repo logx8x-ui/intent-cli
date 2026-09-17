@@ -7,7 +7,15 @@ public struct QuickSelectionTab: Hashable {
     public init(browser: String, id: Int) { self.browser = browser; self.id = id }
 }
 
+public struct QuickSelectionBrowserWindow: Hashable {
+    public var browser: String
+    public var id: Int
+    public init(browser: String, id: Int) { self.browser = browser; self.id = id }
+}
+
 public struct QuickSelection {
+    /// Visual scope only. Enforcement still uses the exact selected tab IDs.
+    public var browserWindowTabs: [QuickSelectionBrowserWindow: Set<Int>] = [:]
     public var accessMode: IntentionAccessMode = .whitelist
     public var apps: Set<String> = []
     public var tabs: Set<QuickSelectionTab> = []
@@ -26,6 +34,7 @@ public struct QuickSelection {
     public static let browsers: Set<String> = ["org.mozilla.firefox", "com.google.Chrome"]
 
     public mutating func toggleApp(_ identifier: String, snapshots: [BrowserTabSnapshot]) {
+        browserWindowTabs = browserWindowTabs.filter { $0.key.browser != identifier }
         windowIDsByApp.removeValue(forKey: identifier)
         if apps.remove(identifier) != nil {
             tabs = tabs.filter { $0.browser != identifier }
@@ -38,16 +47,23 @@ public struct QuickSelection {
     }
 
     public mutating func toggleTab(_ key: QuickSelectionTab) {
+        browserWindowTabs = browserWindowTabs.filter { $0.key.browser != key.browser || !$0.value.contains(key.id) }
         if tabs.remove(key) == nil { tabs.insert(key); apps.insert(key.browser) }
         if !tabs.contains(where: { $0.browser == key.browser }) { apps.remove(key.browser) }
     }
 
-    public mutating func toggleBrowserWindow(browser: String, windowID: Int, snapshots: [BrowserTabSnapshot]) {
+    public mutating func toggleBrowserWindow(browser: String, windowID: Int, snapshots: [BrowserTabSnapshot], outlineWholeWindow: Bool = false) {
         let keys = Set((snapshots.first { $0.browserBundleIdentifier == browser }?.tabs ?? [])
             .filter { $0.windowID == windowID && Self.isSelectable($0) }
             .map { QuickSelectionTab(browser: browser, id: $0.id) })
         guard !keys.isEmpty else { return }
-        if keys.isSubset(of: tabs) { tabs.subtract(keys) } else { tabs.formUnion(keys) }
+        let windowKey = QuickSelectionBrowserWindow(browser: browser, id: windowID)
+        browserWindowTabs.removeValue(forKey: windowKey)
+        if keys.isSubset(of: tabs) { tabs.subtract(keys) }
+        else {
+            tabs.formUnion(keys)
+            if outlineWholeWindow { browserWindowTabs[windowKey] = Set(keys.map(\.id)) }
+        }
         if tabs.contains(where: { $0.browser == browser }) { apps.insert(browser) }
         else { apps.remove(browser) }
     }

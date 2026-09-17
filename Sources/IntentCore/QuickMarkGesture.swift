@@ -2,7 +2,7 @@ import Foundation
 
 /// Pure key-state logic, independent of UI/event-tap delivery.
 public struct QuickMarkGesture {
-    public enum Action: Equatable { case single, mark, run, toggleMode, clear }
+    public enum Action: Equatable { case single, mark, markWindow, run, toggleMode, clear }
     public struct Result { public let consume: Bool; public let action: Action? }
     public static let doublePressInterval: TimeInterval = 0.28
     private var held = false
@@ -35,10 +35,10 @@ public struct QuickMarkGesture {
             pendingSingle = nil
             return .init(consume: true, action: nil)
         }
-        if down, held, !modified, [36, 76, 44, 53].contains(code) {
+        if down, held, !modified, [36, 76, 44, 53, 48].contains(code) {
             guard !repeatKey, !usedChord else { return .init(consume: true, action: nil) }
             usedChord = true; pendingSingle = nil; swallowed.insert(code)
-            return .init(consume: true, action: code == 53 ? .clear : (code == 44 ? .toggleMode : .run))
+            return .init(consume: true, action: code == 48 ? .markWindow : (code == 53 ? .clear : (code == 44 ? .toggleMode : .run)))
         }
         // Typing another key cancels an incomplete gesture; never open a picker
         // behind ongoing typing or a Command/Shift shortcut.

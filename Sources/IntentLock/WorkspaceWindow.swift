@@ -119,6 +119,11 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             let tabs = snapshot.tabs.filter { $0.windowID == id }
             let selectedIDs = Set(selection.tabs.filter { $0.browser == window.bundle }.map(\.id))
             guard tabs.contains(where: { selectedIDs.contains($0.id) }) else { continue }
+            if let whole = selection.browserWindowTabs[.init(browser: window.bundle, id: id)],
+               !whole.isEmpty, whole.isSubset(of: selectedIDs), whole == Set(tabs.filter(QuickSelection.isSelectable).map(\.id)) {
+                markedRegions[window.id] = [window.frame]
+                continue
+            }
             // Read background window chrome too so marks survive entering Mission Control.
             let scan = WorkspaceTabOutline.scan(window: window, tabs: tabs, selected: selectedIDs)
             let context = "\(window.pid):\(window.frame):\(tabs):\(selectedIDs.sorted())"

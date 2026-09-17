@@ -38,11 +38,11 @@ do {
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0.17).action == .mark, "Double backtick marks without opening picker")
         _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
         try expect(gesture.expire(now: 1) == nil, "Double press cancels single action")
-        for code in [36, 76, 44, 53] {
+        for code in [36, 76, 44, 53, 48] {
             gesture.reset()
             _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
             let result = gesture.key(code: code, down: true, modified: false, repeatKey: false, now: 0.1)
-            try expect(result.consume && result.action == (code == 53 ? .clear : (code == 44 ? .toggleMode : .run)), "Held backtick chord dispatches once")
+            try expect(result.consume && result.action == (code == 48 ? .markWindow : (code == 53 ? .clear : (code == 44 ? .toggleMode : .run))), "Held backtick chord dispatches once")
             try expect(gesture.key(code: code, down: true, modified: false, repeatKey: true, now: 0.11).action == nil, "Held chord does not repeat")
             try expect(gesture.key(code: code, down: false, modified: false, repeatKey: false, now: 0.12).consume, "Chord key-up cannot leak to the application")
             _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
@@ -155,6 +155,18 @@ do {
     fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 2, snapshots: [groupedSnapshot])
     fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot])
     try expect(fieldSelection.tabIDsByBrowser["com.google.Chrome"] == [21], "Deselecting a window must preserve the other selected window")
+    try expect(BrowserWindowMatching.sameWindowTitle("Papago - Google Chrome – Logavix", "Papago"), "Chrome AX profile suffix matches its WindowServer title")
+    try expect(!BrowserWindowMatching.sameWindowTitle("Other page - Google Chrome – Logavix", "Papago"), "Chrome title normalization never borrows another page")
+    try expect(!BrowserWindowMatching.sameWindowTitle("", ""), "Empty titles do not prove identity")
+    var wholeWindowSelection = QuickSelection()
+    wholeWindowSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot], outlineWholeWindow: true)
+    try expect(wholeWindowSelection.tabIDsByBrowser["com.google.Chrome"] == [11, 12], "Whole-window chord selects only that window's tabs")
+    try expect(wholeWindowSelection.browserWindowTabs[.init(browser: "com.google.Chrome", id: 1)] == [11, 12], "Whole-window selection gets a window border")
+    wholeWindowSelection.toggleTab(.init(browser: "com.google.Chrome", id: 11))
+    try expect(wholeWindowSelection.browserWindowTabs.isEmpty && wholeWindowSelection.tabIDsByBrowser["com.google.Chrome"] == [12], "Individual tab edit returns to tab-only outlines")
+    wholeWindowSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot], outlineWholeWindow: true)
+    wholeWindowSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot], outlineWholeWindow: true)
+    try expect(wholeWindowSelection.apps.isEmpty && wholeWindowSelection.tabs.isEmpty && wholeWindowSelection.browserWindowTabs.isEmpty, "Repeating whole-window chord clears its tabs and border")
     let usageNow = Date()
     let usageIDs = AppUsageEvidence.frequentIdentifiers(in: [
         .init(bundleIdentifier: "frequent", useCount: 25, lastUsedAt: usageNow.addingTimeInterval(-60)),

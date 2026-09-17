@@ -289,6 +289,7 @@ final class IntentRuntime {
                 else { self.quickSelectionController.toggle() }
             }
         }
+        hotKeyManager?.markWindowHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(wholeWindow: true) } }
         hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground() } }
         hotKeyManager?.runMarkedHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.runMarked() } }
         hotKeyManager?.clearMarksHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.clearMarks() } }

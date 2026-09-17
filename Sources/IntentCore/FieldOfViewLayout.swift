@@ -49,6 +49,11 @@ public enum BrowserWindowMatching {
         return matching.count == 1 ? matching.first : nil
     }
 
+    public static func sameWindowTitle(_ lhs: String, _ rhs: String) -> Bool {
+        let left = normalize(lhs), right = normalize(rhs)
+        return !left.isEmpty && !right.isEmpty && (titleMatches(left, right) || titleMatches(right, left))
+    }
+
     private static func titleMatches(_ native: String, _ tab: String) -> Bool {
         if native == tab { return true }
         // macOS can truncate a browser's window title even when the tab title is complete.

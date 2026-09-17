@@ -27,11 +27,13 @@ enum WorkspaceTabOutline {
         }
         let app = AXUIElementCreateApplication(window.pid)
         let windows = value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-        guard let root = windows.first(where: { element in
+        let matchingWindows = windows.filter { element in
             guard let rect = frame(element) else { return false }
             return abs(rect.minX - window.frame.minX) < 3 && abs(rect.minY - window.frame.minY) < 3
-                && abs(rect.width - window.frame.width) < 3 && text(element, kAXTitleAttribute) == window.title
-        }) else { return ([], false) }
+                && abs(rect.width - window.frame.width) < 3 && abs(rect.height - window.frame.height) < 3
+                && BrowserWindowMatching.sameWindowTitle(text(element, kAXTitleAttribute) ?? "", window.title)
+        }
+        guard matchingWindows.count == 1, let root = matchingWindows.first else { return ([], false) }
         var pending: [(AXUIElement, CGRect?)] = [(root, nil)]
         var cursor = 0; var regions: [CGRect] = []
         var visited = Set<CFHashCode>()
@@ -47,7 +49,8 @@ enum WorkspaceTabOutline {
                 else if sidebar == nil { continue }
             }
             let descendants = children(element)
-            let labels = [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].compactMap { text(element, $0) }
+            let labels = sidebar != nil && descendants.isEmpty
+                ? [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].compactMap { text(element, $0) } : []
             let matches = tabs.filter { tab in !tab.title.isEmpty && labels.contains { $0 == tab.title || $0.hasPrefix(tab.title + " - Memory usage - ") } }
             if let sidebar, descendants.isEmpty, !matches.isEmpty, matches.allSatisfy({ selected.contains($0.id) }), let bounds = frame(element) {
                 let row = CGRect(x: sidebar.minX + 2, y: bounds.minY - 5, width: sidebar.width - 4, height: bounds.height + 10).intersection(sidebar)

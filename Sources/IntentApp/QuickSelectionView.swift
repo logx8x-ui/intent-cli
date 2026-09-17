@@ -61,7 +61,7 @@ final class QuickSelectionController: ObservableObject {
         }
         return false
     }
-    func markForeground() {
+    func markForeground(wholeWindow: Bool = false) {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { toggle(); return }
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
@@ -77,13 +77,18 @@ final class QuickSelectionController: ObservableObject {
                 guard fresh,
                       let stillFocused = WorkspaceWindow.focused(), stillFocused.id == window.id, stillFocused.title == window.title,
                       let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
-                      let browserWindow = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == window.bundle }.count),
-                      let tab = snapshot.tabs.first(where: { $0.windowID == browserWindow && $0.active }), QuickSelection.isSelectable(tab) else {
+                      let browserWindow = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == window.bundle }.count) else {
                     self.model.errorMessage = "Couldn't confirm the current tab. Keep it open, check Browser Guard, then double-press ` again."; self.model.showOverlay(); return
                 }
                 guard !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
                 if !self.hasStagedSelection { self.selection = QuickSelection() }
-                self.selection.toggleTab(.init(browser: window.bundle, id: tab.id))
+                if wholeWindow {
+                    guard snapshot.tabs.contains(where: { $0.windowID == browserWindow && QuickSelection.isSelectable($0) }) else { return }
+                    self.selection.toggleBrowserWindow(browser: window.bundle, windowID: browserWindow, snapshots: self.snapshots, outlineWholeWindow: true)
+                } else {
+                    guard let tab = snapshot.tabs.first(where: { $0.windowID == browserWindow && $0.active }), QuickSelection.isSelectable(tab) else { return }
+                    self.selection.toggleTab(.init(browser: window.bundle, id: tab.id))
+                }
             } else {
                 if !self.hasStagedSelection { self.selection = QuickSelection() }
                 self.selection.toggleWindow(window.id, app: window.bundle)
@@ -121,7 +126,7 @@ final class QuickSelectionController: ObservableObject {
         markGeneration = UUID()
         markTask?.cancel(); markTask = nil
         runMarkedTask?.cancel()
-        selection.apps.removeAll(); selection.tabs.removeAll(); selection.windowIDsByApp.removeAll()
+        selection.apps.removeAll(); selection.tabs.removeAll(); selection.windowIDsByApp.removeAll(); selection.browserWindowTabs.removeAll()
         hasStagedSelection = false
         workspaceOutlines.stop()
     }
