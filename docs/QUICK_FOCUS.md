@@ -22,7 +22,7 @@ Physical acceptance still requires the installed matching app, native host and b
 
 ## Session controls
 
-The compact Session popover combines a Timer (typed duration or Start/End clock time), an in-session task checklist, browser searches, and cooldown. Removed pre-start options are not offered in this picker. Checklists start unchecked, and the last completed task ends the session. During a session **`** toggles the draggable timer/checklist panel. The picker keeps a clock at the top right and uses a green Allow/red Block perimeter.
+The bottom modification strip exposes Timer (typed duration or Start/End clock time), Checklist, Searches and Cooldown as individual controls with hover help and enabled indicators. Removed pre-start options are not offered in this picker. Checklists start unchecked, and the last completed task ends the session. During a session **`** toggles the draggable timer/checklist panel. The picker keeps a clock at the top right and uses a green Allow/red Block perimeter.
 
 ### September 16 verification
 
@@ -50,3 +50,15 @@ Quick-mark freshness follow-up: idle Browser Guard does not continuously publish
 The native host now renews snapshot timestamps for explicit discovery replies even when tab contents are unchanged; unsolicited duplicate snapshots still coalesce. `test-native-host-snapshot-refresh.cjs` exercises this handshake independently for Firefox and Chrome in temporary test directories and is included in `npm run test:native-host`.
 Live installed-bridge verification also passed: explicit idle discovery responded in 0.261 s on Firefox and 0.213 s on Chrome; a second request in each browser renewed the snapshot timestamp while the tab payload remained identical. This is bridge evidence, not physical double-press evidence.
 Final freshness build/install and signature/UUID verification passed. The native-host freshness, behavior and performance tests passed (8.0 MiB peak RSS); one earlier stress run exceeded its timed-write count while background-throttled during compilation, then passed unchanged after the build finished. No performance threshold was relaxed.
+
+## September 17 follow-up: tab identity and preview recovery
+
+- Staged browser marks outline actual native tab chrome or visible Firefox sidebar rows. Only native-window marks outline entire windows. Mission Control scales tab rectangles into uniquely matched window thumbnails; ambiguous titles are not guessed. Bounded partial-scan continuity avoids dropping valid outlines when AX runs out of time.
+- Hold backtick and press Escape to clear all staged tabs/windows, including queued marks. This does not stop an active intention. The double-backtick mapping is unchanged pending the shortcut decision.
+- Selected-tab sessions permit navigation, redirects and SPA channel changes within those exact tab IDs. Unselected tabs remain blocked, even with identical URLs. Saved website-based intentions retain their URL rules.
+- Previews now try off-screen named windows, reject transparent captures, retry failed captures, and reuse a matching in-memory capture where available. Real window names remain visible when macOS cannot supply pixels. Apps with no capturable window still have a named app card; no fabricated preview is shown.
+- Timer, Checklist, Searches and Cooldown are spread along the bottom. Each has its own editor, hover explanation and enabled indicator; the tab panel ends above this strip.
+
+Verification: CoreSpec, both complete extension suites, idle-work checks, release readiness, extension lint (zero errors/warnings), extension packaging, optimized development installation and signature/installed UUID checks passed. Browser Guard 0.2.10 was reloaded in both browsers. Live selected-tab sessions allowed example.com to example.org navigation in both browsers, and switching Discord channels in Firefox without reversal. The original Discord channel was restored, disposable tabs closed, and the test intention ended without saving (active rules false). Live picker screenshots now show real Preview, Reminders, Music, Spotify, RStudio, Firefox, Chrome, ChatGPT and Finder windows; windowless QuickTime/TextEdit remain named cards. Timer editor and visible bottom strip were verified.
+
+Physical global gestures and native Mission Control tab-outline alignment remain unverified: generated double-backtick did not stage a selection in this automation environment. Firefox's running 0.2.10 copy remains temporary; permanent 0.2.5 is outdated, and Mozilla signing credentials are unavailable for a persistent update. No claim of restart persistence or universal OS-protected preview availability is made.

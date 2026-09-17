@@ -38,6 +38,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var tabPreviewLoading = false
     private let workspaceOutlines = WorkspaceOutlineController()
     private var hasStagedSelection = false
+    private var markGeneration = UUID()
     private var markTask: Task<Void, Never>?
     private var runMarkedTask: Task<Void, Never>?
     private func freshSnapshots(for browsers: Set<String>) async -> Bool {
@@ -64,14 +65,15 @@ final class QuickSelectionController: ObservableObject {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { toggle(); return }
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
+        let markToken = markGeneration
         let previous = markTask
         markTask = Task { [weak self] in
             await previous?.value
-            guard let self, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+            guard let self, !Task.isCancelled, self.markGeneration == markToken, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
             self.refresh()
             if QuickSelection.browsers.contains(window.bundle) {
                 let fresh = await self.freshSnapshots(for: [window.bundle])
-                guard !Task.isCancelled, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+                guard !Task.isCancelled, self.markGeneration == markToken, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
                 guard fresh,
                       let stillFocused = WorkspaceWindow.focused(), stillFocused.id == window.id, stillFocused.title == window.title,
                       let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
@@ -114,6 +116,15 @@ final class QuickSelectionController: ObservableObject {
             } else { self.model.showOverlay() }
         }
     }
+    func clearMarks() {
+        guard !model.hasActiveSession else { return }
+        markGeneration = UUID()
+        markTask?.cancel(); markTask = nil
+        runMarkedTask?.cancel()
+        selection.apps.removeAll(); selection.tabs.removeAll(); selection.windowIDsByApp.removeAll()
+        hasStagedSelection = false
+        workspaceOutlines.stop()
+    }
     func toggleMarkedMode() {
         guard !model.hasActiveSession else { return }
         if !hasStagedSelection, panel?.isVisible != true { selection = QuickSelection(); hasStagedSelection = true }
@@ -126,6 +137,8 @@ final class QuickSelectionController: ObservableObject {
     private var panel: NSPanel?
     private var monitor: Any?
     private var refreshTimer: Timer?
+    private var previewCache: [CGWindowID: WindowItem] = [:]
+    private var previewRetry = 0
     private var previewTask: Task<Void, Never>?
     private var previousApp: NSRunningApplication?
     private var wasOverlayVisible = false
@@ -161,7 +174,7 @@ final class QuickSelectionController: ObservableObject {
         optionsSection = nil; message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
         previousApp = NSWorkspace.shared.frontmostApplication
         wasOverlayVisible = model.overlayPresenter?.isOverlayVisible == true
-        refresh(); generation = UUID()
+        refresh(); generation = UUID(); previewRetry = 0
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
         // Capture coordinates are top-left; AppKit screens are bottom-left.
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
@@ -389,11 +402,15 @@ final class QuickSelectionController: ObservableObject {
                     }
                 }
                 let appByPID = Dictionary(uniqueKeysWithValues: self.apps.map { ($0.pid, $0.id) })
+                let invisibleIDs = Set((CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { entry -> CGWindowID? in
+                    guard let alpha = entry[kCGWindowAlpha as String] as? Double, alpha <= 0 else { return nil }
+                    return entry[kCGWindowNumber as String] as? CGWindowID
+                })
                 var seenWindowIDs = Set<CGWindowID>()
                 let candidates = content.windows.filter {
-                    $0.isOnScreen && $0.windowLayer == 0 && $0.frame.width > 140 && $0.frame.height > 140
+                    !invisibleIDs.contains($0.windowID) && $0.windowLayer == 0 && $0.frame.width > 140 && $0.frame.height > 140
                         && seenWindowIDs.insert($0.windowID).inserted
-                        && !($0.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        && ($0.isOnScreen || !($0.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         && $0.owningApplication.flatMap { appByPID[$0.processID] } != nil
                 }.sorted {
                     let rowA = Int($0.frame.midY / 120), rowB = Int($1.frame.midY / 120)
@@ -419,11 +436,28 @@ final class QuickSelectionController: ObservableObject {
                     items.append(contentsOf: batch)
                 }
                 guard !Task.isCancelled, self.generation == token else { return }
+                let liveIDs = Set(content.windows.map(\.windowID))
+                self.previewCache = self.previewCache.filter { liveIDs.contains($0.key) }
+                for index in items.indices {
+                    let item = items[index]
+                    if item.preview != nil { self.previewCache[item.id] = item }
+                    else if let cached = self.previewCache[item.id], cached.appID == item.appID, cached.title == item.title {
+                        items[index].preview = cached.preview
+                    }
+                }
                 for app in self.apps where !items.contains(where: { $0.appID == app.id }) {
                     items.append(.init(id: UInt32.max - UInt32(app.pid), appID: app.id, title: app.app.name,
                         sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
                 }
                 self.windows = items; self.loading = false; self.refresh()
+                if items.contains(where: { $0.preview == nil && liveIDs.contains($0.id) }), self.previewRetry < 2 {
+                    self.previewRetry += 1
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        guard let self, self.generation == token, !self.closing else { return }
+                        self.loadPreviews()
+                    }
+                }
                 // Mount at desktop positions before animating into the overview.
                 try? await Task.sleep(nanoseconds: 30_000_000)
                 guard self.generation == token, !self.closing else { return }
@@ -451,16 +485,28 @@ final class QuickSelectionController: ObservableObject {
             config.showsCursor = false; config.ignoreShadowsSingleWindow = true
             let filter = SCContentFilter(desktopIndependentWindow: window)
             image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-            if image == nil, !Task.isCancelled {
+            if image.map(Self.hasVisiblePixels) != true, !Task.isCancelled {
                 image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
             }
         }
-        if image == nil {
+        if image.map(Self.hasVisiblePixels) != true {
             image = CGWindowListCreateImage(.null, .optionIncludingWindow, window.windowID, [.boundsIgnoreFraming, .bestResolution])
         }
+        if let captured = image, !Self.hasVisiblePixels(captured) { image = nil }
         guard !Task.isCancelled else { return nil }
         return .init(id: window.windowID, appID: appID, title: window.title ?? "", sourceFrame: window.frame,
                      preview: image.map { NSImage(cgImage: $0, size: .zero) })
+    }
+    private static func hasVisiblePixels(_ image: CGImage) -> Bool {
+        // Some WindowServer surfaces report success but return transparent pixels.
+        // Treat those as failed captures, so retry/fallback can recover them.
+        var bytes = [UInt8](repeating: 0, count: 16 * 16 * 4)
+        return bytes.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 64,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 16, height: 16))
+            return stride(from: 3, to: buffer.count, by: 4).filter { buffer[$0] > 16 }.count > 8
+        }
     }
 }
 
@@ -501,14 +547,25 @@ private struct QuickSelectionView: View {
                         }.font(.system(size: 27, weight: .medium, design: .serif)).accessibilityElement(children: .ignore).accessibilityLabel("Intent")
                     }.padding(.horizontal, 28).frame(height: 52).padding(.top, controller.topSafeInset)
                     Spacer()
-                    HStack {
-                        Button { controller.optionsSection = .session } label: { Label("Modifications", systemImage: "slider.horizontal.3") }
-                            .buttonStyle(.bordered).help("Add a timer, a task checklist, browser searches or a cooldown.")
-                            .popover(isPresented: Binding(get: { controller.optionsSection != nil }, set: { if !$0 { controller.optionsSection = nil } }), arrowEdge: .bottom) {
-                                QuickSelectionOptionsView(selection: $controller.selection) { controller.optionsSection = nil }.frame(width: 340, height: 490)
-                            }
-                        Spacer()
-                    }.padding(.horizontal, 28)
+                    HStack(spacing: 12) {
+                        ForEach(QuickSelectionOptionsSection.allCases, id: \.self) { section in
+                            let enabled = section.enabled(in: controller.selection)
+                            Button { controller.optionsSection = section } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: section.icon)
+                                    Text(section.rawValue)
+                                    if enabled { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
+                                }.font(.system(size: 13, weight: .medium))
+                                    .frame(maxWidth: .infinity).padding(.vertical, 11)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                                    .overlay(Capsule().stroke(enabled ? accent.opacity(0.8) : .white.opacity(0.2), lineWidth: 1))
+                            }.buttonStyle(.plain).help(section.hint)
+                                .accessibilityLabel("\(section.rawValue), \(enabled ? "on" : "off")")
+                                .popover(isPresented: Binding(get: { controller.optionsSection == section }, set: { if !$0 { controller.optionsSection = nil } }), arrowEdge: .bottom) {
+                                    QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.optionsSection = nil }.frame(width: 340, height: section == .checklist ? 360 : 260)
+                                }
+                        }
+                    }.frame(maxWidth: 880).padding(.horizontal, 28)
                     if let message = controller.message { Text(message).font(.callout).foregroundStyle(.orange).padding(8).background(.regularMaterial, in: Capsule()) }
                     HStack {
                         Button("Close · ` / Esc") { controller.cancel() }.buttonStyle(.plain)
@@ -521,8 +578,8 @@ private struct QuickSelectionView: View {
                 }
                 if controller.loading { ProgressView("Gathering your apps…").padding(18).background(.regularMaterial, in: Capsule()) }
                 if let focused {
-                    tabGrid(focused).frame(width: tabWidth - 20, height: max(160, geometry.size.height - header - 84))
-                        .position(x: geometry.size.width - tabWidth / 2 - 12, y: header + (geometry.size.height - header - 84) / 2)
+                    tabGrid(focused).frame(width: tabWidth - 20, height: max(160, geometry.size.height - header - 126))
+                        .position(x: geometry.size.width - tabWidth / 2 - 12, y: header + (geometry.size.height - header - 126) / 2)
                 }
                 RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)
@@ -542,6 +599,9 @@ private struct QuickSelectionView: View {
                         VStack(spacing: 12) {
                             if let app { Image(nsImage: app.icon).resizable().frame(width: 64, height: 64) }
                             Text(app?.app.name ?? window.appID).font(.headline)
+                            if !window.title.isEmpty, window.title != app?.app.name {
+                                Text(window.title).font(.caption).lineLimit(2).multilineTextAlignment(.center).padding(.horizontal, 12)
+                            }
                         }
                     }
 

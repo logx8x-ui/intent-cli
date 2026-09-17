@@ -238,6 +238,7 @@ async function run() {
   assert.deepEqual(Array.from(selectedOnly.sessionRules.find(rule => rule.id === 23000).condition.excludedTabIds), [7],
     "Chrome blocks main-frame network navigation outside selected tab IDs");
   assert.equal(selectedOnly.tabs.get(7).active, true, "Starting Quick Focus selects an allowed tab");
+  assert.equal(selectedOnly.dynamicRules.length, 0, "URL restrictions must not override selected-tab navigation");
   const nativeSnapshot = selectedOnly.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
   assert.ok(nativeSnapshot.allTabs.some(tab => tab.id === 8), "Native click geometry gets complete tab ordering including forbidden tabs");
   assert.equal(nativeSnapshot.tabs.some(tab => tab.id === 8), false, "Forbidden tabs never enter the allowed Ctrl+Tab switcher snapshot");
@@ -262,6 +263,13 @@ async function run() {
   selectedOnly.intervals[0].callback();
   await selectedOnly.settle();
   assert.equal(selectedOnly.tabs.get(7).active, true, "Heartbeat repairs a missed activation event");
+  for (const url of ["https://discord.com/channels/1/2", "https://discord.com/channels/1/3", "https://another-site.example/new"]) {
+    await selectedOnly.navigate(7, url);
+    assert.equal(selectedOnly.tabs.get(7).url, url, "Selected tab allows channel changes and cross-site navigation");
+    await selectedOnly.activate(8);
+    assert.equal(selectedOnly.tabs.get(7).active, true, "Navigation never grants another tab access");
+  }
+
   const twoSelected = createHarness({ active: true, accessMode: "whitelist", allowedWebsites: ["youtube.com"], selectedTabIDs: [31, 32], blockTabSwitching: true }, [
     { id: 31, windowId: 4, active: true, url: "https://youtube.com/watch?v=one" },
     { id: 32, windowId: 4, active: false, url: "https://youtube.com/watch?v=two" },

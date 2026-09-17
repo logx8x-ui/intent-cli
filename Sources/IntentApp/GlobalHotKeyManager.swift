@@ -259,6 +259,7 @@ final class GlobalHotKeyManager {
     var selectionHandler: (() -> Void)?
     var markHandler: (() -> Void)?
     var runMarkedHandler: (() -> Void)?
+    var clearMarksHandler: (() -> Void)?
     var markedModeHandler: (() -> Void)?
     private let markMonitor = QuickMarkKeyMonitor()
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
@@ -289,6 +290,7 @@ final class GlobalHotKeyManager {
             case .single: self?.selectionHandler?()
             case .mark: self?.markHandler?()
             case .run: self?.runMarkedHandler?()
+            case .clear: self?.clearMarksHandler?()
             case .toggleMode: self?.markedModeHandler?()
             }
         }

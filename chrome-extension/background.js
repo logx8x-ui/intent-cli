@@ -387,7 +387,7 @@ function allowedRuleRegex(rawRule) {
 }
 
 function desiredNetworkRules() {
-  if (!rules.active || !rules.blockNavigation) return [];
+  if (!rules.active || !rules.blockNavigation || Array.isArray(rules.selectedTabIDs)) return [];
   const dynamicRules = [];
   let nextID = DYNAMIC_RULE_ID_START;
   if (rules.accessMode === "whitelist") {
@@ -477,14 +477,15 @@ function isFreshBlankTab(tab) {
 }
 
 function isRuntimeAllowedTab(tab) {
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab?.id)) return false;
+  // Explicit tab selection follows that tab across URLs, redirects and SPA routes.
+  if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.selectedTabIDs.includes(tab?.id);
   return Boolean(tab?.url && (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab)));
 }
 
 async function primeAllowedTab() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
-    if (tab.id != null && isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tab.id, tab.url);
+    if (tab.id != null && isRuntimeAllowedTab(tab)) lastAllowedURLByTab.set(tab.id, tab.url);
   }
   const activeAllowed = tabs.find((tab) => tab.active && isRuntimeAllowedTab(tab));
   const firstAllowed = activeAllowed || tabs.find((tab) => isRuntimeAllowedTab(tab));
@@ -789,7 +790,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   if (!rules.active) return;
   if (!tab?.url) return;
   if (isRuntimeAllowedTab(tab)) {
-    if (isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tabId, tab.url);
+    lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
   } else if (rules.blockTabSwitching) {
     await recoverBlockedNavigation(tabId);
@@ -827,6 +828,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   if (
     rules.accessMode === "whitelist" &&
+    !Array.isArray(rules.selectedTabIDs) &&
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs &&
     changeInfo.url &&
@@ -840,10 +842,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 
   if (isRuntimeAllowedTab(tab)) {
-    if (isAllowedURL(tab.url, rules)) {
-      freshBlankTabIds.delete(tabId);
-      lastAllowedURLByTab.set(tabId, tab.url);
-    }
+    freshBlankTabIds.delete(tabId);
+    lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
   } else if (rules.blockNavigation) {
     await recoverBlockedNavigation(tabId);
@@ -868,7 +868,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     return;
   }
 
-  if (isAllowedURL(tab.url, rules)) {
+  if (isRuntimeAllowedTab(tab)) {
     lastAllowedURLByTab.set(tab.id, tab.url);
     lastAllowedTabId = tab.id;
     return;
@@ -904,6 +904,7 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
       await returnToAllowedTab();
       return;
     }
+    if (Array.isArray(rules.selectedTabIDs) && rules.selectedTabIDs.includes(details.tabId)) return;
     if (isPendingStartupNavigation(details.tabId, details.url)) {
       startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
       return;

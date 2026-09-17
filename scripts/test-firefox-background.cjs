@@ -246,6 +246,13 @@ async function run() {
   await selectedOnly.create({ id: 9, windowId: 1, active: true, url: "https://example.org/work" });
   assert.equal(selectedOnly.tabs.get(7).active, true, "New tabs cannot bypass selected-tab scope");
 
+  for (const url of ["https://discord.com/channels/1/2", "https://discord.com/channels/1/3", "https://another-site.example/new"]) {
+    await selectedOnly.update(7, { url });
+    assert.equal(selectedOnly.tabs.get(7).url, url, "Selected tab allows channel changes and cross-site navigation");
+    await selectedOnly.activate(8);
+    assert.equal(selectedOnly.tabs.get(7).active, true, "Navigation never grants another tab access");
+  }
+
   const lockedRules = {
     active: true,
     startupSessionID: "firefox-startup-session",

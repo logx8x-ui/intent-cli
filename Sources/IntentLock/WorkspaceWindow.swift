@@ -78,6 +78,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var revision = 0
     private var lastSnapshotRequest = Date.distantPast // worker queue only
+    private var tabContinuity: [UInt32: TabBlurContinuity] = [:] // worker queue only
     private var panels: [NSPanel] = [] // main queue only
     public init() {}
     public func update(_ selection: QuickSelection) {
@@ -105,16 +106,30 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             }
         }
         let windows = WorkspaceWindow.list(onScreen: false)
-        let selected = windows.filter { window in
-            if QuickSelection.browsers.contains(window.bundle) {
-                guard let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: window.bundle).load(),
-                      let id = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: windows.filter { $0.bundle == window.bundle }.count),
-                      let active = snapshot.tabs.first(where: { $0.windowID == id && $0.active }) else { return false }
-                return selection.tabs.contains(.init(browser: window.bundle, id: active.id))
+        var markedRegions: [UInt32: [CGRect]] = [:]
+        let front = WorkspaceWindow.focused()
+        for window in windows {
+            if selection.windowIDsByApp[window.bundle]?.contains(window.id) == true {
+                markedRegions[window.id] = [window.frame]
+                continue
             }
-            return selection.windowIDsByApp[window.bundle]?.contains(window.id) == true
+            guard QuickSelection.browsers.contains(window.bundle),
+                  let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: window.bundle).load(),
+                  let id = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: windows.filter { $0.bundle == window.bundle }.count) else { continue }
+            let tabs = snapshot.tabs.filter { $0.windowID == id }
+            let selectedIDs = Set(selection.tabs.filter { $0.browser == window.bundle }.map(\.id))
+            guard tabs.contains(where: { selectedIDs.contains($0.id) }) else { continue }
+            // Read background window chrome too so marks survive entering Mission Control.
+            let scan = WorkspaceTabOutline.scan(window: window, tabs: tabs, selected: selectedIDs)
+            let context = "\(window.pid):\(window.frame):\(tabs):\(selectedIDs.sorted())"
+            var continuity = tabContinuity[window.id] ?? TabBlurContinuity()
+            let regions = continuity.update(scan.regions, context: context, complete: scan.complete, now: Date())
+            tabContinuity[window.id] = continuity
+            markedRegions[window.id] = regions
         }
-        let mission = Self.missionRegions(selected: selected, all: windows)
+        tabContinuity = tabContinuity.filter { markedRegions[$0.key] != nil }
+        let selected = windows.filter { markedRegions[$0.id]?.isEmpty == false }
+        let mission = Self.missionRegions(selected: selected, all: windows, markedRegions: markedRegions)
         let dockTransition = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains {
             $0[kCGWindowOwnerName as String] as? String == "Dock" && $0[kCGWindowLayer as String] as? Int == 20
         }
@@ -124,8 +139,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         else {
             // A full-window border must not float across a window covering it.
             // Render the focused marked window; Mission Control renders all marks.
-            let front = WorkspaceWindow.focused()
-            rectangles = selected.filter { $0.id == front?.id }.map(\.frame)
+            rectangles = front.flatMap { markedRegions[$0.id] } ?? []
         }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -147,7 +161,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             }
         }
     }
-    private static func missionRegions(selected: [WorkspaceWindow], all: [WorkspaceWindow]) -> [CGRect]? {
+    private static func missionRegions(selected: [WorkspaceWindow], all: [WorkspaceWindow], markedRegions: [UInt32: [CGRect]]) -> [CGRect]? {
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
         let deadline = Date(timeIntervalSinceNow: 0.08)
         func value(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
@@ -170,7 +184,19 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                 var point = CGPoint.zero; var dimensions = CGSize.zero
                 if AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point), AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) {
                     let frame = CGRect(origin: point, size: dimensions)
-                    if FocusBlurPolicy.valid(frame) { result.append(frame); continue }
+                    if FocusBlurPolicy.valid(frame), let window = selected.first(where: { labels.contains($0.title) }) {
+                        // Scale just the tab chrome into the thumbnail; a selected tab
+                        // must never imply that the entire browser window was selected.
+                        for region in markedRegions[window.id] ?? [] {
+                            let source = window.frame
+                            let mapped = CGRect(x: frame.minX + (region.minX - source.minX) * frame.width / source.width,
+                                                y: frame.minY + (region.minY - source.minY) * frame.height / source.height,
+                                                width: region.width * frame.width / source.width,
+                                                height: region.height * frame.height / source.height)
+                            if mapped.width > 2 && mapped.height > 2 { result.append(mapped) }
+                        }
+                        continue
+                    }
                 }
             }
             pending.append(contentsOf: children(element).prefix(max(0, 400 - pending.count)))

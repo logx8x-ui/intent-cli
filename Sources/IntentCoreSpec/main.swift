@@ -38,11 +38,11 @@ do {
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0.17).action == .mark, "Double backtick marks without opening picker")
         _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
         try expect(gesture.expire(now: 1) == nil, "Double press cancels single action")
-        for code in [36, 76, 44] {
+        for code in [36, 76, 44, 53] {
             gesture.reset()
             _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
             let result = gesture.key(code: code, down: true, modified: false, repeatKey: false, now: 0.1)
-            try expect(result.consume && result.action == (code == 44 ? .toggleMode : .run), "Held backtick chord dispatches once")
+            try expect(result.consume && result.action == (code == 53 ? .clear : (code == 44 ? .toggleMode : .run)), "Held backtick chord dispatches once")
             try expect(gesture.key(code: code, down: true, modified: false, repeatKey: true, now: 0.11).action == nil, "Held chord does not repeat")
             try expect(gesture.key(code: code, down: false, modified: false, repeatKey: false, now: 0.12).consume, "Chord key-up cannot leak to the application")
             _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)

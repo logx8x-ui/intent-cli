@@ -1,20 +1,43 @@
 import IntentCore
 import SwiftUI
 
-enum QuickSelectionOptionsSection { case session }
+enum QuickSelectionOptionsSection: String, CaseIterable {
+    case timer = "Timer", checklist = "Checklist", searches = "Searches", cooldown = "Cooldown"
+    var icon: String {
+        switch self { case .timer: return "timer"; case .checklist: return "checklist"; case .searches: return "magnifyingglass"; case .cooldown: return "hourglass" }
+    }
+    var hint: String {
+        switch self {
+        case .timer: return "Finish after a duration or at a time you choose."
+        case .checklist: return "Check off your tasks; completing them all ends the intention."
+        case .searches: return "Allow search pages in website-based intentions; selected tabs already allow navigation."
+        case .cooldown: return "Wait before starting this saved intention again."
+        }
+    }
+    func enabled(in selection: QuickSelection) -> Bool {
+        switch self {
+        case .timer: return selection.restrictionNodes.contains { $0.kind == .timer || $0.kind == .endTime }
+        case .checklist: return selection.frictionNodes.contains { if case .taskChecklist = $0.friction { return true }; return false }
+        case .searches: return selection.restrictionNodes.contains { $0.kind == .allowBrowserSearches }
+        case .cooldown: return selection.restrictionNodes.contains { $0.kind == .coolDown }
+        }
+    }
+}
 
 struct QuickSelectionOptionsView: View {
     @Binding var selection: QuickSelection
+    let section: QuickSelectionOptionsSection
     let close: () -> Void
     @State private var startTime = Date()
     private var timerIndex: Int? { selection.restrictionNodes.firstIndex { $0.kind == .timer || $0.kind == .endTime } }
     private var checklistIndex: Int? { selection.frictionNodes.firstIndex { if case .taskChecklist = $0.friction { return true }; return false } }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("Modifications").font(.title2); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
-            Text("A little structure. Only what you need.").font(.callout).foregroundStyle(.secondary)
+            HStack { Text(section.rawValue).font(.title2); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
+            Text(section.hint).font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if section == .timer {
                     Toggle("Timer", isOn: Binding(get: { timerIndex != nil }, set: { enabled in
                         selection.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
                         if enabled { selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: false)) }
@@ -35,7 +58,8 @@ struct QuickSelectionOptionsView: View {
                             Text("An earlier end time means tomorrow.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    Divider()
+                    }
+                    if section == .checklist {
                     Toggle("Task checklist", isOn: Binding(get: { checklistIndex != nil }, set: { enabled in
                         selection.frictionNodes.removeAll { if case .taskChecklist = $0.friction { return true }; return false }
                         if enabled { selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260))) }
@@ -60,11 +84,15 @@ struct QuickSelectionOptionsView: View {
                             Button("Add task", systemImage: "plus") { selection.frictionNodes[index].friction = .taskChecklist(tasks + [""]) }.buttonStyle(.plain)
                         }
                     }
-                    Divider()
+                    }
+                    if section == .searches {
                     Toggle("Allow browser searches", isOn: option(.allowBrowserSearches)).help("Allow search results while keeping other website rules in place.")
+                    }
+                    if section == .cooldown {
                     Toggle("Cooldown before replay", isOn: option(.coolDown)).help("Wait before starting this saved intention again.")
                     if let index = selection.restrictionNodes.firstIndex(where: { $0.kind == .coolDown }) {
                         HStack { TextField("Minutes", value: Binding(get: { selection.restrictionNodes[index].durationMinutes ?? 30 }, set: { selection.restrictionNodes[index].durationMinutes = min(1440, max(1, $0)) }), format: .number).textFieldStyle(.roundedBorder); Text("minutes") }
+                    }
                     }
                 }.padding(2)
             }

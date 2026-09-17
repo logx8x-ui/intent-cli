@@ -387,7 +387,8 @@ function isFreshBlankTab(tab) {
 }
 
 function isRuntimeAllowedTab(tab) {
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab?.id)) return false;
+  // Explicit tab selection follows that tab across URLs, redirects and SPA routes.
+  if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.selectedTabIDs.includes(tab?.id);
   return Boolean(
     tab?.url &&
     (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab))
@@ -397,7 +398,7 @@ function isRuntimeAllowedTab(tab) {
 async function primeAllowedTab() {
   const tabs = await browser.tabs.query({});
   for (const tab of tabs) {
-    if (tab.id != null && isAllowedURL(tab.url, rules)) {
+    if (tab.id != null && isRuntimeAllowedTab(tab)) {
       lastAllowedURLByTab.set(tab.id, tab.url);
     }
   }
@@ -559,7 +560,7 @@ async function rememberIfAllowed(tabId) {
 
   const tab = await getAllowedTab(tabId);
   if (tab) {
-    if (isAllowedURL(tab.url, rules)) lastAllowedURLByTab.set(tabId, tab.url);
+    if (isRuntimeAllowedTab(tab)) lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
   }
 }
@@ -636,6 +637,7 @@ async function recoverBlockedNavigation(tabId) {
 
   if (
     rules.accessMode === "whitelist" &&
+    !Array.isArray(rules.selectedTabIDs) &&
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs
   ) {
@@ -714,7 +716,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
     return;
   }
 
-  if (isAllowedURL(tab.url, rules)) {
+  if (isRuntimeAllowedTab(tab)) {
     freshBlankTabIds.delete(tabId);
     lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
@@ -771,6 +773,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 
   if (
+    !Array.isArray(rules.selectedTabIDs) &&
     freshBlankTabIds.has(tabId) &&
     !rules.allowGoogleSearchTabs &&
     changeInfo.url &&
@@ -781,7 +784,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
-  if (isAllowedURL(tab.url, rules)) {
+  if (isRuntimeAllowedTab(tab)) {
     freshBlankTabIds.delete(tabId);
     lastAllowedURLByTab.set(tabId, tab.url);
     lastAllowedTabId = tabId;
@@ -819,7 +822,7 @@ browser.tabs.onCreated.addListener(async (tab) => {
     return;
   }
 
-  if (isAllowedURL(tab.url, rules)) {
+  if (isRuntimeAllowedTab(tab)) {
     lastAllowedURLByTab.set(tab.id, tab.url);
     lastAllowedTabId = tab.id;
     return;
@@ -871,6 +874,7 @@ browser.webRequest.onBeforeRequest.addListener(
       setTimeout(returnToAllowedTab, 0);
       return { cancel: true };
     }
+    if (rules.active && Array.isArray(rules.selectedTabIDs) && rules.selectedTabIDs.includes(details.tabId)) return {};
     if (isPendingStartupNavigation(details.tabId, details.url)) {
       startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
       return {};
