@@ -147,9 +147,9 @@ struct IntentGraphView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                if accountManager.phase == .loading
+                if !showQuickGuide && (accountManager.phase == .loading
                     || accountManager.phase == .choosing
-                    || accountManager.isPresentingAccount {
+                    || accountManager.isPresentingAccount) {
                     IntentAccountGate()
                         .environmentObject(accountManager)
                         .zIndex(2_000)
@@ -194,8 +194,8 @@ struct IntentGraphView: View {
                         showQuickGuide = false
                     }, onDismiss: { showQuickGuide = false })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
                     .ignoresSafeArea()
-                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
                     .zIndex(1_000)
                 }
             }
@@ -240,8 +240,23 @@ struct IntentGraphView: View {
                 aiAutocompleteWebsitesByBrowser = PromptAutocompleteWebsiteSource.load(
                     intentions: model.intentions
                 )
-                if !didCompleteOnboarding {
+                if !didCompleteOnboarding && !UserDefaults.standard.bool(forKey: IntentOnboardingCoordinator.deferredKey) {
                     showQuickGuide = true
+                }
+            }
+            .onReceive(model.onboarding.$canvasRequest) { request in
+                guard request != nil, let id = model.onboarding.state.savedIntentionID,
+                      let intention = model.intentions.first(where: { $0.id == id }) else { return }
+                currentPage = .desktop
+                leaveEditMode()
+                selectIntention(id, additive: false)
+                cameraScale = 1
+                cameraOffset = CGSize(width: -intention.graphPosition.x, height: -intention.graphPosition.y)
+                offsetAtGestureStart = cameraOffset
+            }
+            .onChange(of: accountManager.phase) { phase in
+                if phase == .choosing, showQuickGuide, model.onboarding.state.startedAt != nil {
+                    accountManager.continueAsGuest()
                 }
             }
             .onChange(of: currentPage) { page in
@@ -986,6 +1001,7 @@ struct IntentGraphView: View {
                         accountManager.customBackgroundDidChange()
                     },
                     onShowGuide: {
+                        model.onboarding.present()
                         showSettings = false
                         showQuickGuide = true
                     }
@@ -1259,6 +1275,7 @@ struct IntentGraphView: View {
 
         if showQuickGuide {
             if key == .escape {
+                model.onboarding.exit()
                 showQuickGuide = false
             }
             return

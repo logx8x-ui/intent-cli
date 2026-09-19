@@ -21,12 +21,14 @@ protocol IntentOverlayPresenting: AnyObject {
 @MainActor
 final class IntentAppModel: ObservableObject {
     private static let requireManualFinishKey = "intentRequireManualFinishBeforeSwitching"
+    let onboarding = IntentOnboardingCoordinator()
 
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
     @Published var activeChecklist: [String] = []
     @Published var completedChecklist: Set<Int> = []
     private var saveSessionOnFinish = false
+    private var pendingOnboardingReplacement: (draftID: String, savedID: String)?
     @Published var activeSessionName: String?
     @Published var activeSessionIsLeisure = false
     @Published var activeSessionEndsAt: Date?
@@ -80,6 +82,7 @@ final class IntentAppModel: ObservableObject {
     private var quickSelectionTabIDs: [String: [Int]]?
     private var quickSelectionBrowserSessionIDs: [String: String] = [:]
     private var quickSelectionIntentionID: String?
+    private var quickSelectionOnboardingOrigin: IntentOnboardingStep?
     private var firstIntentionID: String?
     private var quickSelectionMonitor: Task<Void, Never>?
 
@@ -104,14 +107,19 @@ final class IntentAppModel: ObservableObject {
         return hasActiveSession
     }
 
-    func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot]) -> Bool {
+    func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot], onboardingOrigin: IntentOnboardingStep? = nil) -> Bool {
         guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil,
               pendingFriction == nil, pendingEndTimeRequest == nil else {
             errorMessage = "Finish the current intention and save or dismiss its result first."
             return false
         }
         do {
-            let intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
+            var intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
+            let teachingOrigin = onboarding.isTeaching && (onboardingOrigin == .overview || onboardingOrigin == .quickMark) ? onboardingOrigin : nil
+            if teachingOrigin != nil {
+                let purpose = onboarding.purposeName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !purpose.isEmpty { intention.name = purpose }
+            }
             for browser in Set(selection.tabs.map(\.browser)) {
                 guard BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
                     errorMessage = "Turn on Intent Browser Guard before starting a selected-tab intention."
@@ -131,16 +139,18 @@ final class IntentAppModel: ObservableObject {
             }
             errorMessage = nil
             quickSelectionIntentionID = intention.id
+            quickSelectionOnboardingOrigin = teachingOrigin
             quickSelectionWindowIDs = selection.windowIDsByApp
             quickSelectionTabIDs = selection.tabIDsByBrowser
             quickSelectionBrowserSessionIDs = selection.browserSessionIDs
             purposeTemporaryIntention = intention
-            purposeStatedPrompt = "your Quick Focus selection"
+            purposeStatedPrompt = teachingOrigin == nil ? "your Quick Focus selection" : intention.name
             // Deliberately bypass Always Allowed additions: only green selections belong here.
             requestStart(intention)
             let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil
             if !accepted {
                 quickSelectionIntentionID = nil
+                quickSelectionOnboardingOrigin = nil
                 quickSelectionTabIDs = nil
                 quickSelectionBrowserSessionIDs = [:]
                 purposeTemporaryIntention = nil
@@ -280,8 +290,9 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    func save() {
-        guard !hasActiveSession else { return }
+    @discardableResult
+    func save() -> Bool {
+        guard !hasActiveSession else { return false }
         do {
             intentions = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intentions)
             let namedIntentions = intentions.filter {
@@ -289,8 +300,10 @@ final class IntentAppModel: ObservableObject {
             }
             try store.save(namedIntentions)
             onWorkspaceChanged?()
+            return true
         } catch {
             errorMessage = "Could not save intentions: \(error)"
+            return false
         }
     }
 
@@ -578,35 +591,74 @@ final class IntentAppModel: ObservableObject {
     }
 
     func savePurposeSessionCandidate() {
-        guard var intention = pendingPurposeSessionSave?.intention else { return }
-        if intention.selectionOnly {
-            // Only the first, already-running session suppresses resource startup.
-            intention.restrictionNodes.removeAll { $0.id == QuickSelection.startupSuppressionID }
-        }
-        let position = availableAIPosition(index: 0, occupied: intentions.map(\.graphPosition))
-        let deltaX = position.x - intention.graphPosition.x
-        let deltaY = position.y - intention.graphPosition.y
-        intention.graphPosition = position
-        intention.restrictionNodes = intention.restrictionNodes.map { node in
-            var moved = node
-            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
-            return moved
-        }
-        intention.frictionNodes = intention.frictionNodes.map { node in
-            var moved = node
-            moved.position = .init(x: node.position.x + deltaX, y: node.position.y + deltaY)
-            return moved
+        guard !hasActiveSession, let candidate = pendingPurposeSessionSave?.intention else { return }
+        defer { pendingOnboardingReplacement = nil }
+        let isOnboardingCandidate = onboarding.lastIntention?.id == candidate.id
+        let replacement = isOnboardingCandidate && pendingOnboardingReplacement?.draftID == candidate.id ? pendingOnboardingReplacement : nil
+        let existingID = replacement?.savedID ?? (isOnboardingCandidate ? onboarding.state.savedIntentionID : nil)
+        let existing = existingID.flatMap { id in intentions.first(where: { $0.id == id }) }
+            ?? intentions.first(where: { $0.id == candidate.id })
+        let plan = OnboardingSavePlan(candidate: candidate,
+            latestPurpose: isOnboardingCandidate ? onboarding.purposeName : nil,
+            existing: existing, replaceExisting: replacement != nil,
+            insertionPosition: availableAIPosition(index: 0, occupied: intentions.map(\.graphPosition)))
+        let intention = plan.intention
+        if plan.action == .keepExisting {
+            selectedID = intention.id
+            pendingPurposeSessionSave = nil
+            if isOnboardingCandidate { onboarding.record(.saved, savedIntentionID: intention.id) }
+            return
         }
 
+        let previousIntentions = intentions
+        let previousSelectedID = selectedID
+        let previousUndoStack = undoStack
         recordUndoSnapshot()
-        intentions.append(AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intention))
+        let stored = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intention)
+        if plan.action == .replaceExisting, let index = intentions.firstIndex(where: { $0.id == stored.id }) {
+            intentions[index] = stored
+        } else { intentions.append(stored) }
         selectedID = intention.id
+        guard save() else {
+            intentions = previousIntentions
+            selectedID = previousSelectedID
+            undoStack = previousUndoStack
+            return
+        }
         pendingPurposeSessionSave = nil
-        save()
+        if isOnboardingCandidate {
+            onboarding.retainSavedIntention(stored)
+            onboarding.record(.saved, savedIntentionID: intention.id)
+        }
+    }
+
+    /// Uses the normal finish-and-save path; accepting the button is not proof
+    /// of saving. Only the successful persistence path records that evidence.
+    @discardableResult
+    func saveOnboardingIntention(replaceExisting: Bool = false) -> Bool {
+        guard let intention = onboarding.lastIntention else { return false }
+        let existingID = onboarding.state.savedIntentionID.flatMap { id in intentions.contains(where: { $0.id == id }) ? id : nil }
+        if let savedID = existingID, !replaceExisting {
+            selectedID = savedID
+            onboarding.record(.saved, savedIntentionID: savedID)
+            return true
+        }
+        if hasActiveSession {
+            guard activeSessionID == intention.id, activeSessionCanFinishManually else { return false }
+            endAndSaveActiveSession()
+            if replaceExisting, let existingID { pendingOnboardingReplacement = (intention.id, existingID) }
+            return true
+        }
+        guard pendingPurposeSessionSave == nil || pendingPurposeSessionSave?.intention.id == intention.id else { return false }
+        pendingOnboardingReplacement = replaceExisting ? existingID.map { (intention.id, $0) } : nil
+        pendingPurposeSessionSave = PurposeSessionSaveCandidate(intention: intention, statedPurpose: intention.name)
+        savePurposeSessionCandidate()
+        return pendingPurposeSessionSave == nil && intentions.contains(where: { $0.id == (existingID ?? intention.id) })
     }
 
     func discardPurposeSessionCandidate() {
         guard let intentionID = pendingPurposeSessionSave?.intention.id else { return }
+        pendingOnboardingReplacement = nil
         try? cooldownStore.clear(intentionID: intentionID)
         cooldownExpirations.removeValue(forKey: intentionID)
         if selectedID == intentionID {
@@ -1056,6 +1108,7 @@ final class IntentAppModel: ObservableObject {
 
     func endAndSaveActiveSession() {
         guard hasActiveSession, activeSessionCanFinishManually else { return }
+        pendingOnboardingReplacement = nil
         saveSessionOnFinish = true
         endActiveSession()
     }
@@ -1073,6 +1126,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func emergencyStop(showMessage: Bool = true) {
+        pendingOnboardingReplacement = nil
         sessionExpiryPolicy?.cancel()
         sessionLimitTask?.cancel()
         overlayPresenter?.hideSessionExpiry()
@@ -1173,6 +1227,7 @@ final class IntentAppModel: ObservableObject {
         if quickSelectionIntentionID == intention.id, !hasActiveSession,
            pendingZeroDriftStart?.intention.id != intention.id {
             quickSelectionIntentionID = nil
+            quickSelectionOnboardingOrigin = nil
             quickSelectionTabIDs = nil
             quickSelectionBrowserSessionIDs = [:]
             purposeTemporaryIntention = nil
@@ -1287,9 +1342,12 @@ final class IntentAppModel: ObservableObject {
         var lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
         if quickSelectionIntentionID == intention.id { lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs }
         let lock = FocusLock(spec: lockSpec)
+        pendingOnboardingReplacement = nil
         activeLock = lock
         activeSessionID = intention.id
         activeSessionOccurrenceID = UUID()
+        let occurrence = activeSessionOccurrenceID
+        let onboardingOrigin = quickSelectionIntentionID == intention.id ? quickSelectionOnboardingOrigin : nil
         overlayPresenter?.hideSessionExpiry()
         activeSessionIntention = intention
         activeSessionName = intention.name
@@ -1377,7 +1435,18 @@ final class IntentAppModel: ObservableObject {
 
             let failureMessage: String?
             do {
-                try lock.run()
+                try lock.run(onReady: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.activeSessionOccurrenceID == occurrence else { return }
+                        if let onboardingOrigin {
+                            self.onboarding.capture(intention)
+                            self.onboarding.record(onboardingOrigin == .overview ? .overviewRun : .quickMarkRun)
+                        }
+                        if self.onboarding.state.savedIntentionID == intention.id {
+                            self.onboarding.record(.reused)
+                        }
+                    }
+                })
                 failureMessage = nil
             } catch {
                 failureMessage = "Could not start session: \(error)"
@@ -1433,6 +1502,7 @@ final class IntentAppModel: ObservableObject {
                 if wasPurposeSession {
                     self.firstIntentionID = nil
                     self.quickSelectionIntentionID = nil
+                    self.quickSelectionOnboardingOrigin = nil
                     self.quickSelectionTabIDs = nil
                     self.quickSelectionBrowserSessionIDs = [:]
                     self.purposeTemporaryIntention = nil

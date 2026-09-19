@@ -297,6 +297,9 @@ final class IntentRuntime {
         quickSelectionController.toggle()
     }
 
+    func beginOnboardingSelectionScope() { quickSelectionController.beginOnboardingSelectionScope() }
+    func endOnboardingSelectionScope() { quickSelectionController.endOnboardingSelectionScope() }
+
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
@@ -306,8 +309,20 @@ final class IntentRuntime {
                 IntentRuntime.shared.model.toggleOverlay()
             }
         }
-        gestureSessionObserver = model.$activeSessionName.dropFirst().sink { [weak self] _ in
+        gestureSessionObserver = model.$activeSessionName.dropFirst().sink { [weak self] name in
             self?.hotKeyManager?.cancelPendingQuickGesture()
+            if name == nil {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if self.model.onboarding.isTeaching {
+                        // A guide opened during an existing run waits to own a
+                        // temporary selection until that real run has ended.
+                        self.quickSelectionController.beginOnboardingSelectionScope()
+                    } else {
+                        self.quickSelectionController.restoreOnboardingSelectionIfPending()
+                    }
+                }
+            }
         }
         if hotKeyManager?.isRegistered != true {
             model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
@@ -320,11 +335,14 @@ final class IntentRuntime {
                 if self.quickSelectionController.isSelectionSurfaceVisible { self.quickSelectionController.toggle() }
                 else if self.model.collapseSessionControlsIfExpanded() { return }
                 else if self.model.hasActiveSession { self.model.toggleSessionControls() }
-                else { self.quickSelectionController.toggle() }
+                else {
+                    self.quickSelectionController.toggle()
+                    if self.quickSelectionController.isSelectionSurfaceVisible { self.model.onboarding.record(.overviewShortcut) }
+                }
             }
         }
-        hotKeyManager?.markWindowHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(wholeWindow: true) } }
-        hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground() } }
+        hotKeyManager?.markWindowHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(wholeWindow: true, fromShortcut: true) } }
+        hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(fromShortcut: true) } }
         hotKeyManager?.runMarkedHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.runMarked() } }
         hotKeyManager?.clearMarksHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.clearMarks() } }
         hotKeyManager?.modificationHandler = { [weak self] index in Task { @MainActor in self?.quickSelectionController.openModification(index) } }
@@ -367,7 +385,8 @@ final class IntentRuntime {
         model.load()
         Task { await accountManager.start() }
         if !IntentEnvironment.isQA { IntentUpdateManager.shared.startAutomaticChecks() }
-        if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
+        if (!UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
+            && !UserDefaults.standard.bool(forKey: IntentOnboardingCoordinator.deferredKey))
             || !UserDefaults.standard.bool(forKey: "intentAccountChoiceMade")
             || PurposeModePreference.isEnabled {
             overlayController.showOverlay(animated: false)

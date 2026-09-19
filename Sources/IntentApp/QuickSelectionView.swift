@@ -41,6 +41,46 @@ final class QuickSelectionController: ObservableObject {
     @Published var tabPreviewLoading = false
     private let workspaceOutlines = WorkspaceOutlineController()
     private var hasStagedSelection = false
+    private var onboardingSelectionScope: (selection: QuickSelection, staged: Bool)?
+    private var onboardingScopeRestorePending = false
+    var onboarding: IntentOnboardingCoordinator { model.onboarding }
+
+    func beginOnboardingSelectionScope() {
+        if onboardingSelectionScope != nil {
+            // Resuming the same guide during its real run keeps ownership of the
+            // temporary selection until the user exits again.
+            onboardingScopeRestorePending = false
+            return
+        }
+        guard !model.hasActiveSession else { return }
+        onboardingSelectionScope = (selection, hasStagedSelection)
+        onboardingScopeRestorePending = false
+        markGeneration = UUID(); markTask?.cancel(); markTask = nil
+        runMarkedTask?.cancel()
+        if panel?.isVisible == true { close() }
+        dismissMarkNotice(); hideStagedModifiers(); workspaceOutlines.stop()
+        selection = QuickSelection(); hasStagedSelection = false
+    }
+
+    func endOnboardingSelectionScope() {
+        guard onboardingSelectionScope != nil else { return }
+        markGeneration = UUID(); markTask?.cancel(); markTask = nil
+        runMarkedTask?.cancel()
+        if panel?.isVisible == true { close() }
+        dismissMarkNotice(); hideStagedModifiers(); workspaceOutlines.stop()
+        onboardingScopeRestorePending = true
+        restoreOnboardingSelectionIfPending()
+    }
+
+    func restoreOnboardingSelectionIfPending() {
+        guard onboardingScopeRestorePending, !model.hasActiveSession,
+              let prior = onboardingSelectionScope else { return }
+        selection = prior.selection; hasStagedSelection = prior.staged
+        onboardingSelectionScope = nil; onboardingScopeRestorePending = false
+        if hasStagedSelection, !selection.apps.isEmpty {
+            workspaceOutlines.update(selection); showStagedModifiers()
+        }
+    }
     private var markGeneration = UUID()
     private var markTask: Task<Void, Never>?
     private var runMarkedTask: Task<Void, Never>?
@@ -115,7 +155,7 @@ final class QuickSelectionController: ObservableObject {
         if panel?.isVisible != true { stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps]) }
     }
     private func hideStagedModifiers() { optionsSection = nil; stagedModifiersPanel?.orderOut(nil); stagedModifiersPanel = nil }
-    func markForeground(wholeWindow: Bool = false) {
+    func markForeground(wholeWindow: Bool = false, fromShortcut: Bool = false) {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { toggle(); return }
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
@@ -125,6 +165,9 @@ final class QuickSelectionController: ObservableObject {
             await previous?.value
             guard let self, !Task.isCancelled, self.markGeneration == markToken, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
             self.refresh()
+            let beforeApps = self.selection.apps
+            let beforeTabs = self.selection.tabs
+            let beforeWindows = self.selection.windowIDsByApp
             if QuickSelection.browsers.contains(window.bundle) {
                 let fresh = await self.freshSnapshots(for: [window.bundle])
                 guard !Task.isCancelled, self.markGeneration == markToken, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
@@ -161,6 +204,11 @@ final class QuickSelectionController: ObservableObject {
             self.hasStagedSelection = true
             self.workspaceOutlines.update(self.selection)
             self.showStagedModifiers()
+            if !self.selection.apps.isEmpty,
+               beforeApps != self.selection.apps || beforeTabs != self.selection.tabs || beforeWindows != self.selection.windowIDsByApp {
+                self.onboarding.record(.quickMarkChanged)
+                if fromShortcut && !wholeWindow { self.onboarding.record(.quickMarkShortcut) }
+            }
         }
     }
     func runMarked() {
@@ -182,7 +230,7 @@ final class QuickSelectionController: ObservableObject {
             guard self.selection.windowIDsByApp.values.allSatisfy({ $0.isSubset(of: current) }) else {
                 self.model.errorMessage = "A marked window closed. Open ` and review your selection."; self.model.showOverlay(); return
             }
-            if self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots) {
+            if self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .quickMark) {
                 self.workspaceOutlines.stop(); self.hasStagedSelection = false; self.hideStagedModifiers()
             } else { self.model.showOverlay() }
         }
@@ -301,6 +349,8 @@ final class QuickSelectionController: ObservableObject {
         self.panel = panel
         model.overlayPresenter?.hideOverlay(animated: false)
         NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
+        onboarding.selectionVisible = panel.isVisible
+        if panel.isVisible { onboarding.record(.overviewOpened) }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel?.isVisible == true else { return event }
             if event.keyCode == 53 {
@@ -458,7 +508,7 @@ final class QuickSelectionController: ObservableObject {
             guard let self, self.generation == token else { return }
             if start {
                 self.refresh()
-                guard self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots) else {
+                guard self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .overview) else {
                     self.message = self.model.errorMessage; self.closing = false
                     withAnimation(.easeOut(duration: 0.2)) { self.expanded = true }; return
                 }
@@ -479,6 +529,7 @@ final class QuickSelectionController: ObservableObject {
         refreshTimer?.invalidate(); refreshTimer = nil
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
         panel?.orderOut(nil); panel = nil
+        onboarding.selectionVisible = false
         windows = []; apps = []; snapshots = []; wallpaper = nil; loading = false; closing = false
     }
     func enablePreviews() {
@@ -486,6 +537,7 @@ final class QuickSelectionController: ObservableObject {
         if hasPreviewPermission { loadPreviews() }
         else {
             panel?.orderOut(nil)
+            onboarding.selectionVisible = false
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
             message = "Turn on Intent in Screen Recording, then reopen `."
         }
@@ -676,12 +728,17 @@ private final class SelectionPanel: NSPanel {
 
 private struct QuickSelectionView: View {
     @ObservedObject var controller: QuickSelectionController
+    @ObservedObject private var onboarding: IntentOnboardingCoordinator
+    init(controller: QuickSelectionController) {
+        self.controller = controller
+        onboarding = controller.onboarding
+    }
     private var accent: Color { controller.selection.accessMode == .blacklist ? .red : .green }
     var body: some View {
         GeometryReader { geometry in
             let focused = controller.windows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
-            let header = controller.topSafeInset + 56
+            let header = controller.topSafeInset + 56 + (onboarding.isTeaching ? 60 : 0)
             let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - 126))
             let frames = FieldOfViewLayout.frames(sizes: controller.windows.map { $0.sourceFrame.size }, in: area, tabHeight: 0)
             ZStack {
@@ -705,6 +762,10 @@ private struct QuickSelectionView: View {
                             Text("ntent")
                         }.font(.system(size: 27, weight: .medium, design: .serif)).accessibilityElement(children: .ignore).accessibilityLabel("Intent")
                     }.padding(.horizontal, 28).frame(height: 52).padding(.top, controller.topSafeInset)
+                    if onboarding.isTeaching {
+                        OnboardingSelectionHint(coordinator: controller.onboarding)
+                            .frame(height: 60).padding(.horizontal, 28)
+                    }
                     Spacer()
                     ModificationStrip(controller: controller).frame(maxWidth: 880).padding(.horizontal, 28)
                     if let message = controller.message { Text(message).font(.callout).foregroundStyle(.orange).padding(8).background(.regularMaterial, in: Capsule()) }

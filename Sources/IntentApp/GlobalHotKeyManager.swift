@@ -21,6 +21,8 @@ struct OverlayShortcut: Codable, Equatable {
         keyLabel: "`"
     )
 
+    static let finishAndSaveShortcut = OverlayShortcut(keyCode: UInt32(kVK_ANSI_Grave), modifiers: UInt32(cmdKey | shiftKey), keyLabel: "`")
+
     static let legacyDefaultShortcut = OverlayShortcut(
         keyCode: UInt32(kVK_ANSI_Grave),
         modifiers: UInt32(shiftKey),
@@ -305,7 +307,7 @@ final class GlobalHotKeyManager {
             selectionRegistrationStatus = noErr
         }
         _ = updateFinishShortcut(FinishShortcutStore.load())
-        _ = register(OverlayShortcut(keyCode: UInt32(kVK_ANSI_Grave), modifiers: UInt32(cmdKey | shiftKey), keyLabel: "`"), id: UInt32.max - 3, ref: &saveHotKeyRef)
+        _ = register(OverlayShortcut.finishAndSaveShortcut, id: UInt32.max - 3, ref: &saveHotKeyRef)
         _ = register(OverlayShortcut(keyCode: UInt32(kVK_Escape),
             modifiers: UInt32(cmdKey | controlKey | optionKey), keyLabel: "Escape"),
             id: UInt32.max - 2, ref: &safetyHotKeyRef)

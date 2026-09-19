@@ -182,7 +182,7 @@ public final class FocusLock {
 
     public var isStopRequested: Bool { isStopped }
 
-    public func run() throws {
+    public func run(onReady: (@Sendable () -> Void)? = nil) throws {
         returnApplication = NSWorkspace.shared.frontmostApplication
         if let returnApplication,
            let bundleIdentifier = returnApplication.bundleIdentifier,
@@ -212,6 +212,7 @@ public final class FocusLock {
 
         do {
             try runStartupSteps()
+            if !isStopped { onReady?() }
             while !isStopped {
                 if !RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2)) {
                     Thread.sleep(forTimeInterval: 0.02)
