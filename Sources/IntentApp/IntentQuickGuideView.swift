@@ -23,7 +23,10 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
             panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
             panel.isOpaque = false; panel.backgroundColor = .clear
-            panel.level = .floating; panel.hidesOnDeactivate = false
+            // Keep the coach above the canvas and running controls. A normal
+            // floating panel can be obscured when the canvas regains focus.
+            panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+            panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             owner.panel = panel; owner.dismiss = onDismiss; panel.delegate = owner
@@ -36,8 +39,10 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
                 if visible { owner?.panel?.orderOut(nil) }
                 else if owner?.active == true { owner?.panel?.orderFrontRegardless() }
             }
-            panel.orderFrontRegardless()
-            if [.welcome, .purpose].contains(model.onboarding.state.step) { panel.makeKeyAndOrderFront(nil) }
+            if !model.onboarding.selectionVisible {
+                panel.orderFrontRegardless()
+                if [.welcome, .purpose].contains(model.onboarding.state.step) { panel.makeKeyAndOrderFront(nil) }
+            }
         }
         return anchor
     }

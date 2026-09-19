@@ -252,6 +252,12 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     }
 
     private func focusOverlay(_ panel: NSPanel) {
+        // Reopening the canvas must not steal purpose-entry keyboard focus
+        // from its own guide, including the delayed activation below.
+        if onboardingOwnsEntryFocus {
+            panel.orderFrontRegardless()
+            return
+        }
         NSRunningApplication.current.activate(options: [
             .activateAllWindows,
             .activateIgnoringOtherApps
@@ -261,11 +267,16 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(nil)
 
-        DispatchQueue.main.async { [weak panel] in
-            guard let panel, panel.isVisible else { return }
+        DispatchQueue.main.async { [weak self, weak panel] in
+            guard let self, let panel, panel.isVisible, !self.onboardingOwnsEntryFocus else { return }
             panel.makeKeyAndOrderFront(nil)
             panel.makeFirstResponder(nil)
         }
+    }
+
+    private var onboardingOwnsEntryFocus: Bool {
+        model.onboarding.isPresented && !model.onboarding.selectionVisible
+            && [.welcome, .purpose].contains(model.onboarding.state.step)
     }
 
     private func makeSessionTimerPanel() -> NSPanel {
