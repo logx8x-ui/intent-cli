@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import IntentCore
 import ServiceManagement
 import SwiftUI
@@ -7,6 +8,8 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: IntentStatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        IntentEnvironment.validateLaunch()
+        if !IntentEnvironment.isQA {
         do { try IntentFreshInstallation.prepare() } catch {
             let alert = NSAlert(); alert.messageText = "Fresh setup needs attention"; alert.informativeText = error.localizedDescription; alert.runModal()
             NSApp.terminate(nil); return
@@ -15,6 +18,8 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
         try? IntentLocalDataSecurity.hardenDefaultDirectory()
         NSApp.setActivationPolicy(.accessory)
         LaunchAtLoginController.applySavedPreference()
+        }
+        NSApp.setActivationPolicy(.accessory)
         IntentRuntime.shared.start()
         statusItemController = IntentStatusItemController(
             model: IntentRuntime.shared.model,
@@ -22,7 +27,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
         )
         DispatchQueue.main.async {
             NSApp.windows
-                .filter { $0.title == "Intent Settings" }
+                .filter { $0.identifier == EmptySettingsScene.windowIdentifier }
                 .forEach { $0.close() }
         }
     }
@@ -53,7 +58,7 @@ struct IntentDesktopApp: App {
     @NSApplicationDelegateAdaptor(IntentAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { EmptyView() }
+        Settings { EmptySettingsScene() }
             .commands {
                 CommandGroup(after: .newItem) {
                     Button("Quick Focus") { IntentRuntime.shared.toggleQuickFocus() }
@@ -62,6 +67,27 @@ struct IntentDesktopApp: App {
                         .keyboardShortcut(.escape, modifiers: [.command, .control, .option])
                 }
             }
+    }
+}
+
+/// The SwiftUI Settings scene is only a lifecycle host for this menu-bar app.
+/// Mark its actual window instead of guessing its localized/bundle-specific title.
+private struct EmptySettingsScene: NSViewRepresentable {
+    static let windowIdentifier = NSUserInterfaceItemIdentifier("intent.empty-settings-scene")
+
+    func makeNSView(context: Context) -> NSView { WindowMarker() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class WindowMarker: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.identifier = EmptySettingsScene.windowIdentifier
+            DispatchQueue.main.async { [weak window] in
+                guard let window, window.identifier == EmptySettingsScene.windowIdentifier else { return }
+                window.close()
+            }
+        }
     }
 }
 
@@ -239,6 +265,7 @@ final class IntentRuntime {
     private var showOverlayObserver: NSObjectProtocol?
     private var becomeActiveObserver: NSObjectProtocol?
     private var hasStarted = false
+    private var gestureSessionObserver: AnyCancellable?
 
     init() {
         let model = IntentAppModel()
@@ -279,13 +306,20 @@ final class IntentRuntime {
                 IntentRuntime.shared.model.toggleOverlay()
             }
         }
+        gestureSessionObserver = model.$activeSessionName.dropFirst().sink { [weak self] _ in
+            self?.hotKeyManager?.cancelPendingQuickGesture()
+        }
         if hotKeyManager?.isRegistered != true {
             model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
         }
         hotKeyManager?.selectionHandler = { [weak self] in
-            Task { @MainActor in
+            // Carbon and the gesture monitor deliver on the main run loop. Route
+            // synchronously so a queued single cannot collapse a replacement run.
+            MainActor.assumeIsolated {
                 guard let self else { return }
-                if self.model.hasActiveSession { self.model.toggleSessionControls() }
+                if self.quickSelectionController.isSelectionSurfaceVisible { self.quickSelectionController.toggle() }
+                else if self.model.collapseSessionControlsIfExpanded() { return }
+                else if self.model.hasActiveSession { self.model.toggleSessionControls() }
                 else { self.quickSelectionController.toggle() }
             }
         }
@@ -293,6 +327,7 @@ final class IntentRuntime {
         hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground() } }
         hotKeyManager?.runMarkedHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.runMarked() } }
         hotKeyManager?.clearMarksHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.clearMarks() } }
+        hotKeyManager?.modificationHandler = { [weak self] index in Task { @MainActor in self?.quickSelectionController.openModification(index) } }
         hotKeyManager?.markedModeHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.toggleMarkedMode() } }
         hotKeyManager?.finishHandler = { [weak self] in
             Task { @MainActor in self?.model.endActiveSession() }
@@ -306,6 +341,7 @@ final class IntentRuntime {
         if hotKeyManager?.selectionRegistrationStatus != 0 {
             model.shortcutWarning = "` is unavailable. Another app may have registered it."
         }
+        if !IntentEnvironment.isQA {
         showOverlayObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("dev.loganmondi.intent.showOverlay"),
             object: nil,
@@ -327,9 +363,10 @@ final class IntentRuntime {
             }
         }
 
+        }
         model.load()
         Task { await accountManager.start() }
-        IntentUpdateManager.shared.startAutomaticChecks()
+        if !IntentEnvironment.isQA { IntentUpdateManager.shared.startAutomaticChecks() }
         if !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
             || !UserDefaults.standard.bool(forKey: "intentAccountChoiceMade")
             || PurposeModePreference.isEnabled {
@@ -421,6 +458,7 @@ enum LaunchAtLoginController {
 
     @discardableResult
     static func setEnabled(_ enabled: Bool) -> String? {
+        guard !IntentEnvironment.isQA else { return "Launch at login is disabled in the isolated QA app." }
         UserDefaults.standard.set(enabled, forKey: preferenceKey)
         guard Bundle.main.bundleURL.pathExtension == "app" else { return nil }
 

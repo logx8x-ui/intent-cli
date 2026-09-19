@@ -1,5 +1,16 @@
 import Foundation
 
+public struct BrowserWindowFrame: Codable, Equatable {
+    public var left: Double
+    public var top: Double
+    public var width: Double
+    public var height: Double
+    public init(left: Double, top: Double, width: Double, height: Double) {
+        self.left = left; self.top = top; self.width = width; self.height = height
+    }
+    public var rect: CGRect { CGRect(x: left, y: top, width: width, height: height) }
+}
+
 public struct BrowserTabItem: Codable, Equatable, Identifiable {
     public var id: Int
     public var windowID: Int
@@ -8,6 +19,18 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
     public var url: String
     public var active: Bool
     public var faviconURL: String?
+    /// Native multi-selection is independent from the one active tab. Nil means an older bridge.
+    public var highlighted: Bool?
+    public var pinned: Bool?
+    public var discarded: Bool?
+    public var groupID: Int?
+    public var windowFrame: BrowserWindowFrame?
+    public var windowFocused: Bool?
+
+    public var displayTitle: String {
+        if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
+        return url.isEmpty ? "New tab" : url
+    }
 
     public init(
         id: Int,
@@ -16,7 +39,13 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         title: String,
         url: String,
         active: Bool,
-        faviconURL: String? = nil
+        faviconURL: String? = nil,
+        highlighted: Bool? = nil,
+        pinned: Bool? = nil,
+        discarded: Bool? = nil,
+        groupID: Int? = nil,
+        windowFrame: BrowserWindowFrame? = nil,
+        windowFocused: Bool? = nil
     ) {
         self.id = id
         self.windowID = windowID
@@ -25,22 +54,31 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         self.url = url
         self.active = active
         self.faviconURL = faviconURL
+        self.highlighted = highlighted
+        self.pinned = pinned
+        self.discarded = discarded
+        self.groupID = groupID
+        self.windowFrame = windowFrame
+        self.windowFocused = windowFocused
     }
 }
 
 public struct BrowserTabSnapshot: Codable, Equatable {
     public var browserBundleIdentifier: String
+    public var browserSessionID: String?
     public var tabs: [BrowserTabItem]
     public var allTabs: [BrowserTabItem]?
     public var updatedAt: Date
 
     public init(
         browserBundleIdentifier: String,
+        browserSessionID: String? = nil,
         tabs: [BrowserTabItem],
         updatedAt: Date = Date(),
         allTabs: [BrowserTabItem]? = nil
     ) {
         self.browserBundleIdentifier = browserBundleIdentifier
+        self.browserSessionID = browserSessionID
         self.tabs = tabs
         self.allTabs = allTabs
         self.updatedAt = updatedAt
@@ -53,19 +91,22 @@ public struct BrowserTabCommand: Codable, Equatable, Identifiable {
     public var windowID: Int
     public var createdAt: Date
     public var action: BrowserTabCommandAction?
+    public var browserSessionID: String?
 
     public init(
         id: String = UUID().uuidString,
         tabID: Int,
         windowID: Int,
         createdAt: Date = Date(),
-        action: BrowserTabCommandAction = .activate
+        action: BrowserTabCommandAction = .activate,
+        browserSessionID: String? = nil
     ) {
         self.id = id
         self.tabID = tabID
         self.windowID = windowID
         self.createdAt = createdAt
         self.action = action
+        self.browserSessionID = browserSessionID
     }
 }
 
@@ -170,11 +211,7 @@ public final class BrowserTabCommandStore {
     }
 }
 
-private var intentDirectory: URL {
-    FileManager.default
-        .homeDirectoryForCurrentUser
-        .appendingPathComponent(".intent", isDirectory: true)
-}
+private var intentDirectory: URL { IntentEnvironment.dataDirectory }
 
 private func safeBrowserFileComponent(_ value: String) -> String {
     value.map { character in

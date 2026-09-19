@@ -36,6 +36,12 @@ func writeMessage<T: Encodable>(_ value: T) throws {
 }
 
 struct HostTab: Codable {
+    var highlighted: Bool?
+    var pinned: Bool?
+    var discarded: Bool?
+    var groupID: Int?
+    var windowFrame: BrowserWindowFrame?
+    var windowFocused: Bool?
     var faviconURL: String?
     var id: Int
     var windowID: Int
@@ -46,6 +52,7 @@ struct HostTab: Codable {
 }
 
 struct HostRequest: Codable {
+    var browserSessionID: String?
     var preview: BrowserTabPreview?
     var type: String?
     var enabled: Bool?
@@ -59,6 +66,7 @@ struct HostRequest: Codable {
 }
 
 struct HostRuleState: Codable, Equatable {
+    var selectedBrowserSessionID: String? = nil
     var selectedTabIDs: [Int]? = nil
     var active: Bool
     var accessMode: String
@@ -73,9 +81,10 @@ struct HostRuleState: Codable, Equatable {
 }
 
 struct HostResponse: Codable {
-    var bundledExtensionVersion: String = "0.2.9"
-    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1"]
+    var bundledExtensionVersion: String = "0.2.12"
+    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1"]
     var selectedTabIDs: [Int]?
+    var selectedBrowserSessionID: String?
     var active: Bool
     var accessMode: String
     var allowedWebsites: [String]
@@ -89,6 +98,7 @@ struct HostResponse: Codable {
     var tabCommand: BrowserTabCommand?
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?) {
+        selectedBrowserSessionID = state.selectedBrowserSessionID
         selectedTabIDs = state.selectedTabIDs
         active = state.active
         accessMode = state.accessMode
@@ -252,7 +262,7 @@ private final class HostRuntime {
                 }
             case "tabsSnapshot":
                 if let tabs = request.tabs {
-                    persistSnapshot(tabs, allTabs: request.allTabs, browserBundleIdentifier: browser)
+                    persistSnapshot(tabs, allTabs: request.allTabs, browserSessionID: request.browserSessionID, browserBundleIdentifier: browser)
                 }
             case "recordWebsiteVisit":
                 if let url = request.url {
@@ -321,8 +331,9 @@ private final class HostRuntime {
         }
     }
 
+    private var lastSnapshotSessionID: String?
     private var lastSnapshotAllTabs: [BrowserTabItem]?
-    private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserBundleIdentifier: String) {
+    private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserSessionID: String?, browserBundleIdentifier: String) {
         let items = tabs.map {
             BrowserTabItem(
                 id: $0.id,
@@ -331,15 +342,16 @@ private final class HostRuntime {
                 title: $0.title,
                 url: $0.url,
                 active: $0.active,
-                faviconURL: $0.faviconURL
+                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused
             )
         }
-        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL) }
+        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused) }
         // Explicit discovery is also a freshness acknowledgment. Preserve idle
         // deduplication, but refresh the timestamp even if requested tabs did not change.
-        guard requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs else { return }
+        guard requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
+            browserSessionID: browserSessionID,
             tabs: items,
             allTabs: allItems
         )
@@ -347,6 +359,7 @@ private final class HostRuntime {
         if (try? store.write(snapshot)) != nil {
             requestedSnapshotRefresh = false
             metrics.snapshotWrites += 1
+            lastSnapshotSessionID = browserSessionID
             lastSnapshotTabs = items
             lastSnapshotAllTabs = allItems
         }
@@ -425,6 +438,7 @@ private final class HostRuntime {
         let browserWebsites = rules.allowedWebsitesByBrowser[browserBundleIdentifier]
             ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
         return HostRuleState(
+            selectedBrowserSessionID: rules.selectedBrowserSessionIDsByBrowser?[browserBundleIdentifier],
             selectedTabIDs: rules.selectedTabIDsByBrowser?[browserBundleIdentifier],
             active: rules.active,
             accessMode: rules.accessMode.rawValue,

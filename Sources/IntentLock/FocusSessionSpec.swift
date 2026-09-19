@@ -108,7 +108,7 @@ public struct FocusSessionSpec {
             blockBrowserTabEscape: !intention.isLeisure && (
                 intention.accessMode == .whitelist
                     ? intention.allowedApps.contains(where: \.isBrowser)
-                    : !intention.allowedWebsites.isEmpty
+                    : !intention.allowedWebsites.isEmpty || !intention.selectionBrowserBundleIdentifiers.isEmpty
             ),
             blockFirefoxChromeClicks: false,
             allowGoogleSearchTabs: intention.browserSearchesAllowed,

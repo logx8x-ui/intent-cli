@@ -1,0 +1,48 @@
+import Foundation
+import IntentCore
+
+func runSessionRuntimeSpecs() throws {
+    let start = Date(timeIntervalSince1970: 1_000)
+    var duration = SessionExpiryPolicy(duration: 60, absoluteEnd: nil)
+    try expect(duration.remaining(elapsed: 10, now: start.addingTimeInterval(86_400)) == 50, "Civil clock jumps do not shorten elapsed duration timers")
+    try expect(duration.expire(elapsed: 59, now: start.addingTimeInterval(86_400)) == nil, "A duration cannot expire because the civil clock jumps ahead")
+    try expect(duration.expire(elapsed: 60, now: start.addingTimeInterval(-86_400)) == .duration, "Elapsed duration ends despite a backwards civil-clock change")
+    try expect(duration.expire(elapsed: 61, now: start) == nil, "An expiry occurrence is consumed exactly once")
+
+    var absolute = SessionExpiryPolicy(duration: nil, absoluteEnd: start.addingTimeInterval(60))
+    try expect(absolute.expire(elapsed: 200, now: start.addingTimeInterval(59)) == nil, "Absolute end times follow civil time independently of elapsed duration")
+    try expect(absolute.expire(elapsed: 201, now: start.addingTimeInterval(60)) == .endTime, "Absolute deadline emits its expiry at the endpoint")
+    var asleep = SessionExpiryPolicy(duration: 60, absoluteEnd: nil)
+    try expect(asleep.expire(elapsed: 300, now: start.addingTimeInterval(300)) == .duration, "Continuous elapsed time covers expiry during sleep when runtime resumes")
+    var cancelled = SessionExpiryPolicy(duration: 1, absoluteEnd: nil)
+    cancelled.cancel()
+    try expect(cancelled.expire(elapsed: 100, now: start) == nil, "Early completion or cancellation never emits stale expiry")
+    var replaced = SessionExpiryPolicy(duration: 2, absoluteEnd: nil)
+    try expect(replaced.occurrenceID != cancelled.occurrenceID, "Repeated use of the same intention gets a new occurrence identity")
+    try expect(replaced.expire(elapsed: 2, now: start) == .duration, "Replacement timing starts from its own elapsed origin")
+    var mixed = SessionExpiryPolicy(duration: 90, absoluteEnd: start.addingTimeInterval(30))
+    try expect(mixed.remaining(elapsed: 10, now: start.addingTimeInterval(10)) == 20, "Multiple timing modifiers use the first deadline")
+    try expect(mixed.expire(elapsed: 30, now: start.addingTimeInterval(30)) == .endTime, "Earliest end-time deadline wins mixed timing modifiers")
+    let fixedAbsolute = SessionExpiryPolicy(duration: nil, absoluteEnd: start)
+    try expect(fixedAbsolute.absoluteEnd == start, "A timezone display change does not reinterpret an already chosen absolute deadline")
+
+    var overlay = SessionOverlayPolicy()
+    let first = UUID()
+    overlay.update(occurrenceID: first, hasTimer: false, hasChecklist: false)
+    try expect(!overlay.eligible && !overlay.expanded, "A plain session does not open a generic running overlay")
+    overlay.toggle()
+    try expect(!overlay.expanded, "A plain session cannot restore an irrelevant overlay")
+    overlay.update(occurrenceID: UUID(), hasTimer: true, hasChecklist: false)
+    try expect(overlay.eligible && overlay.expanded, "Timer sessions show relevant controls once")
+    let timerRun = overlay.occurrenceID!
+    try expect(overlay.collapse(), "The expanded overlay can collapse through a shared action")
+    overlay.update(occurrenceID: timerRun, hasTimer: true, hasChecklist: true)
+    try expect(!overlay.expanded, "Timer refreshes and checklist changes preserve a user's hidden overlay")
+    try expect(!overlay.collapse(), "Collapse does not reopen an already collapsed overlay")
+    overlay.toggle()
+    try expect(overlay.expanded, "Explicit restore can reopen eligible controls")
+    overlay.end()
+    try expect(overlay.occurrenceID == nil && !overlay.expanded, "Session cleanup removes overlay lifecycle state")
+    overlay.update(occurrenceID: UUID(), hasTimer: false, hasChecklist: true)
+    try expect(overlay.expanded, "A fresh checklist-only session shows its controls")
+}

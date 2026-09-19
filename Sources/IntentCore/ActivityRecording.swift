@@ -145,8 +145,7 @@ public final class ActivityRecordingStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("activity-recording.json")
     }
 }

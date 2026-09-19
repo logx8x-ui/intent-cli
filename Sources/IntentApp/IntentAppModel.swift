@@ -9,9 +9,13 @@ protocol IntentOverlayPresenting: AnyObject {
     func showOverlay(animated: Bool)
     func hideOverlay(animated: Bool)
     func toggleOverlay()
-    func showSessionTimer(name: String, endsAt: Date, displaysEndTime: Bool)
+    func showSessionControls(occurrenceID: UUID)
+    var isSessionControlsExpanded: Bool { get }
+    @discardableResult func collapseSessionControlsIfExpanded() -> Bool
     func toggleSessionControls()
     func hideSessionTimer()
+    func showSessionExpiry(occurrenceID: UUID, name: String)
+    func hideSessionExpiry()
 }
 
 @MainActor
@@ -26,6 +30,8 @@ final class IntentAppModel: ObservableObject {
     @Published var activeSessionName: String?
     @Published var activeSessionIsLeisure = false
     @Published var activeSessionEndsAt: Date?
+    @Published private(set) var activeSessionAbsoluteEndTime: Date?
+    @Published private(set) var activeSessionOccurrenceID: UUID?
     @Published var zeroDriftEndsAt: Date?
     @Published var cooldownExpirations: [String: Date] = [:]
     @Published var pendingFriction: PendingFriction?
@@ -72,6 +78,7 @@ final class IntentAppModel: ObservableObject {
     private var purposeUsageTracker: PurposeSessionUsageTracker?
     private var quickSelectionWindowIDs: [String: Set<UInt32>] = [:]
     private var quickSelectionTabIDs: [String: [Int]]?
+    private var quickSelectionBrowserSessionIDs: [String: String] = [:]
     private var quickSelectionIntentionID: String?
     private var firstIntentionID: String?
     private var quickSelectionMonitor: Task<Void, Never>?
@@ -85,6 +92,7 @@ final class IntentAppModel: ObservableObject {
         errorMessage = nil
         firstIntentionID = intention.id
         quickSelectionTabIDs = nil
+        quickSelectionBrowserSessionIDs = [:]
         purposeTemporaryIntention = intention
         purposeStatedPrompt = intention.name
         start(intention)
@@ -109,16 +117,23 @@ final class IntentAppModel: ObservableObject {
                     errorMessage = "Turn on Intent Browser Guard before starting a selected-tab intention."
                     return false
                 }
-                guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
-                    .supports(.quickSelection, maxAge: 5) else {
+                let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
+                guard heartbeat.supports(selection.accessMode == .blacklist ? .blacklistSelection : .quickSelection, maxAge: 5),
+                      heartbeat.supports(.tabSessionIdentity, maxAge: 5) else {
                     errorMessage = "Update Intent Browser Guard for selected-tab sessions, then try again."
+                    return false
+                }
+                guard let expected = selection.browserSessionIDs[browser], !expected.isEmpty,
+                      snapshots.first(where: { $0.browserBundleIdentifier == browser })?.browserSessionID == expected else {
+                    errorMessage = "The browser restarted or Browser Guard reloaded. Clear your marks and choose the current tabs again."
                     return false
                 }
             }
             errorMessage = nil
             quickSelectionIntentionID = intention.id
             quickSelectionWindowIDs = selection.windowIDsByApp
-            quickSelectionTabIDs = selection.accessMode == .whitelist ? selection.tabIDsByBrowser : nil
+            quickSelectionTabIDs = selection.tabIDsByBrowser
+            quickSelectionBrowserSessionIDs = selection.browserSessionIDs
             purposeTemporaryIntention = intention
             purposeStatedPrompt = "your Quick Focus selection"
             // Deliberately bypass Always Allowed additions: only green selections belong here.
@@ -127,6 +142,7 @@ final class IntentAppModel: ObservableObject {
             if !accepted {
                 quickSelectionIntentionID = nil
                 quickSelectionTabIDs = nil
+                quickSelectionBrowserSessionIDs = [:]
                 purposeTemporaryIntention = nil
                 purposeStatedPrompt = nil
             }
@@ -141,6 +157,7 @@ final class IntentAppModel: ObservableObject {
     private var activeMoveUndoKeys: Set<String> = []
     private var scheduleTimer: Timer?
     private var sessionLimitTask: Task<Void, Never>?
+    private var sessionExpiryPolicy: SessionExpiryPolicy?
     private var zeroDriftLimitTask: Task<Void, Never>?
 
     init() {
@@ -167,13 +184,14 @@ final class IntentAppModel: ObservableObject {
     }
 
     var activeSessionCanFinishManually: Bool {
+        if !activeChecklist.isEmpty && completedChecklist.count < activeChecklist.count { return false }
         guard let intention = activeSessionIntention,
-              intention.sessionLocksManualFinish,
-              let activeSessionEndsAt,
-              activeSessionEndsAt > Date() else {
+              intention.sessionLocksManualFinish else {
             return true
         }
-        return false
+        // Runtime expiry owns completion; civil-clock changes must not briefly
+        // enable a manual finish before the continuous-clock duration expires.
+        return sessionExpiryPolicy?.hasDeadline != true && activeSessionEndsAt == nil
     }
 
     func load() {
@@ -208,7 +226,10 @@ final class IntentAppModel: ObservableObject {
         }
 
         do {
+            if IntentEnvironment.isQA { schedules = [] }
+            else {
             schedules = try scheduleStore.load()
+            }
         } catch {
             errorMessage = "Could not load schedules: \(error)"
             schedules = []
@@ -222,14 +243,14 @@ final class IntentAppModel: ObservableObject {
             hasResetRuntimeOnLaunch = true
             // Restart is recovery, never a reason to re-lock the user's computer.
             emergencyStop(showMessage: false)
-            for index in schedules.indices {
+            for index in schedules.indices where !IntentEnvironment.isQA {
                 if let key = schedules[index].triggerKeyIfDue(at: Date()) {
                     schedules[index].lastTriggeredKey = key
                 }
             }
-            saveSchedules()
+            if !IntentEnvironment.isQA { saveSchedules() }
         }
-        startScheduleTimer()
+        if !IntentEnvironment.isQA { startScheduleTimer() }
     }
 
     func switchProfile(to directory: URL) {
@@ -1022,6 +1043,11 @@ final class IntentAppModel: ObservableObject {
 
     func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
 
+    var hasEligibleSessionControls: Bool { hasActiveSession && (activeSessionEndsAt != nil || !activeChecklist.isEmpty) }
+    var isSessionControlsExpanded: Bool { overlayPresenter?.isSessionControlsExpanded == true }
+    @discardableResult
+    func collapseSessionControlsIfExpanded() -> Bool { overlayPresenter?.collapseSessionControlsIfExpanded() ?? false }
+
     func setTaskCompleted(_ index: Int, completed: Bool) {
         guard hasActiveSession, activeChecklist.indices.contains(index) else { return }
         if completed { completedChecklist.insert(index) } else { completedChecklist.remove(index) }
@@ -1037,7 +1063,8 @@ final class IntentAppModel: ObservableObject {
     func endActiveSession() {
         sessionSwitchWarning = nil
         guard activeSessionCanFinishManually else {
-            if let activeSessionEndsAt {
+            if !activeChecklist.isEmpty { errorMessage = "Check off your tasks to finish this intention." }
+            else if let activeSessionEndsAt {
                 errorMessage = "This intention is locked for another \(Self.durationText(until: activeSessionEndsAt))."
             }
             return
@@ -1046,6 +1073,9 @@ final class IntentAppModel: ObservableObject {
     }
 
     func emergencyStop(showMessage: Bool = true) {
+        sessionExpiryPolicy?.cancel()
+        sessionLimitTask?.cancel()
+        overlayPresenter?.hideSessionExpiry()
         cancelEndTimeSelection()
         zeroDriftEndsAt = nil
         zeroDriftLimitTask?.cancel()
@@ -1144,19 +1174,28 @@ final class IntentAppModel: ObservableObject {
            pendingZeroDriftStart?.intention.id != intention.id {
             quickSelectionIntentionID = nil
             quickSelectionTabIDs = nil
+            quickSelectionBrowserSessionIDs = [:]
             purposeTemporaryIntention = nil
             purposeStatedPrompt = nil
         }
     }
 
     private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
+        guard !intention.selectionRequiresTabReselection || quickSelectionIntentionID == intention.id else {
+            errorMessage = "This intention used specific browser tabs. Open ` and choose the current tabs before running it again."
+            return
+        }
         // Frictions may take time. Revalidate exact tabs before enabling any lock.
         if quickSelectionIntentionID == intention.id, let tabIDs = quickSelectionTabIDs {
             for (browser, ids) in tabIDs {
-                guard let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
-                      ids.allSatisfy({ id in snapshot.tabs.contains { tab in
-                          tab.id == id && QuickSelection.isSelectable(tab)
-                              && intention.allowedWebsites.contains(AllowedWebsite(tab.url, browserBundleIdentifier: browser))
+                let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
+                guard heartbeat.supports(.tabSessionIdentity, maxAge: 5),
+                      heartbeat.supports(intention.accessMode == .blacklist ? .blacklistSelection : .quickSelection, maxAge: 5),
+                      let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+                      let expected = quickSelectionBrowserSessionIDs[browser], !expected.isEmpty,
+                      snapshot.browserSessionID == expected,
+                      ids.allSatisfy({ id in (snapshot.allTabs ?? snapshot.tabs).contains { tab in
+                          tab.id == id
                       } }) else {
                     errorMessage = "A selected tab changed while you were getting ready. Reopen ` and choose your tabs again."
                     return
@@ -1225,6 +1264,7 @@ final class IntentAppModel: ObservableObject {
             startupWebsitesByBrowser: startupWebsitesByBrowser,
             startupSessionID: UUID().uuidString,
             selectedTabIDsByBrowser: quickSelectionIntentionID == intention.id ? quickSelectionTabIDs : nil,
+            selectedBrowserSessionIDsByBrowser: quickSelectionIntentionID == intention.id ? quickSelectionBrowserSessionIDs : nil,
             blockTabSwitching: true,
             blockNavigation: true,
             blockNewTabs: false,
@@ -1249,11 +1289,14 @@ final class IntentAppModel: ObservableObject {
         let lock = FocusLock(spec: lockSpec)
         activeLock = lock
         activeSessionID = intention.id
+        activeSessionOccurrenceID = UUID()
+        overlayPresenter?.hideSessionExpiry()
         activeSessionIntention = intention
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
         if quickSelectionIntentionID == intention.id, !(quickSelectionTabIDs ?? [:]).isEmpty || !quickSelectionWindowIDs.isEmpty {
             let tabIDs = quickSelectionTabIDs ?? [:]
+            let browserSessionIDs = quickSelectionBrowserSessionIDs
             let windowIDs = Set(quickSelectionWindowIDs.values.flatMap { $0 })
             quickSelectionMonitor = Task { [weak self] in
                 while !Task.isCancelled {
@@ -1265,7 +1308,9 @@ final class IntentAppModel: ObservableObject {
                         return
                     }
                     for (browser, selected) in tabIDs {
-                        guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5),
+                        let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
+                        guard heartbeat.supports(intention.accessMode == .blacklist ? .blacklistSelection : .quickSelection, maxAge: 5),
+                              heartbeat.supports(.tabSessionIdentity, maxAge: 5),
                               BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
                             // Safety failures must release even a user-locked timer.
                             self.activeLock?.stop()
@@ -1273,9 +1318,15 @@ final class IntentAppModel: ObservableObject {
                             self.showOverlay()
                             return
                         }
-                        if let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
-                           snapshot.updatedAt > Date().addingTimeInterval(-3),
-                           !snapshot.tabs.contains(where: { selected.contains($0.id) }) {
+                        guard let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+                              let expected = browserSessionIDs[browser], !expected.isEmpty,
+                              snapshot.browserSessionID == expected else {
+                            self.activeLock?.stopForSafety()
+                            self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
+                            return
+                        }
+                        if snapshot.updatedAt > Date().addingTimeInterval(-3),
+                           !(snapshot.allTabs ?? snapshot.tabs).contains(where: { selected.contains($0.id) }) {
                             self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
                             self.activeLock?.stop()
                             return
@@ -1296,7 +1347,9 @@ final class IntentAppModel: ObservableObject {
         }
         completedChecklist = []
         scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
-        if activeSessionEndsAt == nil { overlayPresenter?.showSessionTimer(name: intention.name, endsAt: Date(), displaysEndTime: false) }
+        if let occurrence = activeSessionOccurrenceID, hasEligibleSessionControls {
+            overlayPresenter?.showSessionControls(occurrenceID: occurrence)
+        } else { overlayPresenter?.hideSessionTimer() }
         overlayPresenter?.hideOverlay(animated: true)
 
         Thread.detachNewThread {
@@ -1342,7 +1395,11 @@ final class IntentAppModel: ObservableObject {
                 self.purposeUsageTracker = nil
                 self.sessionLimitTask?.cancel()
                 self.sessionLimitTask = nil
+                self.sessionExpiryPolicy?.cancel()
+                self.sessionExpiryPolicy = nil
                 self.activeSessionEndsAt = nil
+                self.activeSessionAbsoluteEndTime = nil
+                self.activeSessionOccurrenceID = nil
                 self.overlayPresenter?.hideSessionTimer()
                 if lock.didStopForSafety {
                     self.emergencyStop()
@@ -1377,6 +1434,7 @@ final class IntentAppModel: ObservableObject {
                     self.firstIntentionID = nil
                     self.quickSelectionIntentionID = nil
                     self.quickSelectionTabIDs = nil
+                    self.quickSelectionBrowserSessionIDs = [:]
                     self.purposeTemporaryIntention = nil
                     self.purposeStatedPrompt = nil
                 }
@@ -1477,39 +1535,43 @@ final class IntentAppModel: ObservableObject {
 
     private func scheduleSessionLimit(for intention: Intention, runtimeEndDate: Date?) {
         sessionLimitTask?.cancel()
+        sessionExpiryPolicy?.cancel()
         let now = Date()
-        let timerEndDate = intention.timerMinutes.map { now.addingTimeInterval(TimeInterval($0 * 60)) }
-        let clockEndDate = intention.endTimeDate(after: now)
-        let candidates: [(date: Date, displaysEndTime: Bool)] = [
-            timerEndDate.map { ($0, false) },
-            clockEndDate.map { ($0, true) },
-            runtimeEndDate.map { ($0, true) }
-        ].compactMap { $0 }
-        guard let deadline = candidates.min(by: { $0.date < $1.date }) else {
+        guard let occurrence = activeSessionOccurrenceID else { return }
+        let absoluteEnd = [intention.endTimeDate(after: now), runtimeEndDate].compactMap { $0 }.min()
+        let policy = SessionExpiryPolicy(occurrenceID: occurrence,
+            duration: intention.timerMinutes.map { TimeInterval($0) * 60 }, absoluteEnd: absoluteEnd)
+        sessionExpiryPolicy = policy
+        activeSessionAbsoluteEndTime = absoluteEnd
+        guard let remaining = policy.remaining(elapsed: 0, now: now) else {
             activeSessionEndsAt = nil
             sessionLimitTask = nil
-            overlayPresenter?.hideSessionTimer()
             return
         }
-
-        let duration = max(0.1, deadline.date.timeIntervalSince(now))
-        activeSessionEndsAt = deadline.date
-        if let activeSessionEndsAt {
-            overlayPresenter?.showSessionTimer(
-                name: intention.name,
-                endsAt: activeSessionEndsAt,
-                displaysEndTime: deadline.displaysEndTime
-            )
-        }
+        activeSessionEndsAt = now.addingTimeInterval(remaining)
+        let clock = ContinuousClock()
+        let started = clock.now
         sessionLimitTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
-            guard !Task.isCancelled,
-                  let self,
-                  self.activeSessionID == intention.id else {
-                return
+            while !Task.isCancelled {
+                guard let self, self.activeSessionOccurrenceID == occurrence,
+                      let lock = self.activeLock, !lock.isStopRequested else { return }
+                let components = started.duration(to: clock.now).components
+                let elapsed = Double(components.seconds) + Double(components.attoseconds) / 1e18
+                let wallNow = Date()
+                if self.sessionExpiryPolicy?.expire(elapsed: elapsed, now: wallNow) != nil {
+                    self.overlayPresenter?.showSessionExpiry(occurrenceID: occurrence, name: intention.name)
+                    lock.stopForExpiry()
+                    return
+                }
+                if let remaining = self.sessionExpiryPolicy?.remaining(elapsed: elapsed, now: wallNow) {
+                    // Updating countdown data must never reinstall or reopen the panel.
+                    let projectedEnd = wallNow.addingTimeInterval(remaining)
+                    if self.activeSessionEndsAt.map({ abs($0.timeIntervalSince(projectedEnd)) > 0.25 }) ?? true {
+                        self.activeSessionEndsAt = projectedEnd
+                    }
+                }
+                do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             }
-            self.errorMessage = "\(intention.name)'s scheduled session finished."
-            self.activeLock?.stop()
         }
     }
 
@@ -1542,7 +1604,8 @@ final class IntentAppModel: ObservableObject {
         return intention.allowedApps.filter {
             Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
                 && (intention.accessMode == .whitelist
-                    || !intention.websites(for: $0.bundleIdentifier).isEmpty)
+                    || !intention.websites(for: $0.bundleIdentifier).isEmpty
+                    || intention.selectionBrowserBundleIdentifiers.contains($0.bundleIdentifier))
         }
     }
 
@@ -1751,6 +1814,7 @@ final class IntentAppModel: ObservableObject {
         purposeStatedPrompt = nil
         quickSelectionIntentionID = nil
         quickSelectionTabIDs = nil
+        quickSelectionBrowserSessionIDs = [:]
     }
 
     private func availableAIPosition(index: Int, occupied: [GraphPoint]) -> GraphPoint {

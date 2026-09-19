@@ -20,6 +20,12 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     guardEnabled: options.guardEnabled !== false,
     ...(options.storage || {})
   };
+  const sessionStorage = options.sessionStorage || {};
+  // Model a modern native host: each exact-ID policy carries its browser lifetime.
+  if (Array.isArray(nativeRules.selectedTabIDs) && nativeRules.selectedBrowserSessionID === undefined) {
+    sessionStorage.intentBrowserSessionID ||= `chrome-fixture-${Math.random()}`;
+    nativeRules = { ...nativeRules, selectedBrowserSessionID: sessionStorage.intentBrowserSessionID };
+  }
   const nativeMessages = [];
   const dynamicUpdates = [];
   const sessionUpdates = [];
@@ -65,7 +71,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       onStartup: event(),
       onInstalled: event()
     },
-    storage: { local: {
+    storage: { session: { get: async () => ({ ...sessionStorage }), set: async values => Object.assign(sessionStorage, values) }, local: {
       get: async (defaults) => ({ ...defaults, ...storage }),
       set: async (values) => Object.assign(storage, values)
     } },
@@ -125,6 +131,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       sendMessage: async () => ({})
     },
     windows: {
+      getAll: async () => [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({ id, left: id * 20, top: 50, width: 900, height: 700, focused: id === 1 })),
       onFocusChanged: windowFocus,
       update: async (id, patch) => {
         focusedWindows.push({ id, patch });
@@ -148,7 +155,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       intervals.push({ callback, delay });
       return intervals.length;
     },
-    setTimeout: (callback) => { Promise.resolve().then(callback); return 0; },
+    setTimeout: (callback, delay) => {
+      if (delay === 180 && options.onPreviewDelay) options.onPreviewDelay(tabs);
+      Promise.resolve().then(callback); return 0;
+    },
     clearTimeout: () => {}
   };
   vm.runInNewContext(source, context, { filename: "chrome-extension/background.js" });
@@ -162,6 +172,13 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
+    effectiveRules: context.effectiveRules,
+    browserSessionID: () => vm.runInNewContext("browserSessionID", context),
+    async command(message) {
+      await context.handleRequestedTab(message);
+      for (let i = 0; i < 48; i++) await Promise.resolve();
+    },
+    async snapshot() { await context.publishTabSnapshot(true, true); await settle(); return nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1); },
     interruptNextReturn(tabId) { interruptReturnWithTab = tabId; },
     async focusWindow(id) {
       for (const listener of windowFocus.listeners) await listener(id);
@@ -212,6 +229,9 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       });
     },
     async receiveNative(message) {
+      if (Array.isArray(message.selectedTabIDs) && message.selectedBrowserSessionID === undefined) {
+        message = { ...message, selectedBrowserSessionID: sessionStorage.intentBrowserSessionID };
+      }
       for (const listener of nativeMessage.listeners) await listener(message);
       await settle();
     },
@@ -226,6 +246,72 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  const commands = createHarness({ active: false }, [
+    { id: 61, windowId: 6, index: 0, active: true, url: "https://example.org/" },
+    { id: 62, windowId: 6, index: 1, active: false, url: "https://example.com/" }
+  ]);
+  await commands.settle();
+  const initialUpdates = commands.updates.length;
+  for (const action of ["activate", "close", "preview"]) {
+    for (const invalid of [
+      { windowID: 6 },
+      { windowID: 6, browserSessionID: "stale-browser-lifetime" },
+      { windowID: 99, browserSessionID: commands.browserSessionID() }
+    ]) {
+      const id = `invalid-${action}-${invalid.windowID}-${invalid.browserSessionID || "missing"}`;
+      await commands.command({ action, id, tabID: 62, ...invalid });
+      assert.equal(commands.tabs.has(62), true, "A missing/stale/window-mismatched command must never close a current tab");
+      assert.equal(commands.tabs.get(61).active, true, "Invalid commands must never activate a reused tab ID");
+      if (action === "preview") assert.ok(commands.nativeMessages.some(message => message.preview?.requestID === id && message.preview.error), "Rejected preview replies with an explicit error instead of timing out");
+    }
+  }
+  assert.equal(commands.updates.length, initialUpdates, "Invalid commands perform no tab mutation");
+  assert.equal(commands.focusedWindows.length, 0, "Invalid commands never change window focus");
+  await commands.command({ action: "activate", tabID: 62, windowID: 6, browserSessionID: commands.browserSessionID() });
+  assert.equal(commands.tabs.get(62).active, true, "A current-session command activates the exact current-window target");
+  await commands.command({ action: "close", tabID: 62, windowID: 6, browserSessionID: commands.browserSessionID() });
+  assert.equal(commands.tabs.has(62), false, "A current-session close command still works for the exact target");
+  const mixedTabs = [
+    { id: 1, windowId: 1, index: 0, active: true, url: "https://example.org/" },
+    { id: 2, windowId: 1, index: 1, active: false, url: "file:///tmp/guide.pdf", highlighted: true },
+    { id: 3, windowId: 1, index: 2, active: false, url: "chrome://newtab/", highlighted: true },
+    { id: 4, windowId: 1, index: 3, active: false, url: "", highlighted: true },
+    { id: 5, windowId: 1, index: 4, active: false, url: "https://example.org/", highlighted: true, pinned: true, discarded: true, groupId: 9 }
+  ];
+  const discovery = createHarness({ active: false }, mixedTabs);
+  await discovery.settle();
+  const metadata = await discovery.snapshot();
+  assert.deepEqual(Array.from(metadata.tabs, tab => tab.id), [1, 2, 3, 4, 5], "Discovery includes local PDF, internal, blank, pinned and discarded actual tabs");
+  assert.deepEqual(Array.from(metadata.tabs.filter(tab => tab.highlighted), tab => tab.id), [2, 3, 4, 5], "Native Shift-selected group reaches Intent intact");
+  assert.equal(metadata.tabs[4].groupID, 9);
+  assert.equal(metadata.tabs[4].pinned && metadata.tabs[4].discarded, true);
+  assert.equal(metadata.tabs[0].windowFrame.left, 20, "Window geometry identifies same-title browser windows");
+  assert.equal(metadata.tabs[0].windowFocused, true, "Browser focus disambiguates overlapping windows");
+  assert.ok(metadata.browserSessionID, "Every snapshot carries a browser-session identity");
+  assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1] }).active, false, "Missing identity cannot authorize a potentially reused tab ID");
+  assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1], selectedBrowserSessionID: "previous-browser-session" }).active, false, "Old exact-ID rules cannot target tabs after restart");
+  const resumedWorker = createHarness({ active: false }, mixedTabs, { sessionStorage: { intentBrowserSessionID: metadata.browserSessionID } });
+  await resumedWorker.settle();
+  assert.equal((await resumedWorker.snapshot()).browserSessionID, metadata.browserSessionID, "Chrome worker suspension preserves the browser session identity");
+  const restartedBrowser = createHarness({ active: false }, mixedTabs);
+  await restartedBrowser.settle();
+  assert.notEqual((await restartedBrowser.snapshot()).browserSessionID, metadata.browserSessionID, "A new Chrome browser session receives a different identity even when tab IDs are reused");
+  for (const accessMode of ["whitelist", "blacklist"]) {
+    const group = createHarness({ active: true, accessMode, selectedTabIDs: [2, 3, 4, 5], allowedWebsites: [], startupWebsites: [], blockTabSwitching: true, blockNavigation: true, blockNewTabs: true }, mixedTabs);
+    await group.settle();
+    for (const id of [2, 3, 4, 5]) {
+      await group.activate(id);
+      assert.equal(group.tabs.get(id).active, accessMode === "whitelist", "Every selected group member receives the same allow/block policy, regardless of content");
+      assert.equal(group.tabs.has(id), true, "Policy preserves actual selected tabs");
+    }
+    assert.deepEqual(Array.from(group.tabs.values(), tab => tab.url), mixedTabs.map(tab => tab.url), "Applying the group never rewrites tab URLs");
+    if (accessMode === "blacklist") {
+      await group.create({ id: 9, windowId: 1, index: 5, active: true, openerTabId: 2, url: "https://child.example/" });
+      assert.equal(group.tabs.get(9)?.url, "https://child.example/", "A blocked tab's new child is preserved without closing or URL replacement");
+      assert.equal(group.tabs.get(2)?.url, "file:///tmp/guide.pdf", "The original blocked parent is also preserved");
+    }
+  }
+
   const selectedOnly = createHarness({
     active: true, accessMode: "whitelist", allowedWebsites: ["example.org/work"],
     startupWebsites: [], selectedTabIDs: [7], blockTabSwitching: true,
@@ -286,7 +372,7 @@ async function run() {
     { id: 52, windowId: 3, active: false, url: "https://example.org/" }
   ]);
   await preview.settle();
-  await preview.receiveNative({ active: false, tabCommand: { id: "preview-test", action: "preview", tabID: 52, windowID: 3 } });
+  await preview.receiveNative({ active: false, tabCommand: { browserSessionID: preview.browserSessionID(), id: "preview-test", action: "preview", tabID: 52, windowID: 3 } });
   await preview.settle();
   assert.ok(preview.nativeMessages.some(message => message.preview?.requestID === "preview-test" && message.preview.image), "Hover preview captures the requested tab");
   assert.equal(preview.tabs.get(51).active, true, "Preview restores the original active tab");
@@ -294,16 +380,31 @@ async function run() {
   await preview.receiveNative({ active: false, tabCommand: { action: "snapshot" } });
   assert.ok(preview.nativeMessages.some(message => message.tabs?.some(tab => tab.faviconURL === "https://example.com/favicon.ico")), "Snapshot carries the actual site's icon");
 
+  const movingPreview = createHarness({ active: false }, [
+    { id: 51, windowId: 3, active: true, url: "https://example.com/" },
+    { id: 52, windowId: 3, active: false, url: "https://example.org/" },
+    { id: 53, windowId: 3, active: false, url: "https://example.net/" }
+  ], { onPreviewDelay(tabs) {
+    tabs.get(52).windowId = 4; // User detaches the temporarily previewed tab.
+    tabs.get(53).active = true; // User's new choice in the original window.
+  } });
+  await movingPreview.settle();
+  await movingPreview.command({ id: "moved-during-preview", action: "preview", tabID: 52, windowID: 3,
+    browserSessionID: movingPreview.browserSessionID() });
+  assert.equal(movingPreview.tabs.get(53).active, true, "Preview cleanup must preserve the user's choice after the target moves to another window");
+  assert.equal(movingPreview.updates.some(update => update.tabId === 51), false, "Preview cleanup cannot reactivate the old tab across a moved target");
+  assert.ok(movingPreview.nativeMessages.some(message => message.preview?.requestID === "moved-during-preview" && message.preview.error), "A moved target produces an explicit preview error");
+
   const idle = createHarness({ active: false }, [
-    { id: 1, active: true, url: "https://youtube.com/" }
+    { id: 1, windowId: 1, index: 0, active: true, url: "https://youtube.com/" }
   ]);
   await idle.settle();
   assert.equal(idle.nativeMessages.some(message => message.extensionCapabilities?.includes("quick-selection-tabs-v1")), false,
     "An old native host must not be advertised as selected-tab capable");
-  await idle.receiveNative({ active: false, hostCapabilities: ["quick-selection-host-v1"] });
+  await idle.receiveNative({ active: false, hostCapabilities: ["quick-selection-host-v1", "tab-session-identity-host-v1"] });
   assert.ok(idle.nativeMessages.some(message => message.extensionCapabilities?.includes("quick-selection-tabs-v1")),
     "Selected-tab capability requires a matching native host handshake");
-  await idle.receiveNative({ active: false, hostCapabilities: ["quick-selection-host-v1"],
+  await idle.receiveNative({ active: false, hostCapabilities: ["quick-selection-host-v1", "tab-session-identity-host-v1"],
     tabCommand: { action: "snapshot", tabID: -1, windowID: -1 } });
   assert.ok(idle.nativeMessages.some(message => message.type === "tabsSnapshot" && message.tabs.some(tab => tab.id === 1)),
     "Picker discovery returns idle tabs on demand");
@@ -517,18 +618,18 @@ async function run() {
   assert.equal(allowed.tabs.get(2).active, true, "Allowed tabs should remain selectable");
   await allowed.receiveNative({
     ...lockedRules,
-    tabCommand: { tabID: 1, windowID: 7 }
+    tabCommand: { browserSessionID: allowed.browserSessionID(), tabID: 1, windowID: 7 }
   });
   assert.equal(allowed.tabs.get(1).active, true, "A native Ctrl+Tab command should activate an allowed tab");
   assert.equal(allowed.focusedWindows.at(-1).id, 7, "A native Ctrl+Tab command should focus the tab's browser window");
   await allowed.receiveNative({
     ...lockedRules,
-    tabCommand: { tabID: 99, windowID: 8 }
+    tabCommand: { browserSessionID: allowed.browserSessionID(), tabID: 99, windowID: 8 }
   });
   assert.equal(allowed.tabs.get(1).active, true, "A stale or unallowed native tab command should do nothing");
   await allowed.receiveNative({
     ...lockedRules,
-    tabCommand: { tabID: 2, windowID: 7, action: "close" }
+    tabCommand: { browserSessionID: allowed.browserSessionID(), tabID: 2, windowID: 7, action: "close" }
   });
   assert.equal(allowed.tabs.has(2), false, "A native cleanup command should close its session-created tab");
   await allowed.remove(2);
@@ -612,7 +713,7 @@ async function run() {
   await blacklist.settle();
   await blacklist.receiveNative(blacklistRules);
   assert.equal(blacklist.tabs.has(1), true, "Chrome blacklist mode should preserve unlisted websites");
-  assert.equal(blacklist.tabs.has(2), false, "Chrome blacklist mode should remove already-open blocked websites");
+  assert.equal(blacklist.tabs.has(2), true, "Chrome blacklist mode must preserve already-open blocked websites");
   assert.equal(
     blacklist.dynamicRules.some((rule) =>
       rule.action.type === "block" && String(rule.condition.regexFilter).includes("youtube")
@@ -628,8 +729,8 @@ async function run() {
   await blacklist.navigate(1, "https://youtube.com/watch?v=2");
   assert.equal(
     blacklist.tabs.get(1).url,
-    "https://wikipedia.org/wiki/Focus",
-    "Blocked Chrome navigation should immediately restore the last permitted page"
+    "https://youtube.com/watch?v=2",
+    "Blacklist recovery must not rewrite or delete a document"
   );
   const blacklistBlank = createHarness(blacklistRules, [
     { id: 1, active: true, url: "chrome://newtab/" }
@@ -638,9 +739,26 @@ async function run() {
   await blacklistBlank.navigate(1, "https://youtube.com/watch?v=3");
   assert.equal(
     blacklistBlank.tabs.get(1).url.replace(/\/$/, ""),
-    "chrome://newtab",
-    "A blacklisted site entered from a fresh Chrome tab should return to a clean tab"
+    "https://youtube.com/watch?v=3",
+    "Blacklist recovery must preserve the attempted tab document"
   );
+
+  const markedBlockRules = { ...blacklistRules, selectedTabIDs: [2] };
+  const markedBlock = createHarness(markedBlockRules, [
+    {id: 1, active: true, url: "https://youtube.com/", windowId: 1},
+    {id: 2, active: false, url: "https://youtube.com/", windowId: 1},
+    {id: 3, active: false, url: "https://example.org/", windowId: 1}
+  ]);
+  await markedBlock.settle();
+  await markedBlock.receiveNative(markedBlockRules);
+  await markedBlock.activate(2);
+  await markedBlock.settle();
+  assert.equal(markedBlock.tabs.has(2), true, "Marked blacklist tab is retained");
+  assert.equal(markedBlock.tabs.get(2).url, "https://youtube.com/", "Marked blacklist URL is retained");
+  assert.equal(markedBlock.tabs.get(1).active, true, "Same-URL unmarked tab stays usable");
+  await markedBlock.activate(3);
+  await markedBlock.settle();
+  assert.equal(markedBlock.tabs.get(3).active, true, "Unmarked tab stays usable");
 
   const disabled = createHarness(lockedRules, [
     { id: 1, active: true, url: "https://instagram.com/direct/inbox/" },

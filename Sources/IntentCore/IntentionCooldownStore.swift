@@ -42,9 +42,7 @@ public final class IntentionCooldownStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("cooldowns.json")
     }
 

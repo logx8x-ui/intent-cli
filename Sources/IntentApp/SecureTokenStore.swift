@@ -22,6 +22,7 @@ final class KeychainTokenStore: SecureTokenStoring {
     }
 
     func save(account: String, data: Data) throws {
+        guard !IntentEnvironment.isQA else { return }
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -49,6 +50,7 @@ final class KeychainTokenStore: SecureTokenStoring {
     }
 
     func load(account: String) throws -> Data? {
+        guard !IntentEnvironment.isQA else { return nil }
         let query = noninteractive([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -71,6 +73,7 @@ final class KeychainTokenStore: SecureTokenStoring {
     }
 
     func delete(account: String) throws {
+        guard !IntentEnvironment.isQA else { return }
         let query = noninteractive([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

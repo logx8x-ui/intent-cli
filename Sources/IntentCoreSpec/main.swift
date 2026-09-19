@@ -25,6 +25,10 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    try runQuickGestureRegressionSpecs()
+    try runTabSelectionSpecs()
+    try runSessionRuntimeSpecs()
+    try runBrowserCommandSpecs()
     do {
         var gesture = QuickMarkGesture()
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0).consume, "Backtick is owned by Intent")
@@ -38,11 +42,11 @@ do {
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0.17).action == .mark, "Double backtick marks without opening picker")
         _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
         try expect(gesture.expire(now: 1) == nil, "Double press cancels single action")
-        for code in [36, 76, 44, 53, 48] {
+        for code in [36, 76, 11, 53, 48] {
             gesture.reset()
             _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
             let result = gesture.key(code: code, down: true, modified: false, repeatKey: false, now: 0.1)
-            try expect(result.consume && result.action == (code == 48 ? .markWindow : (code == 53 ? .clear : (code == 44 ? .toggleMode : .run))), "Held backtick chord dispatches once")
+            try expect(result.consume && result.action == (code == 48 ? .markWindow : (code == 53 ? .clear : (code == 11 ? .toggleMode : .run))), "Held backtick chord dispatches once")
             try expect(gesture.key(code: code, down: true, modified: false, repeatKey: true, now: 0.11).action == nil, "Held chord does not repeat")
             try expect(gesture.key(code: code, down: false, modified: false, repeatKey: false, now: 0.12).consume, "Chord key-up cannot leak to the application")
             _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
@@ -68,6 +72,14 @@ do {
         marked.toggleWindow(43, app: "test.app")
         try expect(marked.apps.isEmpty && marked.windowIDsByApp.isEmpty, "Removing final window clears its application")
     }
+    for (index, code) in [18,19,20,21].enumerated() {
+        var modifierGesture = QuickMarkGesture()
+        _ = modifierGesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
+        try expect(modifierGesture.key(code: code, down: true, modified: false, repeatKey: false, now: 0.1).action == .modification(index), "Modifier chords dispatch their ordered slot")
+        try expect(modifierGesture.key(code: code, down: true, modified: false, repeatKey: true, now: 0.2).action == nil, "Modifier repeat is suppressed")
+    }
+    let scaled = FieldOfViewLayout.frames(sizes: [CGSize(width: 1200, height: 800), CGSize(width: 600, height: 400)], in: CGRect(x: 0, y: 0, width: 1200, height: 700))
+    try expect(abs(scaled[0].width / scaled[1].width - 2) < 0.001, "Overview preserves relative source window scale")
     let recoveryNow = Date()
     try expect(QuickMarkRecovery.connection(nil, now: recoveryNow) == .reconnecting, "Missing bridge gets a reconnect opportunity")
     try expect(QuickMarkRecovery.connection(.init(lastSeenAt: recoveryNow, extensionVersion: "0.2.5"), now: recoveryNow) == .updateRequired, "Old Firefox is identified as an update issue, not a tab error")
@@ -85,6 +97,38 @@ do {
         BrowserTabItem(id: 12, windowID: 1, index: 1, title: "Same title", url: "https://example.com", active: false),
         BrowserTabItem(id: 13, windowID: 1, index: 2, title: "Third", url: "https://example.org", active: false)
     ]
+    try expect(!NativeTabClickPolicy.blocksWholeWindow(tabs: [], allowedIDs: []), "An empty or unavailable tab inventory cannot infer a blocked window")
+    try expect(!NativeTabClickPolicy.blocksWholeWindow(tabs: clickTabs, allowedIDs: [12]), "One permitted tab keeps the window available for tab switching")
+    try expect(NativeTabClickPolicy.blocksWholeWindow(tabs: clickTabs, allowedIDs: []), "A window containing only forbidden tabs also blocks its existing page content")
+    try expect(NativeTabClickPolicy.blocksWholeWindow(tabs: clickTabs, allowedIDs: [99]), "A permitted tab in another window does not unblock this window")
+    let interactiveRegions = IntentInteractivePanelRegions()
+    let controlsID = UUID()
+    let controlsFrame = CGRect(x: 20, y: 20, width: 40, height: 30)
+    let fullBlockedFrame = CGRect(x: 0, y: 0, width: 100, height: 100)
+    interactiveRegions.update(id: controlsID, frame: controlsFrame, isKey: true)
+    let blockedInternalTab = BrowserTabItem(id: 14, windowID: 1, index: 0, title: "Settings", url: "about:preferences", active: true)
+    let internalWindowBlocked = NativeTabClickPolicy.blocksWholeWindow(tabs: [blockedInternalTab], allowedIDs: [])
+    let pagePoint = CGPoint(x: 10, y: 10)
+    let controlsPoint = CGPoint(x: 30, y: 30)
+    try expect(NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: internalWindowBlocked,
+        pointerBlocked: fullBlockedFrame.contains(pagePoint) && !interactiveRegions.contains(pagePoint), missionControl: false), "An entirely blocked internal browser page cannot receive wheel input")
+    try expect(!NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: internalWindowBlocked,
+        pointerBlocked: fullBlockedFrame.contains(CGPoint(x: 150, y: 10)), missionControl: false), "Scroll over another window outside the blocked frame passes through")
+    try expect(!NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: internalWindowBlocked,
+        pointerBlocked: fullBlockedFrame.contains(controlsPoint) && !interactiveRegions.contains(controlsPoint), missionControl: false), "Checklist and other registered controls remain scrollable over a blocked browser")
+    try expect(!NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: internalWindowBlocked,
+        pointerBlocked: true, missionControl: true), "Mission Control scrolling is not captured by a cached browser mask")
+    try expect(!NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: NativeTabClickPolicy.blocksWholeWindow(tabs: clickTabs, allowedIDs: [11]),
+        pointerBlocked: true, missionControl: false), "A header-only forbidden-tab mask does not capture normal browser scrolling")
+    try expect(interactiveRegions.contains(CGPoint(x: 30, y: 30)) && interactiveRegions.hasKeyboardFocus, "Registered session controls retain click and keyboard priority over a blocked browser")
+    try expect(!interactiveRegions.contains(CGPoint(x: 10, y: 10)), "Interactive exemption cannot unblock content outside the actual controls")
+    let uncoveredRegions = interactiveRegions.visibleRegions(from: [fullBlockedFrame])
+    try expect(uncoveredRegions.allSatisfy { $0.intersection(controlsFrame).isEmpty || $0.intersection(controlsFrame).isNull }, "Blur leaves the registered controls visible")
+    try expect(uncoveredRegions.reduce(CGFloat.zero) { $0 + $1.width * $1.height } == 8800, "Cutting out controls preserves every other blocked pixel")
+    interactiveRegions.update(id: controlsID, frame: CGRect(x: 70, y: 70, width: 20, height: 20))
+    try expect(!interactiveRegions.contains(CGPoint(x: 30, y: 30)) && interactiveRegions.contains(CGPoint(x: 75, y: 75)) && !interactiveRegions.hasKeyboardFocus, "Moving controls removes the old input exemption and resets key ownership")
+    interactiveRegions.update(id: controlsID, frame: nil)
+    try expect(!interactiveRegions.contains(CGPoint(x: 75, y: 75)) && interactiveRegions.visibleRegions(from: [fullBlockedFrame]) == [fullBlockedFrame], "Hiding or closing controls removes both the input and visual exemption")
     try expect(NativeTabClickPolicy.blockedIndices(nativeCount: 3, tabs: clickTabs, allowedIDs: [11, 13]) == [1], "Native clicks distinguish same-title/same-URL tabs by exact tab identity and position")
     try expect(NativeTabClickPolicy.blockedIndices(nativeCount: 2, tabs: clickTabs, allowedIDs: [11]) == nil, "Collapsed or incomplete native tab lists must not guess indices")
     try expect(NativeTabClickPolicy.blocksSidebarTitle("Same title", tabs: clickTabs, allowedIDs: [11]), "Ambiguous sidebar labels cannot grant a forbidden duplicate tab")
@@ -161,7 +205,7 @@ do {
     try expect(BrowserWindowMatching.match(title: "First page", tabs: ambiguousTabs, nativeWindowCount: 2) == nil,
         "Duplicate active titles must not guess a browser window")
     var fieldSelection = QuickSelection()
-    let groupedSnapshot = BrowserTabSnapshot(browserBundleIdentifier: "com.google.Chrome", tabs: groupedTabs)
+    let groupedSnapshot = BrowserTabSnapshot(browserBundleIdentifier: "com.google.Chrome", browserSessionID: "main-selection-session", tabs: groupedTabs)
     fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 1, snapshots: [groupedSnapshot])
     try expect(fieldSelection.tabIDsByBrowser["com.google.Chrome"] == [11, 12], "Window selection must not allow other browser windows")
     fieldSelection.toggleBrowserWindow(browser: "com.google.Chrome", windowID: 2, snapshots: [groupedSnapshot])
@@ -208,7 +252,7 @@ do {
         .init(name: "Chrome", bundleIdentifier: "com.google.Chrome"),
         .init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")]
     let quickSnapshots = ["com.google.Chrome", "org.mozilla.firefox"].map { browser in
-        BrowserTabSnapshot(browserBundleIdentifier: browser, tabs: [
+        BrowserTabSnapshot(browserBundleIdentifier: browser, browserSessionID: "main-selection-session", tabs: [
             .init(id: 7, windowID: 1, index: 0, title: "Work", url: "https://example.org/work", active: true),
             .init(id: 8, windowID: 1, index: 1, title: "Duplicate", url: "https://example.org/work", active: false),
             .init(id: 9, windowID: 1, index: 2, title: "Settings", url: "about:preferences", active: false)])
@@ -231,10 +275,10 @@ do {
     var quick = QuickSelection()
     quick.toggleApp("com.apple.Notes", snapshots: quickSnapshots)
     quick.toggleApp("com.google.Chrome", snapshots: quickSnapshots)
-    try expect(quick.tabs.count == 2, "Browser selection includes website tabs, not privileged browser pages")
+    try expect(quick.tabs.count == 3, "Browser selection includes all real tabs, including privileged browser pages")
     quick.toggleTab(.init(browser: "com.google.Chrome", id: 8))
-    quick.toggleTab(.init(browser: "org.mozilla.firefox", id: 7))
-    try expect(quick.tabs.count == 2 && quick.apps.count == 3, "Tab IDs are scoped per browser and select their browser")
+    quick.toggleTab(.init(browser: "org.mozilla.firefox", id: 7), browserSessionID: "main-selection-session")
+    try expect(quick.tabs.count == 3 && quick.apps.count == 3, "Tab IDs are scoped per browser and select their browser")
     let quickIntention = try quick.makeIntention(apps: quickApps, snapshots: quickSnapshots)
     try expect(quickIntention.selectionOnly && quickIntention.allowedWebsites.count == 2, "Quick Focus keeps browser ownership")
     try expect(IntentionStartupPlanner.steps(for: quickIntention).isEmpty, "Quick Focus reuses running resources without opening duplicate tabs")
@@ -259,7 +303,7 @@ do {
         configuredQuick.accessMode = mode
         let configured = try configuredQuick.makeIntention(apps: quickApps, snapshots: quickSnapshots)
         let restored = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(configured))
-        try expect(restored.timerMinutes == 12 && !restored.sessionLocksManualFinish && restored.requiresRuntimeEndTime,
+        try expect(restored.timerMinutes == 12 && restored.sessionLocksManualFinish && restored.requiresRuntimeEndTime,
                    "Quick sessions retain explicit timer, end-time and manual-finish settings in both modes")
         try expect(restored.coolDownMinutes == 30 && restored.frictionNodes.count == 1,
                    "Saving preserves cooldown and only the in-session checklist")
@@ -302,7 +346,7 @@ do {
         _ = try quick.makeIntention(apps: quickApps, snapshots: closedSnapshot)
         throw SpecFailure(description: "Closed tabs must fail selection validation")
     } catch is QuickSelectionError {}
-    quick.toggleTab(.init(browser: "org.mozilla.firefox", id: 7))
+    quick.toggleTab(.init(browser: "org.mozilla.firefox", id: 7), browserSessionID: "main-selection-session")
     try expect(!quick.apps.contains("org.mozilla.firefox"), "Deselecting final tab deselects browser")
 
     let secureHome = FileManager.default.temporaryDirectory

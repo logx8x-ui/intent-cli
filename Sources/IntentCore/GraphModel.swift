@@ -162,7 +162,7 @@ public extension AllowedWebsite {
 public extension Intention {
     var blockedAppBundleIdentifiers: Set<String> {
         guard accessMode == .blacklist else { return [] }
-        let browserScopes = Set(allowedWebsites.compactMap(\.browserBundleIdentifier))
+        let browserScopes = Set(allowedWebsites.compactMap(\.browserBundleIdentifier)).union(selectionBrowserBundleIdentifiers)
         return Set(allowedApps.map(\.bundleIdentifier)).subtracting(browserScopes)
     }
 
@@ -229,7 +229,11 @@ public extension Intention {
     }
 
     var sessionLocksManualFinish: Bool {
-        timerLocksManualFinish || endTimeLocksManualFinish
+        if timerMinutes != nil || restrictionNodes.contains(where: { $0.kind == .endTime }) { return true }
+        return orderedFrictionNodes.contains { node in
+            guard case .taskChecklist(let tasks) = node.friction else { return false }
+            return tasks.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
     }
 
     func endTimeDate(

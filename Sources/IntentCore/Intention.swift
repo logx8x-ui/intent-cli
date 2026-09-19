@@ -32,6 +32,9 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var closeSessionResourcesOnFinish: Bool
     public var isLeisure: Bool
     public var accessMode: IntentionAccessMode
+    /// Browsers controlled by live tab identity, including tabs with no web URL.
+    public var selectionBrowserBundleIdentifiers: [String] = []
+    public var selectionRequiresTabReselection: Bool = false
     public var selectionOnly: Bool = false
     // Derived from this Mac's presets on load/start; not another visible restriction node.
     public var presetStartupExcludedResourceIDs: Set<String> = []
@@ -99,6 +102,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         case isLeisure
         case accessMode
         case selectionOnly
+        case selectionBrowserBundleIdentifiers
+        case selectionRequiresTabReselection
     }
 
     public init(from decoder: Decoder) throws {
@@ -121,6 +126,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         ) ?? false
         isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
         selectionOnly = try container.decodeIfPresent(Bool.self, forKey: .selectionOnly) ?? false
+        selectionBrowserBundleIdentifiers = try container.decodeIfPresent([String].self, forKey: .selectionBrowserBundleIdentifiers) ?? []
+        selectionRequiresTabReselection = try container.decodeIfPresent(Bool.self, forKey: .selectionRequiresTabReselection) ?? false
         accessMode = isLeisure
             ? .whitelist
             : (try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist)

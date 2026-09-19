@@ -1,12 +1,12 @@
 # Quick Focus
 
-Press <kbd>`</kbd> while Intent is running to open a full-screen overview of running apps. Click an app card to select it. A browser card selects all supported tabs in that window; its Tabs button opens a readable wrapping grid beside the overview. Hover previews replace that browser card, never the screen center. Press **Return** to run. **Escape** or **`** closes without starting.
+Press <kbd>`</kbd> while Intent is running to open the overview of running apps and windows. Click a browser to open its vertical tab list; clicking the browser does not select every tab. Use the list checkbox or **X** to select all. Hover previews appear below the list. Press **Return** to run. **Escape** or **`** closes without starting.
 
-Selecting a browser selects its currently open HTTP/HTTPS tabs. Deselect individual tabs in the tab grid to narrow it down. Selecting a single tab also selects its browser. Browser settings, extension pages, local files, and empty new-tab pages are visible but cannot be selected. Other browser engines are not supported by Browser Guard.
+Every real Chrome/Firefox tab exposed by Browser Guard can be selected, including PDFs, local files, internal pages and blank/new tabs. Selection uses exact browser and tab identity; inspecting the page or capturing a preview is a separate browser capability. Shift-click selects an inclusive range in that browser window, while Shift-click on an app tile retains its always-allowed preset behavior. Other browser engines are not supported by Browser Guard.
 
 Quick Focus requires Browser Guard **0.2.6** and its matching native host for tab discovery and selected-tab enforcement. An older or disconnected guard produces an explanation instead of starting a broader session. Discovery is requested only while the picker is open; idle browsing retains event-driven, debounced snapshot behavior.
 
-The overview is Intent's own window, using public macOS APIs; it does not alter the system Mission Control. The permission guide checks Accessibility and Screen Recording before opening the picker. On macOS 14 or newer, Screen Recording enables window previews; a capture failure falls back to named app cards. Hidden/minimized windows and apps without capturable windows retain their icons. Previews are held in memory and released when the picker closes. Tabs wrap into columns; very large tab collections scroll vertically rather than shrinking every tab. Apps without capturable windows appear as full icon/name cards in the main overview.
+The overview is Intent's own window, using public macOS APIs; it does not alter the system Mission Control. The permission guide checks Accessibility and Screen Recording before opening the picker. On macOS 14 or newer, Screen Recording enables window previews; a capture failure falls back to named app cards. Hidden/minimized windows and apps without capturable windows retain their icons. Previews are held in memory and released when the picker closes. The vertical tab list scrolls when needed; the lower half of its panel holds the hover preview. Apps without capturable windows appear as full icon/name cards in the main overview.
 
 During the temporary session, Browser Guard restricts tab IDs separately for each browser as well as applying the selected website rules. Existing unselected tabs are preserved. If a browser loses all its selected tabs, Intent ends the temporary session. New tabs are not automatically included. An already-running intention or Zero Drift cannot be replaced through this picker.
 
@@ -16,7 +16,7 @@ The bare <kbd>`</kbd> key is reserved while Intent is running. If another applic
 
 ## Verification
 
-Automated regression cases cover browser-specific tab identity, duplicate URLs, implicit browser selection, privileged-page exclusion, closed/disconnected resources, selection-only persistence, no duplicate startup resources, rules renewal, and preserving unselected tabs. Native-host tests verify forwarding tab IDs. Browser idle-work tests continue to check that idle events do not enumerate tabs.
+Automated regression cases cover browser-specific tab identity, duplicate URLs, implicit browser selection, privileged-page selection, closed/disconnected resources, selection-only persistence, no duplicate startup resources, rules renewal, and preserving unselected tabs. Native-host tests verify forwarding tab IDs. Browser idle-work tests continue to check that idle events do not enumerate tabs.
 
 Physical acceptance still requires the installed matching app, native host and both extensions: opening with <kbd>`</kbd>; selecting/deselecting across browsers; cancellation; app enforcement across Spaces; allowed-tab switching; finishing and saving/discarding; and visual layout on the user's displays. A release build alone does not establish these results.
 
@@ -35,7 +35,7 @@ Automation did not establish physical delivery of global backtick, Shift-backtic
 - Click a browser card to inspect its ordered vertical tab list; this does not select its tabs. Select all is an explicit checkbox, with **X** while the tab panel is focused (text editing is excluded). Hover previews appear below the list.
 - **Modifications** sits at bottom-left, with hover help. Timer offers Duration and **Set end time**. The centered Intent wordmark uses a grave accent above the dotless i.
 - Single **`** opens/closes the picker (or toggles session controls during a run), after a 280 ms double-press window. Double **`** toggles the foreground website tab or native window in a temporary workspace.
-- Hold **`** and press **Return** to start that workspace; hold **`** and press **/** to change Allow/Block. In the picker, Return and / alone retain their existing behavior. **~** ends, **⌘⇧`** ends and saves.
+- Hold **`** and press **Return** to start that workspace; hold **`** and press **B** to change Allow/Block. In the picker, Return and / alone retain their existing behavior. **~** ends, **⌘⇧`** ends and saves.
 - Native window marks are scoped to WindowServer IDs for this session. They are not persisted as stale IDs in saved intentions. A closed marked window ends its active session safely.
 - Outline panels are mouse-transparent. The desktop shows the focused marked window; native Mission Control maps all unambiguous marked window titles to Dock tiles. Duplicate titles are intentionally not guessed. Browser window outlines follow whether the currently active tab is marked.
 - Blur captures the mapped regions in one frame, retains blurred pixels during geometry refresh, and independently expires incompletely scanned AX rows. Context switches clear old overlays. Click enforcement remains separate from the visual cache.

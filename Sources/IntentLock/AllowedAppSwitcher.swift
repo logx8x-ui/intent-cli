@@ -169,7 +169,7 @@ private final class AllowedAppSwitcherPanelController {
     init(onHover: @escaping (Int) -> Void, onClick: @escaping (Int) -> Void) {
         self.onHover = onHover
         self.onClick = onClick
-        panel = NSPanel(
+        panel = IntentInteractivePanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -183,11 +183,11 @@ private final class AllowedAppSwitcherPanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
         let container = NSVisualEffectView()
-        container.material = .hudWindow
+        container.material = .popover
         container.blendingMode = .behindWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.055, alpha: 0.58).cgColor
+        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.12).cgColor
         container.layer?.cornerRadius = 22
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.20).cgColor
@@ -214,17 +214,20 @@ private final class AllowedAppSwitcherPanelController {
         }
         itemViews = []
 
-        for (index, item) in items.enumerated() {
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? .zero
+        let capacity = max(1, Int((min(960, visibleFrame.width - 48) - 40 + 14) / 122))
+        let first = max(0, min(selectedIndex - capacity / 2, items.count - capacity))
+        let last = min(items.count, first + capacity)
+        for (index, item) in items.enumerated() where index >= first && index < last {
             let itemView = makeItemView(item, index: index, selected: index == selectedIndex)
+            itemView.identifier = NSUserInterfaceItemIdentifier(String(index))
             itemViews.append(itemView)
             content.addArrangedSubview(itemView)
         }
 
-        let itemWidth: CGFloat = 122
-        let width = min(CGFloat(items.count) * itemWidth + 40, 960)
-        let size = NSSize(width: max(width, 264), height: 158)
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? .zero
+        let width = CGFloat(last - first) * 108 + CGFloat(max(0, last - first - 1)) * 14 + 40
+        let size = NSSize(width: width, height: 158)
         let origin = NSPoint(
             x: visibleFrame.midX - size.width / 2,
             y: visibleFrame.midY - size.height / 2
@@ -234,8 +237,8 @@ private final class AllowedAppSwitcherPanelController {
     }
 
     func updateSelection(_ selectedIndex: Int) {
-        for (index, itemView) in itemViews.enumerated() {
-            itemView.setSelected(index == selectedIndex)
+        for itemView in itemViews {
+            itemView.setSelected(itemView.identifier?.rawValue == String(selectedIndex))
         }
     }
 
@@ -323,7 +326,7 @@ private final class AllowedAppSwitcherItemView: NSView {
             ? NSColor(calibratedWhite: 1, alpha: 0.13).cgColor
             : NSColor.clear.cgColor
         layer?.borderWidth = selected ? 1.2 : 0
-        layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.52).cgColor
+        layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.8).cgColor
 
         subviews.compactMap { $0 as? NSTextField }.forEach {
             $0.font = .systemFont(ofSize: 11, weight: selected ? .semibold : .regular)

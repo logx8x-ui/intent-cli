@@ -929,15 +929,9 @@ struct RestrictionEditorMenu: View {
                     detail: "Automatically ends this intention when the timer reaches zero.",
                     defaultMinutes: 25
                 )
-                Toggle(
-                    "Keep intention running until timer ends",
-                    isOn: Binding(
-                        get: { node.locksSessionUntilTimerEnds ?? true },
-                        set: { node.locksSessionUntilTimerEnds = $0 }
-                    )
-                )
-                .toggleStyle(.checkbox)
-                .font(.system(size: 12, weight: .medium))
+                Text("Ends when time is up or every checklist task is checked. Normal finish is disabled; Safety Stop remains available.")
+                    .font(.caption)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
             case .endTime:
                 Toggle(
                     "Use preset end time",
@@ -964,15 +958,9 @@ struct RestrictionEditorMenu: View {
                         .font(.caption)
                         .foregroundStyle(GraphTheme.muted(colorScheme))
                 }
-                Toggle(
-                    "Keep intention running until end time",
-                    isOn: Binding(
-                        get: { node.locksSessionUntilTimerEnds ?? true },
-                        set: { node.locksSessionUntilTimerEnds = $0 }
-                    )
-                )
-                .toggleStyle(.checkbox)
-                .font(.system(size: 12, weight: .medium))
+                Text("Ends when time is up or every checklist task is checked. Normal finish is disabled; Safety Stop remains available.")
+                    .font(.caption)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
             }
 
             Divider()

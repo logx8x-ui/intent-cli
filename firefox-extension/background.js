@@ -9,11 +9,14 @@ const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
+const browserSessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
+let hostSupportsNativeTabGroups = false;
+let hostSupportsSessionIdentity = false;
 function advertisedCapabilities() {
-  return hostSupportsQuickSelection
-    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1", ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : EXTENSION_CAPABILITIES;
+  return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
+    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : EXTENSION_CAPABILITIES;
 }
 
 const {
@@ -97,9 +100,13 @@ function connectCommandPort() {
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
-      if (supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview) {
+      const groupsSupported = message?.hostCapabilities?.includes("native-tab-groups-host-v1") === true;
+      const identitySupported = message?.hostCapabilities?.includes("tab-session-identity-host-v1") === true;
+      if (identitySupported !== hostSupportsSessionIdentity || supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview || groupsSupported !== hostSupportsNativeTabGroups) {
         hostSupportsQuickSelection = supported;
         hostSupportsTabPreview = previewSupported;
+        hostSupportsNativeTabGroups = groupsSupported;
+        hostSupportsSessionIdentity = identitySupported;
         sendHeartbeat();
       }
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
@@ -201,24 +208,38 @@ async function captureTabPreview(message) {
 }
 
 async function handleRequestedTab(message) {
-  if (message.action === "preview") {
-    await captureTabPreview(message);
-    return;
-  }
+  // Discovery is how Intent learns the current browser lifetime in the first place.
   if (message.action === "snapshot") {
     await publishTabSnapshot(true, true);
     return;
   }
-  const tab = await browser.tabs.get(message.tabID).catch(() => null);
-  if (!tab) return;
+  let tab = null;
+  if (typeof message.browserSessionID === "string" && message.browserSessionID.length > 0
+      && message.browserSessionID === browserSessionID
+      && Number.isInteger(message.tabID) && Number.isInteger(message.windowID)) {
+    const current = await browser.tabs.get(message.tabID).catch(() => null);
+    if (current?.windowId === message.windowID) tab = current;
+  }
+  if (!tab) {
+    if (message.action === "preview") postCommandPort({
+      type: "tabPreview",
+      preview: { requestID: message.id, error: "This tab moved, closed or belongs to a previous browser session. Hover its current row again." }
+    });
+    return;
+  }
+  if (message.action === "preview") {
+    await captureTabPreview(message);
+    return;
+  }
   if (message.action === "close") {
-    await browser.tabs.remove(tab.id).catch(() => {});
+    if (rules.accessMode !== "blacklist") await browser.tabs.remove(tab.id).catch(() => {});
     return;
   }
   if (!isRuntimeAllowedTab(tab)) return;
-  if (tab.windowId != null) {
-    await browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
-  }
+  await browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  // Focusing a window is asynchronous; a user can move/close the target meanwhile.
+  const current = await browser.tabs.get(tab.id).catch(() => null);
+  if (current?.windowId !== message.windowID || !isRuntimeAllowedTab(current)) return;
   await browser.tabs.update(tab.id, { active: true }).catch(() => {});
 }
 
@@ -238,7 +259,13 @@ async function publishTabSnapshot(force = false, discovery = false) {
   if (!commandPort) connectCommandPort();
   if (!commandPort) return;
   const tabs = rules.active || discovery ? await browser.tabs.query({}) : [];
+  // Window identity is supplied by the browser; bounds disambiguate equal titles
+  // when matching these IDs to macOS WindowServer preview windows.
+  const windows = tabs.length && browser.windows?.getAll
+    ? await browser.windows.getAll({ populate: false, windowTypes: ["normal", "popup"] }).catch(() => []) : [];
+  const windowsByID = new Map(windows.map(window => [window.id, window]));
   const allSnapshotTabs = tabs
+    .filter(tab => Number.isInteger(tab.id) && tab.id >= 0 && Number.isInteger(tab.windowId))
       .map((tab) => ({
         id: tab.id,
         windowID: tab.windowId,
@@ -246,14 +273,24 @@ async function publishTabSnapshot(force = false, discovery = false) {
         title: tab.title || tab.url || "New Tab",
         url: tab.url || "",
         active: Boolean(tab.active),
-        faviconURL: tab.favIconUrl || null
+        faviconURL: tab.favIconUrl || null,
+        highlighted: typeof tab.highlighted === "boolean" ? tab.highlighted : null,
+        pinned: Boolean(tab.pinned),
+        discarded: Boolean(tab.discarded),
+        groupID: Number.isInteger(tab.groupId) ? tab.groupId : null,
+        windowFrame: (() => {
+          const window = windowsByID.get(tab.windowId);
+          return window && [window.left, window.top, window.width, window.height].every(Number.isFinite)
+            ? { left: window.left, top: window.top, width: window.width, height: window.height } : null;
+        })(),
+        windowFocused: windowsByID.get(tab.windowId)?.focused ?? null
       }))
-      .sort((left, right) => left.id - right.id);
+      .sort((left, right) => (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id));
   const allowedIDs = new Set(tabs.filter(tab => discovery || isRuntimeAllowedTab(tab)).map(tab => tab.id));
   const snapshotTabs = allSnapshotTabs.filter(tab => allowedIDs.has(tab.id));
   const nextFingerprint = JSON.stringify({ tabs: snapshotTabs, allTabs: allSnapshotTabs });
   if (!force && nextFingerprint === lastSnapshotFingerprint) return;
-  if (postCommandPort({ type: "tabsSnapshot", tabs: snapshotTabs, allTabs: allSnapshotTabs })) {
+  if (postCommandPort({ type: "tabsSnapshot", browserSessionID, tabs: snapshotTabs, allTabs: allSnapshotTabs })) {
     lastSnapshotFingerprint = nextFingerprint;
   }
 }
@@ -273,6 +310,11 @@ async function notifyNativeGuardState() {
 }
 
 function effectiveRules(nativeRules) {
+  // Browser tab IDs can be reused after restart. Never apply the previous
+  // browser session's exact-ID policy to newly created tabs.
+  if (Array.isArray(nativeRules?.selectedTabIDs)
+      && (!browserSessionID || typeof nativeRules.selectedBrowserSessionID !== "string"
+          || nativeRules.selectedBrowserSessionID !== browserSessionID)) return inactiveRules();
   if (!guardEnabled || !nativeRules?.active) {
     return inactiveRules();
   }
@@ -361,17 +403,7 @@ async function applyNativeRules(nativeRules) {
 }
 
 async function removeAlreadyBlockedTabs() {
-  if (rules.accessMode !== "blacklist") return;
-  const tabs = await browser.tabs.query({});
-  const blocked = tabs.filter((tab) => tab.id != null && tab.url && !isAllowedURL(tab.url, rules));
-  for (const tab of blocked) {
-    if (tabs.length - blocked.length <= 0 && blocked[blocked.length - 1]?.id === tab.id) {
-      await browser.tabs.update(tab.id, { url: "about:newtab", active: tab.active }).catch(() => {});
-      freshBlankTabIds.add(tab.id);
-    } else {
-      await browser.tabs.remove(tab.id).catch(() => {});
-    }
-  }
+  // Blacklisting preserves every tab; native blur and activation guards block access.
 }
 
 async function getAllowedTab(tabId) {
@@ -388,7 +420,7 @@ function isFreshBlankTab(tab) {
 
 function isRuntimeAllowedTab(tab) {
   // Explicit tab selection follows that tab across URLs, redirects and SPA routes.
-  if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.selectedTabIDs.includes(tab?.id);
+  if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.accessMode === "blacklist" ? !rules.selectedTabIDs.includes(tab?.id) : rules.selectedTabIDs.includes(tab?.id);
   return Boolean(
     tab?.url &&
     (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab))
@@ -619,8 +651,9 @@ function shouldBlockNavigation(url) {
 }
 
 async function recoverBlockedNavigation(tabId) {
+  if (rules.accessMode === "blacklist") { await returnToAllowedTab(); return; }
   // Do not navigate or close an existing unselected tab. Leave it intact for after the session.
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
     await returnToAllowedTab();
     return;
   }
@@ -643,7 +676,7 @@ async function recoverBlockedNavigation(tabId) {
   ) {
     freshBlankTabIds.delete(tabId);
     try {
-      await browser.tabs.remove(tabId);
+      if (rules.accessMode !== "blacklist") await browser.tabs.remove(tabId);
     } catch (_) {}
     await returnToAllowedTab();
     return;
@@ -702,7 +735,7 @@ browser.windows?.onFocusChanged?.addListener(async (windowId) => {
 });
 
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
     await returnToAllowedTab();
     return;
   }
@@ -734,8 +767,12 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   scheduleTabSnapshot();
 });
 
+// Selection, pinning and moves can change without navigation or activation.
+browser.tabs.onHighlighted?.addListener(() => scheduleTabSnapshot());
+
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tabId)) {
+  scheduleTabSnapshot();
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
     if (tab.active) await returnToAllowedTab();
     return;
   }
@@ -803,7 +840,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(tab.id)) {
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab(tab)) {
     await returnToAllowedTab();
     return;
   }
@@ -836,7 +873,7 @@ browser.tabs.onCreated.addListener(async (tab) => {
     }
 
     try {
-      await browser.tabs.remove(latest.id);
+      if (rules.accessMode !== "blacklist") await browser.tabs.remove(latest.id);
     } catch (_) {
       await returnToAllowedTab();
     }
@@ -870,11 +907,11 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (rules.active && Array.isArray(rules.selectedTabIDs) && !rules.selectedTabIDs.includes(details.tabId)) {
+    if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: details.tabId})) {
       setTimeout(returnToAllowedTab, 0);
       return { cancel: true };
     }
-    if (rules.active && Array.isArray(rules.selectedTabIDs) && rules.selectedTabIDs.includes(details.tabId)) return {};
+    if (rules.active && Array.isArray(rules.selectedTabIDs) && isRuntimeAllowedTab({id: details.tabId})) return {};
     if (isPendingStartupNavigation(details.tabId, details.url)) {
       startupNavigationURLByTab.get(details.tabId).lastNavigationURL = details.url;
       return {};

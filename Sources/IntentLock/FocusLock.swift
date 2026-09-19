@@ -152,6 +152,15 @@ public final class FocusLock {
         stopStateLock.unlock()
     }
 
+    private var suppressReturnActivation = false
+
+    public func stopForExpiry() {
+        stopStateLock.lock()
+        suppressReturnActivation = true
+        shouldStop = true
+        stopStateLock.unlock()
+    }
+
     public func updateFinishShortcut(_ shortcut: FocusKeyboardShortcut) {
         stopStateLock.lock()
         currentFinishShortcut = shortcut
@@ -212,7 +221,10 @@ public final class FocusLock {
             throw error
         }
 
-        if spec.restorePreviousApplicationOnStop {
+        stopStateLock.lock()
+        let shouldRestore = spec.restorePreviousApplicationOnStop && !suppressReturnActivation
+        stopStateLock.unlock()
+        if shouldRestore {
             returnApplication?.activate(options: [.activateIgnoringOtherApps])
         }
     }
@@ -257,11 +269,13 @@ public final class FocusLock {
             let snapshotStore = BrowserTabSnapshotStore(browserBundleIdentifier: bundleIdentifier)
             let deadline = Date(timeIntervalSinceNow: 0.8)
             repeat {
-                if let tab = snapshotStore.load(maxAge: 2)?.tabs.first(where: {
+                if let snapshot = snapshotStore.load(maxAge: 2),
+                   let browserSessionID = snapshot.browserSessionID, !browserSessionID.isEmpty,
+                   let tab = snapshot.tabs.first(where: {
                     Self.urlsRepresentSameStartupSite($0.url, url)
                 }) {
                     try? BrowserTabCommandStore(browserBundleIdentifier: bundleIdentifier).write(
-                        BrowserTabCommand(tabID: tab.id, windowID: tab.windowID)
+                        BrowserTabCommand(tabID: tab.id, windowID: tab.windowID, browserSessionID: browserSessionID)
                     )
                     _ = activateApp(bundleIdentifier: bundleIdentifier)
                     RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25))
@@ -366,7 +380,7 @@ public final class FocusLock {
     }
 
     private func installEventTap() throws {
-        let types: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDragged,
+        let types: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDragged, .scrollWheel,
                                    .leftMouseUp, .rightMouseUp, .otherMouseUp,
                                    .leftMouseDown, .rightMouseDown, .otherMouseDown]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
@@ -408,6 +422,18 @@ public final class FocusLock {
             return Unmanaged.passUnretained(event)
         }
         if isStopped { return Unmanaged.passUnretained(event) }
+        if type == .scrollWheel {
+            let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let wholeWindowBlocked = nativeTabClickGuard.blocksForegroundWindow(foregroundPID)
+            // Do not intercept normal tab/sidebar scrolling or scroll over a
+            // different window. shouldBlock also exempts registered controls.
+            let pointerBlocked = wholeWindowBlocked && nativeTabClickGuard.shouldBlock(event.location, frontmostPID: foregroundPID)
+            if NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: wholeWindowBlocked,
+                pointerBlocked: pointerBlocked, missionControl: pointerBlocked && isMissionControlActive()) {
+                return nil
+            }
+            return Unmanaged.passUnretained(event)
+        }
         if [.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(type) {
             if suppressedTabButtons.remove(event.getIntegerValueField(.mouseEventButtonNumber)) != nil { return nil }
             return Unmanaged.passUnretained(event)
@@ -432,6 +458,10 @@ public final class FocusLock {
                     // Keep Mission Control open; a known forbidden tile is a no-op.
                     return nil
                 }
+                return Unmanaged.passUnretained(event)
+            }
+
+            if IntentInteractivePanelRegions.shared.contains(event.location) {
                 return Unmanaged.passUnretained(event)
             }
 
@@ -541,6 +571,17 @@ public final class FocusLock {
             return Unmanaged.passUnretained(event)
         }
 
+        // A browser with no permitted tab cannot redirect an already-open or
+        // internal page. Keep its content inert without closing anything. The
+        // stop/switcher routes above and Intent's grave-key controls stay usable.
+        if keyCode != KeyCode.grave,
+           !(keyCode == KeyCode.tab && (command || control)),
+           !(control && FocusSystemShortcutPolicy.isSpaceNavigationKey(keyCode)),
+           !IntentInteractivePanelRegions.shared.hasKeyboardFocus,
+           nativeTabClickGuard.blocksForegroundWindow(NSWorkspace.shared.frontmostApplication?.processIdentifier) {
+            return nil
+        }
+
         if spec.accessMode == .whitelist,
            spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
             if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {
@@ -646,7 +687,7 @@ public final class FocusLock {
         guard app.activationPolicy == .regular else { return }
         guard !baselinePids.contains(app.processIdentifier) else { return }
 
-        app.terminate()
+        if spec.accessMode != .blacklist { app.terminate() }
         refocus()
     }
 
@@ -1123,13 +1164,15 @@ public final class FocusLock {
             let snapshot = BrowserTabSnapshotStore(
                 browserBundleIdentifier: browserBundleIdentifier
             ).load(maxAge: 3)
+            guard let browserSessionID = snapshot?.browserSessionID, !browserSessionID.isEmpty else { continue }
             for tab in snapshot?.tabs ?? [] {
                 let store = BrowserTabCommandStore(browserBundleIdentifier: browserBundleIdentifier)
                 try? store.write(
                     BrowserTabCommand(
                         tabID: tab.id,
                         windowID: tab.windowID,
-                        action: .close
+                        action: .close,
+                        browserSessionID: browserSessionID
                     )
                 )
                 let deadline = Date(timeIntervalSinceNow: 1)

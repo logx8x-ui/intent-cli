@@ -25,6 +25,7 @@ final class IntentUpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate 
         return model.hasActiveSession || model.isZeroDriftActive || model.pendingPurposeSessionSave != nil
     }
     func startAutomaticChecks() {
+        guard !IntentEnvironment.isQA else { return }
         guard controller == nil else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         controller?.updater.automaticallyChecksForUpdates = true
@@ -34,6 +35,10 @@ final class IntentUpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
     func appBecameActive() { startAutomaticChecks() }
     func checkForUpdates(force: Bool = false) {
+        guard !IntentEnvironment.isQA else {
+            errorMessage = "Updates are disabled in the isolated QA app."
+            return
+        }
         startAutomaticChecks()
         errorMessage = nil
         if force { controller?.checkForUpdates(nil) }

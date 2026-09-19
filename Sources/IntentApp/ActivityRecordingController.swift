@@ -15,6 +15,7 @@ final class ActivityRecordingController: ObservableObject {
 
     init(store: ActivityRecordingStore = ActivityRecordingStore()) {
         self.store = store
+        guard !IntentEnvironment.isQA else { return }
         state = store.load()
 
         if state?.isActive == true {
@@ -54,6 +55,10 @@ final class ActivityRecordingController: ObservableObject {
     }
 
     func start(period: ActivityRecordingPeriod, now: Date = Date()) {
+        guard !IntentEnvironment.isQA else {
+            errorMessage = "Personal activity recording is disabled in the isolated QA app."
+            return
+        }
         let baseline = Dictionary(
             uniqueKeysWithValues: Self.currentWebsiteCounts().map { key, count in
                 (ActivityRecordingKey.baselineFingerprint(for: key), count)

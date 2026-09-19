@@ -5,6 +5,7 @@ import IntentCore
 final class AllowedBrowserTabSwitcher {
     private struct Item {
         let tab: BrowserTabItem
+        let browserSessionID: String
         let title: String
         let subtitle: String
         let icon: NSImage
@@ -74,11 +75,12 @@ final class AllowedBrowserTabSwitcher {
             return
         }
         let tab = items[selectedIndex].tab
+        let browserSessionID = items[selectedIndex].browserSessionID
         visible = false
         items = []
         stateLock.unlock()
 
-        let command = BrowserTabCommand(tabID: tab.id, windowID: tab.windowID)
+        let command = BrowserTabCommand(tabID: tab.id, windowID: tab.windowID, browserSessionID: browserSessionID)
         try? BrowserTabCommandStore(browserBundleIdentifier: browserBundleIdentifier).write(command)
         DispatchQueue.main.async { [weak self] in
             self?.panelController?.hide()
@@ -114,7 +116,7 @@ final class AllowedBrowserTabSwitcher {
     private func makeItems(browserBundleIdentifier: String) -> [Item] {
         guard let snapshot = BrowserTabSnapshotStore(
             browserBundleIdentifier: browserBundleIdentifier
-        ).load(maxAge: 10) else {
+        ).load(maxAge: 10), let browserSessionID = snapshot.browserSessionID, !browserSessionID.isEmpty else {
             return []
         }
 
@@ -127,6 +129,7 @@ final class AllowedBrowserTabSwitcher {
         return orderedTabs.map { tab in
             Item(
                 tab: tab,
+                browserSessionID: browserSessionID,
                 title: tab.title.isEmpty ? "New Tab" : tab.title,
                 subtitle: URL(string: tab.url)?.host ?? "Search tab",
                 icon: icon
@@ -161,7 +164,7 @@ private final class BrowserTabSwitcherPanelController {
     init(onHover: @escaping (Int) -> Void, onClick: @escaping (Int) -> Void) {
         self.onHover = onHover
         self.onClick = onClick
-        panel = NSPanel(
+        panel = IntentInteractivePanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -175,11 +178,11 @@ private final class BrowserTabSwitcherPanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
         let container = NSVisualEffectView()
-        container.material = .hudWindow
+        container.material = .popover
         container.blendingMode = .behindWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.055, alpha: 0.58).cgColor
+        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.12).cgColor
         container.layer?.cornerRadius = 22
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.20).cgColor
@@ -205,7 +208,12 @@ private final class BrowserTabSwitcherPanelController {
             $0.removeFromSuperview()
         }
         itemViews = []
-        for (index, item) in items.enumerated() {
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? .zero
+        let capacity = max(1, Int((min(1020, visibleFrame.width - 48) - 40 + 12) / 156))
+        let first = max(0, min(selectedIndex - capacity / 2, items.count - capacity))
+        let last = min(items.count, first + capacity)
+        for (index, item) in items.enumerated() where index >= first && index < last {
             let view = BrowserTabSwitcherItemView(
                 item: item,
                 index: index,
@@ -213,15 +221,13 @@ private final class BrowserTabSwitcherPanelController {
                 onClick: onClick
             )
             view.setSelected(index == selectedIndex)
+            view.identifier = NSUserInterfaceItemIdentifier(String(index))
             itemViews.append(view)
             content.addArrangedSubview(view)
         }
 
-        let itemWidth: CGFloat = 156
-        let width = min(CGFloat(items.count) * itemWidth + 40, 1_020)
-        let size = NSSize(width: max(width, 340), height: 166)
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? .zero
+        let width = CGFloat(last - first) * 144 + CGFloat(max(0, last - first - 1)) * 12 + 40
+        let size = NSSize(width: width, height: 166)
         panel.setFrame(
             NSRect(
                 x: visibleFrame.midX - size.width / 2,
@@ -235,8 +241,8 @@ private final class BrowserTabSwitcherPanelController {
     }
 
     func updateSelection(_ selectedIndex: Int) {
-        for (index, view) in itemViews.enumerated() {
-            view.setSelected(index == selectedIndex)
+        for view in itemViews {
+            view.setSelected(view.identifier?.rawValue == String(selectedIndex))
         }
     }
 
@@ -331,6 +337,6 @@ private final class BrowserTabSwitcherItemView: NSView {
             ? NSColor(calibratedWhite: 1, alpha: 0.13).cgColor
             : NSColor.clear.cgColor
         layer?.borderWidth = selected ? 1.2 : 0
-        layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.52).cgColor
+        layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.8).cgColor
     }
 }

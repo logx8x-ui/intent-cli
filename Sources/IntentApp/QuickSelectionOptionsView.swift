@@ -1,8 +1,23 @@
+import AppKit
 import IntentCore
 import SwiftUI
 
 enum QuickSelectionOptionsSection: String, CaseIterable {
     case timer = "Timer", checklist = "Checklist", searches = "Searches", cooldown = "Cooldown"
+    static var ordered: [Self] {
+        let stored = UserDefaults.standard.stringArray(forKey: "quickModificationOrder") ?? []
+        let decoded = stored.compactMap(Self.init(rawValue:))
+        return decoded.count == allCases.count && Set(decoded).count == allCases.count ? decoded : allCases
+    }
+    func enable(in selection: inout QuickSelection) {
+        guard !enabled(in: selection) else { return }
+        switch self {
+        case .timer: selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: true))
+        case .checklist: selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260)))
+        case .searches: selection.restrictionNodes.append(.init(kind: .allowBrowserSearches, position: .init(x: 240, y: 390)))
+        case .cooldown: selection.restrictionNodes.append(.init(kind: .coolDown, position: .init(x: 240, y: 390), durationMinutes: 30))
+        }
+    }
     var icon: String {
         switch self { case .timer: return "timer"; case .checklist: return "checklist"; case .searches: return "magnifyingglass"; case .cooldown: return "hourglass" }
     }
@@ -40,10 +55,11 @@ struct QuickSelectionOptionsView: View {
                     if section == .timer {
                     Toggle("Timer", isOn: Binding(get: { timerIndex != nil }, set: { enabled in
                         selection.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
-                        if enabled { selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: false)) }
+                        if enabled { selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: true)) }
                     }))
                     .help("Finish after a duration or at a time you choose.")
                     if let index = timerIndex {
+                        Text("Choose one: Duration OR Set end time. Finish shortcuts stay disabled until completion.").font(.caption).foregroundStyle(.secondary)
                         HStack(spacing: 8) {
                             timerModeButton("Duration", clock: false, index: index)
                             timerModeButton("Set end time", clock: true, index: index)
@@ -66,7 +82,7 @@ struct QuickSelectionOptionsView: View {
                     }))
                     .help("Check off your tasks during the intention; completing them all ends it.")
                     if let index = checklistIndex {
-                        Text("Check tasks off during your session; the last check finishes it.").font(.caption).foregroundStyle(.secondary)
+                        Text("Finish shortcuts are disabled. The last checked task finishes the intention.").font(.caption).foregroundStyle(.secondary)
                         if case .taskChecklist(let tasks) = selection.frictionNodes[index].friction {
                             ForEach(tasks.indices, id: \.self) { taskIndex in
                                 HStack {

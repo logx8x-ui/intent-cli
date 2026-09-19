@@ -68,9 +68,7 @@ public final class IntentionStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("intentions.json")
     }
 }
@@ -85,6 +83,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     public var startupWebsitesByBrowser: [String: [String]]
     public var startupSessionID: String?
     public var selectedTabIDsByBrowser: [String: [Int]]?
+    public var selectedBrowserSessionIDsByBrowser: [String: String]?
     public var blockTabSwitching: Bool
     public var blockNavigation: Bool
     public var blockNewTabs: Bool
@@ -99,6 +98,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         startupWebsitesByBrowser: [String: [String]] = [:],
         startupSessionID: String? = nil,
         selectedTabIDsByBrowser: [String: [Int]]? = nil,
+        selectedBrowserSessionIDsByBrowser: [String: String]? = nil,
         blockTabSwitching: Bool,
         blockNavigation: Bool,
         blockNewTabs: Bool,
@@ -112,6 +112,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         self.startupWebsitesByBrowser = startupWebsitesByBrowser
         self.startupSessionID = startupSessionID
         self.selectedTabIDsByBrowser = selectedTabIDsByBrowser
+        self.selectedBrowserSessionIDsByBrowser = selectedBrowserSessionIDsByBrowser
         self.blockTabSwitching = blockTabSwitching
         self.blockNavigation = blockNavigation
         self.blockNewTabs = blockNewTabs
@@ -127,6 +128,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         case startupWebsitesByBrowser
         case startupSessionID
         case selectedTabIDsByBrowser
+        case selectedBrowserSessionIDsByBrowser
         case blockTabSwitching
         case blockNavigation
         case blockNewTabs
@@ -143,6 +145,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         startupWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .startupWebsitesByBrowser) ?? [:]
         startupSessionID = try container.decodeIfPresent(String.self, forKey: .startupSessionID)
         selectedTabIDsByBrowser = try container.decodeIfPresent([String: [Int]].self, forKey: .selectedTabIDsByBrowser)
+        selectedBrowserSessionIDsByBrowser = try container.decodeIfPresent([String: String].self, forKey: .selectedBrowserSessionIDsByBrowser)
         blockTabSwitching = try container.decodeIfPresent(Bool.self, forKey: .blockTabSwitching) ?? false
         blockNavigation = try container.decodeIfPresent(Bool.self, forKey: .blockNavigation) ?? false
         blockNewTabs = try container.decodeIfPresent(Bool.self, forKey: .blockNewTabs) ?? false
@@ -159,6 +162,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
             startupWebsitesByBrowser: startupWebsitesByBrowser,
             startupSessionID: startupSessionID,
             selectedTabIDsByBrowser: selectedTabIDsByBrowser,
+            selectedBrowserSessionIDsByBrowser: selectedBrowserSessionIDsByBrowser,
             blockTabSwitching: blockTabSwitching,
             blockNavigation: blockNavigation,
             blockNewTabs: blockNewTabs,
@@ -193,9 +197,7 @@ public final class ActiveBrowserRulesStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("browser-rules.json")
     }
 }
@@ -234,7 +236,10 @@ public struct BrowserGuardHeartbeat: Codable, Equatable {
 public enum BrowserGuardCapability: String, Codable, Equatable {
     case singleStartupLaunch = "single-startup-launch-v1"
     case quickSelection = "quick-selection-tabs-v1"
+    case blacklistSelection = "blacklist-selection-tabs-v1"
     case tabPreview = "tab-preview-v1"
+    case nativeTabGroups = "native-tab-groups-v1"
+    case tabSessionIdentity = "tab-session-identity-v1"
 }
 
 public struct BrowserGuardState: Codable, Equatable {
@@ -275,16 +280,12 @@ public final class BrowserGuardStateStore {
         guard browserBundleIdentifier != "org.mozilla.firefox" else {
             return defaultFileURL()
         }
-        return FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        return IntentEnvironment.dataDirectory
             .appendingPathComponent("browser-guard-state-\(safeFileComponent(browserBundleIdentifier)).json")
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("browser-guard-state.json")
     }
 }
@@ -347,9 +348,7 @@ public final class BrowserGuardHeartbeatStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("browser-guard-heartbeat.json")
     }
 
@@ -357,9 +356,7 @@ public final class BrowserGuardHeartbeatStore {
         guard browserBundleIdentifier != "org.mozilla.firefox" else {
             return defaultFileURL()
         }
-        return FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        return IntentEnvironment.dataDirectory
             .appendingPathComponent("browser-guard-heartbeat-\(safeFileComponent(browserBundleIdentifier)).json")
     }
 }

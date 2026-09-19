@@ -115,8 +115,9 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             }
             guard QuickSelection.browsers.contains(window.bundle),
                   let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: window.bundle).load(),
-                  let id = BrowserWindowMatching.match(title: window.title, tabs: snapshot.tabs, nativeWindowCount: windows.filter { $0.bundle == window.bundle }.count) else { continue }
-            let tabs = snapshot.tabs.filter { $0.windowID == id }
+                  selection.browserSessionIDs[window.bundle] == snapshot.browserSessionID,
+                  let id = BrowserWindowMatching.match(title: window.title, tabs: snapshot.allTabs ?? snapshot.tabs, nativeWindowCount: windows.filter { $0.bundle == window.bundle }.count, frame: window.frame, isFocused: front?.id == window.id) else { continue }
+            let tabs = (snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == id }
             let selectedIDs = Set(selection.tabs.filter { $0.browser == window.bundle }.map(\.id))
             guard tabs.contains(where: { selectedIDs.contains($0.id) }) else { continue }
             if let whole = selection.browserWindowTabs[.init(browser: window.bundle, id: id)],

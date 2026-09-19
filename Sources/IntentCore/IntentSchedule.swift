@@ -211,8 +211,7 @@ public final class IntentScheduleStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("schedules.json")
     }
 }

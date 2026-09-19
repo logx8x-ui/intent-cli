@@ -14,6 +14,7 @@ public enum FieldOfViewLayout {
             let cellHeight = (bounds.height - gap * CGFloat(rows - 1)) / CGFloat(rows)
             let reserved = tabHeight + 26
             guard cellWidth > 8, cellHeight - reserved > 8 else { continue }
+            let commonScale = sizes.map { min(cellWidth / max(1, $0.width), (cellHeight - reserved) / max(1, $0.height)) }.min() ?? 1
             var result: [CGRect] = []
             var score: CGFloat = 0
             for (index, size) in sizes.enumerated() {
@@ -22,7 +23,7 @@ public enum FieldOfViewLayout {
                 let rowCount = min(columns, sizes.count - row * columns)
                 let width: CGFloat = max(1, size.width)
                 let height: CGFloat = max(1, size.height)
-                let scale: CGFloat = min(min(cellWidth / width, (cellHeight - reserved) / height), 1)
+                let scale: CGFloat = min(commonScale, 1)
                 let fitted = CGSize(width: width * scale, height: height * scale)
                 let rowWidth = CGFloat(rowCount) * cellWidth + CGFloat(rowCount - 1) * gap
                 let cellX: CGFloat = bounds.midX - rowWidth / 2 + CGFloat(column) * (cellWidth + gap)
@@ -40,7 +41,19 @@ public enum FieldOfViewLayout {
 
 /// Never attach a tab group to a window on a guess. Browser window IDs are not CGWindowIDs.
 public enum BrowserWindowMatching {
-    public static func match(title: String, tabs: [BrowserTabItem], nativeWindowCount: Int) -> Int? {
+    public static func match(title: String, tabs: [BrowserTabItem], nativeWindowCount: Int, frame: CGRect? = nil, isFocused: Bool = false) -> Int? {
+        if let frame, frame.width > 0, frame.height > 0 {
+            let geometryMatches = Set(tabs.filter { tab in
+                guard let candidate = tab.windowFrame?.rect else { return false }
+                return abs(candidate.minX - frame.minX) <= 3 && abs(candidate.minY - frame.minY) <= 3
+                    && abs(candidate.width - frame.width) <= 3 && abs(candidate.height - frame.height) <= 3
+            }.map(\.windowID))
+            if geometryMatches.count == 1 { return geometryMatches.first }
+            if isFocused {
+                let focused = Set(tabs.filter { $0.windowFocused == true && geometryMatches.contains($0.windowID) }.map(\.windowID))
+                if focused.count == 1 { return focused.first }
+            }
+        }
         let ids = Set(tabs.map(\.windowID))
         if ids.count == 1, nativeWindowCount == 1 { return ids.first }
         let normalized = normalize(title)

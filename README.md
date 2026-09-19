@@ -79,7 +79,7 @@ only on that Mac. An account keeps each device on the same private workspace;
 a brand-new account always starts with zero intentions. See [Intent Accounts](docs/ACCOUNTS.md).
 
 - Click an intention to run it.
-- Press `` ` `` to select running apps and Chrome/Firefox tabs in [Quick Focus](docs/QUICK_FOCUS.md), then press it again to start. Requires matching Browser Guard 0.2.6; finish to save or discard the setup.
+- Press `` ` `` to select running apps and Chrome/Firefox tabs in [Quick Focus](docs/QUICK_FOCUS.md), then press Return to start. Requires a matching Browser Guard; Shift-backtick finishes without saving, and Command-Shift-backtick finishes and saves unlocked sessions.
 - Press `Cmd+G` to show or hide Intent, or change that shortcut in Settings.
 - Press `Tab` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
 - Pinch to zoom and use two fingers to pan.

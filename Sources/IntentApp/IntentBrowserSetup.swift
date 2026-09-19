@@ -4,8 +4,9 @@ import IntentCore
 /// Per-user registration takes precedence over stale system-wide installer manifests.
 @MainActor
 enum IntentBrowserSetup {
-    static var root: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".intent/browser-guard") }
+    static var root: URL { IntentEnvironment.dataDirectory.appendingPathComponent("browser-guard") }
     static func register() throws {
+        guard !IntentEnvironment.isQA else { return }
         let fm = FileManager.default
         let host = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/IntentNativeHost")
         guard fm.isExecutableFile(atPath: host.path) else { return }
@@ -51,6 +52,7 @@ enum IntentBrowserSetup {
         }
     }
     static func open(_ browserID: String) {
+        guard !IntentEnvironment.isQA else { return }
         do { try register() } catch {
             let alert = NSAlert(); alert.messageText = "Couldn’t connect Browser Guard"; alert.informativeText = error.localizedDescription; alert.runModal(); return
         }

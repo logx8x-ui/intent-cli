@@ -131,7 +131,7 @@ public final class PurposeWebsiteHistoryStore {
     }
 
     private static func defaultDirectoryURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
     }
 
     private static func websiteIdentity(

@@ -323,8 +323,7 @@ public final class CalendarPreferencesStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("calendar-preferences.json")
     }
 }

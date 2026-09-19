@@ -172,8 +172,7 @@ public final class AIHistoryStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("ai-history.json")
     }
 

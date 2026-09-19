@@ -55,6 +55,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func appear(visibleInterval: DateInterval? = nil) {
+        guard !IntentEnvironment.isQA else { return }
         if let visibleInterval {
             self.visibleInterval = visibleInterval
         }
@@ -73,11 +74,13 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func appBecameActive() {
+        guard !IntentEnvironment.isQA else { return }
         Task { await refresh(reason: .active) }
     }
 
     @discardableResult
     func connectApple() async -> Bool {
+        guard !IntentEnvironment.isQA else { syncStatusMessage = "Calendar connections are disabled in the isolated QA app."; return false }
         appleState.status = .connecting
         appleState.message = nil
         do {
@@ -93,6 +96,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func disconnectApple() async {
+        guard !IntentEnvironment.isQA else { return }
         await appleProvider.disconnect()
         publishStates()
         await refresh(reason: .manual)
@@ -100,6 +104,7 @@ final class CalendarSyncManager: ObservableObject {
 
     @discardableResult
     func connectGoogle() async -> Bool {
+        guard !IntentEnvironment.isQA else { syncStatusMessage = "Calendar connections are disabled in the isolated QA app."; return false }
         googleState.status = .connecting
         googleState.message = nil
         do {
@@ -115,6 +120,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func disconnectGoogle() async {
+        guard !IntentEnvironment.isQA else { return }
         await googleProvider.disconnect()
         publishStates()
         await refresh(reason: .manual)
@@ -143,6 +149,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func enableAppleReminders() async {
+        guard !IntentEnvironment.isQA else { return }
         do {
             try await appleProvider.enableRemindersIfNeeded()
             preferences.appleRemindersEnabled = true
@@ -154,6 +161,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func syncSchedule(_ schedule: IntentSchedule, intentionName: String) async -> IntentSchedule? {
+        guard !IntentEnvironment.isQA else { return nil }
         guard let syncTarget = schedule.sync?.provider ?? preferredWriteProvider() else {
             return nil
         }
@@ -179,6 +187,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     func deleteSyncedEvent(for schedule: IntentSchedule) async {
+        guard !IntentEnvironment.isQA else { return }
         guard let metadata = schedule.sync else { return }
         do {
             switch metadata.provider {
@@ -216,6 +225,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     private func refresh(reason: RefreshReason) async {
+        guard !IntentEnvironment.isQA else { return }
         refreshTask?.cancel()
         let task = Task { @MainActor in
             publishStates()
@@ -293,6 +303,7 @@ final class CalendarSyncManager: ObservableObject {
     }
 
     private func startBackgroundRefresh() {
+        guard !IntentEnvironment.isQA else { return }
         guard backgroundTimer == nil else { return }
         let timer = Timer(timeInterval: 15 * 60, repeats: true) { [weak self] _ in
             guard let self else { return }

@@ -16,7 +16,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 function blockUnallowedLink(event) {
-  if (!intentRules.active || !intentRules.blockNavigation) return;
+  if (!intentRules.active || !intentRules.blockNavigation || Array.isArray(intentRules.selectedTabIDs)) return;
   const link = event.target?.closest?.("a[href]");
   if (!link || IntentBrowserRules.isAllowedURL(link.href, intentRules)) return;
   event.preventDefault();

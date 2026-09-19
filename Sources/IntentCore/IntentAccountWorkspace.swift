@@ -166,7 +166,7 @@ public enum IntentOfflineAccountPolicy {
 
 public enum IntentProfilePaths {
     public static func rootDirectory(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        homeDirectory.appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory(forHome: homeDirectory)
     }
 
     public static func guestDirectory(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {

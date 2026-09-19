@@ -64,6 +64,7 @@ try {
       "com.google.Chrome": ["https://www.youtube.com/"]
     },
     startupSessionID: "native-host-startup-session",
+    selectedBrowserSessionIDsByBrowser: { "org.mozilla.firefox": "firefox-session", "com.google.Chrome": "chrome-session" },
     selectedTabIDsByBrowser: { "org.mozilla.firefox": [7], "com.google.Chrome": [14] },
     blockTabSwitching: true,
     blockNavigation: true,
@@ -78,6 +79,7 @@ try {
 
   const [rulesResponse] = callHost([{ type: "getRules" }]);
   assert.equal(rulesResponse.active, true, "Native host should return active app rules");
+  assert.equal(rulesResponse.selectedBrowserSessionID, "firefox-session", "Selected-tab policy is bound to the browser lifetime");
   assert.equal(rulesResponse.accessMode, "blacklist", "Native host should preserve browser access mode");
   assert.deepEqual(rulesResponse.selectedTabIDs, [7], "Native host must forward browser-scoped selected tab IDs");
   assert.ok(rulesResponse.hostCapabilities.includes("quick-selection-host-v1"), "Native host must acknowledge the selected-tab protocol");
@@ -96,10 +98,11 @@ try {
   fs.writeFileSync(rulesPath, JSON.stringify(activeRules));
   const snapshotResponses = callHost([{
     type: "tabsSnapshot",
+    browserSessionID: "chrome-session",
     browserBundleIdentifier: "com.google.Chrome",
     extensionVersion: "0.2.2",
     extensionCapabilities: ["single-startup-launch-v1"],
-    allTabs: [{ id: 99, windowID: 3, index: 0, title: "Unselected tab", url: "https://example.com/", active: false }],
+    allTabs: [{ id: 99, windowID: 3, index: 0, title: "", url: "", active: false, highlighted: true, discarded: true }],
     tabs: [{
       id: 14,
       windowID: 3,
@@ -107,7 +110,9 @@ try {
       title: "Instagram",
       url: "https://instagram.com/direct/inbox/",
       active: true,
-      faviconURL: "https://instagram.com/favicon.ico"
+      faviconURL: "https://instagram.com/favicon.ico",
+      highlighted: true, pinned: true, discarded: false, groupID: 8,
+      windowFrame: { left: 20, top: 50, width: 900, height: 700 }, windowFocused: true
     }]
   }]);
   assert.equal(snapshotResponses.length, 0, "Snapshots should not generate unused native responses");
@@ -120,9 +125,17 @@ try {
   );
   const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
   assert.equal(snapshot.browserBundleIdentifier, "com.google.Chrome");
+  assert.equal(snapshot.browserSessionID, "chrome-session", "Snapshot browser lifetime reaches the app unchanged");
   assert.equal(snapshot.tabs[0].id, 14, "Native host should persist allowed browser tabs for Ctrl+Tab");
   assert.equal(snapshot.allTabs[0].id, 99, "Full tab metadata is separate from allowed-switcher entries");
   assert.equal(snapshot.tabs[0].faviconURL, "https://instagram.com/favicon.ico", "Native bridge preserves the actual tab favicon");
+  assert.equal(snapshot.tabs[0].highlighted, true, "Native multi-selection metadata survives the host");
+  assert.equal(snapshot.tabs[0].pinned, true, "Pinned metadata survives the host");
+  assert.equal(snapshot.tabs[0].groupID, 8, "Group identity survives the host");
+  assert.equal(snapshot.tabs[0].windowFrame.left, 20, "Native window geometry survives the host");
+  assert.equal(snapshot.tabs[0].windowFocused, true, "Native focus survives the host");
+  assert.equal(snapshot.allTabs[0].url, "", "Blank tab identity survives without a URL");
+  assert.equal(snapshot.allTabs[0].highlighted, true, "Unallowed selected group members are retained separately");
   callHost([{ type: "tabPreview", browserBundleIdentifier: "com.google.Chrome", preview: { requestID: "preview-spec", image: "data:image/jpeg;base64,dGVzdA==" } }]);
   const preview = JSON.parse(fs.readFileSync(path.join(intentDir, "browser-preview-com-google-Chrome.json"), "utf8"));
   assert.equal(preview.requestID, "preview-spec", "Preview replies retain request identity and use the isolated host directory");

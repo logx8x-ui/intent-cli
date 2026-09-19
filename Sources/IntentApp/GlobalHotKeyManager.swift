@@ -261,8 +261,10 @@ final class GlobalHotKeyManager {
     var markHandler: (() -> Void)?
     var runMarkedHandler: (() -> Void)?
     var clearMarksHandler: (() -> Void)?
+    var modificationHandler: ((Int) -> Void)?
     var markedModeHandler: (() -> Void)?
     private let markMonitor = QuickMarkKeyMonitor()
+    func cancelPendingQuickGesture() { markMonitor.cancelPending() }
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
     private var nextHotKeyID: UInt32 = 2
@@ -281,7 +283,8 @@ final class GlobalHotKeyManager {
         guard registrationStatus == noErr else { return }
 
         registrationStatus = registerRequiredShortcut()
-        guard registrationStatus == noErr else { return }
+        // A conflicting dashboard shortcut must not disable the independent
+        // selection, finish, save, or safety-stop routes below.
         let selectionID = EventHotKeyID(signature: fourCharCode("IntO"), id: UInt32.max)
         selectionRegistrationStatus = RegisterEventHotKey(OverlayShortcut.quickSelectionShortcut.keyCode,
                                                         OverlayShortcut.quickSelectionShortcut.modifiers, selectionID,
@@ -294,6 +297,7 @@ final class GlobalHotKeyManager {
             case .run: self?.runMarkedHandler?()
             case .clear: self?.clearMarksHandler?()
             case .toggleMode: self?.markedModeHandler?()
+            case .modification(let index): self?.modificationHandler?(index)
             }
         }
         if markMonitor.start() {

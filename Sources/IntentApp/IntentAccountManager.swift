@@ -54,7 +54,7 @@ final class IntentAccountManager: ObservableObject {
     private var logicalWorkspaceUpdatedAt = Date()
 
     init() {
-        configuration = IntentSupabaseConfiguration.load()
+        configuration = IntentEnvironment.isQA ? nil : IntentSupabaseConfiguration.load()
         if let configuration {
             client = SupabaseClient(
                 supabaseURL: configuration.url,
@@ -106,6 +106,7 @@ final class IntentAccountManager: ObservableObject {
 
     var configurationMessage: String? {
         guard client == nil else { return nil }
+        if IntentEnvironment.isQA { return "Account connections are disabled in the isolated QA app." }
         return "Account sync is not configured in this build yet. Guest mode remains fully available."
     }
 
@@ -134,6 +135,11 @@ final class IntentAccountManager: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        if IntentEnvironment.isQA {
+            prepareGuestProfile()
+            phase = .guest
+            return
+        }
         lastPortablePreferences = capturePreferences()
 
         guard let client else {
@@ -952,6 +958,7 @@ private final class IntentAuthSessionStorage: AuthLocalStorage, @unchecked Senda
     private let service = "dev.loganmondi.intent.account"
 
     func store(key: String, value: Data) throws {
+        guard !IntentEnvironment.isQA else { return }
         let query = baseQuery(key: key)
         let updates: [String: Any] = [
             kSecValueData as String: value,
@@ -968,6 +975,7 @@ private final class IntentAuthSessionStorage: AuthLocalStorage, @unchecked Senda
     }
 
     func retrieve(key: String) throws -> Data? {
+        guard !IntentEnvironment.isQA else { return nil }
         var query = baseQuery(key: key)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -984,6 +992,7 @@ private final class IntentAuthSessionStorage: AuthLocalStorage, @unchecked Senda
     }
 
     func remove(key: String) throws {
+        guard !IntentEnvironment.isQA else { return }
         let status = SecItemDelete(baseQuery(key: key) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw keychainError(status)

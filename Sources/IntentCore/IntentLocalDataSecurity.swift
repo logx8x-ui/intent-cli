@@ -4,7 +4,7 @@ public enum IntentLocalDataSecurity {
     public static func hardenDefaultDirectory(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws {
-        try harden(directory: homeDirectory.appendingPathComponent(".intent", isDirectory: true))
+        try harden(directory: IntentEnvironment.dataDirectory(forHome: homeDirectory))
     }
 
     public static func harden(directory: URL) throws {

@@ -75,9 +75,7 @@ public final class ZeroDriftStateStore {
     }
 
     public static func defaultFileURL() -> URL {
-        FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".intent", isDirectory: true)
+        IntentEnvironment.dataDirectory
             .appendingPathComponent("zero-drift.json")
     }
 }

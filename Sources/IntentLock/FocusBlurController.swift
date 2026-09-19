@@ -97,7 +97,8 @@ final class FocusBlurController: @unchecked Sendable {
             let url = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("focus-blur-diagnostics.json")
             if let data = try? JSONSerialization.data(withJSONObject: scanDetails) { try? data.write(to: url, options: .atomic) }
         }
-        let validRectangles = rectangles.filter(FocusBlurPolicy.valid).sorted { $0.minY == $1.minY ? $0.minX < $1.minX : $0.minY < $1.minY }
+        let validRectangles = IntentInteractivePanelRegions.shared.visibleRegions(from: rectangles)
+            .filter(FocusBlurPolicy.valid).sorted { $0.minY == $1.minY ? $0.minX < $1.minX : $0.minY < $1.minY }
         let sourceWindows = windows.compactMap { window -> NSNumber? in
             guard window[kCGWindowOwnerPID as String] as? pid_t != ProcessInfo.processInfo.processIdentifier else { return nil }
             return window[kCGWindowNumber as String] as? NSNumber
@@ -108,7 +109,7 @@ final class FocusBlurController: @unchecked Sendable {
             // Geometry renews the watchdog independently of slow WindowServer/GPU work.
             let context = "\(foregroundPID ?? 0):\(dockOverlay)"
             if self.displayContext != context { self.clear(); self.displayContext = context }
-            self.show(validRectangles)
+            self.show(validRectangles, aboveSystemOverview: dockOverlay)
             guard !self.captureInFlight, !validRectangles.isEmpty else { return }
             self.captureInFlight = true
             let revision = self.displayRevision
@@ -175,6 +176,7 @@ final class FocusBlurController: @unchecked Sendable {
         }) else { return [] }
         scanDetails["missionControlRoot"] = 1
         let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let currentRules = (try? Data(contentsOf: ActiveBrowserRulesStore.defaultFileURL())).flatMap { try? JSONDecoder().decode(ActiveBrowserRules.self, from: $0) }
         var known: [String: [Bool]] = [:]
         for window in windows {
             guard window[kCGWindowLayer as String] as? Int == 0,
@@ -185,9 +187,11 @@ final class FocusBlurController: @unchecked Sendable {
             var blocked = !spec.permitsWindow(window[kCGWindowNumber as String] as? UInt32 ?? 0, bundleIdentifier: bundle)
             if !blocked, QuickSelection.browsers.contains(bundle),
                let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: bundle).load(),
+               let currentRules, currentRules.active, currentRules.isFresh(), currentRules.matchesBrowserSession(snapshot),
                let allTabs = snapshot.allTabs,
                let id = BrowserWindowMatching.match(title: title, tabs: allTabs,
-                   nativeWindowCount: Set(allTabs.map(\.windowID)).count),
+                   nativeWindowCount: Set(allTabs.map(\.windowID)).count,
+                   frame: (window[kCGWindowBounds as String] as? [String: Any]).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }),
                let active = allTabs.first(where: { $0.windowID == id && $0.active }) {
                 // The snapshot's tabs are the guard's currently permitted subset.
                 blocked = !snapshot.tabs.contains(where: { $0.id == active.id })
@@ -239,7 +243,7 @@ final class FocusBlurController: @unchecked Sendable {
         return CGRect(origin: point, size: dimensions)
     }
 
-    private func show(_ rectangles: [CGRect]) {
+    private func show(_ rectangles: [CGRect], aboveSystemOverview: Bool) {
         expiry?.cancel()
         if displayedRectangles != rectangles {
             displayedRectangles = rectangles
@@ -254,11 +258,11 @@ final class FocusBlurController: @unchecked Sendable {
                 panel.ignoresMouseEvents = true; panel.hasShadow = false
                 panel.hidesOnDeactivate = false
                 panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-                panel.level = .screenSaver
                 panel.contentView = FocusBlurView()
                 panels.append(panel)
             }
             let panel = panels[index]
+            panel.level = aboveSystemOverview ? .screenSaver : .floating
             let frame = FocusBlurPolicy.appKitFrame(rect, primaryDisplayHeight: height)
             let moved = panel.frame != frame
             if moved { panel.setFrame(frame, display: false) }
