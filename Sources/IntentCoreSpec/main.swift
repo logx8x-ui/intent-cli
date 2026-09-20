@@ -141,23 +141,7 @@ do {
     try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "blocked.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: true), "Mission Control must retain its separate click prevention behavior")
     try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: "allowed.app", accessMode: .whitelist, controlledBundleIdentifiers: ["allowed.app"], missionControlActive: false), "Swiping onto an allowed window is permitted")
     try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: nil, accessMode: .blacklist, controlledBundleIdentifiers: ["blocked.app"], missionControlActive: false), "Blacklist must not reject empty desktops")
-    for count in [1, 2, 4, 9, 16, 30, 50] {
-        let bounds = CGRect(x: 32, y: 98, width: 1300, height: 620)
-        let sizes = (0..<count).map { CGSize(width: $0 % 3 == 0 ? 600 : 1400, height: $0 % 3 == 0 ? 1000 : 850) }
-        let frames = FieldOfViewLayout.frames(sizes: sizes, in: bounds)
-        try expect(frames.count == count, "Every capturable window must get a field-of-view frame")
-        for (index, frame) in frames.enumerated() {
-            try expect(bounds.insetBy(dx: -0.001, dy: -0.001).contains(frame), "Overview windows must fit inside the display (\(count): \(frame))")
-            try expect(abs(frame.width / frame.height - sizes[index].width / sizes[index].height) < 0.001,
-                "Overview must preserve real window proportions")
-            let decorated = frame.insetBy(dx: -2, dy: 0).union(CGRect(x: frame.minX - 2, y: frame.minY - 62, width: frame.width + 4, height: frame.height + 88))
-            try expect(bounds.insetBy(dx: -0.001, dy: -0.001).contains(CGPoint(x: frame.minX, y: decorated.minY)), "Tab bubbles must stay beneath the header")
-            for other in frames.dropFirst(index + 1) {
-                let otherDecorated = CGRect(x: other.minX - 2, y: other.minY - 62, width: other.width + 4, height: other.height + 88)
-                try expect(!decorated.intersects(otherDecorated), "Window tab bubbles and captions must not overlap neighbours")
-            }
-        }
-    }
+    try runFieldOfViewLayoutSpecs()
     try expect(!FocusBlurPolicy.shouldBlur(matches: []), "Unknown Mission Control tiles stay clear")
     try expect(!FocusBlurPolicy.shouldBlur(matches: [true, false]), "Duplicate titles must not blur permitted windows")
     try expect(FocusBlurPolicy.shouldBlur(matches: [true, true]), "Only definitely forbidden tiles blur")
