@@ -1,6 +1,6 @@
 # Intent onboarding live QA — 20 September 2026
 
-Status: partial live acceptance; QA is stopped and final cleanup is verified. The full combined regression script passed all three repetitions. Three native functional cycles and a hidden-controls expiry notice were observed on earlier `u676`. Rebuilt `gZRuKyGJ` passed build/signature checks and a correctly attributed canvas-framing screenshot, but effective macOS permissions were still false at its last check despite on switches. New-candidate enforcement, physical global shortcuts and live browser integration remain unverified; this is not an all-complete or three-flawless-passes claim.
+Status: partial live acceptance. The full combined regression script passed all three repetitions. Three native functional cycles and a hidden-controls expiry notice were observed on earlier `u676`. Rebuilt `gZRuKyGJ` passed build/signature checks and a correctly attributed canvas-framing screenshot. The later supported permission-entry replacement below restored effective permissions for this unchanged candidate; QA is running idle for a physical-key check. New-candidate enforcement, physical global shortcuts and live browser integration remain unverified; this is not an all-complete or three-flawless-passes claim.
 
 ## Candidate and evidence
 
@@ -170,6 +170,14 @@ The guide was closed with **Continue later**, then QA was quit through its nativ
 
 No QA native-host manifests remained; the QA Firefox profile was not registered, the original `ykomjweq.default-release` default was retained, and no QA Chrome profile was present. The new Chrome packaging command passed, and `gZRuKyGJ` again passed deep/strict signature verification. Private QA data and artifacts remain for resumption. The daily app was not replaced; it is currently closed. No release, push or deployment is claimed by this report.
 
+## Later permission recovery and physical-key handoff
+
+After the user asked what to do next, the unchanged `gZRuKyGJ` artifact was opened again. Read-only inspection confirmed valid signatures and matching QA plists, but different designated cdhash requirements between old `u676` and `gZRuKyGJ`. The guide polls the actual macOS APIs every two seconds; no stored permission override was introduced. A stale old-code permission entry was the working diagnosis, not a finding from direct TCC database access.
+
+Through System Settings, only the **Intent QA** entries were selected and removed, then the exact `package-gZRuKyGJ/Intent QA.app` was added back. Actual selected-row state was verified before removal; other apps and daily Intent were untouched. The guide first changed to **Accessibility Ready**. After the same supported replacement for Screen Recording and **Quit & Reopen**, it changed from the permission gate to **Press ` once** with **Open the picker instead**, confirming both effective grants in the running candidate. No password prompt was required in this recovery.
+
+Exactly one QA process was observed, PID `79524`, at the intended `gZRuKyGJ` path. No new restriction session was started. Browser rules were inactive and daily data hashes remained unchanged. Calculator was raised for the user to physically press backtick once and Esc; the result is pending. This later observation supersedes the effective-permission blocker and stopped-app state above, while leaving all other live acceptance limits intact.
+
 ## Remaining live matrix
 
 | Priority | Scenario | Status / required evidence |
@@ -180,7 +188,7 @@ No QA native-host manifests remained; the QA Firefox profile was not registered,
 | 1 | Edit purpose from a later step, Back, close/resume and quit/relaunch | Purpose edits, replay and explicit saved updates worked in the three resumed native cycles; prior close/resume persistence was observed. Back and full replay/relaunch combinations remain pending. |
 | 1 | Real `0:01 → 0:00 → -0:01` countdown | Negative values visibly confirmed; the actual zero crossing remains uncaptured. |
 | 1 | Skip both skills, decline saving, finish and explicit replay | Quick-selection skill skip and truthful skipped-skill copy observed; explicit replay reached welcome and retained purpose. Skip-both/no-save and complete replay flows remain pending. |
-| 1 | Grant QA permissions and observe the guide's real refresh | Worked for `u676`. Rebuilt `gZRuKyGJ` still reports effective grants false despite on switches, exact-artifact Add and Quit & Reopen; new-candidate enforcement is blocked. |
+| 1 | Grant QA permissions and observe the guide's real refresh | Recovered for unchanged `gZRuKyGJ` by removing only stale QA entries and adding the exact artifact; guide now reaches the real picker instruction. New-candidate enforcement still needs its live pass. |
 | 1 | Emergency release and bounded fallback before restriction testing | Menu path exercised; app-directed emergency chord released the pilot with safety alert and inactive rules. Physical global delivery remains unverified. |
 | 2 | First actual intention run through the overview and native global shortcut | Three limited native scenarios exercised start, finish-lock refusal, timer/checklist completion and saved reuse. Native global-shortcut delivery and mastery remain pending. |
 | 2 | Timer and checklist completion | One-minute Timer expired normally; one-minute Timer + two-task Checklist ended on the final checkbox before its deadline. These limited native assertions passed. |
