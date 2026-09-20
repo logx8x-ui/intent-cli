@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import IntentCore
 import IntentLock
@@ -18,6 +19,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     private var lockObserver: NSObjectProtocol?
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
+    private var permissionHandoffObserver: AnyCancellable?
 
     var isOverlayVisible: Bool {
         panel?.isVisible == true
@@ -32,6 +34,11 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         self.calendarSync = calendarSync
         self.accountManager = accountManager
         super.init()
+        permissionHandoffObserver = model.onboarding.$permissionHandoffActive.sink { [weak self] active in
+            // This also wins over a currently running open animation. Its
+            // completion below must not bring an ordered-out canvas back.
+            if active { self?.panel?.orderOut(nil) }
+        }
         let notifications = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             sessionSecurityObservers.append(notifications.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -52,7 +59,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     }
 
     func showOverlay(animated: Bool) {
-        guard !isAnimating else { return }
+        guard !isAnimating, !model.onboarding.permissionHandoffActive else { return }
         let panel = panel ?? makePanel()
         self.panel = panel
 
@@ -78,7 +85,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
             panel.animator().setFrame(targetFrame, display: true)
         } completionHandler: { [weak self] in
             self?.isAnimating = false
-            if let panel = self?.panel {
+            if let panel = self?.panel, panel.isVisible {
                 self?.focusOverlay(panel)
             }
         }
@@ -252,6 +259,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     }
 
     private func focusOverlay(_ panel: NSPanel) {
+        guard !model.onboarding.permissionHandoffActive else { panel.orderOut(nil); return }
         // Reopening the canvas must not steal purpose-entry keyboard focus
         // from its own guide, including the delayed activation below.
         if onboardingOwnsEntryFocus {
@@ -268,7 +276,8 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         panel.makeFirstResponder(nil)
 
         DispatchQueue.main.async { [weak self, weak panel] in
-            guard let self, let panel, panel.isVisible, !self.onboardingOwnsEntryFocus else { return }
+            guard let self, let panel, panel.isVisible, !self.onboardingOwnsEntryFocus,
+                  !self.model.onboarding.permissionHandoffActive else { return }
             panel.makeKeyAndOrderFront(nil)
             panel.makeFirstResponder(nil)
         }

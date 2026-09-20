@@ -1001,9 +1001,9 @@ struct IntentGraphView: View {
                         accountManager.customBackgroundDidChange()
                     },
                     onShowGuide: {
-                        model.onboarding.present()
                         showSettings = false
                         showQuickGuide = true
+                        DispatchQueue.main.async { model.onboarding.requestPresentation() }
                     }
                 )
                 .environmentObject(accountManager)

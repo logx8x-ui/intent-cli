@@ -31,6 +31,7 @@ do {
     try runBrowserCommandSpecs()
     try runOnboardingSpecs()
     try runOnboardingSavePlanSpecs()
+    try runOnboardingPresentationSpecs()
     do {
         var gesture = QuickMarkGesture()
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0).consume, "Backtick is owned by Intent")

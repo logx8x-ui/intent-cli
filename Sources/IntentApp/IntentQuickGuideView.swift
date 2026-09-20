@@ -16,10 +16,11 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
         let owner = context.coordinator
         DispatchQueue.main.async {
             guard owner.active else { return }
-            model.onboarding.present()
+            if !model.onboarding.isPresented { model.onboarding.present() }
             let panel = GuidePanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
                                    styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
             panel.title = "Intent · Get started"
+            panel.identifier = NSUserInterfaceItemIdentifier("dev.loganmondi.intent.onboarding.guide")
             panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
             panel.isOpaque = false; panel.backgroundColor = .clear
@@ -35,14 +36,21 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
             let bounds = (NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main)?.visibleFrame ?? panel.frame
             let width = min(480, bounds.width - 32), height = min(548, bounds.height - 32)
             panel.setFrame(NSRect(x: bounds.maxX - width - 16, y: bounds.maxY - height - 16, width: width, height: height), display: true)
-            owner.visibility = model.onboarding.$selectionVisible.sink { [weak owner] visible in
-                if visible { owner?.panel?.orderOut(nil) }
-                else if owner?.active == true { owner?.panel?.orderFrontRegardless() }
-            }
-            if !model.onboarding.selectionVisible {
-                panel.orderFrontRegardless()
-                if [.welcome, .purpose].contains(model.onboarding.state.step) { panel.makeKeyAndOrderFront(nil) }
-            }
+            owner.visibility = Publishers.CombineLatest4(model.onboarding.$isPresented,
+                model.onboarding.$selectionVisible, model.onboarding.$presentationRequest,
+                model.onboarding.$permissionHandoffActive)
+                .sink { [weak owner] values in
+                    // Hide before entering a synchronous macOS permission
+                    // request; its alert must not sit beneath this coach.
+                    if values.3 { owner?.panel?.orderOut(nil) }
+                    // Published values emit before storage changes. Read the
+                    // current state on the next turn, after popover dismissal,
+                    // so a queued older show cannot cover a newly opened picker.
+                    DispatchQueue.main.async { [weak owner] in owner?.updatePresentation() }
+                }
+            // Finish initial presentation before the purpose field's queued
+            // first-responder request checks whether its window is visible.
+            owner.updatePresentation()
         }
         return anchor
     }
@@ -60,8 +68,34 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
         var active = true
         var panel: NSPanel?
         var visibility: AnyCancellable?
+        private var presentationPolicy = OnboardingPresentationPolicy()
         var dismiss: (() -> Void)?
         init(model: IntentAppModel) { self.model = model }
+        @MainActor func updatePresentation() {
+            guard active, let panel else { return }
+            let guide = model.onboarding
+            switch presentationPolicy.update(isPresented: guide.isPresented,
+                selectionVisible: guide.selectionVisible, request: guide.presentationRequest,
+                initialEntryFocus: [.welcome, .purpose].contains(guide.state.step),
+                permissionHandoffActive: guide.permissionHandoffActive) {
+            case .none: break
+            case .hide: panel.orderOut(nil)
+            case .show: panel.orderFrontRegardless()
+            case .showAndFocus:
+                // An explicit request also recovers a coach left on a display
+                // that is no longer attached. Preserve a user's visible frame.
+                if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(panel.frame) }),
+                   let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+                    let bounds = screen.visibleFrame
+                    let size = NSSize(width: min(480, bounds.width - 32), height: min(548, bounds.height - 32))
+                    panel.setFrame(NSRect(x: bounds.maxX - size.width - 16, y: bounds.maxY - size.height - 16,
+                                          width: size.width, height: size.height), display: true)
+                }
+                NSApp.activate(ignoringOtherApps: true)
+                panel.orderFrontRegardless()
+                panel.makeKeyAndOrderFront(nil)
+            }
+        }
         func windowWillClose(_ notification: Notification) { model.onboarding.exit(); dismiss?() }
     }
 }
@@ -307,6 +341,8 @@ struct IntentQuickGuideView: View {
                 Text("Turn on \(appName). If it’s missing, drag this icon into the list, or use + and choose this app; macOS may require your password and a restart.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Text("The guide waits while Settings is open. Return to Intent when you’re done.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Safety Stop: Control + Option + Command + Esc. Also available from Intent’s menu-bar menu.").font(.caption.weight(.medium))
         }
     }
@@ -340,9 +376,11 @@ struct IntentQuickGuideView: View {
         }.font(.callout)
     }
     private func openPermission(_ pane: String) {
+        guide.beginPermissionHandoff()
         if pane == "Privacy_Accessibility" { _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) }
         else { _ = CGRequestScreenCaptureAccess() }
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)"), NSWorkspace.shared.open(url) { return }
+        guide.resumePermissionHandoff()
     }
     private func refreshPermissions() {
         accessibilityReady = AXIsProcessTrusted(); previewsReady = CGPreflightScreenCaptureAccess()

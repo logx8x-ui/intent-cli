@@ -143,10 +143,12 @@ Do not record one browser/profile/display as proof for all others. Record actual
 
 Core path-only changes touch shared scheduler/AI-history/Purpose-history storage to prevent production data access; their features remain excluded. QA account clients/Keychain, recording, calendar requests/mutations, updater, native-host registration and launch integrations are disabled. These guard changes are not evidence that live hosted accounts or calendar services were tested.
 
-`scripts/build-qa.sh` builds/packages only. `--skip-build` packages existing release products. It creates a separately named/signed app under a new QA root with a Launch Services environment entry, and never opens or replaces the installed app. Browser components are prepared separately:
+`scripts/build-qa.sh` builds/packages only. `--skip-build` packages existing release products. Since the 20 September packaging fix, the separately named/signed app lives in a unique `~/.codex/artifacts/intent-qa/package-*/Intent QA.app` folder, outside temporary cleanup; its Launch Services environment still points to a private, marked temporary QA data root. `--data-root "$QA_ROOT"` reuses an existing validated QA workspace without changing its data or replacing an earlier app. Copied resource timestamps are refreshed before deep/strict signature verification. Stop the earlier QA process before launching a replacement package against the same data; this script never launches an app or stops any process. Browser components are prepared separately:
 
 ```sh
 bash -n scripts/build-qa.sh
+# Uses existing release products; creates and removes only its own QA packages:
+/usr/bin/python3 scripts/test-qa-packaging.py
 swiftc -parse-as-library Sources/IntentCore/IntentEnvironment.swift scripts/test-qa-isolation.swift -o /tmp/IntentQASpec
 /tmp/IntentQASpec
 /usr/bin/python3 scripts/test-qa-chrome.py

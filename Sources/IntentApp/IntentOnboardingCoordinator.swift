@@ -11,10 +11,14 @@ final class IntentOnboardingCoordinator: ObservableObject {
     @Published var state: IntentOnboardingState
     @Published var isPresented = false
     @Published var selectionVisible = false
+    @Published private(set) var presentationRequest: UUID?
+    @Published private(set) var permissionHandoffActive = false
     @Published var canvasRequest: UUID?
     @Published private(set) var setupBrowser: String?
     @Published private(set) var lastIntention: Intention?
     private var timer: Timer?
+    private var permissionHandoff = OnboardingPermissionHandoffPolicy()
+    private var workspaceActivationObserver: NSObjectProtocol?
     private var purposeReturnStep: IntentOnboardingStep?
     private let defaults: UserDefaults
     private let clock = ContinuousClock()
@@ -52,6 +56,7 @@ final class IntentOnboardingCoordinator: ObservableObject {
         }
         state.forgetSavedIntention(ifMissingFrom: Set(IntentRuntime.shared.model.intentions.map(\.id)))
         isPresented = true
+        observePermissionWindows()
         defaults.set(false, forKey: Self.deferredKey)
         tick()
         timer?.invalidate()
@@ -59,6 +64,52 @@ final class IntentOnboardingCoordinator: ObservableObject {
             MainActor.assumeIsolated { self?.tick() }
         }
         RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    /// Explicit window presentation only. Reopening a retained coach must not
+    /// restart its clock, clear evidence, or rebuild the selection scope.
+    func requestPresentation() {
+        if !isPresented { present() }
+        resumePermissionHandoff()
+        presentationRequest = UUID()
+    }
+
+    func beginPermissionHandoff() {
+        permissionHandoff.begin()
+        permissionHandoffActive = true
+    }
+
+    func resumePermissionHandoff() {
+        permissionHandoff.resume()
+        permissionHandoffActive = false
+    }
+
+    private func observePermissionWindows() {
+        if workspaceActivationObserver == nil {
+            workspaceActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updatePermissionWindowState() }
+            }
+        }
+        updatePermissionWindowState()
+    }
+
+    private func updatePermissionWindowState() {
+        guard isPresented else { return }
+        permissionHandoff.activatedApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                                               intentBundleIdentifier: Bundle.main.bundleIdentifier)
+        if permissionHandoffActive != permissionHandoff.isSuspended {
+            permissionHandoffActive = permissionHandoff.isSuspended
+        }
+    }
+
+    private func stopObservingPermissionWindows() {
+        if let workspaceActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver)
+            self.workspaceActivationObserver = nil
+        }
+        resumePermissionHandoff()
     }
 
     func begin() {
@@ -111,6 +162,7 @@ final class IntentOnboardingCoordinator: ObservableObject {
         state.exit(now: now)
         setupBrowser = nil
         isPresented = false
+        stopObservingPermissionWindows()
         timer?.invalidate(); timer = nil
         defaults.set(true, forKey: Self.deferredKey)
         IntentRuntime.shared.endOnboardingSelectionScope()
@@ -120,6 +172,7 @@ final class IntentOnboardingCoordinator: ObservableObject {
         guard state.finish(now: now) else { return }
         purposeReturnStep = nil; setupBrowser = nil
         isPresented = false
+        stopObservingPermissionWindows()
         timer?.invalidate(); timer = nil
         defaults.set(true, forKey: "intentDidCompleteOnboarding")
         defaults.set(false, forKey: Self.deferredKey)
@@ -144,5 +197,8 @@ final class IntentOnboardingCoordinator: ObservableObject {
         // Local aggregate values only. The draft above is not analytics.
         if let data = try? JSONEncoder().encode(state.measurement) { defaults.set(data, forKey: "intentOnboardingMeasurementsV2") }
     }
-    deinit { timer?.invalidate() }
+    deinit {
+        timer?.invalidate()
+        if let workspaceActivationObserver { NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver) }
+    }
 }

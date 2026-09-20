@@ -194,7 +194,7 @@ struct IntentSettingsView: View {
                     onUpdate: IntentRuntime.shared.updateFinishShortcut
                 )
 
-                Text("Ends the active intention unless a Timer is locking it.")
+                Text("Ends the intention unless a timer or unfinished checklist is keeping it running.")
                     .font(.caption2)
                     .foregroundStyle(GraphTheme.muted(colorScheme))
 
@@ -205,7 +205,7 @@ struct IntentSettingsView: View {
                         finishShortcut = .defaultFinishShortcut
                     }
                 }
-                Text("Open Intent: ⌘G · Finish: ⇧⌘M · Quick Focus: `")
+                Text("Open Intent: \(overlayShortcut.displayName) · Finish: \(finishShortcut.displayName) · Quick Focus: \(OverlayShortcut.quickSelectionShortcut.displayName)")
                     .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
                 Text("Safety stop: ⌃⌥⌘Esc releases all restrictions, including Zero Drift.")
                     .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))

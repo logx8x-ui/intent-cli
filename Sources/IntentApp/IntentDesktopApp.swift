@@ -33,6 +33,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return true }
         IntentRuntime.shared.model.showOverlay()
         return true
     }
@@ -222,6 +223,7 @@ final class IntentStatusItemController: NSObject {
     }
 
     @objc private func openIntent() {
+        if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return }
         model.showOverlay()
     }
 
@@ -300,12 +302,20 @@ final class IntentRuntime {
     func beginOnboardingSelectionScope() { quickSelectionController.beginOnboardingSelectionScope() }
     func endOnboardingSelectionScope() { quickSelectionController.endOnboardingSelectionScope() }
 
+    @discardableResult
+    func resumeOnboardingPermissionHandoffIfNeeded() -> Bool {
+        guard model.onboarding.isPresented, model.onboarding.permissionHandoffActive else { return false }
+        model.onboarding.requestPresentation()
+        return true
+    }
+
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
 
         hotKeyManager = GlobalHotKeyManager {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return }
                 IntentRuntime.shared.model.toggleOverlay()
             }
         }

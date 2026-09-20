@@ -32,6 +32,7 @@ node scripts/test-download-page.mjs > "$qa_logs/download-page.log" 2>&1
 /usr/bin/python3 scripts/test-download-kits.py > "$qa_logs/download-kits.log" 2>&1
 /usr/bin/python3 scripts/test-qa-chrome.py > "$qa_logs/qa-chrome-isolation.log" 2>&1
 /usr/bin/python3 scripts/test-qa-firefox.py > "$qa_logs/qa-firefox-isolation.log" 2>&1
+/usr/bin/python3 scripts/test-qa-packaging.py > "$qa_logs/qa-packaging.log" 2>&1
 swiftc -parse-as-library Sources/IntentCore/IntentEnvironment.swift scripts/test-qa-isolation.swift -o "$qa_logs/IntentQASpec"
 "$qa_logs/IntentQASpec" > "$qa_logs/qa-isolation.log" 2>&1
 swiftc -parse-as-library Sources/IntentApp/IntentFreshInstallation.swift scripts/test-fresh-install.swift -o "$qa_logs/IntentFreshInstallSpec"
