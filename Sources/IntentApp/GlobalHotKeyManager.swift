@@ -266,6 +266,10 @@ final class GlobalHotKeyManager {
     var modificationHandler: ((Int) -> Void)?
     var markedModeHandler: (() -> Void)?
     private let markMonitor = QuickMarkKeyMonitor()
+    private var gestureRecoveryTimer: Timer?
+    private var gestureActivationObserver: NSObjectProtocol?
+    private var lastGestureDiagnosticState: String?
+    private(set) var isQuickGestureReady = false
     func cancelPendingQuickGesture() { markMonitor.cancelPending() }
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
@@ -302,9 +306,22 @@ final class GlobalHotKeyManager {
             case .modification(let index): self?.modificationHandler?(index)
             }
         }
-        if markMonitor.start() {
-            unregister(ref: &selectionHotKeyRef)
-            selectionRegistrationStatus = noErr
+        gestureActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.recoverQuickGestureIfNeeded()
+        }
+        recoverQuickGestureIfNeeded()
+        if !isQuickGestureReady {
+            // First launch can precede Accessibility approval. Keep checking
+            // while the user is in System Settings or another app, so granting
+            // permission does not leave the single-press fallback installed.
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                self?.recoverQuickGestureIfNeeded()
+            }
+            timer.tolerance = 0.2
+            gestureRecoveryTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
         _ = updateFinishShortcut(FinishShortcutStore.load())
         _ = register(OverlayShortcut.finishAndSaveShortcut, id: UInt32.max - 3, ref: &saveHotKeyRef)
@@ -322,6 +339,10 @@ final class GlobalHotKeyManager {
     }
 
     deinit {
+        gestureRecoveryTimer?.invalidate()
+        if let gestureActivationObserver {
+            NotificationCenter.default.removeObserver(gestureActivationObserver)
+        }
         unregister(ref: &requiredHotKeyRef)
         unregister(ref: &customHotKeyRef)
         unregister(ref: &selectionHotKeyRef)
@@ -331,6 +352,35 @@ final class GlobalHotKeyManager {
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
+    }
+
+    private func recoverQuickGestureIfNeeded() {
+        guard !isQuickGestureReady else { return }
+        let accessibilityTrusted = AXIsProcessTrusted()
+        if accessibilityTrusted, markMonitor.start() {
+            isQuickGestureReady = true
+            gestureRecoveryTimer?.invalidate()
+            gestureRecoveryTimer = nil
+            unregister(ref: &selectionHotKeyRef)
+            selectionRegistrationStatus = noErr
+        }
+        recordQuickGestureReadiness(accessibilityTrusted: accessibilityTrusted)
+    }
+
+    private func recordQuickGestureReadiness(accessibilityTrusted: Bool) {
+        guard IntentEnvironment.isQA else { return }
+        let state = "\(accessibilityTrusted):\(isQuickGestureReady):\(selectionHotKeyRef != nil)"
+        guard state != lastGestureDiagnosticState else { return }
+        let status: [String: Any] = [
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "accessibilityTrusted": accessibilityTrusted,
+            "gestureReady": isQuickGestureReady,
+            "carbonFallbackRegistered": selectionHotKeyRef != nil,
+            "updatedAt": Date().timeIntervalSince1970
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
+              (try? data.write(to: IntentEnvironment.dataDirectory.appendingPathComponent("quick-gesture-status.json"), options: .atomic)) != nil else { return }
+        lastGestureDiagnosticState = state
     }
 
     func update(to candidate: OverlayShortcut) -> OSStatus {
@@ -374,7 +424,11 @@ final class GlobalHotKeyManager {
             guard let event, GetEventParameter(event, EventParamName(kEventParamDirectObject),
                 EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier) == noErr,
                 identifier.signature == fourCharCode("IntO") else { return OSStatus(eventNotHandledErr) }
-            if identifier.id == UInt32.max { manager.selectionHandler?() }
+            if identifier.id == UInt32.max {
+                // Unregistering a hotkey does not retract an already queued
+                // Carbon event. Only the gesture monitor owns input once ready.
+                if !manager.isQuickGestureReady { manager.selectionHandler?() }
+            }
             else if identifier.id == UInt32.max - 3 { manager.saveHandler?() }
             else if identifier.id == UInt32.max - 1 { manager.finishHandler?() }
             else if identifier.id == UInt32.max - 2 { manager.safetyHandler?() }
