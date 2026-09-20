@@ -244,6 +244,13 @@ struct IntentGraphView: View {
                     showQuickGuide = true
                 }
             }
+            .onReceive(model.$settingsPresentationRequest) { request in
+                guard request != nil else { return }
+                showQuickGuide = false
+                showRecordingMode = false
+                purposeModeDismissed = true
+                showSettings = true
+            }
             .onReceive(model.onboarding.$canvasRequest) { request in
                 guard request != nil, let id = model.onboarding.state.savedIntentionID,
                       let intention = model.intentions.first(where: { $0.id == id }) else { return }

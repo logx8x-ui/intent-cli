@@ -61,6 +61,10 @@ struct IntentDesktopApp: App {
     var body: some Scene {
         Settings { EmptySettingsScene() }
             .commands {
+                CommandGroup(replacing: .appSettings) {
+                    Button("Settings…") { IntentRuntime.shared.model.requestSettingsPresentation() }
+                        .keyboardShortcut(",", modifiers: .command)
+                }
                 CommandGroup(after: .newItem) {
                     Button("Quick Focus") { IntentRuntime.shared.toggleQuickFocus() }
                     Button("Finish Intention") { IntentRuntime.shared.model.endActiveSession() }

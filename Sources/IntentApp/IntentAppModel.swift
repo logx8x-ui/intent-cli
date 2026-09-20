@@ -48,6 +48,7 @@ final class IntentAppModel: ObservableObject {
     @Published var purposeModeError: String?
     @Published var pendingPurposeSessionSave: PurposeSessionSaveCandidate?
     @Published private(set) var overlayPresentationID = UUID()
+    @Published private(set) var settingsPresentationRequest: UUID?
     @Published var requireManualFinishBeforeSwitching: Bool {
         didSet {
             UserDefaults.standard.set(requireManualFinishBeforeSwitching, forKey: Self.requireManualFinishKey)
@@ -1172,9 +1173,18 @@ final class IntentAppModel: ObservableObject {
         startZeroDriftIdleLockIfNeeded()
     }
 
-    func showOverlay() {
+    func requestSettingsPresentation() {
+        // Settings is the existing canvas popover, not SwiftUI's empty lifecycle
+        // scene. Defer an open guide without losing its progress or ending a run.
+        onboarding.exit()
+        showOverlay(animated: false)
+        // Let the canvas finish its queued activation before opening the popover.
+        DispatchQueue.main.async { self.settingsPresentationRequest = UUID() }
+    }
+
+    func showOverlay(animated: Bool = true) {
         overlayPresentationID = UUID()
-        overlayPresenter?.showOverlay(animated: true)
+        overlayPresenter?.showOverlay(animated: animated)
     }
 
     func hideOverlay() {
