@@ -78,7 +78,7 @@ final class QuickSelectionController: ObservableObject {
         selection = prior.selection; hasStagedSelection = prior.staged
         onboardingSelectionScope = nil; onboardingScopeRestorePending = false
         if hasStagedSelection, !selection.apps.isEmpty {
-            workspaceOutlines.update(selection); showStagedModifiers()
+            refreshStagedOutlines(); showStagedModifiers()
         }
     }
     private var markGeneration = UUID()
@@ -118,7 +118,6 @@ final class QuickSelectionController: ObservableObject {
     func openModification(_ index: Int) {
         guard !model.hasActiveSession, modificationOrder.indices.contains(index) else { return }
         if !hasStagedSelection && panel?.isVisible != true { selection = QuickSelection(); hasStagedSelection = true }
-        if panel?.isVisible != true { showStagedModifiers() }
         openModification(modificationOrder[index])
     }
     func openModification(_ section: QuickSelectionOptionsSection) {
@@ -128,7 +127,10 @@ final class QuickSelectionController: ObservableObject {
         }
         section.enable(in: &selection)
         optionsSection = section
-        if panel?.isVisible != true { NSApp.activate(ignoringOtherApps: true); stagedModifiersPanel?.makeKeyAndOrderFront(nil) }
+        if panel?.isVisible != true {
+            showStagedModifiers()
+            NSApp.activate(ignoringOtherApps: true); stagedModifiersPanel?.makeKeyAndOrderFront(nil)
+        }
         if QuickSelectionOptionsSection.timer.enabled(in: selection), QuickSelectionOptionsSection.checklist.enabled(in: selection),
            !UserDefaults.standard.bool(forKey: "explainedTimerChecklist") {
             combinationNotice = true
@@ -142,6 +144,14 @@ final class QuickSelectionController: ObservableObject {
         UserDefaults.standard.set(modificationOrder.map(\.rawValue), forKey: "quickModificationOrder")
     }
     private func showStagedModifiers() {
+        // A retained draft can have no targets after the last mark is toggled
+        // off. Keep its settings, but only show controls for actual targets or
+        // an explicitly opened modifier editor.
+        guard !model.hasActiveSession, panel?.isVisible != true, hasStagedSelection,
+              !selection.apps.isEmpty || optionsSection != nil else {
+            hideStagedModifiers()
+            return
+        }
         guard stagedModifiersPanel == nil, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
         let width = min(880, screen.visibleFrame.width - 56)
         let notice = SelectionPanel(contentRect: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 58), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -152,9 +162,26 @@ final class QuickSelectionController: ObservableObject {
     }
     func closeModification() {
         optionsSection = nil
-        if panel?.isVisible != true { stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps]) }
+        if panel?.isVisible != true {
+            showStagedModifiers()
+            stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps])
+            stagedPreviousApp = nil
+        }
     }
-    private func hideStagedModifiers() { optionsSection = nil; stagedModifiersPanel?.orderOut(nil); stagedModifiersPanel = nil }
+    private func hideStagedModifiers() {
+        optionsSection = nil
+        let previousPanel = stagedModifiersPanel
+        stagedModifiersPanel = nil
+        previousPanel?.orderOut(nil)
+    }
+    private func refreshStagedOutlines() {
+        guard hasStagedSelection, !selection.apps.isEmpty,
+              !model.hasActiveSession, panel?.isVisible != true else {
+            workspaceOutlines.stop()
+            return
+        }
+        workspaceOutlines.update(selection)
+    }
     func markForeground(wholeWindow: Bool = false, fromShortcut: Bool = false) {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { toggle(); return }
@@ -202,8 +229,9 @@ final class QuickSelectionController: ObservableObject {
             }
             self.dismissMarkNotice()
             self.hasStagedSelection = true
-            self.workspaceOutlines.update(self.selection)
-            self.showStagedModifiers()
+            self.refreshStagedOutlines()
+            if self.selection.apps.isEmpty { self.hideStagedModifiers() }
+            else { self.showStagedModifiers() }
             if !self.selection.apps.isEmpty,
                beforeApps != self.selection.apps || beforeTabs != self.selection.tabs || beforeWindows != self.selection.windowIDsByApp {
                 self.onboarding.record(.quickMarkChanged)
@@ -283,7 +311,7 @@ final class QuickSelectionController: ObservableObject {
     func toggleMarkedMode() {
         guard !model.hasActiveSession else { return }
         if !hasStagedSelection, panel?.isVisible != true { selection = QuickSelection(); hasStagedSelection = true }
-        toggleAccessMode(); workspaceOutlines.update(selection)
+        toggleAccessMode(); refreshStagedOutlines()
         if panel?.isVisible != true { showStagedModifiers() }
     }
     private var hoverTask: Task<Void, Never>?
@@ -476,7 +504,7 @@ final class QuickSelectionController: ObservableObject {
         guard let window = windows.first(where: { $0.id == focusedBrowserWindow }), window.appID == browser else { return }
         selection.selectTab(.init(browser: browser, id: tab.id), windowID: tab.windowID,
                             displayedTabs: tabs(for: window), extendingRange: extendingRange)
-        if hasStagedSelection { workspaceOutlines.update(selection) }
+        if hasStagedSelection { refreshStagedOutlines() }
     }
     func toggleAllFocusedTabs() {
         guard let window = windows.first(where: { $0.id == focusedBrowserWindow }),
@@ -517,12 +545,13 @@ final class QuickSelectionController: ObservableObject {
                 if self.model.pendingFriction != nil || self.model.pendingEndTimeRequest != nil { self.model.showOverlay() }
             } else {
                 self.close()
-                if self.hasStagedSelection { self.workspaceOutlines.update(self.selection); self.showStagedModifiers() }
+                if self.hasStagedSelection { self.refreshStagedOutlines(); self.showStagedModifiers() }
                 if self.wasOverlayVisible { self.model.showOverlay() } else { self.previousApp?.activate(options: []) }
             }
         }
     }
     private func close() {
+        optionsSection = nil
         hoverTask?.cancel(); hoverTask = nil; hoveredTab = nil; tabPreview = nil; tabPreviewLoading = false
         for browser in QuickSelection.browsers { try? FileManager.default.removeItem(at: BrowserTabPreview.fileURL(browser: browser)) }
         generation = UUID(); previewTask?.cancel(); previewTask = nil
