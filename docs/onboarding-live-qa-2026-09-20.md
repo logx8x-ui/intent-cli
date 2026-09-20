@@ -1,6 +1,6 @@
 # Intent onboarding live QA — 20 September 2026
 
-Status: partial live observations; the final permission-handoff candidate compiled, passed CoreSpec and automatically displayed its welcome on a fresh launch. Purpose entry and Return reached the permission gate. The QA app is running, awaiting the user's macOS Touch ID/password authentication to enable its new Accessibility entry. No intention or restrictions have been started during this pass. This document does not claim effective permission grants or a complete onboarding, accessibility, browser or safety pass.
+Status: partial live acceptance. Final QA permissions worked; three limited native scenarios covered timer expiry, checklist-first completion, and saving/reusing one canvas intention while closing the guide. These are not three fully integrated passes. Physical global shortcuts, browser integration, composited blur/input behavior and the independent hidden-controls expiry notice remain unverified. The Mac locked during replay testing; QA cleanup is verified and further live work awaits unlock.
 
 ## Candidate and evidence
 
@@ -12,7 +12,7 @@ Status: partial live observations; the final permission-handoff candidate compil
 - The [19 September implementation report](onboarding-qa-2026-09-19.md) contains the earlier full automated results. The final release App compilation after all three window/focus fixes passed in 28.35 seconds (`/tmp/intent-onboarding-live-final-build.log`); packaging and code-signature verification passed (`/tmp/intent-onboarding-live-final-package.log`). CoreSpec, including 100 gesture sequences, and AccountSpec executables were rerun successfully against unchanged core sources. This is not a new full-suite or live-acceptance claim.
 - Subsequent durable-package candidates are identified below by `OxTBjTz0` and `4U34UP`. The comprehensive run after the guide-reopen changes passed all checks and three automated repetitions: `/tmp/intent-onboarding-approved-final-checks-2.log`, detailed log directory `intent-qa-checks-i5IYTXdT`. An earlier attempt failed because `updatePresentation` lacked `@MainActor`; that annotation was corrected before the successful run. These results predate the final permission-handoff change and do not substitute for live integrated passes.
 - Final permission-handoff artifact: `/Users/loganmondi/.codex/artifacts/intent-qa/package-u676apjy/Intent QA.app`, using the same private QA data. Release IntentApp compilation passed in 54.72 seconds; CoreSpec passed, including 100 gesture sequences and the extended presentation/handoff specifications. Logs: `/tmp/intent-permission-handoff-core-build.log`, `/tmp/intent-permission-handoff-core-spec.log`, `/tmp/intent-permission-handoff-app-build.log` and `/tmp/intent-permission-handoff-package.log`. These focused results supplement the earlier comprehensive run; they are not three live integrated passes.
-- After the final handoff build, `/usr/bin/python3 scripts/test-qa-packaging.py` passed both tests in 5.102 seconds. Shell syntax checks (`bash -n`) and `git diff --check` passed. Daily `intentions.json`, `schedules.json` and `cooldowns.json` hashes were unchanged; QA `browser-rules.json` was inactive. The QA app remains running for the pending authentication handoff, so this is not a final process-cleanup claim.
+- After the final handoff build, `/usr/bin/python3 scripts/test-qa-packaging.py` passed both tests in 5.102 seconds. Shell syntax checks (`bash -n`) and `git diff --check` passed. At that earlier checkpoint, daily `intentions.json`, `schedules.json` and `cooldowns.json` hashes were unchanged and QA `browser-rules.json` was inactive. A fresh final daily-state and cleanup check remains due after the live runs below.
 
 ## Verified observations
 
@@ -62,10 +62,46 @@ Status: partial live observations; the final permission-handoff candidate compil
 | Fresh-state preparation | With QA stopped, only QA onboarding preferences were backed up to `onboarding-before-fresh-launch.plist` within the private QA data root, then reset through `defaults`. Daily data was untouched. | This creates a controlled fresh onboarding state; it is not a new macOS account or a novice study. |
 | Automatic welcome | Fresh launch of `package-u676apjy` automatically displayed the welcome coach. | This resolves the previously unobserved automatic path for this candidate; broader display/accessibility conditions remain untested. |
 | Entry focus and typing | Clicking **Let's begin** focused the purpose field. CUA `typeText('Read my notes')` followed by Return advanced to the overview permission gate. | This is actual UI entry through automation, not physical keyboard/IME acceptance or a native global-shortcut test. |
-| Settings handoff | Open Settings created an off QA Accessibility row after the exact-QA TCC reset. Toggling it on opened a macOS Privacy & Security sheet requiring Touch ID or a password. | The effective grant and the guide's Ready state remain unverified. The user's existing approval is retained; OS authentication must be completed by the user. |
-| Current pause | The main task displayed the exact user-action callout and sent an asynchronous Done response prompt. Live UI work is waiting at the macOS authentication sheet. | No intention or enforcement has started, and no additional UI action is being treated as authorized authentication. |
+| Settings handoff | Open Settings created an off QA Accessibility row after the exact-QA TCC reset. Toggling it on opened a macOS Privacy & Security sheet requiring Touch ID or a password. | At that stage, effective grants and Ready were unverified. The user's existing approval was retained while waiting for OS authentication. |
+| Authentication pause, now resolved | The main task displayed the exact user-action callout and sent an asynchronous Done response prompt. Live UI work paused at the macOS authentication sheet until the user completed it. | No intention or enforcement had started at that checkpoint. Post-authentication runs are recorded separately below. |
 
 Tool-observation limit: requesting AX state directly from a hidden QA app can reopen it. Such an observation cannot by itself prove that the permission handoff failed to keep the app hidden or that it stole focus.
+
+## Post-authentication native runs
+
+| Check | Actual observation | Limits |
+|---|---|---|
+| Effective permissions | After the user's authentication and Screen Recording Quit & Reopen, Accessibility and Screen Recording worked for the final `u676` candidate. | This verifies the tested candidate after the handoff; it does not establish retained grants across a future differently signed build. |
+| Single QA process | macOS restart left two QA processes: the older `OxTBjTz0` package and final `u676`. Both exact processes were stopped, then only final `u676` was relaunched as PID `70706`. | Process identity was controlled for these runs; the final process was stopped during cleanup below. |
+| Emergency-release pilot | Safety Stop was invoked from the menu while idle and during the pilot. An app-directed Control + Option + Command + Escape released the pilot; the safety alert appeared and QA browser rules became inactive. | This proves the exercised app-directed release path, not delivery of a physical global chord from another app. The pilot is not counted as a completed integrated pass. |
+| Pilot timer entry | The pilot initially used the default 25 minutes because CUA typing had not focused the field; the pilot was stopped. | No code defect was established from this targeting error. |
+| One-minute configuration | A later setValue plus Raise interaction set the value to one minute, which persisted after closing and reopening the modifier popover. | A verified value is required before running; the earlier unfocused typing attempt is not treated as successful input. |
+| Native smoke 1: Timer | One-minute Timer with Block Calculator started at `01:00`. Normal Finish was refused with 23 seconds remaining. Automatic expiry was observed, the guide reported “Your first setup ran,” and the dashboard became inactive. | A limited native timer run passed these assertions. Physical shortcut mastery, browser selection and pixel-level blur/input enforcement are not established by it. |
+| Native smoke 2: Timer + Checklist | The one-time Timer + Checklist explanation appeared. With Timer set to one minute and two tasks, normal Finish was refused with “Check off your tasks.” The first checkbox produced `1/2` at `00:38`; checking the last task closed the controls and returned to an inactive dashboard before the timer deadline. | Checklist-first completion and normal-finish refusal were observed. This is a second limited native run, not the third fully integrated pass. |
+| Overview previews | The picker screenshot showed actual app previews at differing scaled sizes, with some icon fallbacks for native apps without windows. | The individual-window captures available through CUA cannot prove the final composited blur or input blocking on the desktop. |
+
+These first two limited native runs and the emergency pilot are supplemented by the save/reuse scenario below. No browser integration pass is claimed; fixture preparation and targeting limits are recorded separately.
+
+## Save, reuse and replay
+
+| Check | Actual observation | Limits |
+|---|---|---|
+| Save through the guide | After skipping the quick-selection skill, the first overview timer setup was saved through the guide's Save to canvas path. QA `intentions.json` contained exactly one saved `Read my notes` intention, ID `BE41729E-191E-48F2-917E-D03A50EE6C0A`, with Block Calculator and a one-minute Timer. Show on canvas displayed its actual card. | The observed save produced one card. Retry, edited-name update and stable-ID replacement still require separate live checks. |
+| Native smoke 3: saved reuse | Double-clicking the canvas card started a real reuse. The final guide showed “You ran your saved intention again” and explained that skipped skills are not marked learned. | This verifies the saved native setup's reuse; the skipped quick-selection skill was not demonstrated. |
+| Close guide during a run | **Let me do my thing** closed the guide while the saved intention continued, with `00:48` visible. | Intentional guide closure did not silently stop this run. Preservation of pre-existing staged marks remains untested. |
+| Hide controls and expiry | After hiding controls with their arrow and hiding the dashboard, the saved run expired and the dashboard was later inactive. | The independent expiry notice was missed; hidden-controls/background notice delivery is not proven. |
+| Explicit replay | Settings → Show quick guide returned to welcome. **Let's begin** reopened a purpose field containing `Read my notes`. The next screenshot attempt was blocked because the Mac locked. | Replay entry and retained purpose were observed; the full replay flow and timing were not completed. |
+| Native shortcut attempt | An app-directed double-backtick attempt targeting Calculator did not invoke quick marking. | App-directed CUA input can miss the native global path; this attempt is inconclusive, not an established product bug or physical-shortcut pass. |
+
+There are now three limited native scenarios, plus a separately identified safety pilot. They do not satisfy three fully integrated selection/run/stop/save/replay passes with the outstanding browser and native global-key coverage.
+
+## Isolated browser attempts and cleanup
+
+| Browser | Actual work and cleanup | Remaining limit |
+|---|---|---|
+| Firefox | A profile was created at the QA path and the original `default-release` default was restored immediately. QA Firefox launched as PID `78073`, but CUA resolved the personal Firefox process `1032` even when rebound using the exact application path `/Applications/Firefox.app`; the app selector has no process-ID option. No extension was installed. The exact QA process was stopped, its profile entry removed using **Don't Delete Files**, the original default confirmed, and only the QA about:profiles tab closed. | Correct QA-process UI targeting was unavailable; tab selection and enforcement were not tested. Profile data was retained. |
+| Firefox native-host fixture | `prepare-qa-firefox.py` was run, followed by `--cleanup`. Cleanup verified removal of the QA native-host registration and copied fixture while retaining profile data. | Fixture preparation/cleanup is verified; it is not a connected extension or browser runtime pass. |
+| Chrome | The latest Add profile attempt again produced blank AX output and no available screenshot; Cmd+W closed it. The final names-only profile inventory contained no QA profile. | No Chrome extension installation or browser integration pass is claimed. |
 
 ## Issues found and changes awaiting verification
 
@@ -77,11 +113,15 @@ The later bundle inspection established a packaging-integrity problem. Temporary
 
 Guide presentation now has an explicit request that raises a retained coach without restarting its clock, clearing evidence or recreating the selection scope. The presentation policy defers focus while the real picker is visible and restores the coach without taking keyboard focus on ordinary picker closure. Source review and automated policy tests found no new actionable lifecycle regression; only the explicit reopening/Continue later behavior above has been observed live.
 
-## Current blocker
+## Current verification boundary
 
-The prior password-sheet and temporary-package blockers have been superseded. Settings subsequently showed both rows on, but rebuilt QA did not become Ready and the scoped `tccd` log confirmed a stored code-requirement mismatch. After quitting QA, the main task successfully reset Accessibility and ScreenCapture for the exact QA bundle ID with official `tccutil` commands. That removes the stale test authorization; it does not grant permission to the next candidate.
+The password-sheet, stale QA authorization and temporary-package blockers have been superseded for the current candidate. Effective QA permissions and the app-directed emergency-release path were exercised before the bounded native runs. The older duplicate QA process was removed from the test before those runs.
 
-The permission-handoff change now passes the focused CoreSpec and release build checks, and `package-u676apjy` is packaged and launched. Its new Accessibility row is present, but turning it on requires the user's macOS Touch ID/password authentication. That sheet is the current blocker, and further UI work waits for the user. Fresh effective Accessibility and Screen Recording grants, the guide's Ready state and emergency release must be verified before enforcement. No enforcement has been started.
+The remaining boundary is evidence coverage: physical native global-key delivery, actual isolated browser connection/tab behavior, full composited blur/input behavior, save retries/updates, the independent hidden-controls expiry notice, three fully integrated live passes and the broader accessibility matrix remain outstanding. Basic one-card save, real canvas reuse and guide closure while running were observed. The Mac is now locked; an unlock request was sent, and further live work waits for access.
+
+Final read-only cleanup checks confirmed unchanged hashes for daily `intentions.json`, `schedules.json` and `cooldowns.json`; inactive QA browser rules; absent QA Chrome/Firefox native-host manifests; no QA Firefox profile registration; the original Firefox default `Profiles/ykomjweq.default-release`; and an empty QA Chrome profile-name list. Deep/strict signature verification of final `u676` and `git diff --check` passed. The exact QA process `70706` received TERM while the Mac was locked; a subsequent process check found no Intent QA, QA Firefox or daily Intent process. No UI observation is claimed after stopping QA.
+
+The private QA data and durable artifact remain available for resumption, including the one saved QA card. The daily app was neither replaced nor relaunched; there was no release, push or deployment. The daily app remains closed while the Mac is locked.
 
 ## Remaining live matrix
 
@@ -92,17 +132,20 @@ The permission-handoff change now passes the focused CoreSpec and release build 
 | 1 | Blank/whitespace, long input, physical Unicode/IME entry | Empty/whitespace rejection, long Unicode retention, bounded header and CUA Return observed; physical typing/IME still pending. |
 | 1 | Edit purpose from a later step, Back, close/resume and quit/relaunch | Purpose/negative timer persisted across candidate launches; Continue later and explicit Settings reopening preserved state on `4U34UP`. Edit-return, Back and complete replay/relaunch combinations remain pending. |
 | 1 | Real `0:01 → 0:00 → -0:01` countdown | Negative values visibly confirmed; the actual zero crossing remains uncaptured. |
-| 1 | Skip both skills, decline saving, finish and explicit replay | Pending; no fabricated demonstrated actions or saved card. |
-| 1 | Grant QA permissions and observe the guide's real refresh | Exact-QA grants reset; new final candidate's Accessibility row exists. macOS Touch ID/password sheet is awaiting the user; effective grants and Ready remain pending. |
-| 1 | Emergency release and bounded fallback before restriction testing | Pending; do not count source/automated checks as physical escape verification. |
-| 2 | First actual intention run through the overview and native global shortcut | Not started. After permissions/escape are verified, observe selection, runtime success and normal stop; a button or synthetic app-targeted key alone does not establish native global-shortcut mastery. |
-| 2 | Actual native quick-mark shortcut, staged targets and successful run | Pending; verify actual target identity and successful runtime start. Failed starts or recognised keys alone do not establish mastery. |
-| 2 | Isolated Chrome and Firefox fixture connections | Chrome profile attempt closed without creating a QA profile; no QA extensions/hosts installed. QA disables production Connect/register, so isolated fixtures are still required. |
-| 2 | Optional save, canvas click/reuse, edited name and explicit stable-ID update | Pending; verify one saved card, no implicit overwrite and no duplicate after retry. |
-| 2 | Guide closure/resume during a real session and preservation of earlier marks | Pending; closure must not silently end the session or destroy pre-existing selection. |
-| 2 | Three integrated live selection/run/stop/save/replay passes | Not started; automated repetitions are not substitutes. |
+| 1 | Skip both skills, decline saving, finish and explicit replay | Quick-selection skill skip and truthful skipped-skill copy observed; explicit replay reached welcome and retained purpose. Skip-both/no-save and complete replay flows remain pending. |
+| 1 | Grant QA permissions and observe the guide's real refresh | Effective final-candidate Accessibility and Screen Recording worked after user authentication and Screen Recording Quit & Reopen. |
+| 1 | Emergency release and bounded fallback before restriction testing | Menu path exercised; app-directed emergency chord released the pilot with safety alert and inactive rules. Physical global delivery remains unverified. |
+| 2 | First actual intention run through the overview and native global shortcut | Three limited native scenarios exercised start, finish-lock refusal, timer/checklist completion and saved reuse. Native global-shortcut delivery and mastery remain pending. |
+| 2 | Timer and checklist completion | One-minute Timer expired normally; one-minute Timer + two-task Checklist ended on the final checkbox before its deadline. These limited native assertions passed. |
+| 2 | Composited blur, input blocking and overview previews | Actual preview images/scaled sizes observed; complete desktop composition and blocked-input behavior cannot be concluded from individual-window captures. |
+| 2 | Actual native quick-mark shortcut, staged targets and successful run | App-directed Calculator double-backtick did not invoke marking and is inconclusive; physical global delivery, target identity and successful marked run remain pending. |
+| 2 | Isolated Chrome and Firefox fixture connections | Firefox QA profile/preparation attempted and safely cleaned up, but CUA targeted personal Firefox; no QA extension installed. Chrome profile UI remained unavailable; browser integration remains untested. |
+| 2 | Optional save, canvas click/reuse, edited name and explicit stable-ID update | One `Read my notes` card persisted with the recorded ID and double-clicked reuse worked. Retry, edited-name update and explicit stable-ID replacement remain pending. |
+| 2 | Guide closure/resume during a real session and preservation of earlier marks | Guide closure left the saved run active at `00:48`; pre-existing staged-mark preservation remains pending. |
+| 2 | Independent expiry notice with hidden controls | Saved run ended with controls/dashboard hidden, but the notice was missed; visibility/delivery assertion remains unproven. |
+| 2 | Three integrated live selection/run/stop/save/replay passes | Still pending. Emergency pilot is not a pass; the three limited native scenarios do not satisfy all integrated criteria. |
 | 2 | Keyboard-only access, VoiceOver, reduced effects, small/multiple displays | Pending; no accessibility acceptance claimed. |
 | 3 | Uncoached first-user study and independent shortcut recall | Not run; see the [research test script](onboarding-research-2026-09-19.md#short-uncoached-first-user-test). |
-| Final | Cleanup, QA rules/processes/hosts, daily state hashes and daily app restoration | Daily intention/schedule/cooldown hashes unchanged and QA browser rules inactive. `package-u676apjy` is running for authentication; remaining cleanup/restoration is pending, not a completed final cleanup. |
+| Final | Cleanup, QA rules/processes/hosts, daily state hashes and daily app restoration | Daily hashes unchanged, QA rules inactive, QA hosts/profile entries absent, original Firefox default retained and final signature valid. QA/QA Firefox processes stopped; daily Intent also closed. Artifact/data retained; daily app reopening remains blocked by the locked Mac. |
 
 AI Mode, Purpose Mode, scheduler, publication, daily-app replacement and unrelated projects remain outside this pass.
