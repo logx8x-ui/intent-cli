@@ -15,7 +15,7 @@ function event() {
 }
 
 function createHarness(nativeRules, initialTabs, options = {}) {
-  const tabs = new Map(initialTabs.map((tab) => [tab.id, { ...tab }]));
+  const tabs = new Map(initialTabs.map((tab, index) => [tab.id, { index, highlighted: Boolean(tab.active), ...tab }]));
   const storage = {
     guardEnabled: options.guardEnabled !== false,
     ...(options.storage || {})
@@ -34,6 +34,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const reloads = [];
   const extensionReloads = [];
   const focusedWindows = [];
+  const highlightUpdates = [];
   let interruptReturnWithTab = null;
   const intervals = [];
   let dynamicRules = [];
@@ -44,13 +45,29 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const tabUpdated = event();
   const tabCreated = event();
   const tabRemoved = event();
+  const tabHighlighted = event();
   const beforeNavigate = event();
   const nativeMessage = event();
   const nativeDisconnect = event();
   const windowFocus = event();
 
   function setActive(id) {
-    for (const tab of tabs.values()) tab.active = tab.id === id;
+    const target = tabs.get(id);
+    if (!target) return;
+    // Chromium ActivateTabAt resets native highlighted selection in this window.
+    for (const tab of tabs.values()) if (tab.windowId === target.windowId) {
+      tab.active = tab.id === id;
+      tab.highlighted = tab.id === id;
+    }
+    for (const listener of tabHighlighted.listeners) listener({ windowId: target.windowId, tabIds: [id] });
+  }
+
+  function setHighlighted(ids, windowId) {
+    for (const tab of tabs.values()) if (tab.windowId === windowId) {
+      tab.active = tab.id === ids[0];
+      tab.highlighted = ids.includes(tab.id);
+    }
+    for (const listener of tabHighlighted.listeners) listener({ windowId, tabIds: ids });
   }
 
   const port = {
@@ -92,10 +109,18 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       onUpdated: tabUpdated,
       onCreated: tabCreated,
       onRemoved: tabRemoved,
-      query: async (query = {}) => Array.from(tabs.values())
-        .filter(tab => (query.windowId == null || tab.windowId === query.windowId) && (query.active == null || tab.active === query.active))
-        .map((tab) => ({ ...tab })),
+      onHighlighted: tabHighlighted,
+      query: async (query = {}) => {
+        const beforeQuery = options.beforeTabQuery?.(query);
+        if (beforeQuery) await beforeQuery;
+        const result = Array.from(tabs.values())
+          .filter(tab => (query.windowId == null || tab.windowId === query.windowId) && (query.active == null || tab.active === query.active))
+          .map((tab) => ({ ...tab }));
+        options.onTabQuery?.(query, tabs, { highlight: setHighlighted });
+        return result;
+      },
       captureVisibleTab: async (windowId) => {
+        if (options.failPreviewCapture) throw new Error("capture denied");
         const tab = Array.from(tabs.values()).find(tab => tab.windowId === windowId && tab.active);
         return `data:image/jpeg;base64,${Buffer.from(String(tab?.id)).toString("base64")}`;
       },
@@ -110,6 +135,13 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         if (patch.active) setActive(id);
         updates.push({ tabId: id, patch });
         return { ...tab };
+      },
+      highlight: async ({ windowId, tabs: indices }) => {
+        const selected = Array.from(indices, index => Array.from(tabs.values()).find(tab => tab.windowId === windowId && tab.index === index));
+        if (selected.some(tab => !tab)) throw new Error("missing tab index");
+        highlightUpdates.push({ windowId, indices: Array.from(indices), tabIDs: selected.map(tab => tab.id) });
+        setHighlighted(selected.map(tab => tab.id), windowId);
+        return { id: windowId };
       },
       reload: async (id) => {
         if (!tabs.has(id)) throw new Error("missing tab");
@@ -131,7 +163,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       sendMessage: async () => ({})
     },
     windows: {
-      getAll: async () => [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({ id, left: id * 20, top: 50, width: 900, height: 700, focused: id === 1 })),
+      getAll: async () => {
+        const pending = options.beforeWindowQuery?.();
+        if (pending) await pending;
+        return [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({ id, left: id * 20, top: 50, width: 900, height: 700, focused: id === 1 }));
+      },
       onFocusChanged: windowFocus,
       update: async (id, patch) => {
         focusedWindows.push({ id, patch });
@@ -156,7 +192,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       return intervals.length;
     },
     setTimeout: (callback, delay) => {
-      if (delay === 180 && options.onPreviewDelay) options.onPreviewDelay(tabs);
+      if (delay === 180 && options.onPreviewDelay) options.onPreviewDelay(tabs, { highlight: setHighlighted });
+      if (delay === 180 && options.previewDelayGate) {
+        Promise.resolve(options.previewDelayGate).then(callback); return 0;
+      }
       Promise.resolve().then(callback); return 0;
     },
     clearTimeout: () => {}
@@ -168,7 +207,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   }
 
   return {
-    extensionReloads, tabs, storage, nativeMessages, dynamicUpdates, sessionUpdates, removedTabs, focusedWindows, intervals, updates, reloads,
+    extensionReloads, tabs, storage, nativeMessages, dynamicUpdates, sessionUpdates, removedTabs, focusedWindows, highlightUpdates, intervals, updates, reloads,
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
@@ -282,7 +321,7 @@ async function run() {
   await discovery.settle();
   const metadata = await discovery.snapshot();
   assert.deepEqual(Array.from(metadata.tabs, tab => tab.id), [1, 2, 3, 4, 5], "Discovery includes local PDF, internal, blank, pinned and discarded actual tabs");
-  assert.deepEqual(Array.from(metadata.tabs.filter(tab => tab.highlighted), tab => tab.id), [2, 3, 4, 5], "Native Shift-selected group reaches Intent intact");
+  assert.deepEqual(Array.from(metadata.tabs.filter(tab => tab.highlighted), tab => tab.id), [1, 2, 3, 4, 5], "Native Shift-selected group, including its active tab, reaches Intent intact");
   assert.equal(metadata.tabs[4].groupID, 9);
   assert.equal(metadata.tabs[4].pinned && metadata.tabs[4].discarded, true);
   assert.equal(metadata.tabs[0].windowFrame.left, 20, "Window geometry identifies same-title browser windows");
@@ -394,6 +433,159 @@ async function run() {
   assert.equal(movingPreview.tabs.get(53).active, true, "Preview cleanup must preserve the user's choice after the target moves to another window");
   assert.equal(movingPreview.updates.some(update => update.tabId === 51), false, "Preview cleanup cannot reactivate the old tab across a moved target");
   assert.ok(movingPreview.nativeMessages.some(message => message.preview?.requestID === "moved-during-preview" && message.preview.error), "A moved target produces an explicit preview error");
+
+  const groupPreview = options => createHarness({ active: false }, [
+    { id: 51, windowId: 3, index: 0, active: true, highlighted: true, url: "https://example.com/" },
+    { id: 52, windowId: 3, index: 1, active: false, highlighted: false, url: "https://example.org/" },
+    { id: 53, windowId: 3, index: 2, active: false, highlighted: true, url: "https://example.net/" },
+    { id: 54, windowId: 3, index: 3, active: false, highlighted: false, url: "https://example.com/other" },
+    { id: 55, windowId: 4, index: 0, active: true, highlighted: true, url: "https://example.org/other-window" },
+    { id: 56, windowId: 4, index: 1, active: false, highlighted: false, url: "https://example.net/other-window" }
+  ], options);
+  async function previewGroup(harness, tabID = 52) {
+    await harness.settle();
+    await harness.command({ id: "group-preview", action: "preview", tabID, windowID: 3, browserSessionID: harness.browserSessionID() });
+  }
+  const highlightedIDs = (harness, windowID = 3) => Array.from(harness.tabs.values()).filter(tab => tab.windowId === windowID && tab.highlighted).map(tab => tab.id);
+  let temporarySelection;
+  const nativeGroupPreview = groupPreview({ onPreviewDelay(tabs) {
+    temporarySelection = Array.from(tabs.values()).filter(tab => tab.windowId === 3 && tab.highlighted).map(tab => tab.id);
+  } });
+  await previewGroup(nativeGroupPreview);
+  assert.deepEqual(temporarySelection, [52], "The harness models Chrome activation collapsing native multi-selection");
+  assert.deepEqual(highlightedIDs(nativeGroupPreview), [51, 53], "Hover preview restores every originally highlighted native tab");
+  assert.equal(nativeGroupPreview.tabs.get(51).active, true, "Restoring a native group preserves its original active tab");
+  assert.deepEqual(highlightedIDs(nativeGroupPreview, 4), [55], "Preview selection restoration never changes another window");
+  assert.deepEqual(nativeGroupPreview.highlightUpdates[0].tabIDs, [51, 53], "Native restoration targets exact saved IDs rather than only the active tab");
+
+  const alreadyActiveGroup = groupPreview();
+  await previewGroup(alreadyActiveGroup, 51);
+  assert.deepEqual(highlightedIDs(alreadyActiveGroup), [51, 53], "Previewing the already-active tab leaves native multi-selection untouched");
+  assert.equal(alreadyActiveGroup.highlightUpdates.length, 0, "An already-active preview performs no selection restoration");
+
+  const changedGroup = groupPreview({ onPreviewDelay(_tabs, controls) { controls.highlight([52, 54], 3); } });
+  await previewGroup(changedGroup);
+  assert.deepEqual(highlightedIDs(changedGroup), [52, 54], "A user's new highlighted group during preview must win");
+  assert.equal(changedGroup.highlightUpdates.length, 0, "Preview must not restore over an intervening group selection");
+  const changedThenReturned = groupPreview({ onPreviewDelay(_tabs, controls) {
+    controls.highlight([54], 3);
+    controls.highlight([52], 3);
+  } });
+  await previewGroup(changedThenReturned);
+  assert.deepEqual(highlightedIDs(changedThenReturned), [52], "A user gesture remains authoritative even after returning to the temporary tab");
+  assert.equal(changedThenReturned.highlightUpdates.length, 0, "Matching final state cannot erase evidence of intervening user selection");
+
+  let interruptedOriginalQuery = false;
+  const changedWhileReading = groupPreview({ onTabQuery(query, _tabs, controls) {
+    if (query.windowId === 3 && !interruptedOriginalQuery) {
+      interruptedOriginalQuery = true;
+      controls.highlight([52], 3);
+    }
+  } });
+  await previewGroup(changedWhileReading);
+  assert.deepEqual(highlightedIDs(changedWhileReading), [52], "A user selecting the target while original metadata is in flight keeps that new selection");
+  assert.equal(changedWhileReading.updates.length, 0, "Interference during the initial query cancels before preview activation");
+  assert.equal(changedWhileReading.highlightUpdates.length, 0, "The original metadata response must not restore over newer native selection");
+
+  const reorderedGroup = groupPreview({ onPreviewDelay(tabs) {
+    tabs.get(51).index = 2;
+    tabs.get(53).index = 0;
+  } });
+  await previewGroup(reorderedGroup);
+  assert.deepEqual(reorderedGroup.highlightUpdates[0].indices, [2, 0], "Restore resolves original IDs to current indices after reordering");
+  assert.deepEqual(highlightedIDs(reorderedGroup), [51, 53], "Tab reordering never substitutes a different tab in the restored group");
+
+  for (const mutation of ["move", "close"]) {
+    const missingGroupMember = groupPreview({ onPreviewDelay(tabs) {
+      if (mutation === "move") tabs.get(53).windowId = 4;
+      else tabs.delete(53);
+    } });
+    await previewGroup(missingGroupMember);
+    assert.equal(missingGroupMember.highlightUpdates.length, 0, "A moved or closed group member cannot restore a partial or wrong-window selection");
+    assert.equal(missingGroupMember.tabs.get(52).active, true, "An invalidated original group must not cause a stale activation");
+  }
+  const otherWindowGroup = groupPreview({ onPreviewDelay(_tabs, controls) { controls.highlight([55, 56], 4); } });
+  await previewGroup(otherWindowGroup);
+  assert.deepEqual(highlightedIDs(otherWindowGroup), [51, 53], "An independent window selection does not invalidate safe restoration here");
+  assert.deepEqual(highlightedIDs(otherWindowGroup, 4), [55, 56], "Restoration preserves the user's new selection in another window");
+
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    return { promise, resolve };
+  };
+  const snapshotMessages = harness => harness.nativeMessages.filter(message => message.type === "tabsSnapshot");
+  for (const outcome of ["success", "capture-error", "user-interference"]) {
+    const captureGate = deferred();
+    const delayedPreview = groupPreview({
+      previewDelayGate: captureGate.promise,
+      failPreviewCapture: outcome === "capture-error",
+      onPreviewDelay(_tabs, controls) {
+        if (outcome === "user-interference") controls.highlight([52, 54], 3);
+      }
+    });
+    await delayedPreview.settle();
+    const before = snapshotMessages(delayedPreview).length;
+    const capture = delayedPreview.command({ id: "discovery-during-preview", action: "preview", tabID: 52, windowID: 3,
+      browserSessionID: delayedPreview.browserSessionID() });
+    await delayedPreview.settle();
+    await Promise.all([delayedPreview.snapshot(), delayedPreview.snapshot(), delayedPreview.snapshot()]);
+    assert.equal(snapshotMessages(delayedPreview).length, before, "Discovery while preview is busy cannot publish a temporary native group");
+    captureGate.resolve();
+    await capture;
+    await delayedPreview.settle();
+    const replies = snapshotMessages(delayedPreview).slice(before);
+    assert.equal(replies.length, 1, "Pending discovery is coalesced into one fresh reply after every preview outcome");
+    const expected = outcome === "user-interference" ? [52, 54] : [51, 53];
+    assert.deepEqual(Array.from(replies[0].allTabs.filter(tab => tab.windowID === 3 && tab.highlighted), tab => tab.id), expected,
+      "Post-preview discovery reports the restored group or the user's newer choice, including capture failure");
+  }
+
+  for (const alsoRequestWhileBusy of [false, true]) {
+    const oldQueryGate = deferred();
+    const oldWindowGate = deferred();
+    const overlappingCaptureGate = deferred();
+    let armOldQuery = false;
+    let oldQueryPaused = false;
+    let oldWindowPaused = false;
+    const overlappingDiscovery = groupPreview({
+      previewDelayGate: overlappingCaptureGate.promise,
+      beforeTabQuery(query) {
+        if (armOldQuery && query.windowId == null && !oldQueryPaused) {
+          oldQueryPaused = true;
+          return oldQueryGate.promise;
+        }
+      },
+      beforeWindowQuery() {
+        if (oldQueryPaused && !oldWindowPaused) {
+          oldWindowPaused = true;
+          return oldWindowGate.promise;
+        }
+      }
+    });
+    await overlappingDiscovery.settle();
+    const beforeOverlap = snapshotMessages(overlappingDiscovery).length;
+    armOldQuery = true;
+    const oldSnapshot = overlappingDiscovery.snapshot();
+    await overlappingDiscovery.settle();
+    const overlappingCapture = overlappingDiscovery.command({ id: "overlapping-discovery", action: "preview", tabID: 52, windowID: 3,
+      browserSessionID: overlappingDiscovery.browserSessionID() });
+    await overlappingDiscovery.settle();
+    oldQueryGate.resolve(); // The old tab query now reads the preview's temporary group.
+    await overlappingDiscovery.settle();
+    assert.equal(oldWindowPaused, true, "The overlapping snapshot holds temporary tab metadata across another async API call");
+    if (alsoRequestWhileBusy) await overlappingDiscovery.snapshot(); // Optional separate request coalesces until restoration.
+    overlappingCaptureGate.resolve();
+    await overlappingCapture;
+    await overlappingDiscovery.settle();
+    oldWindowGate.resolve(); // The old response returns only after preview is no longer busy.
+    await oldSnapshot;
+    await overlappingDiscovery.settle();
+    const overlapReplies = snapshotMessages(overlappingDiscovery).slice(beforeOverlap);
+    assert.equal(overlapReplies.length, 1, "An older overlapping API response cannot overwrite or duplicate the fresh post-preview reply");
+    assert.deepEqual(Array.from(overlapReplies[0].allTabs.filter(tab => tab.windowID === 3 && tab.highlighted), tab => tab.id), [51, 53],
+      "Generation validation rejects temporary metadata even after previewBusy became false");
+  }
 
   const idle = createHarness({ active: false }, [
     { id: 1, windowId: 1, index: 0, active: true, url: "https://youtube.com/" }

@@ -42,4 +42,48 @@ func runOnboardingSavePlanSpecs() throws {
     let noLongerExisting = OnboardingSavePlan(candidate: draft, latestPurpose: " \n ", existing: nil,
         replaceExisting: true, insertionPosition: .zero)
     try expect(noLongerExisting.action == .insert && noLongerExisting.intention.name == draft.name, "A removed saved entry can be saved again and empty transient input does not erase a valid name")
+
+    // Exercise the real picker constructor: synthetic drafts with an explicit
+    // graph origin previously hid its UUID-derived origin mismatch.
+    var selection = QuickSelection()
+    selection.apps = [currentApp.bundleIdentifier]
+    selection.restrictionNodes = [.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 1)]
+    selection.frictionNodes = [.init(friction: .taskChecklist(["Finish the task"]), position: .init(x: -240, y: 260))]
+    for _ in 0..<3 {
+        let actualDraft = try selection.makeIntention(apps: [currentApp], snapshots: [])
+        try expect(actualDraft.graphPosition == .zero, "Every quick-selection draft uses the same local origin as its modifier coordinates, regardless of its generated identity")
+        let firstSave = OnboardingSavePlan(candidate: actualDraft, latestPurpose: "QA first run", existing: nil,
+            replaceExisting: false, insertionPosition: .init(x: 340, y: 0)).intention
+        let replay = OnboardingSavePlan(candidate: actualDraft, latestPurpose: "QA replay", existing: firstSave,
+            replaceExisting: true, insertionPosition: .init(x: -999, y: -999)).intention
+        for saved in [firstSave, replay] {
+            try expect(saved.graphPosition == .init(x: 340, y: 0)
+                && saved.restrictionNodes.first?.position == .init(x: 580, y: 260)
+                && saved.frictionNodes.first?.position == .init(x: 100, y: 260),
+                "First save and explicit replay replacement keep the real picker modifiers beside their card, without random displacement")
+        }
+        try expect(replay.id == firstSave.id, "Fitting a replay preserves the existing saved identity")
+
+        for viewport in [(900.0, 560.0), (640.0, 440.0)] {
+            let focus = OnboardingCanvasFocus(intention: replay, viewportWidth: viewport.0, viewportHeight: viewport.1)
+            let renderedNodes: [(GraphPoint, Double, Double)] = [
+                (replay.graphPosition, 200, 190),
+                (replay.restrictionNodes[0].position, 116, 116),
+                (replay.frictionNodes[0].position, 126, 112)
+            ]
+            for (point, width, height) in renderedNodes {
+                let centerX = viewport.0 / 2 + focus.offset.x + point.x * focus.scale
+                let centerY = viewport.1 / 2 + focus.offset.y + point.y * focus.scale
+                try expect(centerX - width * focus.scale / 2 >= 40
+                    && centerX + width * focus.scale / 2 <= viewport.0 - 40
+                    && centerY - height * focus.scale / 2 >= 72
+                    && centerY + height * focus.scale / 2 <= viewport.1 - 100,
+                    "Show on canvas fits the whole saved group above the bottom controls, including the lower checklist and timer")
+            }
+        }
+    }
+
+    let keptFocus = OnboardingCanvasFocus(intention: existing, viewportWidth: 900, viewportHeight: 560)
+    try expect(keptFocus.scale == 1 && existing.graphPosition == .init(x: 400, y: 500),
+        "Focusing an existing unmodified card keeps normal scale and never rewrites user graph coordinates")
 }

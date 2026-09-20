@@ -235,6 +235,37 @@ function sendHeartbeat() {
 }
 
 let previewBusy = false;
+let previewSelectionWatch = null;
+let previewGeneration = 0;
+let deferredSnapshotPending = false;
+let deferredSnapshotDiscovery = false;
+let deferredSnapshotFlight = null;
+let publishedSnapshotGeneration = -1;
+let publishedSnapshotDiscovery = false;
+
+function deferSnapshotForPreview(discovery, overlapping = false) {
+  // A fresh post-preview reply already satisfies older overlapping requests.
+  if (overlapping && !previewBusy && publishedSnapshotGeneration === previewGeneration
+      && (!discovery || publishedSnapshotDiscovery)) return;
+  if (!previewBusy && deferredSnapshotFlight?.generation === previewGeneration
+      && (!discovery || deferredSnapshotFlight.discovery)) return;
+  deferredSnapshotPending = true;
+  deferredSnapshotDiscovery ||= discovery;
+  flushDeferredPreviewSnapshot();
+}
+
+function flushDeferredPreviewSnapshot() {
+  if (previewBusy || !deferredSnapshotPending || deferredSnapshotFlight) return;
+  const flight = { generation: previewGeneration, discovery: deferredSnapshotDiscovery };
+  deferredSnapshotPending = false;
+  deferredSnapshotDiscovery = false;
+  deferredSnapshotFlight = flight;
+  publishTabSnapshot(true, flight.discovery).catch(() => {}).finally(() => {
+    if (deferredSnapshotFlight === flight) deferredSnapshotFlight = null;
+    flushDeferredPreviewSnapshot();
+  });
+}
+
 async function captureTabPreview(message) {
   const result = { requestID: message.id };
   if (previewBusy || rules.active) {
@@ -242,15 +273,29 @@ async function captureTabPreview(message) {
     return;
   }
   previewBusy = true;
+  previewGeneration += 1;
   let previous = null;
   let tab = null;
+  let originalHighlightedIDs = [];
+  let selectionWatch = null;
   try {
     tab = await chrome.tabs.get(message.tabID);
     if (tab.windowId !== message.windowID || tab.incognito || tab.discarded || !/^https?:\/\//.test(tab.url || "")) {
       throw new Error("This tab cannot be previewed.");
     }
-    previous = (await chrome.tabs.query({ windowId: tab.windowId, active: true }))[0];
-    if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
+    selectionWatch = { windowID: tab.windowId, targetID: tab.id, activationRequested: false, interfered: false };
+    previewSelectionWatch = selectionWatch;
+    const originalWindowTabs = await chrome.tabs.query({ windowId: tab.windowId });
+    if (selectionWatch.interfered) throw new Error("Tab selection changed.");
+    previous = originalWindowTabs.find(candidate => candidate.active);
+    if (previous?.id !== tab.id) {
+      originalHighlightedIDs = originalWindowTabs.filter(candidate => candidate.highlighted === true).map(candidate => candidate.id);
+      if (!previous || !originalHighlightedIDs.includes(previous.id) || typeof chrome.tabs.highlight !== "function") {
+        throw new Error("Cannot preserve this window's tab selection.");
+      }
+      selectionWatch.activationRequested = true;
+      await chrome.tabs.update(tab.id, { active: true });
+    }
     await new Promise(resolve => setTimeout(resolve, 180));
     const current = await chrome.tabs.get(tab.id);
     if (rules.active || !current.active || current.windowId !== message.windowID || current.url !== tab.url) throw new Error("Tab changed");
@@ -258,16 +303,27 @@ async function captureTabPreview(message) {
   } catch (_) {
     result.error = "Preview unavailable. Open the tab once, then try again.";
   } finally {
-    // Restore only our temporary activation; never overwrite a user's intervening choice.
-    if (previous && tab && previous.id !== tab.id) {
-      const current = await chrome.tabs.get(tab.id).catch(() => null);
-      const restore = await chrome.tabs.get(previous.id).catch(() => null);
-      if (current?.active && current.windowId === message.windowID && restore?.windowId === message.windowID
+    // Activating a Chrome tab collapses native multi-selection. Restore that
+    // exact group by current IDs/indices, but only while our temporary selection
+    // remains untouched. Never apply stale indices after a move or close.
+    if (selectionWatch?.activationRequested && previous && tab) {
+      const currentWindowTabs = await chrome.tabs.query({ windowId: message.windowID }).catch(() => []);
+      const current = currentWindowTabs.find(candidate => candidate.id === tab.id);
+      const highlighted = currentWindowTabs.filter(candidate => candidate.highlighted === true);
+      const restoreIDs = [previous.id, ...originalHighlightedIDs.filter(id => id !== previous.id)];
+      const restoreTabs = restoreIDs.map(id => currentWindowTabs.find(candidate => candidate.id === id));
+      if (!selectionWatch.interfered && current?.active && current.windowId === message.windowID
+          && highlighted.length === 1 && highlighted[0].id === tab.id
+          && restoreTabs.every(candidate => candidate?.windowId === message.windowID && Number.isInteger(candidate.index) && candidate.index >= 0)
           && message.browserSessionID === browserSessionID && !rules.active) {
-        await chrome.tabs.update(previous.id, { active: true }).catch(() => {});
+        await chrome.tabs.highlight({ windowId: message.windowID, tabs: restoreTabs.map(candidate => candidate.index) }).catch(() => {});
       }
     }
+    previewSelectionWatch = null;
     previewBusy = false;
+    previewGeneration += 1;
+    // Includes failed/interrupted captures: never strand requested discovery.
+    flushDeferredPreviewSnapshot();
   }
   postNative({ type: "tabPreview", preview: result });
 }
@@ -324,11 +380,19 @@ async function publishTabSnapshot(force = false, discovery = false) {
   await ensureInitialized();
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
+  if (previewBusy) { deferSnapshotForPreview(discovery); return; }
+  const generation = previewGeneration;
   const tabs = rules.active || discovery ? await chrome.tabs.query({}) : [];
   // Window identity is supplied by the browser; bounds disambiguate equal titles
   // when matching these IDs to macOS WindowServer preview windows.
   const windows = tabs.length && chrome.windows?.getAll
     ? await chrome.windows.getAll({ populate: false, windowTypes: ["normal", "popup"] }).catch(() => []) : [];
+  // Even if capture finished during an API await, its temporary active/native
+  // highlighted state must never be published as a user's fresh selection.
+  if (previewBusy || generation !== previewGeneration) {
+    deferSnapshotForPreview(discovery, true);
+    return;
+  }
   const windowsByID = new Map(windows.map(window => [window.id, window]));
   const allSnapshotTabs = tabs
     .filter(tab => Number.isInteger(tab.id) && tab.id >= 0 && Number.isInteger(tab.windowId))
@@ -359,12 +423,15 @@ async function publishTabSnapshot(force = false, discovery = false) {
   const snapshotFingerprint = JSON.stringify({ tabs: snapshotTabs, allTabs: allSnapshotTabs });
   if (!force && snapshotFingerprint === lastSnapshotFingerprint) return;
   lastSnapshotFingerprint = snapshotFingerprint;
-  postNative({
+  if (postNative({
     type: "tabsSnapshot",
     browserSessionID,
     tabs: snapshotTabs,
     allTabs: allSnapshotTabs
-  });
+  })) {
+    publishedSnapshotGeneration = generation;
+    publishedSnapshotDiscovery = discovery;
+  }
 }
 
 function effectiveRules(nativeRules) {
@@ -850,7 +917,16 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 // Selection, pinning and moves can change without navigation or activation.
-chrome.tabs.onHighlighted?.addListener(() => scheduleTabSnapshot());
+chrome.tabs.onHighlighted?.addListener((selection) => {
+  if (previewSelectionWatch && previewSelectionWatch.windowID === selection?.windowId
+      && (!previewSelectionWatch.activationRequested || !Array.isArray(selection.tabIds)
+          || selection.tabIds.length !== 1 || selection.tabIds[0] !== previewSelectionWatch.targetID)) {
+    // Sticky even if the user subsequently returns to the previewed tab: their
+    // own selection gesture must win over the original preview snapshot.
+    previewSelectionWatch.interfered = true;
+  }
+  scheduleTabSnapshot();
+});
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   scheduleTabSnapshot();

@@ -250,8 +250,10 @@ struct IntentGraphView: View {
                 currentPage = .desktop
                 leaveEditMode()
                 selectIntention(id, additive: false)
-                cameraScale = 1
-                cameraOffset = CGSize(width: -intention.graphPosition.x, height: -intention.graphPosition.y)
+                let focus = OnboardingCanvasFocus(intention: intention,
+                    viewportWidth: Double(viewportSize.width), viewportHeight: Double(viewportSize.height))
+                cameraScale = CGFloat(focus.scale)
+                cameraOffset = CGSize(width: focus.offset.x, height: focus.offset.y)
                 offsetAtGestureStart = cameraOffset
             }
             .onChange(of: accountManager.phase) { phase in

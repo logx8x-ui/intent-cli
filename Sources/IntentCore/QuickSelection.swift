@@ -212,6 +212,9 @@ public struct QuickSelection {
             name: accessMode == .blacklist ? "Quick Block" : "Quick Focus", icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
             allowedApps: chosen, allowedWebsites: websites,
             startupActions: [], restrictions: .init(),
+            // Picker modifier coordinates are local to this draft, not to the
+            // UUID-derived placement used by ordinary new canvas intentions.
+            graphPosition: .zero,
             restrictionNodes: configuredRestrictions + [.init(id: Self.startupSuppressionID, kind: .dontStartUp, position: .init(x: 220, y: 170),
                                     excludedResourceIDs: resources)],
             frictionNodes: sessionFrictions
