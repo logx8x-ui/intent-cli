@@ -1299,9 +1299,27 @@ do {
     let alwaysAllowedStore = AlwaysAllowedAppStore(fileURL: alwaysAllowedURL)
     let defaultAlwaysAllowedApps = try alwaysAllowedStore.load()
     try expect(
-        defaultAlwaysAllowedApps == [AlwaysAllowedAppStore.finder],
-        "Finder should be the universal first-install always-allowed app"
+        defaultAlwaysAllowedApps == AlwaysAllowedAppStore.defaults,
+        "Finder and System Settings are first-install defaults"
     )
+    let blockedPreset = AllowedApp(name: "Chrome", bundleIdentifier: "com.google.Chrome")
+    for mode in IntentionAccessMode.allCases {
+        var draft = dataScience
+        draft.accessMode = mode
+        draft.selectionOnly = true
+        draft.allowedApps.append(blockedPreset)
+        draft.selectionBrowserBundleIdentifiers = [blockedPreset.bundleIdentifier]
+        let applied = SessionAppPresets.applying(allowed: AlwaysAllowedAppStore.defaults, blocked: [blockedPreset], to: draft)
+        try expect(applied.permitsApplication("com.apple.finder"), "Finder is permitted in either selection mode")
+        try expect(!applied.permitsApplication(blockedPreset.bundleIdentifier), "Blocked presets override explicit app and tab selections")
+        let runtime = FocusSessionSpec.make(for: applied)
+        try expect(!runtime.permitsApplication(blockedPreset.bundleIdentifier) && runtime.permitsApplication("com.apple.finder"), "Runtime enforces both presets in either mode")
+        try expect(runtime.presetBlockedBundleIdentifiers.contains(blockedPreset.bundleIdentifier), "Preset blocks preserve the app instead of terminating a newly launched process")
+        try expect(!applied.selectionBrowserBundleIdentifiers.contains(blockedPreset.bundleIdentifier), "A whole-browser preset must not become a partial tab block")
+        try expect(!IntentionStartupPlanner.steps(for: applied).contains(.openBundle(blockedPreset.bundleIdentifier)), "Blocked presets are never launched")
+        let overlap = SessionAppPresets.applying(allowed: [blockedPreset], blocked: [blockedPreset], to: draft)
+        try expect(!overlap.permitsApplication(blockedPreset.bundleIdentifier), "Conflicting stored defaults fail closed")
+    }
     let whitelistWithFinder = AlwaysAllowedAppStore.applying(
         [AlwaysAllowedAppStore.finder],
         to: dataScience

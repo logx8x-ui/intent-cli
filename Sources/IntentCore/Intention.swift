@@ -36,6 +36,8 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var selectionBrowserBundleIdentifiers: [String] = []
     public var selectionRequiresTabReselection: Bool = false
     public var selectionOnly: Bool = false
+    public var presetAllowedBundleIdentifiers: Set<String> = []
+    public var presetBlockedBundleIdentifiers: Set<String> = []
     // Derived from this Mac's presets on load/start; not another visible restriction node.
     public var presetStartupExcludedResourceIDs: Set<String> = []
 

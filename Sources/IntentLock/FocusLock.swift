@@ -688,7 +688,7 @@ public final class FocusLock {
         guard app.activationPolicy == .regular else { return }
         guard !baselinePids.contains(app.processIdentifier) else { return }
 
-        if spec.accessMode != .blacklist { app.terminate() }
+        if spec.accessMode != .blacklist, !spec.presetBlockedBundleIdentifiers.contains(bundleIdentifier) { app.terminate() }
         refocus()
     }
 
@@ -1101,6 +1101,7 @@ public final class FocusLock {
 
     private func supportedFrontmostBrowserBundleIdentifier() -> String? {
         guard let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+              !spec.presetAllowedBundleIdentifiers.contains(bundleIdentifier),
               ["org.mozilla.firefox", "com.google.Chrome"].contains(bundleIdentifier) else {
             return nil
         }

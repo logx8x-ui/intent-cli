@@ -168,6 +168,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
               let data = try? Data(contentsOf: ActiveBrowserRulesStore.defaultFileURL()),
               let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data), rules.active, rules.isFresh(),
               let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+              !rules.unrestrictedBrowserBundleIdentifiers.contains(browser),
               rules.matchesBrowserSession(snapshot),
               let allTabs = snapshot.allTabs else {
             blurContinuity = TabBlurContinuity(); publish([], pid: 0); return

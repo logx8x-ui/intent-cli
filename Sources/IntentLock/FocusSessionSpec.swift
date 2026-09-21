@@ -3,6 +3,8 @@ import IntentCore
 
 public struct FocusSessionSpec {
     public var selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
+    public let presetAllowedBundleIdentifiers: Set<String>
+    public let presetBlockedBundleIdentifiers: Set<String>
     public let accessMode: IntentionAccessMode
     public let displayName: String
     public let startupSteps: [StartupStep]
@@ -43,8 +45,12 @@ public struct FocusSessionSpec {
         closeSessionResourcesOnFinish: Bool = false,
         restorePreviousApplicationOnStop: Bool = true,
         allowedWebsitesByBrowser: [String: [String]] = [:],
-        selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
+        selectedWindowIDsByApp: [String: Set<UInt32>] = [:],
+        presetBlockedBundleIdentifiers: Set<String> = [],
+        presetAllowedBundleIdentifiers: Set<String> = []
     ) {
+        self.presetAllowedBundleIdentifiers = presetAllowedBundleIdentifiers
+        self.presetBlockedBundleIdentifiers = presetBlockedBundleIdentifiers
         self.selectedWindowIDsByApp = selectedWindowIDsByApp
         self.displayName = displayName
         self.accessMode = accessMode
@@ -123,7 +129,9 @@ public struct FocusSessionSpec {
                     return (browser, website.value)
                 },
                 by: \.0
-            ).mapValues { $0.map(\.1) }
+            ).mapValues { $0.map(\.1) },
+            presetBlockedBundleIdentifiers: intention.presetBlockedBundleIdentifiers,
+            presetAllowedBundleIdentifiers: intention.presetAllowedBundleIdentifiers
         )
     }
 
@@ -159,7 +167,9 @@ public struct FocusSessionSpec {
             closeSessionResourcesOnFinish: closeSessionResourcesOnFinish,
             restorePreviousApplicationOnStop: restorePreviousApplicationOnStop,
             allowedWebsitesByBrowser: allowedWebsitesByBrowser,
-            selectedWindowIDsByApp: selectedWindowIDsByApp
+            selectedWindowIDsByApp: selectedWindowIDsByApp,
+            presetBlockedBundleIdentifiers: presetBlockedBundleIdentifiers,
+            presetAllowedBundleIdentifiers: presetAllowedBundleIdentifiers
         )
     }
 

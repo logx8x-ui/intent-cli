@@ -41,6 +41,7 @@ final class IntentAppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var installedApps: [InstalledApp] = []
     @Published var alwaysAllowedApps: [AllowedApp] = []
+    @Published var alwaysBlockedApps: [AllowedApp] = []
     @Published var schedules: [IntentSchedule] = []
     @Published var sessionSwitchWarning: SessionSwitchWarning?
     @Published var shortcutWarning: String?
@@ -64,6 +65,7 @@ final class IntentAppModel: ObservableObject {
     private var store = IntentionStore()
     private var scheduleStore = IntentScheduleStore()
     private let alwaysAllowedAppStore = AlwaysAllowedAppStore()
+    private let alwaysBlockedAppStore = AlwaysAllowedAppStore(fileURL: IntentEnvironment.dataDirectory.appendingPathComponent("always-blocked-apps.json"))
     private let cooldownStore = IntentionCooldownStore()
     private let zeroDriftStore = ZeroDriftStateStore()
     private var hasResetRuntimeOnLaunch = false
@@ -146,7 +148,7 @@ final class IntentAppModel: ObservableObject {
             quickSelectionBrowserSessionIDs = selection.browserSessionIDs
             purposeTemporaryIntention = intention
             purposeStatedPrompt = teachingOrigin == nil ? "your Quick Focus selection" : intention.name
-            // Deliberately bypass Always Allowed additions: only green selections belong here.
+            // Session presets are applied centrally by requestStart for both selection modes.
             requestStart(intention)
             let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil
             if !accepted {
@@ -213,9 +215,18 @@ final class IntentAppModel: ObservableObject {
         do {
             alwaysAllowedApps = try alwaysAllowedAppStore.load()
         } catch {
-            alwaysAllowedApps = [AlwaysAllowedAppStore.finder]
+            alwaysAllowedApps = AlwaysAllowedAppStore.defaults
             errorMessage = "Intent could not load always-allowed apps: \(error)"
         }
+
+        do {
+            if !FileManager.default.fileExists(atPath: alwaysBlockedAppStore.fileURL.path) {
+                try alwaysBlockedAppStore.save([])
+            }
+            alwaysBlockedApps = try alwaysBlockedAppStore.load()
+            let blockedIDs = Set(alwaysBlockedApps.map(\.bundleIdentifier))
+            alwaysAllowedApps.removeAll { blockedIDs.contains($0.bundleIdentifier) }
+        } catch { errorMessage = "Could not load app presets: \(error)" }
 
         do {
             intentions = AlwaysAllowedAppStore.applying(
@@ -316,17 +327,36 @@ final class IntentAppModel: ObservableObject {
         guard !hasActiveSession else { return }
         if isAlwaysAllowed(app.bundleIdentifier) {
             alwaysAllowedApps.removeAll { $0.bundleIdentifier == app.bundleIdentifier }
+            for index in intentions.indices where intentions[index].accessMode == .whitelist && intentions[index].presetStartupExcludedResourceIDs.contains(app.resourceID) {
+                intentions[index].allowedApps.removeAll { $0.bundleIdentifier == app.bundleIdentifier }
+            }
         } else {
+            alwaysBlockedApps.removeAll { $0.bundleIdentifier == app.bundleIdentifier }
             alwaysAllowedApps.append(app)
             intentions = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intentions)
         }
 
         do {
             try alwaysAllowedAppStore.save(alwaysAllowedApps)
+            try alwaysBlockedAppStore.save(alwaysBlockedApps)
             save()
         } catch {
             errorMessage = "Could not update always-allowed apps: \(error)"
         }
+    }
+
+    func toggleAlwaysBlockedApp(_ app: AllowedApp) {
+        guard !hasActiveSession, app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        if alwaysBlockedApps.contains(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+            alwaysBlockedApps.removeAll { $0.bundleIdentifier == app.bundleIdentifier }
+        } else {
+            alwaysAllowedApps.removeAll { $0.bundleIdentifier == app.bundleIdentifier }
+            alwaysBlockedApps.append(app)
+        }
+        do {
+            try alwaysAllowedAppStore.save(alwaysAllowedApps)
+            try alwaysBlockedAppStore.save(alwaysBlockedApps)
+        } catch { errorMessage = "Could not save app presets: \(error)" }
     }
 
     @discardableResult
@@ -958,7 +988,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func requestStart(_ requestedIntention: Intention) {
-        let intention = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: requestedIntention)
+        let intention = SessionAppPresets.applying(allowed: alwaysAllowedApps, blocked: alwaysBlockedApps, to: requestedIntention)
         do {
             if let nextAllowedDate = try cooldownStore.nextAllowedDate(for: intention.id) {
                 cooldownExpirations[intention.id] = nextAllowedDate
@@ -978,8 +1008,8 @@ final class IntentAppModel: ObservableObject {
             return
         }
         let unsupportedBrowsers = intention.isLeisure ? [] : intention.allowedApps.filter {
-            let requiresWebsiteGuard = intention.accessMode == .whitelist
-                || !intention.websites(for: $0.bundleIdentifier).isEmpty
+            let requiresWebsiteGuard = !isAlwaysAllowed($0.bundleIdentifier) && (intention.accessMode == .whitelist
+                || !intention.websites(for: $0.bundleIdentifier).isEmpty)
             return $0.isBrowser && !Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
                 && requiresWebsiteGuard
         }
@@ -1250,6 +1280,10 @@ final class IntentAppModel: ObservableObject {
             errorMessage = "This intention used specific browser tabs. Open ` and choose the current tabs before running it again."
             return
         }
+        let presetIDs = Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier))
+        if quickSelectionIntentionID == intention.id {
+            quickSelectionTabIDs = quickSelectionTabIDs?.filter { !presetIDs.contains($0.key) }
+        }
         // Frictions may take time. Revalidate exact tabs before enabling any lock.
         if quickSelectionIntentionID == intention.id, let tabIDs = quickSelectionTabIDs {
             for (browser, ids) in tabIDs {
@@ -1319,7 +1353,7 @@ final class IntentAppModel: ObservableObject {
             },
             by: \.0
         ).mapValues { $0.map(\.1) }
-        let rules = intention.isLeisure || browserGuards.isEmpty ? nil : ActiveBrowserRules(
+        var configuredRules = intention.isLeisure || browserGuards.isEmpty ? nil : ActiveBrowserRules(
             active: true,
             accessMode: intention.accessMode,
             // A non-matching sentinel keeps already-installed Browser Guard 0.1.3 builds strict
@@ -1336,6 +1370,9 @@ final class IntentAppModel: ObservableObject {
             allowGoogleSearchTabs: intention.accessMode == .whitelist && intention.browserSearchesAllowed
         )
 
+        configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier))
+        let rules = configuredRules
+
         do {
             if let rules {
                 try browserRulesStore.write(rules)
@@ -1350,7 +1387,10 @@ final class IntentAppModel: ObservableObject {
         // Browser Guard owns website-tab creation once its rules are active. The lock
         // only activates each browser so two independent launch paths cannot race.
         var lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
-        if quickSelectionIntentionID == intention.id { lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs }
+        if quickSelectionIntentionID == intention.id {
+            let presetIDs = Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier))
+            lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
+        }
         let lock = FocusLock(spec: lockSpec)
         pendingOnboardingReplacement = nil
         activeLock = lock
@@ -1683,6 +1723,7 @@ final class IntentAppModel: ObservableObject {
         guard !intention.isLeisure else { return [] }
         return intention.allowedApps.filter {
             Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
+                && !isAlwaysAllowed($0.bundleIdentifier)
                 && (intention.accessMode == .whitelist
                     || !intention.websites(for: $0.bundleIdentifier).isEmpty
                     || intention.selectionBrowserBundleIdentifiers.contains($0.bundleIdentifier))

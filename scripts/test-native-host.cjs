@@ -153,6 +153,12 @@ try {
   assert.equal(commandResponse.tabCommand.tabID, 14, "Native host should deliver a pending tab switch command");
   assert.equal(fs.existsSync(commandPath), false, "A tab switch command should only be delivered once");
 
+  fs.writeFileSync(rulesPath, JSON.stringify({ ...activeRules, unrestrictedBrowserBundleIdentifiers: ["com.google.Chrome"], updatedAt: swiftReferenceDateNow() }));
+  const [unrestricted] = callHost([{ type: "getRules", browserBundleIdentifier: "com.google.Chrome" }]);
+  const [restricted] = callHost([{ type: "getRules", browserBundleIdentifier: "org.mozilla.firefox" }]);
+  assert.equal(unrestricted.active, false, "Always-allowed browser stays unrestricted while another browser is controlled");
+  assert.equal(restricted.active, true, "Browser exemption does not disable another browser's rules");
+
   console.log("Native host spec passed");
 } finally {
   fs.rmSync(intentDir, { recursive: true, force: true });

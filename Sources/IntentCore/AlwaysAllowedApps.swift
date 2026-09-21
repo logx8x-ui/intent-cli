@@ -6,6 +6,9 @@ public final class AlwaysAllowedAppStore {
         bundleIdentifier: "com.apple.finder"
     )
 
+    public static let systemSettings = AllowedApp(name: "System Settings", bundleIdentifier: "com.apple.systempreferences")
+    public static let defaults = [finder, systemSettings]
+
     public let fileURL: URL
 
     public init(fileURL: URL = AlwaysAllowedAppStore.defaultFileURL()) {
@@ -14,13 +17,28 @@ public final class AlwaysAllowedAppStore {
 
     public func load() throws -> [AllowedApp] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            let defaults = [Self.finder]
+            let defaults = Self.defaults
             try save(defaults)
+            try markDefaultsVersion()
             return defaults
         }
 
         let data = try Data(contentsOf: fileURL)
-        return Self.unique(try JSONDecoder().decode([AllowedApp].self, from: data))
+        var apps = Self.unique(try JSONDecoder().decode([AllowedApp].self, from: data))
+        if fileURL.lastPathComponent == "always-allowed-apps.json",
+           !FileManager.default.fileExists(atPath: defaultsVersionURL.path) {
+            // Upgrade only the old untouched Finder default. Empty/custom lists
+            // express a user's choice and must not acquire new permissions.
+            if apps == [Self.finder] { apps = Self.defaults; try save(apps) }
+            try markDefaultsVersion()
+        }
+        return apps
+    }
+
+    private var defaultsVersionURL: URL { fileURL.appendingPathExtension("defaults-v2") }
+    private func markDefaultsVersion() throws {
+        guard fileURL.lastPathComponent == "always-allowed-apps.json" else { return }
+        try Data("2".utf8).write(to: defaultsVersionURL, options: .atomic)
     }
 
     public func save(_ apps: [AllowedApp]) throws {

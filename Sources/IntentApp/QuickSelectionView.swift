@@ -33,6 +33,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var expanded = false
     @Published var loading = false
     @Published var closing = false
+    @Published var settingsOpen = false
     @Published var explicitBrowserWindow: QuickSelectionBrowserWindow?
     @Published var focusedBrowserWindow: CGWindowID?
     @Published var hoveredTab: BrowserTabItem?
@@ -317,7 +318,7 @@ final class QuickSelectionController: ObservableObject {
     private var hoverTask: Task<Void, Never>?
     private(set) var displayFrame = CGRect.zero
     private(set) var topSafeInset: CGFloat = 0
-    private let model: IntentAppModel
+    let model: IntentAppModel
     private var panel: NSPanel?
     private var monitor: Any?
     private var refreshTimer: Timer?
@@ -387,6 +388,7 @@ final class QuickSelectionController: ObservableObject {
         if panel.isVisible { onboarding.record(.overviewOpened) }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel?.isVisible == true else { return event }
+            if self.settingsOpen { return event }
             if event.keyCode == 53 {
                 if self.optionsSection != nil { self.optionsSection = nil } else { self.cancel() }
                 return nil
@@ -437,6 +439,9 @@ final class QuickSelectionController: ObservableObject {
             return BrowserTabSnapshotStore(browserBundleIdentifier: browser).load()
         }
     }
+    func reloadBrowserTabs(_ browser: String) async {
+        _ = await freshSnapshots(for: [browser])
+    }
     func browserWindowID(for window: WindowItem) -> Int? {
         guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == window.appID }) else { return nil }
         let siblings = windows.filter { $0.appID == window.appID }
@@ -482,10 +487,14 @@ final class QuickSelectionController: ObservableObject {
         guard !closing else { return }
         if QuickSelection.browsers.contains(window.appID) {
             guard !browserLists(for: window.appID).isEmpty else {
+                focusedBrowserWindow = window.id
+                Task { await reloadBrowserTabs(window.appID) }
                 message = unavailableTabsMessage(for: window.appID); return
             }
             explicitBrowserWindow = nil
             focusedBrowserWindow = window.id
+            hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
+            Task { await reloadBrowserTabs(window.appID) }
             message = nil
         } else if selection.windowIDsByApp[window.appID] != nil { selection.toggleWindow(window.id, app: window.appID) }
         else if let app = apps.first(where: { $0.id == window.appID }) { selectApp(app) }
@@ -765,34 +774,40 @@ private struct QuickSelectionView: View {
     @ObservedObject var controller: QuickSelectionController
     @ObservedObject private var onboarding: IntentOnboardingCoordinator
     @State private var hoveredWindow: CGWindowID?
+    @ObservedObject private var model: IntentAppModel
+    @AppStorage("overviewShowClock") private var showClock = true
+    @AppStorage("overviewShowTitles") private var showTitles = true
     init(controller: QuickSelectionController) {
         self.controller = controller
+        model = controller.model
         onboarding = controller.onboarding
     }
     private var accent: Color { controller.selection.accessMode == .blacklist ? .red : .green }
     var body: some View {
         GeometryReader { geometry in
-            let focused = controller.windows.first { $0.id == controller.focusedBrowserWindow }
+            let presetIDs = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
+            let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
+            let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
             let header = controller.topSafeInset + 48 + (onboarding.isTeaching ? 60 : 0)
-            let footer: CGFloat = controller.message == nil ? 110 : 180
+            let footer: CGFloat = controller.message == nil ? 140 : 210
             let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - footer - 12))
-            let frames = FieldOfViewLayout.frames(sourceFrames: controller.windows.map(\.sourceFrame), in: area, tabHeight: 0)
+            let frames = FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, tabHeight: 0)
             ZStack(alignment: .topLeading) {
                 Group {
                     if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
-                ForEach(Array(controller.windows.enumerated()), id: \.element.id) { index, window in
+                ForEach(Array(visibleWindows.enumerated()), id: \.element.id) { index, window in
                     if index < frames.count { windowCard(window, frame: frames[index]) }
                 }
                 VStack {
                     HStack {
                         Spacer()
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                        if showClock { TimelineView(.periodic(from: .now, by: 1)) { context in
                             Text(context.date, style: .time).monospacedDigit().font(.system(size: 14, weight: .medium)).frame(minWidth: 80)
-                        }
+                        } }
                     }.overlay {
                         HStack(alignment: .firstTextBaseline, spacing: 0) {
                             Text("ı").overlay(alignment: .top) { Text(verbatim: "`").font(.system(size: 17, weight: .bold)).offset(x: 1, y: -4) }
@@ -812,12 +827,23 @@ private struct QuickSelectionView: View {
                             .background(.regularMaterial, in: Capsule()).help(message)
                     }
                     HStack {
+                        AppPresetStatusStrip(model: model) { controller.settingsOpen = true }
+                        Spacer(minLength: 16)
+                    }.padding(.horizontal, 28).frame(height: 26)
+                    HStack {
                         Button("Close · ` / Esc") { controller.cancel() }.buttonStyle(.plain)
                         Spacer()
                         Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
                         Spacer()
                         Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
                             .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing)
+                        Button { controller.settingsOpen.toggle() } label: {
+                            Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 32, height: 32)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }.buttonStyle(.plain).accessibilityLabel("Overview settings").help("Settings and app presets")
+                            .popover(isPresented: $controller.settingsOpen, arrowEdge: .top) {
+                                OverviewSettingsView(model: model).frame(width: 380).padding(20).preferredColorScheme(.dark)
+                            }
                     }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
                 }.frame(width: geometry.size.width, height: footer, alignment: .bottom)
                     .position(x: geometry.size.width / 2, y: geometry.size.height - footer / 2)
@@ -833,6 +859,12 @@ private struct QuickSelectionView: View {
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)
             }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
                 .clipped().foregroundStyle(.white).preferredColorScheme(.dark)
+                .onChange(of: presetIDs) { ids in
+                    for id in ids where controller.selection.apps.contains(id) {
+                        controller.selection.toggleApp(id, snapshots: controller.snapshots)
+                    }
+                    if let focused, ids.contains(focused.appID) { controller.focusedBrowserWindow = nil }
+                }
         }.ignoresSafeArea()
     }
     private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect) -> some View {
@@ -869,7 +901,7 @@ private struct QuickSelectionView: View {
                 Button { controller.selectWindow(window) } label: {
                     HStack(spacing: 5) {
                         if let app { Image(nsImage: app.icon).resizable().frame(width: 16, height: 16) }
-                        Text(label).lineLimit(1).truncationMode(.middle)
+                        Text(showTitles ? label : (app?.app.name ?? label)).lineLimit(1).truncationMode(.middle)
                     }.frame(maxWidth: .infinity, minHeight: 20).contentShape(Rectangle())
                 }.buttonStyle(.plain)
                     .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
@@ -902,20 +934,11 @@ private struct QuickSelectionView: View {
                     Spacer()
                     Button { controller.focusedBrowserWindow = nil; controller.hoveredTab = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Close tabs")
                 }
-                if controller.browserWindowID(for: window) == nil {
-                    // Identical overlapping windows cannot be safely associated by
-                    // public macOS metadata. Keep every real browser list reachable.
-                    Picker("Browser window", selection: Binding<Int?>(
-                        get: { controller.explicitBrowserWindow?.browser == window.appID ? controller.explicitBrowserWindow?.id : nil },
-                        set: { controller.explicitBrowserWindow = $0.map { .init(browser: window.appID, id: $0) } }
-                    )) {
-                        Text("Choose a browser window").tag(nil as Int?)
-                        ForEach(controller.browserLists(for: window.appID), id: \.id) { list in
-                            Text(list.title).tag(Optional(list.id))
-                        }
-                    }.pickerStyle(.menu)
-                    Text("These previews have matching window details. Choose the browser's tab list directly.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                if controller.tabs(for: window).isEmpty {
+                    Label("Connect Browser Guard in this window’s browser profile to see its tabs.", systemImage: "puzzlepiece.extension")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Refresh tabs") { Task { await controller.reloadBrowserTabs(window.appID) } }
+                        .buttonStyle(.bordered)
                 }
                 Toggle(isOn: Binding(get: {
                     let shown = controller.tabs(for: window)

@@ -89,6 +89,11 @@ func runFieldOfViewLayoutSpecs() throws {
     try expect(packed[0].width / crowded[0].width >= 0.24,
                "The reported crowded desktop must use substantially larger previews than the sparse equal-cell grid")
 
+    let uncluttered = Array(crowded.dropFirst(8))
+    let withoutPresets = FieldOfViewLayout.frames(sizes: uncluttered, in: crowdedBounds, tabHeight: 0)
+    try expect(withoutPresets[0].width / uncluttered[0].width > packed[0].width / crowded[0].width,
+               "Moving preset utilities out of the grid gives real windows more room without changing relative scale")
+
     let spatial = [
         CGRect(x: 1000, y: 800, width: 600, height: 400), // bottom right
         CGRect(x: 0, y: 0, width: 600, height: 400), // top left

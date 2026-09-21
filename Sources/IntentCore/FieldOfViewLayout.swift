@@ -165,24 +165,29 @@ public enum FieldOfViewLayout {
 /// Never attach a tab group to a window on a guess. Browser window IDs are not CGWindowIDs.
 public enum BrowserWindowMatching {
     public static func match(title: String, tabs: [BrowserTabItem], nativeWindowCount: Int, frame: CGRect? = nil, isFocused: Bool = false) -> Int? {
+        let normalized = normalize(title)
+        let titled = Set(tabs.filter { $0.active && !normalized.isEmpty && titleMatches(normalized, normalize($0.title)) }.map(\.windowID))
+        // Titles distinguish equally sized windows (and disconnected profiles).
+        // Geometry may break a title tie, but must never override a known title.
+        if titled.count == 1 { return titled.first }
+        let candidates = normalized.isEmpty ? tabs : tabs.filter { titled.contains($0.windowID) }
         if let frame, frame.width > 0, frame.height > 0 {
-            let geometryMatches = Set(tabs.filter { tab in
+            let geometryMatches = Set(candidates.filter { tab in
                 guard let candidate = tab.windowFrame?.rect else { return false }
                 return abs(candidate.minX - frame.minX) <= 3 && abs(candidate.minY - frame.minY) <= 3
                     && abs(candidate.width - frame.width) <= 3 && abs(candidate.height - frame.height) <= 3
             }.map(\.windowID))
             if geometryMatches.count == 1 { return geometryMatches.first }
             if isFocused {
-                let focused = Set(tabs.filter { $0.windowFocused == true && geometryMatches.contains($0.windowID) }.map(\.windowID))
+                let focused = Set(candidates.filter { $0.windowFocused == true && geometryMatches.contains($0.windowID) }.map(\.windowID))
                 if focused.count == 1 { return focused.first }
             }
         }
-        let ids = Set(tabs.map(\.windowID))
-        if ids.count == 1, nativeWindowCount == 1 { return ids.first }
-        let normalized = normalize(title)
-        guard !normalized.isEmpty else { return nil }
-        let matching = Set(tabs.filter { $0.active && titleMatches(normalized, normalize($0.title)) }.map(\.windowID))
-        return matching.count == 1 ? matching.first : nil
+        if normalized.isEmpty {
+            let ids = Set(tabs.map(\.windowID))
+            if ids.count == 1, nativeWindowCount == 1 { return ids.first }
+        }
+        return nil
     }
 
     public static func sameWindowTitle(_ lhs: String, _ rhs: String) -> Bool {

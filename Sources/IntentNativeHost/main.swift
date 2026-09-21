@@ -440,7 +440,7 @@ private final class HostRuntime {
         return HostRuleState(
             selectedBrowserSessionID: rules.selectedBrowserSessionIDsByBrowser?[browserBundleIdentifier],
             selectedTabIDs: rules.selectedTabIDsByBrowser?[browserBundleIdentifier],
-            active: rules.active,
+            active: rules.active && !rules.unrestrictedBrowserBundleIdentifiers.contains(browserBundleIdentifier),
             accessMode: rules.accessMode.rawValue,
             allowedWebsites: browserWebsites,
             startupWebsites: rules.startupWebsitesByBrowser[browserBundleIdentifier] ?? [],

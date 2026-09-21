@@ -42,6 +42,15 @@ func runTabSelectionSpecs() throws {
     var webOnly = QuickSelection(); webOnly.toggleTab(.init(browser: browser, id: 1), browserSessionID: "selection-spec-session")
     let savedWeb = try webOnly.makeIntention(apps: [app], snapshots: [snapshot])
     try expect(!savedWeb.selectionRequiresTabReselection, "Saved web-only intentions keep their established website replay behavior")
+    let identicalFrame = BrowserWindowFrame(left: 0, top: 40, width: 1400, height: 900)
+    let sameSizeTabs = [
+        BrowserTabItem(id: 301, windowID: 301, index: 0, title: "Work", url: "https://example.com", active: true, windowFrame: identicalFrame),
+        BrowserTabItem(id: 302, windowID: 302, index: 0, title: "Study", url: "https://example.org", active: true, windowFrame: identicalFrame)
+    ]
+    for tab in sameSizeTabs {
+        try expect(BrowserWindowMatching.match(title: tab.title + " - Google Chrome", tabs: sameSizeTabs, nativeWindowCount: 3, frame: identicalFrame.rect) == tab.windowID, "Same-size browser windows each open their own tabs")
+    }
+    try expect(BrowserWindowMatching.match(title: "Unconnected profile", tabs: [sameSizeTabs[0]], nativeWindowCount: 3, frame: identicalFrame.rect) == nil, "A disconnected profile cannot borrow another window's tab strip")
     let frameA = BrowserWindowFrame(left: 20, top: 40, width: 900, height: 700)
     let frameB = BrowserWindowFrame(left: 700, top: 80, width: 800, height: 600)
     var sameTitle = [

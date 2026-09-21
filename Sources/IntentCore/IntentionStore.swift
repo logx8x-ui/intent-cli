@@ -78,6 +78,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
 
     public var active: Bool
     public var accessMode: IntentionAccessMode
+    public var unrestrictedBrowserBundleIdentifiers: Set<String> = []
     public var allowedWebsites: [String]
     public var allowedWebsitesByBrowser: [String: [String]]
     public var startupWebsitesByBrowser: [String: [String]]
@@ -123,6 +124,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case active
         case accessMode
+        case unrestrictedBrowserBundleIdentifiers
         case allowedWebsites
         case allowedWebsitesByBrowser
         case startupWebsitesByBrowser
@@ -140,6 +142,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         accessMode = try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist
+        unrestrictedBrowserBundleIdentifiers = try container.decodeIfPresent(Set<String>.self, forKey: .unrestrictedBrowserBundleIdentifiers) ?? []
         allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
         allowedWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .allowedWebsitesByBrowser) ?? [:]
         startupWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .startupWebsitesByBrowser) ?? [:]
@@ -154,7 +157,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     }
 
     public func refreshed(at date: Date = Date()) -> ActiveBrowserRules {
-        .init(
+        var result = Self(
             active: active,
             accessMode: accessMode,
             allowedWebsites: allowedWebsites,
@@ -169,6 +172,8 @@ public struct ActiveBrowserRules: Codable, Equatable {
             allowGoogleSearchTabs: allowGoogleSearchTabs,
             updatedAt: date
         )
+        result.unrestrictedBrowserBundleIdentifiers = unrestrictedBrowserBundleIdentifiers
+        return result
     }
 
     public func isFresh(now: Date = Date(), maxAge: TimeInterval = freshnessWindow) -> Bool {
