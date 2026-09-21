@@ -583,6 +583,12 @@ public final class FocusLock {
             return nil
         }
 
+        if [Int64(36), Int64(76)].contains(keyCode),
+           !IntentInteractivePanelRegions.shared.hasKeyboardFocus,
+           nativeTabClickGuard.blocksAddressSubmission(NSWorkspace.shared.frontmostApplication?.processIdentifier) {
+            return nil
+        }
+
         if spec.accessMode == .whitelist,
            spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
             if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {

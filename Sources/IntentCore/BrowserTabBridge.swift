@@ -26,6 +26,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
     public var groupID: Int?
     public var windowFrame: BrowserWindowFrame?
     public var windowFocused: Bool?
+    public var searchSessionID: String?
 
     public var displayTitle: String {
         if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
@@ -45,7 +46,8 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         discarded: Bool? = nil,
         groupID: Int? = nil,
         windowFrame: BrowserWindowFrame? = nil,
-        windowFocused: Bool? = nil
+        windowFocused: Bool? = nil,
+        searchSessionID: String? = nil
     ) {
         self.id = id
         self.windowID = windowID
@@ -60,6 +62,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         self.groupID = groupID
         self.windowFrame = windowFrame
         self.windowFocused = windowFocused
+        self.searchSessionID = searchSessionID
     }
 }
 

@@ -10,7 +10,11 @@ function updateRules(nextRules) {
   intentRules = nextRules || intentRules;
 }
 
-chrome.runtime.sendMessage({ type: "getActiveRules" }, updateRules).catch(() => {});
+try {
+  chrome.runtime.sendMessage({ type: "getActiveRules" }, (response) => {
+    if (!chrome.runtime.lastError) updateRules(response);
+  });
+} catch (_) { /* An extension reload can invalidate an old content-script context. */ }
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "rulesUpdated") updateRules(message.rules);
 });

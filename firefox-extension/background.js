@@ -32,6 +32,9 @@ let guardEnabled = true;
 let initialized = false;
 let freshBlankTabIds = new Set();
 const lastAllowedURLByTab = new Map();
+const searchSessionTabs = new Set();
+const committedURLByTab = new Map();
+
 // Firefox can deliver the completed about:blank event for a reused startup tab
 // after tabs.update() has already begun loading the requested site. Keep the
 // startup navigation explicit so that stale event cannot cancel the real load.
@@ -283,7 +286,8 @@ async function publishTabSnapshot(force = false, discovery = false) {
           return window && [window.left, window.top, window.width, window.height].every(Number.isFinite)
             ? { left: window.left, top: window.top, width: window.width, height: window.height } : null;
         })(),
-        windowFocused: windowsByID.get(tab.windowId)?.focused ?? null
+        windowFocused: windowsByID.get(tab.windowId)?.focused ?? null,
+        searchSessionID: rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab.id) ? rules.startupSessionID : null
       }))
       .sort((left, right) => (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id));
   const allowedIDs = new Set(tabs.filter(tab => discovery || isRuntimeAllowedTab(tab)).map(tab => tab.id));
@@ -380,7 +384,9 @@ function sendHeartbeat() {
 
 async function applyNativeRules(nativeRules) {
   const previousFingerprint = rulesFingerprint;
-  rules = effectiveRules(nativeRules);
+  const nextRules = effectiveRules(nativeRules);
+  if (nextRules.startupSessionID !== rules.startupSessionID) searchSessionTabs.clear();
+  rules = nextRules;
 
   rulesFingerprint = fingerprintRules(rules);
   if (rulesFingerprint === previousFingerprint) {
@@ -391,11 +397,13 @@ async function applyNativeRules(nativeRules) {
     await removeAlreadyBlockedTabs();
     await synchronizeStartupTabs();
     await primeAllowedTab();
+    for (const tab of await browser.tabs.query({})) if (!committedURLByTab.has(tab.id) && tab.url) committedURLByTab.set(tab.id, tab.url);
     if (Array.isArray(rules.selectedTabIDs)) await returnToAllowedTab();
   } else {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
+    searchSessionTabs.clear(); committedURLByTab.clear();
     startupNavigationURLByTab.clear();
     completedStartupFingerprint = null;
   }
@@ -420,7 +428,7 @@ function isFreshBlankTab(tab) {
 
 function isRuntimeAllowedTab(tab) {
   // Explicit tab selection follows that tab across URLs, redirects and SPA routes.
-  if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.accessMode === "blacklist" ? !rules.selectedTabIDs.includes(tab?.id) : rules.selectedTabIDs.includes(tab?.id);
+  if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.accessMode === "blacklist" ? !rules.selectedTabIDs.includes(tab?.id) : (rules.selectedTabIDs.includes(tab?.id) || (rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id)));
   return Boolean(
     tab?.url &&
     (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab))
@@ -840,6 +848,8 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
+  committedURLByTab.set(tab.id, tab.url || "about:blank");
+  if (rules.active && rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) searchSessionTabs.add(tab.id);
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab(tab)) {
     await returnToAllowedTab();
     return;
@@ -888,6 +898,7 @@ for (const event of [browser.tabs.onMoved, browser.tabs.onAttached, browser.tabs
 }
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
+  searchSessionTabs.delete(tabId); committedURLByTab.delete(tabId);
   scheduleTabSnapshot();
   if (!rules.active) {
     return;
@@ -948,3 +959,20 @@ ensureInitialized().then(() => {
   }
 });
 setInterval(sendHeartbeat, HEARTBEAT_MS);
+
+// Browser-reported transitions distinguish address-bar input from ordinary links
+// and SPA navigation; native input guards prevent address editing when Searches is off.
+browser.webNavigation?.onCommitted?.addListener(async (details) => {
+  if (details.frameId !== 0 || details.tabId < 0) return;
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: details.tabId})) return;
+  const previous = committedURLByTab.get(details.tabId);
+  const direct = ["typed", "generated", "keyword", "keyword_generated", "auto_bookmark"].includes(details.transitionType)
+    || (details.transitionQualifiers || []).includes("from_address_bar");
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && direct
+      && !(rules.allowGoogleSearchTabs && IntentBrowserRules.isGoogleSearchURL(details.url))) {
+    if (previous && previous !== details.url) await browser.tabs.update(details.tabId, {url: previous}).catch(() => {});
+    else await returnToAllowedTab();
+    return;
+  }
+  committedURLByTab.set(details.tabId, details.url);
+});

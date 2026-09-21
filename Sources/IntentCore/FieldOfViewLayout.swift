@@ -170,6 +170,16 @@ public enum BrowserWindowMatching {
         // Titles distinguish equally sized windows (and disconnected profiles).
         // Geometry may break a title tie, but must never override a known title.
         if titled.count == 1 { return titled.first }
+        // During a page-title change, fresh browser focus plus exact geometry
+        // identifies the foreground window without borrowing a background profile.
+        if isFocused, titled.isEmpty, let frame {
+            let focused = Set(tabs.filter { tab in
+                guard tab.windowFocused == true, let candidate = tab.windowFrame?.rect else { return false }
+                return abs(candidate.minX - frame.minX) <= 3 && abs(candidate.minY - frame.minY) <= 3
+                    && abs(candidate.width - frame.width) <= 3 && abs(candidate.height - frame.height) <= 3
+            }.map(\.windowID))
+            if focused.count == 1 { return focused.first }
+        }
         let candidates = normalized.isEmpty ? tabs : tabs.filter { titled.contains($0.windowID) }
         if let frame, frame.width > 0, frame.height > 0 {
             let geometryMatches = Set(candidates.filter { tab in

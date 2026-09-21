@@ -84,6 +84,7 @@ final class QuickSelectionController: ObservableObject {
     }
     private var markGeneration = UUID()
     private var markTask: Task<Void, Never>?
+    private var markSequence = 0
     private var runMarkedTask: Task<Void, Never>?
     private func freshSnapshots(for browsers: Set<String>) async -> Bool {
         guard !browsers.isEmpty else { return true }
@@ -189,6 +190,7 @@ final class QuickSelectionController: ObservableObject {
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
         let markToken = markGeneration
         let previous = markTask
+        markSequence += 1
         markTask = Task { [weak self] in
             await previous?.value
             guard let self, !Task.isCancelled, self.markGeneration == markToken, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
@@ -282,17 +284,17 @@ final class QuickSelectionController: ObservableObject {
         } else { switch connection {
         case .updateRequired: text = "\(name) Browser Guard needs an update to select tabs."
         case .reconnecting: text = "\(name) Browser Guard is disconnected. Your selections are safe."
-        case .ready: text = fresh ? "This tab is still changing. Try marking it once it settles." : "\(name) is taking longer to respond. Try marking again."
+        case .ready: text = fresh ? "Couldn’t identify this browser window. Open Intent’s overview to select its tabs, or check Browser Guard in this browser profile." : "\(name) is taking longer to respond. Try marking again."
         } }
         dismissMarkNotice()
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
-        let frame = CGRect(x: screen.visibleFrame.midX - 210, y: screen.visibleFrame.minY + 24, width: 420, height: 90)
+        let frame = CGRect(x: screen.visibleFrame.midX - 210, y: screen.visibleFrame.minY + 24, width: 420, height: 120)
         let notice = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         notice.isOpaque = false; notice.backgroundColor = .clear; notice.hasShadow = true; notice.hidesOnDeactivate = false
         notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         notice.contentView = NSHostingView(rootView: QuickMarkRecoveryNotice(text: text, needsSetup: needsGroupUpdate || connection != .ready, setup: { [weak self] in
             self?.dismissMarkNotice(); IntentBrowserSetup.open(browser)
-        }, close: { [weak self] in self?.dismissMarkNotice() }))
+        }, overview: { [weak self] in self?.dismissMarkNotice(); self?.toggle() }, close: { [weak self] in self?.dismissMarkNotice() }))
         markNoticePanel = notice; notice.orderFrontRegardless()
         let dismissal = DispatchWorkItem { [weak self] in self?.dismissMarkNotice() }
         markNoticeDismissal = dismissal
@@ -304,6 +306,7 @@ final class QuickSelectionController: ObservableObject {
         hideStagedModifiers()
         markGeneration = UUID()
         markTask?.cancel(); markTask = nil
+        overviewOpenTask?.cancel(); overviewOpenTask = nil
         runMarkedTask?.cancel()
         selection.clearTargets()
         hasStagedSelection = false
@@ -335,7 +338,25 @@ final class QuickSelectionController: ObservableObject {
         return apps.filter { app in !windows.contains { $0.appID == app.id } }
     }
     var isSelectionSurfaceVisible: Bool { panel?.isVisible == true }
+    private var overviewOpenTask: Task<Void, Never>?
     func toggle() {
+        // Finish a pending mark before presenting a surface that changes focus.
+        if markTask != nil, panel?.isVisible != true {
+            guard overviewOpenTask == nil else { return }
+            overviewOpenTask = Task { [weak self] in
+                guard let self else { return }
+                while let pending = self.markTask {
+                    let sequence = self.markSequence
+                    await pending.value
+                    guard !Task.isCancelled else { return }
+                    if self.markSequence == sequence { break }
+                }
+                self.overviewOpenTask = nil
+                self.markTask = nil
+                self.toggle()
+            }
+            return
+        }
         if panel?.isVisible == true { cancel(); return }
         guard !model.hasActiveSession, !model.isZeroDriftActive,
               model.pendingPurposeSessionSave == nil, model.pendingFriction == nil,
@@ -1014,17 +1035,21 @@ private struct QuickMarkRecoveryNotice: View {
     let text: String
     let needsSetup: Bool
     let setup: () -> Void
+    let overview: () -> Void
     let close: () -> Void
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.green)
             VStack(alignment: .leading, spacing: 6) {
                 Text(text).font(.system(size: 13, weight: .medium)).fixedSize(horizontal: false, vertical: true)
-                if needsSetup { Button("Browser Guard setup", action: setup).buttonStyle(.plain).foregroundStyle(.green) }
+                HStack(spacing: 14) {
+                    Button("Open tab picker", action: overview)
+                    Button("Browser Guard setup", action: setup)
+                }.buttonStyle(.plain).foregroundStyle(.green)
             }
             Spacer(minLength: 0)
             Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Dismiss")
-        }.padding(16).frame(width: 420, height: 90).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }.padding(16).frame(width: 420, height: 120).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             .preferredColorScheme(.dark)
     }
 }

@@ -3,6 +3,15 @@ import IntentCore
 import IntentLock
 
 func runTabSelectionSpecs() throws {
+    try expect(BrowserAddressPolicy.isAddressControl(labels: ["Address and search bar"]), "Chrome address bar is identified")
+    try expect(BrowserAddressPolicy.isAddressControl(labels: ["urlbar-input"]), "Firefox address control is identified")
+    try expect(!BrowserAddressPolicy.isAddressControl(labels: ["Find in page"]), "In-page find remains available")
+    for destination in ["https://example.com", "example.com", "localhost", "file:///tmp/x", "about:config"] {
+        try expect(BrowserAddressPolicy.isDirectDestination(destination), "Address-bar URL is not a search query")
+    }
+    for query in ["how to study", "macOS focus", "calculus"] {
+        try expect(!BrowserAddressPolicy.isDirectDestination(query), "Normal search queries stay available with Searches")
+    }
     let browser = "com.google.Chrome"
     let firefox = "org.mozilla.firefox"
     let app = AllowedApp(name: "Chrome", bundleIdentifier: browser)
@@ -61,6 +70,9 @@ func runTabSelectionSpecs() throws {
     sameTitle[1].windowFrame = frameA
     try expect(BrowserWindowMatching.match(title: "New Tab", tabs: sameTitle, nativeWindowCount: 2, frame: frameA.rect) == nil, "Identical overlapping previews never guess a window identity")
     try expect(BrowserWindowMatching.match(title: "New Tab", tabs: sameTitle, nativeWindowCount: 2, frame: frameA.rect, isFocused: true) == 101, "Foreground quick-mark uses confirmed native/browser focus to disambiguate equal geometry")
+
+    try expect(BrowserWindowMatching.match(title: "Loading changed title", tabs: sameTitle, nativeWindowCount: 2, frame: frameA.rect, isFocused: true) == 101, "Fresh foreground geometry survives a changing page title")
+    try expect(BrowserWindowMatching.match(title: "Loading changed title", tabs: sameTitle, nativeWindowCount: 2, frame: frameA.rect) == nil, "Background title mismatches still cannot borrow another profile")
 
     var selected = QuickSelection()
     func click(_ id: Int, shift: Bool = false, displayed: [BrowserTabItem] = rows, window: Int = 10, appID: String = browser) {

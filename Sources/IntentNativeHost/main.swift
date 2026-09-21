@@ -42,6 +42,7 @@ struct HostTab: Codable {
     var groupID: Int?
     var windowFrame: BrowserWindowFrame?
     var windowFocused: Bool?
+    var searchSessionID: String?
     var faviconURL: String?
     var id: Int
     var windowID: Int
@@ -342,10 +343,10 @@ private final class HostRuntime {
                 title: $0.title,
                 url: $0.url,
                 active: $0.active,
-                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused
+                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID
             )
         }
-        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused) }
+        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID) }
         // Explicit discovery is also a freshness acknowledgment. Preserve idle
         // deduplication, but refresh the timestamp even if requested tabs did not change.
         guard requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID else { return }

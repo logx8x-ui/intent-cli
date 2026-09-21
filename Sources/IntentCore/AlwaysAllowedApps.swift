@@ -7,7 +7,9 @@ public final class AlwaysAllowedAppStore {
     )
 
     public static let systemSettings = AllowedApp(name: "System Settings", bundleIdentifier: "com.apple.systempreferences")
-    public static let defaults = [finder, systemSettings]
+    public static let textEdit = AllowedApp(name: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
+    public static let quickTimePlayer = AllowedApp(name: "QuickTime Player", bundleIdentifier: "com.apple.QuickTimePlayerX")
+    public static let defaults = [finder, systemSettings, textEdit, quickTimePlayer]
 
     public let fileURL: URL
 
@@ -27,18 +29,23 @@ public final class AlwaysAllowedAppStore {
         var apps = Self.unique(try JSONDecoder().decode([AllowedApp].self, from: data))
         if fileURL.lastPathComponent == "always-allowed-apps.json",
            !FileManager.default.fileExists(atPath: defaultsVersionURL.path) {
-            // Upgrade only the old untouched Finder default. Empty/custom lists
-            // express a user's choice and must not acquire new permissions.
-            if apps == [Self.finder] { apps = Self.defaults; try save(apps) }
+            // Upgrade the preceding default set once; preserve custom/empty
+            // lists and an explicitly removed System Settings preset in v2.
+            let hasV2Defaults = FileManager.default.fileExists(atPath: fileURL.appendingPathExtension("defaults-v2").path)
+            let priorDefaultIDs = Set([Self.finder.bundleIdentifier, Self.systemSettings.bundleIdentifier])
+            if Set(apps.map(\.bundleIdentifier)) == priorDefaultIDs || (!hasV2Defaults && apps == [Self.finder]) {
+                apps = Self.defaults
+                try save(apps)
+            }
             try markDefaultsVersion()
         }
         return apps
     }
 
-    private var defaultsVersionURL: URL { fileURL.appendingPathExtension("defaults-v2") }
+    private var defaultsVersionURL: URL { fileURL.appendingPathExtension("defaults-v3") }
     private func markDefaultsVersion() throws {
         guard fileURL.lastPathComponent == "always-allowed-apps.json" else { return }
-        try Data("2".utf8).write(to: defaultsVersionURL, options: .atomic)
+        try Data("3".utf8).write(to: defaultsVersionURL, options: .atomic)
     }
 
     public func save(_ apps: [AllowedApp]) throws {

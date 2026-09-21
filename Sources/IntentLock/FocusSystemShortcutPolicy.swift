@@ -1,3 +1,4 @@
+import Foundation
 public enum FocusSystemShortcutPolicy {
     public static func shouldBlock(keyCode: Int64) -> Bool {
         [
@@ -47,7 +48,7 @@ public enum FocusBrowserShortcutPolicy {
         }
 
         if command && keyCode == KeyCode.t {
-            return false
+            return !allowGoogleSearchTabs
         }
 
         if allowGoogleSearchTabs,
@@ -98,5 +99,20 @@ public enum FocusBrowserShortcutPolicy {
             KeyCode.eight,
             KeyCode.nine
         ]
+    }
+}
+
+public enum BrowserAddressPolicy {
+    public static func isAddressControl(labels: [String]) -> Bool {
+        labels.contains { label in
+            let value = label.lowercased()
+            return value.contains("address") || value.contains("urlbar") || value.contains("omnibox") || value == "location"
+        }
+    }
+
+    public static func isDirectDestination(_ input: String) -> Bool {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.contains("://") || ["about:", "file:", "javascript:", "data:"].contains(where: value.hasPrefix) { return true }
+        return !value.contains(where: { $0.isWhitespace }) && (value.contains(".") || value == "localhost" || value.contains("/"))
     }
 }

@@ -47,6 +47,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const tabRemoved = event();
   const tabHighlighted = event();
   const beforeNavigate = event();
+  const committed = event();
   const nativeMessage = event();
   const nativeDisconnect = event();
   const windowFocus = event();
@@ -179,7 +180,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         return { id, ...patch };
       }
     },
-    webNavigation: { onBeforeNavigate: beforeNavigate }
+    webNavigation: { onBeforeNavigate: beforeNavigate, onCommitted: committed }
   };
 
   const context = {
@@ -234,6 +235,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       for (const listener of tabCreated.listeners) await listener({ ...tab });
       await settle();
     },
+    async commit(id, url, transitionType) {
+      tabs.get(id).url = url;
+      for (const listener of committed.listeners) await listener({tabId: id, frameId: 0, url, transitionType});
+      await settle();
+    },
     async navigate(id, url) {
       for (const listener of beforeNavigate.listeners) {
         await listener({ tabId: id, frameId: 0, url });
@@ -285,6 +291,21 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  for (const searches of [false, true]) {
+    const navigation = createHarness({active: true, accessMode: "whitelist", selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], blockNavigation: true, allowGoogleSearchTabs: searches}, [{id: 1, windowId: 1, active: true, url: "https://discord.com/channels/a"}]);
+    await navigation.settle();
+    await navigation.create({id: 2, windowId: 1, active: false, url: "about:blank"});
+    await navigation.commit(2, "https://unrelated.example/", "typed");
+    assert.equal(navigation.tabs.get(2).url, searches ? "about:blank" : "https://unrelated.example/", "Search-authorized new tabs reject typed destinations; unselected tabs are never mutated");
+
+    await navigation.commit(1, "https://discord.com/channels/b", "link");
+    assert.equal(navigation.tabs.get(1).url, "https://discord.com/channels/b", "Normal links remain usable");
+    await navigation.commit(1, "https://unrelated.example/", "typed");
+    assert.equal(navigation.tabs.get(1).url, "https://discord.com/channels/b", "Typed arbitrary destinations return to the last committed page");
+    await navigation.commit(1, "https://www.google.com/search?q=study", "generated");
+    assert.equal(navigation.tabs.get(1).url, searches ? "https://www.google.com/search?q=study" : "https://discord.com/channels/b", "Address-bar searches require Searches");
+  }
+
   const commands = createHarness({ active: false }, [
     { id: 61, windowId: 6, index: 0, active: true, url: "https://example.org/" },
     { id: 62, windowId: 6, index: 1, active: false, url: "https://example.com/" }
@@ -987,7 +1008,7 @@ async function run() {
   };
   const contentChrome = {
     runtime: {
-      sendMessage: (_message, callback) => { callback(contentRules); return Promise.resolve(); },
+      sendMessage: (_message, callback) => { callback(contentRules); return undefined; },
       onMessage: contentRuntimeMessage
     }
   };

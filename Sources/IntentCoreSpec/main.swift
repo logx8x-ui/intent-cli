@@ -1005,7 +1005,7 @@ do {
         "Cmd+W should stay available so tabs can always close"
     )
     try expect(
-        !FocusBrowserShortcutPolicy.shouldBlock(
+        FocusBrowserShortcutPolicy.shouldBlock(
             keyCode: 17,
             command: true,
             control: false,
@@ -1013,7 +1013,7 @@ do {
             shift: false,
             allowGoogleSearchTabs: false
         ),
-        "Cmd+T should always create a browser tab, even when browser searches are disabled"
+        "Cmd+T requires browser searches"
     )
 
     let firefoxBounds = FirefoxWindowBounds(x: 100, y: 200, width: 1200, height: 800)
@@ -1300,8 +1300,25 @@ do {
     let defaultAlwaysAllowedApps = try alwaysAllowedStore.load()
     try expect(
         defaultAlwaysAllowedApps == AlwaysAllowedAppStore.defaults,
-        "Finder and System Settings are first-install defaults"
+        "Finder, System Settings, TextEdit and QuickTime Player are first-install defaults"
     )
+    try expect(Set(defaultAlwaysAllowedApps.map(\.bundleIdentifier)) == ["com.apple.finder", "com.apple.systempreferences", "com.apple.TextEdit", "com.apple.QuickTimePlayerX"], "All four requested defaults use their real bundle identifiers")
+    for (name, prior, expected) in [
+        ("old-defaults", [AlwaysAllowedAppStore.finder, AlwaysAllowedAppStore.systemSettings], AlwaysAllowedAppStore.defaults),
+        ("custom", [AllowedApp(name: "Music", bundleIdentifier: "com.apple.Music")], [AllowedApp(name: "Music", bundleIdentifier: "com.apple.Music")]),
+        ("empty", [], []),
+        ("removed-settings", [AlwaysAllowedAppStore.finder], [AlwaysAllowedAppStore.finder])
+    ] {
+        let url = tempDirectory.appendingPathComponent(name).appendingPathComponent("always-allowed-apps.json")
+        let store = AlwaysAllowedAppStore(fileURL: url)
+        try store.save(prior)
+        try Data("2".utf8).write(to: url.appendingPathExtension("defaults-v2"))
+        let migrated = try store.load()
+        try expect(migrated == expected, "Default migration preserves choices: \(name)")
+        try store.save([])
+        let emptied = try store.load()
+        try expect(emptied.isEmpty, "Removed presets are not restored on the next launch")
+    }
     let blockedPreset = AllowedApp(name: "Chrome", bundleIdentifier: "com.google.Chrome")
     for mode in IntentionAccessMode.allCases {
         var draft = dataScience

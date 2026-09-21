@@ -157,11 +157,15 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                     let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                     panel.isOpaque = false; panel.backgroundColor = .clear; panel.ignoresMouseEvents = true; panel.hasShadow = false; panel.hidesOnDeactivate = false
                     panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]; panel.level = .screenSaver
-                    let view = NSView(); view.wantsLayer = true; view.layer?.cornerRadius = 11; view.layer?.borderWidth = 3
+                    let view = WorkspaceMarkBorderView()
                     panel.contentView = view; self.panels.append(panel)
                 }
                 let panel = self.panels[index]
-                panel.contentView?.layer?.borderColor = (selection.accessMode == .blacklist ? NSColor.systemRed : NSColor.systemGreen).cgColor
+                if let view = panel.contentView as? WorkspaceMarkBorderView {
+                    view.color = selection.accessMode == .blacklist ? .systemRed : .systemGreen
+                    view.chromeTab = front?.bundle == "com.google.Chrome" && rect.height < 65 && rect.width > rect.height * 1.5
+                    view.needsDisplay = true
+                }
                 panel.setFrame(FocusBlurPolicy.appKitFrame(rect, primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height), display: false)
                 if !panel.isVisible { panel.orderFrontRegardless() }
             }
@@ -208,5 +212,32 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             pending.append(contentsOf: children(element).prefix(max(0, 400 - pending.count)))
         }
         return result
+    }
+}
+
+/// Thin, inset contours follow the tab chrome instead of boxing its hit target.
+private final class WorkspaceMarkBorderView: NSView {
+    var color: NSColor = .systemGreen
+    var chromeTab = false
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 1.25, dy: 1.25)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let path: NSBezierPath
+        if chromeTab {
+            let r = min(9, rect.height / 3)
+            path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.minX, y: rect.minY))
+            path.curve(to: NSPoint(x: rect.minX + r, y: rect.minY + r), controlPoint1: NSPoint(x: rect.minX + r, y: rect.minY), controlPoint2: NSPoint(x: rect.minX + r, y: rect.minY))
+            path.line(to: NSPoint(x: rect.minX + r, y: rect.maxY - r))
+            path.curve(to: NSPoint(x: rect.minX + 2*r, y: rect.maxY), controlPoint1: NSPoint(x: rect.minX + r, y: rect.maxY), controlPoint2: NSPoint(x: rect.minX + r, y: rect.maxY))
+            path.line(to: NSPoint(x: rect.maxX - 2*r, y: rect.maxY))
+            path.curve(to: NSPoint(x: rect.maxX - r, y: rect.maxY - r), controlPoint1: NSPoint(x: rect.maxX - r, y: rect.maxY), controlPoint2: NSPoint(x: rect.maxX - r, y: rect.maxY))
+            path.line(to: NSPoint(x: rect.maxX - r, y: rect.minY + r))
+            path.curve(to: NSPoint(x: rect.maxX, y: rect.minY), controlPoint1: NSPoint(x: rect.maxX - r, y: rect.minY), controlPoint2: NSPoint(x: rect.maxX - r, y: rect.minY))
+            path.close()
+        } else {
+            path = NSBezierPath(roundedRect: rect, xRadius: min(8, rect.height / 4), yRadius: min(8, rect.height / 4))
+        }
+        color.setStroke(); path.lineWidth = 1.5; path.stroke()
     }
 }

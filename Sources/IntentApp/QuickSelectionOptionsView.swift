@@ -102,7 +102,7 @@ struct QuickSelectionOptionsView: View {
                     }
                     }
                     if section == .searches {
-                    Toggle("Allow browser searches", isOn: option(.allowBrowserSearches)).help("Allow search results while keeping other website rules in place.")
+                    Toggle("Allow browser searches", isOn: option(.allowBrowserSearches)).help("Allow address-bar searches and new search tabs. Direct website addresses stay blocked.")
                     }
                     if section == .cooldown {
                     Toggle("Cooldown before replay", isOn: option(.coolDown)).help("Wait before starting this saved intention again.")

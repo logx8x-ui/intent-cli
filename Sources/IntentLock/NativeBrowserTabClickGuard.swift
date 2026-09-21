@@ -71,6 +71,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var rectangles: [CGRect] = []
     private var visualRectangles: [CGRect] = []
     private var foregroundWindowBlocked = false
+    private var addressSubmissionBlocked = false
     private var updatedAt = Date.distantPast
     private var blockedClicks = 0
     private var mouseDownEvents = 0
@@ -124,6 +125,11 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             && Date().timeIntervalSince(updatedAt) < 0.45
     }
 
+    func blocksAddressSubmission(_ frontmostPID: pid_t?) -> Bool {
+        mutex.lock(); defer { mutex.unlock() }
+        return !stopped && addressSubmissionBlocked && frontmostPID == pid && Date().timeIntervalSince(updatedAt) < 0.45
+    }
+
     /// A separate visual consumer; never performs AX work on the main thread.
     func blurRegions(frontmostPID: pid_t?) -> [CGRect] {
         mutex.lock(); defer { mutex.unlock() }
@@ -134,11 +140,12 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         return visualRectangles
     }
 
-    private func publish(_ rectangles: [CGRect], pid: pid_t, visualRectangles: [CGRect] = [], blocksForegroundWindow: Bool = false) {
+    private func publish(_ rectangles: [CGRect], pid: pid_t, visualRectangles: [CGRect] = [], blocksForegroundWindow: Bool = false, blocksAddressSubmission: Bool = false) {
         mutex.lock()
         guard !stopped else { mutex.unlock(); return }
         self.rectangles = rectangles; self.visualRectangles = visualRectangles; self.pid = pid; updatedAt = Date()
         foregroundWindowBlocked = blocksForegroundWindow
+        addressSubmissionBlocked = blocksAddressSubmission
         let clicks = blockedClicks
         let events = mouseDownEvents
         let missionControl = missionControlEvents
@@ -184,6 +191,8 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             let right = focused.map { CFEqual($0, rhs) } ?? false
             return left && !right
         }
+        let focusedElement = value(application, kAXFocusedUIElementAttribute, deadline)
+        var blocksAddress = false
         var blocked: [CGRect] = []
         var visual: [CGRect] = []
         var visualComplete = false
@@ -200,7 +209,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             windowMatches += 1
             let windowTabs = allTabs.filter { $0.windowID == windowID }
             let selected = rules.selectedTabIDsByBrowser?[browser]
-            let allowedIDs = rules.accessMode == .blacklist && selected != nil ? Set(allTabs.map(\.id)).subtracting(selected!) : Set(selected ?? snapshot.tabs.map(\.id))
+            let allowedIDs = rules.accessMode == .blacklist && selected != nil ? Set(allTabs.map(\.id)).subtracting(selected!) : Set(selected ?? snapshot.tabs.map(\.id)).union(rules.allowGoogleSearchTabs && rules.startupSessionID != nil ? Set(allTabs.filter { $0.searchSessionID == rules.startupSessionID }.map(\.id)) : [])
             if isFocused, NativeTabClickPolicy.blocksWholeWindow(tabs: windowTabs, allowedIDs: allowedIDs),
                let frame = bounds(window, deadline), frame.width > 5, frame.height > 5 {
                 blocked.append(frame)
@@ -231,6 +240,17 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
                     if browser == "org.mozilla.firefox", url == "chrome://browser/content/webext-panels.xhtml" {
                         sidebar = bounds(element, deadline)
                     } else if sidebar == nil { continue }
+                }
+                let isAddress = sidebar == nil && [kAXTextFieldRole, kAXComboBoxRole].contains(role)
+                    && BrowserAddressPolicy.isAddressControl(labels: [kAXIdentifierAttribute, kAXDescriptionAttribute, kAXTitleAttribute, kAXHelpAttribute].compactMap { string(element, $0, deadline) })
+                if isAddress, let focusedElement, CFEqual(focusedElement, element) {
+                    let input = string(element, kAXValueAttribute, deadline) ?? ""
+                    blocksAddress = !rules.allowGoogleSearchTabs || BrowserAddressPolicy.isDirectDestination(input)
+                }
+                // Browser chrome only: page text fields remain fully usable.
+                if isAddress, !rules.allowGoogleSearchTabs,
+                   let rect = bounds(element, deadline) {
+                    blocked.append(rect)
                 }
                 let children = elements(element, kAXChildrenAttribute, deadline)
                 if sidebar != nil { sidebarRoles[role, default: 0] += 1 }
@@ -286,7 +306,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         }
         // Each completed rectangle is independently validated. Preserve those
         // checks if another branch runs out of time; never infer missing rows.
-        publish(blocked, pid: app.processIdentifier, visualRectangles: visual, blocksForegroundWindow: blocksForegroundWindow)
+        publish(blocked, pid: app.processIdentifier, visualRectangles: visual, blocksForegroundWindow: blocksForegroundWindow, blocksAddressSubmission: blocksAddress)
     }
 
     private func nativeTabs(in children: [AXUIElement], deadline: Date) -> [AXUIElement] {
