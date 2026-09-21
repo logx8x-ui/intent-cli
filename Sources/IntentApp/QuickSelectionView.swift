@@ -782,8 +782,8 @@ private struct QuickSelectionView: View {
                 Group {
                     if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
                     else { Color.black }
-                }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                Color.black.opacity(0.12)
+                }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
+                Color.black.opacity(0.12).allowsHitTesting(false)
                 ForEach(Array(controller.windows.enumerated()), id: \.element.id) { index, window in
                     if index < frames.count { windowCard(window, frame: frames[index]) }
                 }
@@ -803,7 +803,8 @@ private struct QuickSelectionView: View {
                         OnboardingSelectionHint(coordinator: controller.onboarding)
                             .frame(height: 60).padding(.horizontal, 28)
                     }
-                    Spacer()
+                }.frame(width: geometry.size.width)
+                VStack(spacing: 8) {
                     ModificationStrip(controller: controller).frame(maxWidth: 880).padding(.horizontal, 28)
                     if let message = controller.message {
                         Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
@@ -818,7 +819,8 @@ private struct QuickSelectionView: View {
                         Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
                             .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing)
                     }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
-                }.frame(width: geometry.size.width, height: geometry.size.height)
+                }.frame(width: geometry.size.width, height: footer, alignment: .bottom)
+                    .position(x: geometry.size.width / 2, y: geometry.size.height - footer / 2)
                 if controller.loading {
                     ProgressView("Gathering your apps…").padding(18).background(.regularMaterial, in: Capsule())
                         .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
@@ -864,8 +866,13 @@ private struct QuickSelectionView: View {
             }.buttonStyle(.plain)
                 .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
             HStack(spacing: 5) {
-                if let app { Image(nsImage: app.icon).resizable().frame(width: 16, height: 16) }
-                Text(label).lineLimit(1).truncationMode(.middle)
+                Button { controller.selectWindow(window) } label: {
+                    HStack(spacing: 5) {
+                        if let app { Image(nsImage: app.icon).resizable().frame(width: 16, height: 16) }
+                        Text(label).lineLimit(1).truncationMode(.middle)
+                    }.frame(maxWidth: .infinity, minHeight: 20).contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
                 if browser {
                     Button {
                         controller.explicitBrowserWindow = nil
@@ -879,11 +886,13 @@ private struct QuickSelectionView: View {
                 .frame(maxWidth: captionWidth, minHeight: 20, maxHeight: 20)
                 .background(.black.opacity(hovered || selected ? 0.5 : 0.25), in: Capsule())
         }.frame(width: captionWidth, height: frame.height + captionHeight, alignment: .top)
-            // Layout frames describe the image, not the caption beneath it.
-            .position(x: frame.midX, y: frame.midY + captionHeight / 2)
             .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }
             .help("\(app?.app.name ?? window.appID) — \(label)")
             .opacity(controller.expanded ? 1 : 0).allowsHitTesting(controller.expanded && !controller.closing)
+            // Keep hover/help hit regions on the card's bounds. Position expands
+            // its layout wrapper to the canvas; attaching interaction after it
+            // lets later cards intercept clicks intended for earlier previews.
+            .position(x: frame.midX, y: frame.midY + captionHeight / 2)
     }
     private func tabGrid(_ window: QuickSelectionController.WindowItem) -> some View {
         GeometryReader { geometry in
