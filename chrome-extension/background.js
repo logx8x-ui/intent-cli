@@ -44,6 +44,21 @@ let initialized = false;
 let nativePort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
+let nativeConnectionConfirmed = false;
+let lastForegroundReconnectAt = -Infinity;
+function guardStatus() {
+  return { enabled: guardEnabled, connected: Boolean(nativePort && nativeConnectionConfirmed) };
+}
+// A foreground action can shorten a long retry delay, without every tab event
+// defeating exponential backoff. Never replace a healthy native connection.
+function recoverForegroundConnection() {
+  if (nativePort || Date.now() - lastForegroundReconnectAt < 3000) return;
+  lastForegroundReconnectAt = Date.now();
+  if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectDelayMs = RECONNECT_MS;
+  connectNativeHost();
+}
+
 let lastAllowedTabId = null;
 let enforcing = false;
 let freshBlankTabIds = new Set();
@@ -110,7 +125,10 @@ function connectNativeHost() {
     const port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
     hostSupportsQuickSelection = false;
+    nativeConnectionConfirmed = false;
     port.onMessage.addListener((message) => {
+      if (nativePort !== port) return;
+      nativeConnectionConfirmed = true;
       reconnectDelayMs = RECONNECT_MS;
       if (message?.active !== true && message?.bundledExtensionVersion && message.bundledExtensionVersion !== chrome.runtime.getManifest().version) {
         const version = message.bundledExtensionVersion;
@@ -137,6 +155,7 @@ function connectNativeHost() {
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) return;
       nativePort = null;
+      nativeConnectionConfirmed = false;
       settleRuleRequests();
       applyNativeRules(inactiveRules());
       scheduleReconnect();
@@ -874,7 +893,7 @@ async function recoverBlockedNavigation(tabId) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "getGuardStatus") {
-    ensureInitialized().then(() => sendResponse({ enabled: guardEnabled }));
+    ensureInitialized().then(() => { recoverForegroundConnection(); requestRules(); sendResponse(guardStatus()); });
     return true;
   }
   if (message?.type === "getActiveRules") {
@@ -888,7 +907,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       postNative({ type: "setGuardEnabled", enabled });
       requestRules();
       if (!enabled) await applyNativeRules(inactiveRules());
-      sendResponse({ enabled: guardEnabled });
+      sendResponse(guardStatus());
     });
     return true;
   }
@@ -897,6 +916,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // Focusing an existing window need not emit tabs.onActivated.
 chrome.windows?.onFocusChanged?.addListener(async (windowId) => {
+  if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
   const tabs = await chrome.tabs.query({});
   const active = tabs.find(tab => tab.windowId === windowId && tab.active);

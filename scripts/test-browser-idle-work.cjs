@@ -11,6 +11,8 @@ async function harness(browserName, connected) {
   const intervals = [];
   const attempts = [];
   const messages = [];
+  const replies = [];
+  const disconnects = [];
   const event = () => ({ addListener() {} });
   const api = {
     runtime: {
@@ -19,7 +21,7 @@ async function harness(browserName, connected) {
       connectNative() {
         attempts.push(now);
         if (!connected) throw new Error("Host unavailable");
-        return { onMessage: event(), onDisconnect: event(), postMessage: m => messages.push(m) };
+        return { onMessage: { addListener: fn => replies.push(fn) }, onDisconnect: { addListener: fn => disconnects.push(fn) }, postMessage: m => messages.push(m) };
       }
     },
     storage: { local: { get: async defaults => defaults, set: async () => {} } },
@@ -33,6 +35,8 @@ async function harness(browserName, connected) {
   };
   const context = {
     browser: api, chrome: api, URL, console,
+    Date: class extends Date { static now() { return now; } },
+    clearTimeout: id => timers.delete(id),
     IntentBrowserRules: require(`../${browserName}-extension/rule-helpers.js`),
     importScripts() {},
     setTimeout(callback, delay = 0) {
@@ -57,7 +61,7 @@ async function harness(browserName, connected) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, `../${browserName}-extension/background.js`), "utf8"), context);
   await drain();
   await advance(100);
-  return { context, intervals, attempts, messages, timers, advance, drain, queryCount: () => queries };
+  return { context, intervals, attempts, messages, timers, replies, disconnects, advance, drain, queryCount: () => queries };
 }
 
 (async () => {
@@ -73,7 +77,19 @@ async function harness(browserName, connected) {
     assert.equal(offline.attempts.length, 8, `${name}: background activity must not trigger extra reconnects`);
     assert.deepEqual(offline.attempts, [0, 1000, 3000, 7000, 15000, 31000, 61000, 91000]);
 
+    const beforeRecovery = offline.attempts.length;
+    offline.context.recoverForegroundConnection();
+    assert.equal(offline.attempts.length, beforeRecovery + 1, `${name}: foreground resumes connection immediately`);
+    offline.context.recoverForegroundConnection();
+    assert.equal(offline.attempts.length, beforeRecovery + 1, `${name}: popup polling must not flood retries`);
+
     const idle = await harness(name, true);
+    assert.equal(idle.context.guardStatus().connected, false, `${name}: open port alone does not prove connection`);
+    await idle.replies[0]({ active: false });
+    assert.equal(idle.context.guardStatus().connected, true, `${name}: native reply confirms connection`);
+    const connectedAttempts = idle.attempts.length;
+    idle.context.recoverForegroundConnection();
+    assert.equal(idle.attempts.length, connectedAttempts, `${name}: healthy port must stay intact`);
     const queriesBefore = idle.queryCount();
     const timersBefore = idle.timers.size;
     for (let i = 0; i < 1000; i++) idle.context.scheduleTabSnapshot();
@@ -86,6 +102,10 @@ async function harness(browserName, connected) {
     idle.context.scheduleTabSnapshot(true);
     await idle.advance(1100);
     assert.ok(idle.messages.some(m => m.type === "tabsSnapshot" && m.tabs.length === 0));
+    idle.disconnects[0]();
+    assert.equal(idle.context.guardStatus().connected, false, `${name}: disconnected guard cannot claim connected`);
+    await idle.replies[0]({ active: false });
+    assert.equal(idle.context.guardStatus().connected, false, `${name}: late old-port reply is ignored`);
     console.log(`${name}: 8 reconnect attempts / 120s; zero snapshot timers for 1,000 inactive events; heartbeat 20/min`);
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

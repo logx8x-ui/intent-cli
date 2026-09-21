@@ -42,6 +42,21 @@ const startupNavigationURLByTab = new Map();
 let commandPort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
+let nativeConnectionConfirmed = false;
+let lastForegroundReconnectAt = -Infinity;
+function guardStatus() {
+  return { enabled: guardEnabled, connected: Boolean(commandPort && nativeConnectionConfirmed) };
+}
+// A foreground action can shorten a long retry delay, without every tab event
+// defeating exponential backoff. Never replace a healthy native connection.
+function recoverForegroundConnection() {
+  if (commandPort || Date.now() - lastForegroundReconnectAt < 3000) return;
+  lastForegroundReconnectAt = Date.now();
+  if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectDelayMs = RECONNECT_MS;
+  connectCommandPort();
+}
+
 let synchronizingStartupTabs = false;
 let completedStartupSessionID = null;
 let completedStartupFingerprint = null;
@@ -99,7 +114,10 @@ function connectCommandPort() {
     const port = browser.runtime.connectNative(HOST_NAME);
     commandPort = port;
     hostSupportsQuickSelection = false;
+    nativeConnectionConfirmed = false;
     port.onMessage.addListener(async (message) => {
+      if (commandPort !== port) return;
+      nativeConnectionConfirmed = true;
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
@@ -119,6 +137,7 @@ function connectCommandPort() {
     port.onDisconnect.addListener(() => {
       if (commandPort !== port) return;
       commandPort = null;
+      nativeConnectionConfirmed = false;
       settlePendingRuleRefresh();
       scheduleCommandReconnect();
     });
@@ -716,7 +735,7 @@ async function recoverBlockedNavigation(tabId) {
 
 browser.runtime.onMessage.addListener((message) => {
   if (message?.type === "getGuardStatus") {
-    return ensureInitialized().then(() => ({ enabled: guardEnabled }));
+    return ensureInitialized().then(() => { recoverForegroundConnection(); postCommandPort({ type: "getRules" }); return guardStatus(); });
   }
 
   if (message?.type === "setGuardEnabled") {
@@ -727,7 +746,7 @@ browser.runtime.onMessage.addListener((message) => {
         guardEnabled = enabled;
         await notifyNativeGuardState();
         await refreshRules();
-        return { enabled: guardEnabled };
+        return guardStatus();
       });
   }
 
@@ -736,6 +755,7 @@ browser.runtime.onMessage.addListener((message) => {
 
 // Focusing an existing window need not emit tabs.onActivated.
 browser.windows?.onFocusChanged?.addListener(async (windowId) => {
+  if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
   const tabs = await browser.tabs.query({});
   const active = tabs.find(tab => tab.windowId === windowId && tab.active);

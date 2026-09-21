@@ -283,7 +283,10 @@ final class QuickSelectionController: ObservableObject {
             text = "Update \(name) Browser Guard to read all selected tabs. No part of this group was marked."
         } else { switch connection {
         case .updateRequired: text = "\(name) Browser Guard needs an update to select tabs."
-        case .reconnecting: text = "\(name) Browser Guard is disconnected. Your selections are safe."
+        case .reconnecting:
+            text = IntentEnvironment.isQA
+                ? "Intent QA needs its separate test browser connection. Your regular \(name) extension connects to the normal Intent app."
+                : "Reconnecting to \(name). Your selections are safe."
         case .ready: text = fresh ? "Couldn’t identify this browser window. Open Intent’s overview to select its tabs, or check Browser Guard in this browser profile." : "\(name) is taking longer to respond. Try marking again."
         } }
         dismissMarkNotice()
