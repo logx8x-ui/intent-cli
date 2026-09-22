@@ -13,8 +13,8 @@
 ## Chrome
 
 - Web Store submission ZIP built: dist/chrome/intent-browser-guard-chrome-web-store-0.2.14.zip.
-- Existing publisher account requires Google passkey verification. Submission blocked at authentication, not submitted this pass.
-- Existing store item from prior context: ffgfjfpkddgimambgmahlodjjojmjnbc; current listing status still needs authenticated verification.
+- Google verification completed by Logan. Uploaded and verified draft 0.2.14, then submitted for review with automatic publication enabled. Dashboard confirmed: Your extension was submitted for review.
+- Existing public store item ffgfjfpkddgimambgmahlodjjojmjnbc remains on 0.2.5 until review completes; 0.2.14 is submitted, not yet live.
 
 ## App changes
 
