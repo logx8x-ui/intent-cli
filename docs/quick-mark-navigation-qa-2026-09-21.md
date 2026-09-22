@@ -33,3 +33,9 @@ Browser-profile installation is distinct from signing into another website accou
 ## Limits
 
 A committed-navigation fallback restores a disallowed typed URL after navigation begins; it is not proof that no network request occurred. Native input prevention needs physical/live acceptance. Custom browser themes, Firefox sidebars, tab groups and Mission Control animation require visual validation; a finite test suite does not certify every browser layout. No daily app replacement, account changes, GitHub push, store publication or signed extension release is included in this isolated QA pass.
+
+## Live continuation: defaults and overview verified
+
+On September 21, the exact package-NDfK0F0g QA build opened the overview after resetting only dev.loganmondi.intent.qa ScreenCapture and Accessibility records and re-adding that exact app through System Settings. Merely adding or toggling the old entry did not resolve stale ad-hoc build permissions. Daily Intent permissions were untouched.
+
+The live overview exposed Finder, System Settings, TextEdit and QuickTime Player together in Always allowed, with none in the main window grid. Settings exposed individual removal buttons for all four. Calculator selected and deselected correctly; Run enabled and disabled accordingly. Escape closed the overview. Saved defaults contained all four and browser rules were inactive afterward. This confirms preset presentation and app selection, not live browser enforcement or physical shortcut acceptance; those remain unverified on this build.

@@ -27,19 +27,26 @@ enum WorkspaceTabOutline {
         }
         let app = AXUIElementCreateApplication(window.pid)
         let windows = value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-        let matchingWindows = windows.filter { element in
+        let geometryMatches = windows.filter { element in
             guard let rect = frame(element) else { return false }
             return abs(rect.minX - window.frame.minX) < 3 && abs(rect.minY - window.frame.minY) < 3
                 && abs(rect.width - window.frame.width) < 3 && abs(rect.height - window.frame.height) < 3
-                && BrowserWindowMatching.sameWindowTitle(text(element, kAXTitleAttribute) ?? "", window.title)
+        }
+        // CGWindow and AX titles can update on different ticks after navigation.
+        // A unique geometry match identifies the same native window without a
+        // title race. When windows overlap, keep the title disambiguation.
+        let matchingWindows = geometryMatches.count == 1 ? geometryMatches : geometryMatches.filter {
+            BrowserWindowMatching.sameWindowTitle(text($0, kAXTitleAttribute) ?? "", window.title)
         }
         guard matchingWindows.count == 1, let root = matchingWindows.first else { return ([], false) }
         var pending: [(AXUIElement, CGRect?)] = [(root, nil)]
         var cursor = 0; var regions: [CGRect] = []
-        var visited = Set<CFHashCode>()
+        var visited: [CFHashCode: [AXUIElement]] = [:]
         while cursor < pending.count, cursor < 1800, Date() < deadline {
             let (element, inheritedSidebar) = pending[cursor]; cursor += 1
-            guard visited.insert(CFHash(element)).inserted else { continue }
+            let hash = CFHash(element)
+            if visited[hash, default: []].contains(where: { CFEqual($0, element) }) { continue }
+            visited[hash, default: []].append(element)
             let role = text(element, kAXRoleAttribute) ?? ""
             if role == kAXImageRole { continue }
             var sidebar = inheritedSidebar
@@ -66,9 +73,16 @@ enum WorkspaceTabOutline {
                 let ordered = tabs.sorted { $0.index < $1.index }
                 let exactOrder = ordered.count == native.count && ordered.enumerated().allSatisfy { $0.offset == $0.element.index }
                 for (index, node) in native.enumerated() {
-                    let nodeLabels = [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].compactMap { text(node, $0) }
-                    let matching = ordered.filter { tab in !tab.title.isEmpty && nodeLabels.contains { $0 == tab.title || $0.hasPrefix(tab.title + " - Memory usage - ") } }
-                    let marked = exactOrder ? selected.contains(ordered[index].id) : (!matching.isEmpty && matching.allSatisfy { selected.contains($0.id) })
+                    let marked: Bool
+                    if exactOrder {
+                        // Do not burn the bounded scan budget reading every
+                        // label before measuring the selected tab's outline.
+                        marked = selected.contains(ordered[index].id)
+                    } else {
+                        let nodeLabels = [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].compactMap { text(node, $0) }
+                        let matching = ordered.filter { tab in !tab.title.isEmpty && nodeLabels.contains { $0 == tab.title || $0.hasPrefix(tab.title + " - Memory usage - ") } }
+                        marked = !matching.isEmpty && matching.allSatisfy { selected.contains($0.id) }
+                    }
                     if marked, let rect = frame(node), FocusBlurPolicy.valid(rect) { regions.append(rect.insetBy(dx: 1, dy: 1)) }
                 }
                 continue

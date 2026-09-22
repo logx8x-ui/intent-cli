@@ -155,8 +155,8 @@ final class QuickSelectionController: ObservableObject {
             return
         }
         guard stagedModifiersPanel == nil, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
-        let width = min(880, screen.visibleFrame.width - 56)
-        let notice = SelectionPanel(contentRect: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 58), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let width = min(680, screen.visibleFrame.width - 56)
+        let notice = SelectionPanel(contentRect: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 46), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         notice.isOpaque = false; notice.backgroundColor = .clear; notice.hidesOnDeactivate = false
         notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         notice.contentView = NSHostingView(rootView: ModificationStrip(controller: self).padding(4).preferredColorScheme(.dark))
@@ -844,7 +844,7 @@ private struct QuickSelectionView: View {
                     }
                 }.frame(width: geometry.size.width)
                 VStack(spacing: 8) {
-                    ModificationStrip(controller: controller).frame(maxWidth: 880).padding(.horizontal, 28)
+                    ModificationStrip(controller: controller).frame(maxWidth: 680).padding(.horizontal, 28)
                     if let message = controller.message {
                         Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
                             .padding(8).frame(maxWidth: geometry.size.width - 56).frame(height: 52)
@@ -1064,16 +1064,16 @@ private struct ModificationStrip: View {
     @State private var dragOffset: CGFloat = 0
     var body: some View {
         GeometryReader { geometry in
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             ForEach(Array(controller.modificationOrder.enumerated()), id: \.element) { index, section in
                 let enabled = section.enabled(in: controller.selection)
                 Button { controller.openModification(section) } label: {
-                    HStack(spacing: 7) {
+                    HStack(spacing: 5) {
                         Image(systemName: section.icon)
                         Text(section.rawValue)
                         Text("` + \(index + 1)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                         if enabled { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
-                    }.font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 11)
+                    }.font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
                         .overlay(Capsule().stroke(enabled ? accent.opacity(0.8) : .white.opacity(0.2)))
                 }.buttonStyle(.plain).help(section.hint + " Hold and drag to swap positions.")
@@ -1081,7 +1081,7 @@ private struct ModificationStrip: View {
                     .highPriorityGesture(DragGesture(minimumDistance: 10)
                         .onChanged { value in dragged = section; dragOffset = value.translation.width }
                         .onEnded { value in
-                            let slot = (geometry.size.width + 12) / CGFloat(controller.modificationOrder.count)
+                            let slot = (geometry.size.width + 8) / CGFloat(controller.modificationOrder.count)
                             let destination = min(controller.modificationOrder.count - 1, max(0, index + Int((value.translation.width / slot).rounded())))
                             controller.swapModification(section.rawValue, with: controller.modificationOrder[destination])
                             dragged = nil; dragOffset = 0
@@ -1102,6 +1102,6 @@ private struct ModificationStrip: View {
                     }
             }
         }
-        }.frame(height: 44)
+        }.frame(height: 36)
     }
 }

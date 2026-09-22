@@ -3,8 +3,9 @@
     "intent-firefox@loganmondi.dev": {
       "updates": [
         {
-          "version": "0.2.5",
-          "update_link": "https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi"
+          "version": "0.2.14",
+          "update_link": "https://github.com/logx8x-ui/intent-cli/releases/download/browser-guard-0.2.14/Intent-Firefox-Extension-0.2.14.xpi",
+          "update_hash": "sha256:355604078c735faacab6eda80bacebfc88a3c64a6f9277bbb94640e182fec7c0"
         }
       ]
     }
