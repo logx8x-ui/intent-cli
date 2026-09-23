@@ -27,6 +27,16 @@ func runHabitSessionSpecs() throws {
     let missingDescriptors = SessionWorkspace(selection: selection, windows: [], tabs: []).resolve(runningApps: selection.apps, windows: [], snapshots: [])
     try expect(missingDescriptors.missing == 2 && missingDescriptors.selection.apps == ["com.apple.TextEdit"], "A disappearing resource at capture cannot broaden replay scope")
     let intention = Intention(name: "Study chapter 2", icon: "book", colorHex: "#34C759", folder: "", allowedApps: [], allowedWebsites: [], startupActions: [], restrictions: .init())
+    var edited = intention
+    edited.name = "Updated study"
+    edited.accessMode = .blacklist
+    edited.restrictionNodes = [.init(kind: .timer, position: .zero, durationMinutes: 7, showsRemainingTime: true, locksSessionUntilTimerEnds: true)]
+    var replay = resolved.selection
+    replay.applySessionConfiguration(edited)
+    try expect(replay.name == edited.name && replay.accessMode == .blacklist && replay.restrictionNodes.first?.durationMinutes == 7,
+               "Saved replay uses current name, mode and modifiers, not stale snapshot settings")
+    try expect(replay.tabs == resolved.selection.tabs && replay.windowIDsByApp == resolved.selection.windowIDsByApp && replay.browserSessionIDs == resolved.selection.browserSessionIDs,
+               "Updating replay settings preserves resolved resource identity")
     var journal = IntentSessionJournal()
     var record = IntentSessionRecord(id: UUID(), intention: intention, workspace: .init(selection: selection, windows: [], tabs: []), startedAt: Date(timeIntervalSince1970: 1_800_000_000))
     journal.upsert(record)

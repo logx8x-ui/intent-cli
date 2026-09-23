@@ -109,3 +109,15 @@ tab picker was rechecked after its independently observed heartbeat recovered.
 
 Three locally named QA runs remain in Today as evidence; existing user
 intentions were preserved. No public beta release was published by this pass.
+
+### Plan completion audit follow-up
+
+See intent-plan-implementation-audit.md for the full PDF-to-code checklist.
+Named drafts now clear only after the runtime readiness callback, and unexpected
+stops retain a safely re-resolved draft. Saved replay applies current modifiers,
+name and mode after resolving targets. Local development bundles opt out of the
+public updater so a published beta cannot replace unshipped features at relaunch;
+public beta packaging removes that development marker and keeps automatic updates.
+The three earlier test records and the final interruption test were removed
+with local backups, leaving empty Today/Yesterday history and existing saved
+intentions intact. Logan confirmed physical single-backtick opened the picker.

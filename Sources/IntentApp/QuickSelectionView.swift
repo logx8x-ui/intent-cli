@@ -89,6 +89,8 @@ final class QuickSelectionController: ObservableObject {
                 else { missing += 1 }
             }
         }
+        // Workspace snapshots own resource identity, not the saved setup’s latest settings.
+        draft.applySessionConfiguration(intention)
         if let seconds = resume?.remainingSeconds {
             draft.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
             draft.restrictionNodes.append(.init(kind: .timer, position: .zero, durationMinutes: max(1, Int(ceil(seconds / 60))), showsRemainingTime: true, locksSessionUntilTimerEnds: true))
@@ -371,7 +373,8 @@ final class QuickSelectionController: ObservableObject {
             }
             self.prepareRunMetadata()
             if self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .quickMark) {
-                self.workspaceOutlines.stop(); self.hasStagedSelection = false; self.hideStagedModifiers(); self.selection = QuickSelection(); self.naming = true; self.resumeRecord = nil
+                self.workspaceOutlines.stop(); self.hideStagedModifiers()
+                // Keep the draft until FocusLock confirms readiness.
             } else { self.model.showOverlay() }
         }
     }
@@ -447,6 +450,17 @@ final class QuickSelectionController: ObservableObject {
 
     init(model: IntentAppModel) {
         self.model = model
+        model.quickSelectionDidStart = { [weak self] in
+            guard let self else { return }
+            self.workspaceOutlines.stop(); self.hideStagedModifiers()
+            self.hasStagedSelection = false
+            self.selection = QuickSelection(); self.pendingName = ""
+            self.naming = true; self.resumeRecord = nil
+        }
+        model.restoreInterruptedWorkspace = { [weak self] intention, workspace in
+            self?.prepare(intention, workspace: workspace)
+            self?.message = "Restrictions were released. Your draft is here; review it before starting again."
+        }
         model.presentWorkspace = { [weak self] in
             guard let self else { return false }
             if self.panel?.isVisible != true { self.toggle() }
@@ -708,8 +722,8 @@ final class QuickSelectionController: ObservableObject {
                     self.message = self.model.errorMessage; self.closing = false
                     withAnimation(.easeOut(duration: 0.2)) { self.expanded = true }; return
                 }
-                self.hasStagedSelection = false; self.workspaceOutlines.stop()
-                self.selection = QuickSelection(); self.naming = true; self.resumeRecord = nil
+                self.workspaceOutlines.stop()
+                // Readiness, rather than accepting an asynchronous start, clears the draft.
                 self.close()
                 if self.model.pendingFriction != nil || self.model.pendingEndTimeRequest != nil { self.model.showOverlay() }
             } else {

@@ -30,6 +30,8 @@ final class IntentAppModel: ObservableObject {
     @Published var breakEndsAt: Date?
     enum WorkPhase: String { case inactive, choosing, running, resting, recovery }
     var presentWorkspace: (() -> Bool)?
+    var quickSelectionDidStart: (() -> Void)?
+    var restoreInterruptedWorkspace: ((Intention, SessionWorkspace) -> Void)?
     var pendingWorkspace: SessionWorkspace?
     var pendingResume: IntentSessionRecord?
     private var currentRecord: IntentSessionRecord?
@@ -1673,6 +1675,7 @@ final class IntentAppModel: ObservableObject {
                         if let occurrence {
                             self.currentRecord = IntentSessionRecord(id: occurrence, intention: intention, workspace: self.pendingWorkspace)
                             self.journal.upsert(self.currentRecord!)
+                            if self.quickSelectionIntentionID == intention.id { self.quickSelectionDidStart?() }
                             if self.pendingResume?.id == self.journal.recovery?.id { self.journal.recovery = nil }
                             self.pendingResume = nil
                             self.persistJournal()
@@ -1695,6 +1698,8 @@ final class IntentAppModel: ObservableObject {
             renewalQueue?.sync {}
             try? ActiveBrowserRulesStore().clear()
             Task { @MainActor in
+                let interruptedWorkspace = (lock.didStopForSafety || failureMessage != nil)
+                    ? (self.currentRecord?.workspace ?? self.pendingWorkspace) : nil
                 if var record = self.currentRecord, record.id == occurrence {
                     record.endedAt = Date(); record.completedTasks = self.completedChecklist
                     record.remainingSeconds = self.activeSessionEndsAt.map { max(0, $0.timeIntervalSinceNow) }
@@ -1756,6 +1761,7 @@ final class IntentAppModel: ObservableObject {
                 }
                 self.activeChecklist = []
                 self.completedChecklist = []
+                if let interruptedWorkspace { self.restoreInterruptedWorkspace?(intention, interruptedWorkspace) }
                 if self.saveSessionOnFinish || failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
                 self.saveSessionOnFinish = false
                 if let replacement, !lock.didStopForSafety, failureMessage == nil {

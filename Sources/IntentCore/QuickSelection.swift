@@ -16,6 +16,16 @@ public struct QuickSelectionBrowserWindow: Hashable, Codable {
 public struct QuickSelection: Codable {
     public var name: String = ""
     public var sourceIntentionID: String?
+
+    /// Replay current saved settings while retaining conservatively resolved targets.
+    public mutating func applySessionConfiguration(_ intention: Intention) {
+        name = intention.name
+        sourceIntentionID = intention.id
+        accessMode = intention.accessMode
+        restrictionNodes = intention.restrictionNodes.filter { $0.id != Self.startupSuppressionID }
+        frictionNodes = intention.frictionNodes
+    }
+
     /// Visual scope only. Enforcement still uses the exact selected tab IDs.
     public private(set) var browserSessionIDs: [String: String] = [:]
     public var browserWindowTabs: [QuickSelectionBrowserWindow: Set<Int>] = [:]

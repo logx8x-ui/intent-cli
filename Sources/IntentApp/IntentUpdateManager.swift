@@ -20,12 +20,15 @@ final class IntentUpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate 
     var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
+    private var isDevelopmentBuild: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "IntentDevelopmentBuild") as? Bool == true
+    }
     private var sessionNeedsFinishing: Bool {
         let model = IntentRuntime.shared.model
         return model.hasActiveSession || model.isZeroDriftActive || model.pendingPurposeSessionSave != nil
     }
     func startAutomaticChecks() {
-        guard !IntentEnvironment.isQA else { return }
+        guard !IntentEnvironment.isQA, !isDevelopmentBuild else { return }
         guard controller == nil else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         controller?.updater.automaticallyChecksForUpdates = true
@@ -37,6 +40,10 @@ final class IntentUpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate 
     func checkForUpdates(force: Bool = false) {
         guard !IntentEnvironment.isQA else {
             errorMessage = "Updates are disabled in the isolated QA app."
+            return
+        }
+        guard !isDevelopmentBuild else {
+            errorMessage = "This development build keeps your unreleased changes. Install a published release to return to automatic updates."
             return
         }
         startAutomaticChecks()

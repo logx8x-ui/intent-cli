@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+python3 scripts/test-development-updates.py
 VERSION="${1:?version required}"
 BUILD="${2:?monotonic build required}"
 [[ "$VERSION" =~ ^[0-9A-Za-z.-]+$ && "$BUILD" =~ ^[0-9]+$ ]] || exit 2
@@ -18,6 +19,8 @@ import pathlib,plistlib,sys
 source=pathlib.Path('scripts/install-dev.sh').read_text()
 xml=source.split('<<PLIST\n',1)[1].split('\nPLIST',1)[0]
 d=plistlib.loads(xml.encode());d['CFBundleShortVersionString']=sys.argv[2];d['CFBundleVersion']=sys.argv[3]
+# Public beta packages retain automatic updates, unlike a local feature build.
+d.pop('IntentDevelopmentBuild', None)
 with open(sys.argv[1],'wb') as f: plistlib.dump(d,f)
 PLIST
 scripts/configure-supabase-bundle.sh "$APP/Contents/Resources/Intent_IntentApp.bundle" 0

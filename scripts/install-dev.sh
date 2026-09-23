@@ -87,6 +87,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
       </array>
     </dict>
   </array>
+  <key>IntentDevelopmentBuild</key>
+  <true/>
   <key>CFBundleShortVersionString</key>
   <string>0.9.3-beta</string>
   <key>CFBundleVersion</key>
