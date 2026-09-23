@@ -73,6 +73,18 @@ struct IntentSessionNotesView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                if let recovery = model.journal.recovery {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Continue \(recovery.intention.name)?").lineLimit(2)
+                            Spacer()
+                            Button { model.dismissRecovery() } label: { Image(systemName: "xmark") }
+                                .accessibilityLabel("Dismiss interrupted intention")
+                        }
+                        Button("Jump back in") { controller.prepare(recovery.intention, workspace: recovery.workspace, resume: recovery) }
+                    }.font(.callout)
+                    Divider()
+                }
                 notes("Today", day: Date())
                 notes("Yesterday", day: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
             }.frame(maxWidth: .infinity, alignment: .leading).padding(14)

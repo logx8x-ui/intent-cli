@@ -345,6 +345,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func load() {
+        FocusVisibilityController.restoreInterruptedSession()
         do {
             journal = try IntentSessionJournal.load(from: journalURL); journalWritable = true
             // Restart closes prior occurrences, never resumes restrictions.
@@ -1552,6 +1553,7 @@ final class IntentAppModel: ObservableObject {
             allowGoogleSearchTabs: intention.accessMode == .whitelist && intention.browserSearchesAllowed
         )
 
+        configuredRules?.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
         configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier))
         let rules = configuredRules
 
@@ -1573,6 +1575,7 @@ final class IntentAppModel: ObservableObject {
             let presetIDs = Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier))
             lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
         }
+        lockSpec.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
         let lock = FocusLock(spec: lockSpec)
         lock.onManualFinishRequest = { [weak self] in Task { @MainActor [weak self] in self?.endActiveSession() } }
         pendingOnboardingReplacement = nil

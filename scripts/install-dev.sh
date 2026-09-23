@@ -58,6 +58,14 @@ if [[ -n "$GOOGLE_CLIENT_SECRET" ]]; then
   /usr/libexec/PlistBuddy -c "Delete :CLIENT_SECRET" "$GOOGLE_CONFIG" >/dev/null 2>&1 || true
   /usr/libexec/PlistBuddy -c "Add :CLIENT_SECRET string $GOOGLE_CLIENT_SECRET" "$GOOGLE_CONFIG"
 fi
+# Keep the embedded helper and extension sources in lockstep with this build.
+# App startup registers this helper path, so leaving a prior release here silently
+# reconnects browsers to old code even when ~/.intent/bin has been updated.
+mkdir -p "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Resources/BrowserGuard"
+atomic_install_executable "$APP_DIR/IntentNativeHost" "$APP_BUNDLE/Contents/Helpers/IntentNativeHost"
+/usr/bin/ditto "$ROOT/chrome-extension" "$APP_BUNDLE/Contents/Resources/BrowserGuard/Chrome"
+/usr/bin/ditto "$ROOT/firefox-extension" "$APP_BUNDLE/Contents/Resources/BrowserGuard/Firefox"
+codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/IntentNativeHost"
 chmod +x "$APP_BUNDLE/Contents/MacOS/IntentApp"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

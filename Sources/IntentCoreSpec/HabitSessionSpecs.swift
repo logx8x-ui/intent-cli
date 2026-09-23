@@ -2,6 +2,29 @@ import Foundation
 import IntentCore
 
 func runHabitSessionSpecs() throws {
+    let desktop = CGRect(x: 28, y: 70, width: 1300, height: 680)
+    for point in [CGPoint(x: -100, y: -50), CGPoint(x: 500, y: 250), CGPoint(x: 2000, y: 2000)] {
+        let panel = FieldOfViewLayout.panel(origin: point, size: CGSize(width: 240, height: 260), in: desktop)
+        try expect(desktop.contains(panel), "Dragged list stays inside the usable screen")
+        let workspace = FieldOfViewLayout.workspace(around: panel, in: desktop)
+        try expect(!workspace.intersects(panel) && desktop.contains(workspace), "Workspace reflows around the dragged list")
+        let frames = FieldOfViewLayout.frames(sizes: Array(repeating: CGSize(width: 900, height: 600), count: 8), in: workspace, tabHeight: 0)
+        try expect(frames.count == 8 && frames.allSatisfy { !$0.intersects(panel) }, "All previews remain outside the movable list")
+    }
+    let centeredPanel = CGRect(x: 540, y: 220, width: 240, height: 260)
+    for count in [1, 8, 20, 50] {
+        let originals = (0..<count).map { CGRect(x: $0 * 5, y: $0 * 3, width: 800 + $0 * 3, height: 600) }
+        let arranged = FieldOfViewLayout.frames(sourceFrames: originals, in: desktop, avoiding: centeredPanel)
+        try expect(arranged.count == count, "A central list does not drop windows from the workspace")
+        try expect(arranged.allSatisfy { desktop.contains($0) && !$0.intersects(centeredPanel) }, "Reflow uses all sides without overlap")
+        let ratios = zip(arranged, originals).map { $0.width / $1.width }
+        try expect((ratios.max() ?? 0) - (ratios.min() ?? 0) < 0.001, "Reflow preserves one proportional scale")
+    }
+    var hideRules = ActiveBrowserRules(active: true, allowedWebsites: [], blockTabSwitching: true, blockNavigation: true, blockNewTabs: false)
+    hideRules.hideDistractions = true
+    let roundTripRules = try JSONDecoder().decode(ActiveBrowserRules.self, from: JSONEncoder().encode(hideRules))
+    try expect(roundTripRules.hideDistractions, "Hide preference crosses the native bridge")
+    try expect(hideRules.refreshed().hideDistractions, "Rules heartbeat preserves hide preference")
     var selection = QuickSelection()
     selection.name = "Study chapter 2"
     selection.sourceIntentionID = "saved-study"

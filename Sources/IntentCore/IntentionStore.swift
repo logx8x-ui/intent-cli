@@ -74,6 +74,7 @@ public final class IntentionStore {
 }
 
 public struct ActiveBrowserRules: Codable, Equatable {
+    public var hideDistractions = false
     public static let freshnessWindow: TimeInterval = 5
 
     public var active: Bool
@@ -124,6 +125,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case active
         case accessMode
+        case hideDistractions
         case unrestrictedBrowserBundleIdentifiers
         case allowedWebsites
         case allowedWebsitesByBrowser
@@ -142,6 +144,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         accessMode = try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist
+        hideDistractions = try container.decodeIfPresent(Bool.self, forKey: .hideDistractions) ?? false
         unrestrictedBrowserBundleIdentifiers = try container.decodeIfPresent(Set<String>.self, forKey: .unrestrictedBrowserBundleIdentifiers) ?? []
         allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
         allowedWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .allowedWebsitesByBrowser) ?? [:]
@@ -172,6 +175,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
             allowGoogleSearchTabs: allowGoogleSearchTabs,
             updatedAt: date
         )
+        result.hideDistractions = hideDistractions
         result.unrestrictedBrowserBundleIdentifiers = unrestrictedBrowserBundleIdentifiers
         return result
     }

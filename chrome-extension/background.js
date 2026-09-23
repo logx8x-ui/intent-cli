@@ -1,4 +1,4 @@
-importScripts("rule-helpers.js");
+importScripts("rule-helpers.js", "tab-visibility.js");
 
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
@@ -13,7 +13,7 @@ const STARTUP_SESSION_RULE_ID_START = 22000;
 const STARTUP_SESSION_RULE_ID_END = 22999;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
-const EXTENSION_CAPABILITIES = ["single-startup-launch-v1"];
+const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1"];
 let browserSessionID = null;
 let browserSessionPromise = null;
 async function ensureBrowserSessionIdentity() {
@@ -38,6 +38,7 @@ function advertisedCapabilities() {
 
 const { normalizeRule, isAllowedURL, isSearchStagingURL } = IntentBrowserRules;
 
+const tabVisibility = typeof IntentTabVisibility !== "undefined" ? new IntentTabVisibility(chrome, false) : null;
 let rules = inactiveRules();
 let guardEnabled = true;
 let initialized = false;
@@ -247,6 +248,7 @@ function settleRuleRequests() {
 }
 
 function sendHeartbeat() {
+  tabVisibility?.sync(rules, isRuntimeAllowedTab);
   if (rules.active && Array.isArray(rules.selectedTabIDs)) {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => {
       if (tabs.some(tab => tab.active && !isRuntimeAllowedTab(tab))) returnToAllowedTab();
@@ -375,7 +377,7 @@ async function handleRequestedTab(message) {
     return;
   }
   if (message.action === "close") {
-    if (rules.accessMode !== "blacklist") await chrome.tabs.remove(tab.id).catch(() => {});
+    if (rules.accessMode !== "blacklist" && !rules.hideDistractions) await chrome.tabs.remove(tab.id).catch(() => {});
     return;
   }
   if (!isRuntimeAllowedTab(tab)) return;
@@ -467,6 +469,7 @@ function effectiveRules(nativeRules) {
   return {
     ...inactiveRules(),
     active: true,
+    hideDistractions: Boolean(nativeRules.hideDistractions),
     accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
@@ -481,6 +484,7 @@ function effectiveRules(nativeRules) {
 
 async function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
+  if (!nextRules.active) await tabVisibility?.sync(nextRules, () => true);
   if (nextRules.startupSessionID !== rules.startupSessionID) searchSessionTabs.clear();
   const nextFingerprint = fingerprintRules(nextRules);
   rules = nextRules;
@@ -507,6 +511,7 @@ async function applyNativeRules(nativeRules) {
     }
     completedStartupFingerprint = null;
   }
+  await tabVisibility?.sync(rules, isRuntimeAllowedTab);
   scheduleTabSnapshot(true);
 }
 
@@ -994,7 +999,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     !isAllowedURL(changeInfo.url, rules)
   ) {
     freshBlankTabIds.delete(tabId);
-    if (rules.accessMode !== "blacklist") await chrome.tabs.remove(tabId).catch(() => {});
+    if (rules.accessMode !== "blacklist" && !rules.hideDistractions) await chrome.tabs.remove(tabId).catch(() => {});
     await returnToAllowedTab();
     return;
   }
@@ -1010,6 +1015,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
+  if (tab.url === chrome.runtime.getURL?.('parked.html')) return;
   committedURLByTab.set(tab.id, tab.url || "about:blank");
   if (rules.active && rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) searchSessionTabs.add(tab.id);
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab(tab)) {
@@ -1037,7 +1043,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   setTimeout(async () => {
     const latest = await chrome.tabs.get(tab.id).catch(() => null);
     if (!latest || isRuntimeAllowedTab(latest)) return;
-    if (rules.accessMode !== "blacklist") await chrome.tabs.remove(tab.id).catch(() => {});
+    if (rules.accessMode !== "blacklist" && !rules.hideDistractions) await chrome.tabs.remove(tab.id).catch(() => {});
     await returnToAllowedTab();
   }, NEW_TAB_GRACE_MS);
   scheduleTabSnapshot();
@@ -1078,7 +1084,7 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
       !isAllowedURL(details.url, rules)
     ) {
       freshBlankTabIds.delete(details.tabId);
-      if (rules.accessMode !== "blacklist") await chrome.tabs.remove(details.tabId).catch(() => {});
+      if (rules.accessMode !== "blacklist" && !rules.hideDistractions) await chrome.tabs.remove(details.tabId).catch(() => {});
       await returnToAllowedTab();
       return;
     }

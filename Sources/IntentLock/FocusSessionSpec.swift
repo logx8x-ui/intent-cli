@@ -2,6 +2,7 @@ import Foundation
 import IntentCore
 
 public struct FocusSessionSpec {
+    public var hideDistractions = false
     public var selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
     public let presetAllowedBundleIdentifiers: Set<String>
     public let presetBlockedBundleIdentifiers: Set<String>

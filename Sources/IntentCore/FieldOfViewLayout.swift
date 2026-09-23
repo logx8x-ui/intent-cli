@@ -18,6 +18,72 @@ public enum FieldOfViewLayout {
         layout(sizes: sourceFrames.map(\.size), sourceFrames: sourceFrames, in: bounds, tabHeight: tabHeight)
     }
 
+    /// Reserve a movable panel without covering a preview or its caption.
+    public static func workspace(around panel: CGRect, in bounds: CGRect) -> CGRect {
+        let obstacle = panel.insetBy(dx: -18, dy: -18).intersection(bounds)
+        guard !obstacle.isNull else { return bounds }
+        let candidates = [
+            CGRect(x: bounds.minX, y: bounds.minY, width: max(0, obstacle.minX - bounds.minX), height: bounds.height),
+            CGRect(x: obstacle.maxX, y: bounds.minY, width: max(0, bounds.maxX - obstacle.maxX), height: bounds.height),
+            CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: max(0, obstacle.minY - bounds.minY)),
+            CGRect(x: bounds.minX, y: obstacle.maxY, width: bounds.width, height: max(0, bounds.maxY - obstacle.maxY))
+        ]
+        return candidates.max { $0.width * $0.height < $1.width * $1.height } ?? bounds
+    }
+
+    public static func panel(origin: CGPoint, size: CGSize, in bounds: CGRect) -> CGRect {
+        let width = min(size.width, bounds.width), height = min(size.height, bounds.height)
+        return CGRect(x: min(max(bounds.minX, origin.x), bounds.maxX - width),
+                      y: min(max(bounds.minY, origin.y), bounds.maxY - height), width: width, height: height)
+    }
+
+    /// Use the space on every side of the movable list, retaining one preview
+    /// scale. This avoids making all windows tiny when the list is in the middle.
+    public static func frames(sourceFrames: [CGRect], in bounds: CGRect, avoiding panel: CGRect) -> [CGRect] {
+        guard !sourceFrames.isEmpty else { return [] }
+        let obstacle = panel.insetBy(dx: -18, dy: -18).intersection(bounds)
+        guard !obstacle.isNull else { return frames(sourceFrames: sourceFrames, in: bounds, tabHeight: 0) }
+        let regions = [
+            CGRect(x: bounds.minX, y: bounds.minY, width: max(0, obstacle.minX - bounds.minX), height: bounds.height),
+            CGRect(x: obstacle.maxX, y: bounds.minY, width: max(0, bounds.maxX - obstacle.maxX), height: bounds.height),
+            CGRect(x: obstacle.minX, y: bounds.minY, width: obstacle.width, height: max(0, obstacle.minY - bounds.minY)),
+            CGRect(x: obstacle.minX, y: obstacle.maxY, width: obstacle.width, height: max(0, bounds.maxY - obstacle.maxY))
+        ].filter { $0.width >= minimumCaptionWidth + 4 && $0.height > captionHeight + 4 }
+        var groups = Array(repeating: [Int](), count: regions.count)
+        let capacities = regions.map { region in
+            Int((region.width - 4 + gap) / (minimumCaptionWidth + gap))
+                * Int((region.height - 4 + gap) / (captionHeight + gap))
+        }
+        // Larger windows get first choice. Capacity checks are constant-time;
+        // pack each region once, rather than packing on every pointer movement
+        // once per candidate window.
+        for index in sourceFrames.indices.sorted(by: { sourceFrames[$0].width * sourceFrames[$0].height > sourceFrames[$1].width * sourceFrames[$1].height }) {
+            let candidates = regions.indices.filter { groups[$0].count < capacities[$0] }
+            guard let region = candidates.min(by: { left, right in
+                let a = CGFloat(groups[left].count + 1) / (regions[left].width * regions[left].height)
+                let b = CGFloat(groups[right].count + 1) / (regions[right].width * regions[right].height)
+                return a == b ? left < right : a < b
+            }) else { return frames(sourceFrames: sourceFrames, in: workspace(around: panel, in: bounds), tabHeight: 0) }
+            groups[region].append(index)
+        }
+        var result = Array(repeating: CGRect.zero, count: sourceFrames.count)
+        var scale: CGFloat = 1
+        for region in regions.indices {
+            let packed = frames(sourceFrames: groups[region].map { sourceFrames[$0] }, in: regions[region], tabHeight: 0)
+            guard packed.count == groups[region].count else {
+                return frames(sourceFrames: sourceFrames, in: workspace(around: panel, in: bounds), tabHeight: 0)
+            }
+            for (offset, index) in groups[region].enumerated() {
+                result[index] = packed[offset]
+                scale = min(scale, packed[offset].width / max(1, sourceFrames[index].width))
+            }
+        }
+        return result.enumerated().map { index, slot in
+            let size = CGSize(width: max(1, sourceFrames[index].width) * scale, height: max(1, sourceFrames[index].height) * scale)
+            return CGRect(x: slot.midX - size.width / 2, y: slot.midY - size.height / 2, width: size.width, height: size.height)
+        }
+    }
+
     private struct Row {
         let indices: [Int]
         let width: CGFloat

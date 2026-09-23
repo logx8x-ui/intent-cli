@@ -8,7 +8,7 @@
     "test:swift": "bash scripts/test-swift.sh",
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs && python3 scripts/test-firefox-installation.py",
     "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
-    "test:extensions": "npm run test:firefox && npm run test:chrome && node scripts/test-browser-idle-work.cjs && node scripts/test-browser-popup.cjs",
+    "test:extensions": "npm run test:firefox && npm run test:chrome && node scripts/test-browser-idle-work.cjs && node scripts/test-browser-popup.cjs && node scripts/test-tab-visibility.cjs",
     "test:native-host": "swift build -c release --product IntentNativeHost && node scripts/test-native-host.cjs && node scripts/test-native-host-performance.cjs && node scripts/test-native-host-snapshot-refresh.cjs",
     "test:ai": "npm --prefix services/intent-ai test",
     "test:release-readiness": "node scripts/test-release-readiness.cjs",

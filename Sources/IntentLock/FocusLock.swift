@@ -121,6 +121,7 @@ public final class FocusLock {
     private let allowedAppSwitcher: AllowedAppSwitcher
     private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
     private let nativeTabClickGuard = NativeBrowserTabClickGuard()
+    private let visibilityController: FocusVisibilityController
     private lazy var blurController = FocusBlurController(spec: spec, tabGuard: nativeTabClickGuard)
     private let permittedWindowRecovery = PermittedWindowRecovery()
     private var eventTap: CFMachPort?
@@ -141,6 +142,7 @@ public final class FocusLock {
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        visibilityController = FocusVisibilityController(spec: spec)
         currentFinishShortcut = spec.finishShortcut
         allowedAppSwitcher = AllowedAppSwitcher(
             allowedBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
@@ -180,6 +182,9 @@ public final class FocusLock {
         safetyStop = true
         shouldStop = true
         stopStateLock.unlock()
+        // Quit can terminate the process before run-loop cleanup executes.
+        // Release owned visibility synchronously before returning to AppKit.
+        visibilityController.stop()
     }
 
     public var isStopRequested: Bool { isStopped }
@@ -209,6 +214,7 @@ public final class FocusLock {
             startFocusTimer()
             nativeTabClickGuard.start()
             blurController.start()
+            visibilityController.start()
             startSpotifyTimerIfNeeded()
         }
 
@@ -697,7 +703,7 @@ public final class FocusLock {
         guard app.activationPolicy == .regular else { return }
         guard !baselinePids.contains(app.processIdentifier) else { return }
 
-        if spec.accessMode != .blacklist, !spec.presetBlockedBundleIdentifiers.contains(bundleIdentifier) { app.terminate() }
+        if !spec.hideDistractions, spec.accessMode != .blacklist, !spec.presetBlockedBundleIdentifiers.contains(bundleIdentifier) { app.terminate() }
         refocus()
     }
 
@@ -1165,7 +1171,8 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
-        if !didStopForSafety, spec.accessMode == .whitelist, spec.closeSessionResourcesOnFinish {
+        visibilityController.stop()
+        if !spec.hideDistractions, !didStopForSafety, spec.accessMode == .whitelist, spec.closeSessionResourcesOnFinish {
             closeSessionResources()
         }
     }

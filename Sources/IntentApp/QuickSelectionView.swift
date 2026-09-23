@@ -946,6 +946,13 @@ private struct QuickSelectionView: View {
     @ObservedObject private var model: IntentAppModel
     @AppStorage("overviewShowClock") private var showClock = true
     @AppStorage("overviewShowTitles") private var showTitles = true
+    @AppStorage("overviewNotesX") private var notesX = 1.0
+    @AppStorage("overviewNotesY") private var notesY = 0.0
+    @State private var notesDrag = CGSize.zero
+    @State private var slotsDrag = CGSize.zero
+    @AppStorage("overviewSlotsX") private var slotsX = 0.5
+    @AppStorage("overviewSlotsY") private var slotsY = 0.5
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     init(controller: QuickSelectionController) {
         self.controller = controller
         model = controller.model
@@ -957,20 +964,33 @@ private struct QuickSelectionView: View {
             let presetIDs = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
             let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
-            let tabWidth: CGFloat = focused == nil ? 260 : min(440, geometry.size.width * 0.38)
+            let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
             let header = controller.topSafeInset + 48 + (onboarding.isTeaching ? 60 : 0)
             let footer: CGFloat = controller.message == nil ? 140 : 210
             let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - footer - 12))
-            let frames = FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, tabHeight: 0)
+            let notesSize = CGSize(width: 240, height: min(260, area.height * 0.45))
+            let notesFrame = FieldOfViewLayout.panel(origin: CGPoint(
+                x: area.minX + (area.width - notesSize.width) * notesX + notesDrag.width,
+                y: area.minY + (area.height - notesSize.height) * notesY + notesDrag.height), size: notesSize, in: area)
+            let slotsSize = CGSize(width: min(420, area.width), height: min(520, area.height))
+            let slotsFrame = FieldOfViewLayout.panel(origin: CGPoint(
+                x: area.minX + (area.width - slotsSize.width) * slotsX + slotsDrag.width,
+                y: area.minY + (area.height - slotsSize.height) * slotsY + slotsDrag.height), size: slotsSize, in: area)
+            let frames = focused == nil || controller.showingSlots
+                ? FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, avoiding: controller.showingSlots ? slotsFrame : notesFrame)
+                : FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, tabHeight: 0)
             ZStack(alignment: .topLeading) {
                 Group {
                     if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
-                if !controller.naming && !controller.showingSlots {
+                if !controller.naming {
                 ForEach(Array(visibleWindows.enumerated()), id: \.element.id) { index, window in
-                    if index < frames.count { windowCard(window, frame: frames[index]) }
+                    if index < frames.count {
+                        windowCard(window, frame: frames[index])
+                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: frames[index])
+                    }
                 }
                 }
                 VStack {
@@ -1031,25 +1051,48 @@ private struct QuickSelectionView: View {
                         .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
                 }
                 if controller.showingSlots {
-                    IntentSavedSlotsView(controller: controller, model: model)
-                        .frame(width: min(650, geometry.size.width - 80), height: max(200, area.height - 24))
-                        .position(x: geometry.size.width / 2, y: area.midY)
+                    VStack(spacing: 0) {
+                        Label("Drag to move", systemImage: "line.3.horizontal")
+                            .font(.caption).frame(maxWidth: .infinity).padding(10).contentShape(Rectangle())
+                            .gesture(DragGesture(minimumDistance: 4)
+                                .onChanged { slotsDrag = $0.translation }
+                                .onEnded { _ in
+                                    slotsX = (slotsFrame.minX - area.minX) / max(1, area.width - slotsSize.width)
+                                    slotsY = (slotsFrame.minY - area.minY) / max(1, area.height - slotsSize.height)
+                                    slotsDrag = .zero
+                                })
+                            .contextMenu { Button("Reset position") { slotsX = 0.5; slotsY = 0.5; slotsDrag = .zero } }
+                        IntentSavedSlotsView(controller: controller, model: model)
+                    }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+                        .frame(width: slotsFrame.width, height: slotsFrame.height)
+                        .position(x: slotsFrame.midX, y: slotsFrame.midY)
                 } else if controller.naming {
+                    let namingArea = FieldOfViewLayout.workspace(around: notesFrame, in: area)
                     IntentNameFirstView(controller: controller)
-                        .frame(width: min(460, geometry.size.width - 80))
-                        .position(x: geometry.size.width / 2, y: area.midY)
+                        .frame(width: min(460, max(180, namingArea.width - 24)))
+                        .position(x: namingArea.midX, y: namingArea.midY)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: namingArea)
                 }
                 if !controller.showingSlots && focused == nil {
-                    IntentSessionNotesView(controller: controller, model: model)
-                        .frame(width: 220, height: min(220, area.height * 0.35))
-                        .position(x: geometry.size.width - 140, y: area.minY + min(220, area.height * 0.35) / 2)
-                }
-                if let recovery = model.journal.recovery {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack { Text("Continue \(recovery.intention.name)?").lineLimit(1); Button { model.dismissRecovery() } label: { Image(systemName: "xmark") } }
-                        Button("Jump back in") { controller.prepare(recovery.intention, workspace: recovery.workspace, resume: recovery) }
-                    }.font(.callout).padding(14).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-                        .frame(width: 280).position(x: geometry.size.width - 170, y: controller.topSafeInset + 88)
+                    VStack(spacing: 0) {
+                        HStack {
+                            Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
+                            Image(systemName: "line.3.horizontal")
+                        }.font(.caption.weight(.medium)).padding(12).contentShape(Rectangle())
+                            .help("Drag to move; your apps make room")
+                            .accessibilityLabel("Move recent intentions")
+                            .gesture(DragGesture(minimumDistance: 4)
+                                .onChanged { notesDrag = $0.translation }
+                                .onEnded { _ in
+                                    notesX = (notesFrame.minX - area.minX) / max(1, area.width - notesSize.width)
+                                    notesY = (notesFrame.minY - area.minY) / max(1, area.height - notesSize.height)
+                                    notesDrag = .zero
+                                })
+                            .contextMenu { Button("Reset position") { notesX = 1; notesY = 0; notesDrag = .zero } }
+                        IntentSessionNotesView(controller: controller, model: model)
+                    }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .frame(width: notesFrame.width, height: notesFrame.height)
+                        .position(x: notesFrame.midX, y: notesFrame.midY)
                 }
                 RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)

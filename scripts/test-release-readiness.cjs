@@ -11,6 +11,8 @@ const json = (relativePath) => JSON.parse(read(relativePath));
 const firefoxManifest = json("firefox-extension/manifest.json");
 const chromeManifest = json("chrome-extension/manifest.json");
 const firefoxUpdates = json("firefox-updates.json");
+const hostVersion = read("Sources/IntentNativeHost/main.swift").match(/bundledExtensionVersion: String = "([^"]+)"/)?.[1];
+assert.equal(hostVersion, chromeManifest.version, "The native helper must advertise the extension version actually bundled, so idle reload can update it");
 assert.equal(
   firefoxManifest.version,
   chromeManifest.version,
@@ -26,9 +28,10 @@ const firefoxUpdate = firefoxUpdates.addons?.["intent-firefox@loganmondi.dev"]?.
 assert.ok(/^\d+\.\d+\.\d+$/.test(firefoxUpdate?.version || ''), "Firefox feed needs a released version");
 assert.ok(firefoxUpdate.version.localeCompare(firefoxManifest.version, undefined, {numeric:true}) <= 0,
   "Firefox feed must not advertise a version newer than the source");
-assert.match(firefoxUpdate?.update_link || '',
-  /^https:\/\/github\.com\/logx8x-ui\/intent-cli\/releases\/(?:latest\/download|download\/v[0-9.]+)\/Intent-Firefox-Extension\.xpi$/,
-  "Firefox feed must use an official signed release asset");
+const feedURL = firefoxUpdate?.update_link || '';
+const immutableGuardAsset = `https://github.com/logx8x-ui/intent-cli/releases/download/browser-guard-${firefoxUpdate.version}/Intent-Firefox-Extension-${firefoxUpdate.version}.xpi`;
+assert.ok(feedURL === immutableGuardAsset || /^https:\/\/github\.com\/logx8x-ui\/intent-cli\/releases\/(?:latest\/download|download\/v[0-9.]+)\/Intent-Firefox-Extension\.xpi$/.test(feedURL),
+  "Firefox feed must use an official signed release asset matching its version");
 assert.equal(
   chromeManifest.update_url,
   "https://clients2.google.com/service/update2/crx",
@@ -125,6 +128,8 @@ assert.ok(
     developmentInstaller.includes("Intent is running in the menu bar."),
   "The development installer must relaunch Intent and verify its menu process"
 );
+assert.ok(developmentInstaller.includes('Contents/Helpers/IntentNativeHost') && developmentInstaller.includes('Contents/Resources/BrowserGuard/Chrome') && developmentInstaller.includes('Contents/Resources/BrowserGuard/Firefox'),
+  "Development installation must update the helper and matching extension sources together");
 for (const installer of [developmentInstaller, releaseBuilder]) {
   assert.ok(
     installer.includes("chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/") &&

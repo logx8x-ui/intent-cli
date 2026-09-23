@@ -31,6 +31,7 @@ struct AppPresetStatusStrip: View {
 struct OverviewSettingsView: View {
     @ObservedObject var model: IntentAppModel
     @State private var query = ""
+    @AppStorage("distractionAppearance") private var distractionAppearance = "hide"
     @AppStorage("overviewShowClock") private var showClock = true
     @AppStorage("overviewShowTitles") private var showTitles = true
     var body: some View {
@@ -38,6 +39,14 @@ struct OverviewSettingsView: View {
             Text("Settings").font(.title2.weight(.semibold))
             ScrollView { IntentWorkPeriodSettings(model: model).padding(.trailing, 6) }.frame(maxHeight: 260)
             HStack { Toggle("Show clock", isOn: $showClock); Spacer(); Toggle("Window titles", isOn: $showTitles) }.font(.caption)
+            Picker("Distractions", selection: $distractionAppearance) {
+                Text("Hide (preview)").tag("hide")
+                Text("Blur").tag("blur")
+            }.pickerStyle(.segmented)
+            Text("Hide puts distractions away until you finish or use Safety Stop. Nothing is closed. Choose Blur to switch back for your next intention.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Tabs need Browser Guard 0.2.16. Pinned, grouped and sharing tabs may remain visible with blocking. Chrome puts other tabs in a temporary minimized window.")
+                .font(.caption2).foregroundStyle(.secondary)
             Divider()
             Text("App defaults").font(.headline)
             Text("Apply to every intention in either mode. These apps stay out of the overview. Blocking hides access; it never closes the app.")
