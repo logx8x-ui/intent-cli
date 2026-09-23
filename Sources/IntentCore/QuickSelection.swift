@@ -1,23 +1,25 @@
 import Foundation
 
 /// Browser tab identifiers are scoped to a browser, never shared between browsers.
-public struct QuickSelectionTab: Hashable {
+public struct QuickSelectionTab: Hashable, Codable {
     public var browser: String
     public var id: Int
     public init(browser: String, id: Int) { self.browser = browser; self.id = id }
 }
 
-public struct QuickSelectionBrowserWindow: Hashable {
+public struct QuickSelectionBrowserWindow: Hashable, Codable {
     public var browser: String
     public var id: Int
     public init(browser: String, id: Int) { self.browser = browser; self.id = id }
 }
 
-public struct QuickSelection {
+public struct QuickSelection: Codable {
+    public var name: String = ""
+    public var sourceIntentionID: String?
     /// Visual scope only. Enforcement still uses the exact selected tab IDs.
     public private(set) var browserSessionIDs: [String: String] = [:]
     public var browserWindowTabs: [QuickSelectionBrowserWindow: Set<Int>] = [:]
-    private struct RangeState {
+    private struct RangeState: Codable {
         var anchor: Int
         var independent: Set<QuickSelectionTab>
         var range: Set<QuickSelectionTab> = []
@@ -209,7 +211,8 @@ public struct QuickSelection {
             configuredRestrictions[index].excludedResourceIDs = resources
         }
         var intention = Intention(
-            name: accessMode == .blacklist ? "Quick Block" : "Quick Focus", icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
+            id: sourceIntentionID ?? UUID().uuidString,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (accessMode == .blacklist ? "Quick Block" : "Quick Focus") : name.trimmingCharacters(in: .whitespacesAndNewlines), icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
             allowedApps: chosen, allowedWebsites: websites,
             startupActions: [], restrictions: .init(),
             // Picker modifier coordinates are local to this draft, not to the

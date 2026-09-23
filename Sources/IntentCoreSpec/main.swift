@@ -25,6 +25,7 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    try runHabitSessionSpecs()
     try runQuickGestureRegressionSpecs()
     try runTabSelectionSpecs()
     try runSessionRuntimeSpecs()

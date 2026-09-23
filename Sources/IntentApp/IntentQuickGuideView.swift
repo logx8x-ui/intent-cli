@@ -199,7 +199,7 @@ struct IntentQuickGuideView: View {
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             Text("Reply to friends, make something, watch a film… your words are enough.").font(.callout).foregroundStyle(.secondary)
             primary("Choose my setup") { guide.submitPurpose() }.disabled(purpose.isEmpty)
-            Text("This becomes the name if you save it; you can edit it later.").font(.caption).foregroundStyle(.secondary)
+            Text("This names your intention before you choose anything; you can edit it later.").font(.caption).foregroundStyle(.secondary)
         }
     }
     private var overview: some View {
@@ -207,12 +207,13 @@ struct IntentQuickGuideView: View {
             eyebrow("1 OF 3 · CHOOSE YOUR SETUP")
             if model.hasActiveSession {
                 runFeedback(.overview)
-                primary("End this run & try quick selection") { continueAfterRun(to: .quickMark) }.disabled(!model.activeSessionCanFinishManually)
-                lockedExplanation
+                primary("Let me get to work") { guide.finish(); onFinish() }
+                Text("Learn quick marking later in Settings → Quick guide.").font(.caption).foregroundStyle(.secondary)
             } else if guide.state.evidence.contains(.overviewRun) {
                 success("Your first setup ran.")
                 Text("You’ve prepared the space; finishing your actual task is up to you.").foregroundStyle(.secondary)
-                primary("Try the quicker way") { guide.move(to: .quickMark) }
+                primary("Keep this setup for next time") { guide.move(to: .save) }
+                Button("Done for now") { guide.finish(); onFinish() }
             } else if !permissionsReady {
                 title("Let Intent work with your windows.")
                 Text("macOS needs your approval before the real picker can open; your answer and the clock will stay here.").font(.callout).foregroundStyle(.secondary)
@@ -297,7 +298,7 @@ struct IntentQuickGuideView: View {
     private var ready: some View {
         VStack(alignment: .leading, spacing: 18) {
             title(model.hasActiveSession ? "Your space is ready." : "Start with what you came to do.")
-            Text("When I sit down to use my Mac, I press \(overviewKey) and choose an intention.")
+            Text("When I sit down to use my Mac, I press \(overviewKey) and name what I came to do.")
                 .font(.title3.weight(.medium))
             Text("That’s a small action to repeat—not a habit you have to perfect today.").foregroundStyle(.secondary)
             if guide.state.evidence.contains(.reused) { success("You ran your saved intention again.") }

@@ -137,6 +137,8 @@ public final class FocusLock {
     private var lastPermittedApplication: NSRunningApplication?
     private var systemSwitcherGraceUntil: Date = .distantPast
 
+    public var onManualFinishRequest: (@Sendable () -> Void)?
+
     public init(spec: FocusSessionSpec) {
         self.spec = spec
         currentFinishShortcut = spec.finishShortcut
@@ -554,7 +556,8 @@ public final class FocusLock {
             control: control,
             option: option
         ) {
-            if spec.allowsManualFinish {
+            if let onManualFinishRequest { onManualFinishRequest() }
+            else if spec.allowsManualFinish {
                 stop()
             }
             return nil

@@ -469,7 +469,7 @@ struct IntentGraphView: View {
                 Button {
                     if model.isZeroDriftActive {
                         let remaining = model.zeroDriftStatusText.map { " \($0) remaining." } ?? ""
-                        model.errorMessage = "Zero Drift is active.\(remaining)"
+                        model.errorMessage = "Require an intention is active.\(remaining)"
                     } else if zeroDriftWarningSuppressed {
                         showZeroDriftTiming = true
                     } else {
@@ -480,7 +480,7 @@ struct IntentGraphView: View {
                         Circle()
                             .fill(model.isZeroDriftActive ? Color.green : GraphTheme.muted(colorScheme))
                             .frame(width: 7, height: 7)
-                        Text("Zero Drift: \(model.isZeroDriftActive ? "True" : "False")")
+                        Text("Require an intention: \(model.isZeroDriftActive ? "True" : "False")")
                     }
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .padding(.horizontal, 11)
@@ -495,7 +495,7 @@ struct IntentGraphView: View {
                 .buttonStyle(.plain)
                 .help(
                     model.isZeroDriftActive
-                        ? "Zero Drift is active\(model.zeroDriftStatusText.map { " for \($0)" } ?? "")"
+                        ? "Require an intention is active\(model.zeroDriftStatusText.map { " for \($0)" } ?? "")"
                         : "Require an intention to be running at all times"
                 )
 

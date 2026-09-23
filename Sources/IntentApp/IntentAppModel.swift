@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import CoreGraphics
 import Foundation
 import IntentCore
 import IntentLock
@@ -22,6 +24,24 @@ protocol IntentOverlayPresenting: AnyObject {
 final class IntentAppModel: ObservableObject {
     private static let requireManualFinishKey = "intentRequireManualFinishBeforeSwitching"
     let onboarding = IntentOnboardingCoordinator()
+
+    @Published var journal = IntentSessionJournal()
+    @Published var workPhase: WorkPhase = .inactive
+    @Published var breakEndsAt: Date?
+    enum WorkPhase: String { case inactive, choosing, running, resting, recovery }
+    var presentWorkspace: (() -> Bool)?
+    var pendingWorkspace: SessionWorkspace?
+    var pendingResume: IntentSessionRecord?
+    private var currentRecord: IntentSessionRecord?
+    private var finishPromptOpen = false
+    private var endedEarly = false
+    private var journalWritable = true
+    private var workTimer: Timer?
+    private var suppressedWorkOccurrences: Set<String> = []
+    private var workScheduleInitialized = false
+    private var reminderShownAt = Date()
+    private let gentleReminder = IntentGentleReminder()
+    private var journalURL: URL { profileDirectory.appendingPathComponent("session-journal.json") }
 
     @Published var intentions: [Intention] = []
     @Published var selectedID: String?
@@ -111,11 +131,15 @@ final class IntentAppModel: ObservableObject {
     }
 
     func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot], onboardingOrigin: IntentOnboardingStep? = nil) -> Bool {
-        guard !hasActiveSession, !isZeroDriftActive, pendingPurposeSessionSave == nil,
+        guard !hasActiveSession,
               pendingFriction == nil, pendingEndTimeRequest == nil else {
             errorMessage = "Finish the current intention and save or dismiss its result first."
             return false
         }
+        guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "Name what you came to do before choosing your workspace."; return false
+        }
+        pendingPurposeSessionSave = nil
         do {
             var intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
             let teachingOrigin = onboarding.isTeaching && (onboardingOrigin == .overview || onboardingOrigin == .quickMark) ? onboardingOrigin : nil
@@ -147,10 +171,10 @@ final class IntentAppModel: ObservableObject {
             quickSelectionTabIDs = selection.tabIDsByBrowser
             quickSelectionBrowserSessionIDs = selection.browserSessionIDs
             purposeTemporaryIntention = intention
-            purposeStatedPrompt = teachingOrigin == nil ? "your Quick Focus selection" : intention.name
+            purposeStatedPrompt = intention.name
             // Session presets are applied centrally by requestStart for both selection modes.
             requestStart(intention)
-            let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil
+            let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil || pendingZeroDriftStart != nil
             if !accepted {
                 quickSelectionIntentionID = nil
                 quickSelectionOnboardingOrigin = nil
@@ -193,7 +217,7 @@ final class IntentAppModel: ObservableObject {
 
     var zeroDriftStatusText: String? {
         guard let zeroDriftEndsAt, zeroDriftEndsAt > Date() else { return nil }
-        return Self.durationText(until: zeroDriftEndsAt)
+        return zeroDriftEndsAt == .distantFuture ? "indefinitely" : Self.durationText(until: zeroDriftEndsAt)
     }
 
     var activeSessionCanFinishManually: Bool {
@@ -207,7 +231,128 @@ final class IntentAppModel: ObservableObject {
         return sessionExpiryPolicy?.hasDeadline != true && activeSessionEndsAt == nil
     }
 
+    func persistJournal() {
+        guard journalWritable else { return }
+        do { try journal.save(to: journalURL) }
+        catch { errorMessage = "Could not save session history: \(error.localizedDescription)" }
+    }
+    func dismissRecovery() { journal.recovery = nil; persistJournal() }
+    func saveRecord(_ record: IntentSessionRecord) {
+        var intention = record.intention
+        intention.id = UUID().uuidString
+        if let id = addDraftIntention(intention, at: .zero) {
+            journal.workspaces[id] = record.workspace
+            journal.slotOrder.append(id); persistJournal()
+        }
+    }
+    var savedSlots: [Intention] {
+        intentions.sorted {
+            let a = journal.slotOrder.firstIndex(of: $0.id) ?? Int.max
+            let b = journal.slotOrder.firstIndex(of: $1.id) ?? Int.max
+            return a == b ? $0.name.localizedStandardCompare($1.name) == .orderedAscending : a < b
+        }
+    }
+    func moveSlot(_ source: String, to target: String) {
+        var ids = savedSlots.map(\.id)
+        guard let a = ids.firstIndex(of: source), let b = ids.firstIndex(of: target) else { return }
+        ids.swapAt(a, b); journal.slotOrder = ids; persistJournal()
+    }
+    private func releaseWorkPeriodAfterFailedStart() {
+        if isZeroDriftActive, !hasActiveSession, pendingFriction == nil, pendingEndTimeRequest == nil, pendingZeroDriftStart == nil {
+            let failure = errorMessage
+            emergencyStop(showMessage: false); workPhase = .recovery
+            errorMessage = failure
+        }
+    }
+    private func captureRecoveryCheckpoint() {
+        endedEarly = true
+        if var record = currentRecord {
+            record.completedTasks = completedChecklist
+            record.remainingSeconds = activeSessionEndsAt.map { max(0, $0.timeIntervalSinceNow) }
+            record.endedAt = Date(); journal.recovery = record; persistJournal()
+        }
+    }
+    func endWorkPeriod() {
+        guard isZeroDriftActive, !finishPromptOpen else { return }
+        guard !hasActiveSession || activeSessionCanFinishManually || IntentExitPasscode.isConfigured else {
+            errorMessage = "Finish the checklist or wait for the timer. Safety Stop is always available."; return
+        }
+        finishPromptOpen = true
+        Task { [weak self] in
+            guard let self else { return }
+            let authorized: Bool
+            if IntentExitPasscode.isConfigured { authorized = await IntentExitPasscode.authorize(title: "End this work period?") } else { authorized = true }
+            self.finishPromptOpen = false
+            guard authorized, self.isZeroDriftActive else { return }
+            if self.hasActiveSession { self.captureRecoveryCheckpoint() }
+            self.suppressCurrentWorkSchedules(); self.finishWorkPeriod()
+        }
+    }
+    private func finishWorkPeriod() {
+        zeroDriftEndsAt = nil; breakEndsAt = nil; workPhase = .inactive
+        zeroDriftLimitTask?.cancel(); zeroDriftLimitTask = nil; pendingZeroDriftStart = nil
+        try? zeroDriftStore.clear()
+        zeroDriftIdleLock?.stop(); activeLock?.stop()
+    }
+    func takeWorkBreak(minutes: Int = 5) {
+        guard isZeroDriftActive else { return }
+        let begin = { [weak self] in
+            guard let self, self.isZeroDriftActive else { return }
+            self.breakEndsAt = min(self.zeroDriftEndsAt ?? .distantFuture, Date().addingTimeInterval(TimeInterval(minutes * 60)))
+            self.workPhase = .resting; self.zeroDriftIdleLock?.stop()
+        }
+        if hasActiveSession { finishActiveSession(afterEnd: begin) } else { begin() }
+    }
+    func addWorkSchedule(_ schedule: WorkPeriodSchedule) {
+        journal.workSchedules.append(schedule); persistJournal()
+    }
+    func removeWorkSchedule(_ id: UUID) {
+        journal.workSchedules.removeAll { $0.id == id }; persistJournal()
+    }
+    private func workOccurrenceKey(_ schedule: WorkPeriodSchedule, _ interval: DateInterval) -> String {
+        "\(schedule.id):\(interval.start.timeIntervalSince1970)"
+    }
+    private func suppressCurrentWorkSchedules() {
+        for schedule in journal.workSchedules {
+            if let interval = schedule.occurrence(at: Date()) { suppressedWorkOccurrences.insert(workOccurrenceKey(schedule, interval)) }
+        }
+    }
+    private func startWorkScheduleTimer() {
+        if !workScheduleInitialized { suppressCurrentWorkSchedules(); workScheduleInitialized = true }
+        workTimer?.invalidate()
+        workTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.checkWorkPeriods() }
+        }
+    }
+    private func checkWorkPeriods() {
+        if let end = zeroDriftEndsAt, end <= Date() { finishWorkPeriod(); return }
+        if let end = breakEndsAt, end <= Date() { breakEndsAt = nil; startZeroDriftIdleLockIfNeeded() }
+        guard !IntentEnvironment.isQA, !isZeroDriftActive, !hasActiveSession else { return }
+        for schedule in journal.workSchedules {
+            guard let interval = schedule.occurrence(at: Date()) else { continue }
+            let key = workOccurrenceKey(schedule, interval)
+            guard !suppressedWorkOccurrences.contains(key) else { continue }
+            suppressedWorkOccurrences.insert(key)
+            activateZeroDrift(until: interval.end); return
+        }
+        if UserDefaults.standard.bool(forKey: "intentGentleReminder"), !hasActiveSession,
+           Date().timeIntervalSince(reminderShownAt) > 3600 {
+            reminderShownAt = Date()
+            gentleReminder.show { [weak self] in _ = self?.presentWorkspace?() }
+        }
+    }
+
     func load() {
+        do {
+            journal = try IntentSessionJournal.load(from: journalURL); journalWritable = true
+            // Restart closes prior occurrences, never resumes restrictions.
+            for index in journal.records.indices where journal.records[index].endedAt == nil {
+                journal.records[index].endedAt = Date()
+            }
+            persistJournal()
+        } catch { journalWritable = false; errorMessage = "Could not read session history. Your existing history file has been preserved." }
+        startWorkScheduleTimer()
+
         if installedApps.isEmpty {
             installedApps = AppCatalog.load()
         }
@@ -280,6 +425,7 @@ final class IntentAppModel: ObservableObject {
             errorMessage = "Finish the active intention before switching accounts."
             return
         }
+        suppressedWorkOccurrences.removeAll(); workScheduleInitialized = false
         profileDirectory = directory
         store = IntentionStore(fileURL: IntentProfilePaths.intentionsURL(in: directory))
         scheduleStore = IntentScheduleStore(fileURL: IntentProfilePaths.schedulesURL(in: directory))
@@ -656,6 +802,11 @@ final class IntentAppModel: ObservableObject {
             undoStack = previousUndoStack
             return
         }
+        if let workspace = journal.records.last(where: { $0.intention.id == candidate.id })?.workspace {
+            journal.workspaces[intention.id] = workspace
+            if !journal.slotOrder.contains(intention.id) { journal.slotOrder.append(intention.id) }
+            persistJournal()
+        }
         pendingPurposeSessionSave = nil
         if isOnboardingCandidate {
             onboarding.retainSavedIntention(stored)
@@ -988,6 +1139,14 @@ final class IntentAppModel: ObservableObject {
     }
 
     func requestStart(_ requestedIntention: Intention) {
+        defer { releaseWorkPeriodAfterFailedStart() }
+        if requestedIntention.id != quickSelectionIntentionID { pendingResume = nil; pendingWorkspace = nil }
+        guard !requestedIntention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "Name your intention before starting."; return
+        }
+        if requestedIntention.sessionLocksManualFinish || requestedIntention.orderedFrictionNodes.contains(where: { if case .taskChecklist = $0.friction { return true }; return false }) {
+            IntentExitPasscode.offerOnce()
+        }
         let intention = SessionAppPresets.applying(allowed: alwaysAllowedApps, blocked: alwaysBlockedApps, to: requestedIntention)
         do {
             if let nextAllowedDate = try cooldownStore.nextAllowedDate(for: intention.id) {
@@ -1138,25 +1297,38 @@ final class IntentAppModel: ObservableObject {
     }
 
     func endAndSaveActiveSession() {
-        guard hasActiveSession, activeSessionCanFinishManually else { return }
+        guard hasActiveSession else { return }
         pendingOnboardingReplacement = nil
         saveSessionOnFinish = true
         endActiveSession()
     }
 
-    func endActiveSession() {
+    func endActiveSession() { finishActiveSession(afterEnd: nil) }
+    private func finishActiveSession(afterEnd: (() -> Void)?) {
+        guard hasActiveSession, !finishPromptOpen else { return }
         sessionSwitchWarning = nil
-        guard activeSessionCanFinishManually else {
-            if !activeChecklist.isEmpty { errorMessage = "Check off your tasks to finish this intention." }
-            else if let activeSessionEndsAt {
-                errorMessage = "This intention is locked for another \(Self.durationText(until: activeSessionEndsAt))."
-            }
-            return
+        guard !activeSessionCanFinishManually else { activeLock?.stop(); afterEnd?(); return }
+        guard IntentExitPasscode.isConfigured else {
+            saveSessionOnFinish = false
+            errorMessage = "Finish the checklist or wait for the timer. Safety Stop remains available if something goes wrong."; return
         }
-        activeLock?.stop()
+        finishPromptOpen = true
+        let occurrence = activeSessionOccurrenceID
+        Task { [weak self] in
+            guard let self else { return }
+            let authorized = await IntentExitPasscode.authorize(title: "End this intention early?")
+            self.finishPromptOpen = false
+            guard authorized, self.activeSessionOccurrenceID == occurrence else { self.saveSessionOnFinish = false; return }
+            self.captureRecoveryCheckpoint()
+            self.activeLock?.stop(); afterEnd?()
+        }
     }
 
     func emergencyStop(showMessage: Bool = true) {
+        IntentExitPasscode.cancelAuthorization()
+        suppressCurrentWorkSchedules()
+        workPhase = showMessage ? .recovery : .inactive
+        breakEndsAt = nil
         pendingOnboardingReplacement = nil
         sessionExpiryPolicy?.cancel()
         sessionLimitTask?.cancel()
@@ -1184,22 +1356,29 @@ final class IntentAppModel: ObservableObject {
     }
 
     func activateZeroDrift(until endDate: Date) {
+        guard !hasActiveSession, pendingFriction == nil, pendingEndTimeRequest == nil else {
+            errorMessage = "Finish the current intention before starting a work period."; return
+        }
         guard endDate > Date() else {
-            errorMessage = "Choose a Zero Drift finish time in the future."
+            errorMessage = "Choose a Require an intention finish time in the future."
             return
         }
 
+        guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
+            errorMessage = "Allow Accessibility and Screen Recording before requiring an intention."; return
+        }
         let state = ZeroDriftState(startedAt: Date(), endsAt: endDate)
         do {
             try zeroDriftStore.save(state)
         } catch {
-            errorMessage = "Could not save Zero Drift: \(error)"
+            errorMessage = "Could not save Require an intention: \(error)"
             return
         }
 
+        breakEndsAt = nil; workPhase = .choosing
         zeroDriftEndsAt = endDate
         scheduleZeroDriftLimit(until: endDate)
-        showOverlay()
+        _ = presentWorkspace?()
         startZeroDriftIdleLockIfNeeded()
     }
 
@@ -1219,7 +1398,7 @@ final class IntentAppModel: ObservableObject {
 
     func hideOverlay() {
         guard !isZeroDriftActive || hasActiveSession else {
-            errorMessage = "Zero Drift is active. Start an intention before hiding Intent."
+            errorMessage = "Require an intention is active. Start an intention before hiding Intent."
             showOverlay()
             return
         }
@@ -1276,6 +1455,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
+        defer { releaseWorkPeriodAfterFailedStart() }
         guard !intention.selectionRequiresTabReselection || quickSelectionIntentionID == intention.id else {
             errorMessage = "This intention used specific browser tabs. Open ` and choose the current tabs before running it again."
             return
@@ -1392,6 +1572,7 @@ final class IntentAppModel: ObservableObject {
             lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
         }
         let lock = FocusLock(spec: lockSpec)
+        lock.onManualFinishRequest = { [weak self] in Task { @MainActor [weak self] in self?.endActiveSession() } }
         pendingOnboardingReplacement = nil
         activeLock = lock
         activeSessionID = intention.id
@@ -1399,6 +1580,7 @@ final class IntentAppModel: ObservableObject {
         let occurrence = activeSessionOccurrenceID
         let onboardingOrigin = quickSelectionIntentionID == intention.id ? quickSelectionOnboardingOrigin : nil
         overlayPresenter?.hideSessionExpiry()
+        if isZeroDriftActive { workPhase = .running; breakEndsAt = nil }
         activeSessionIntention = intention
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
@@ -1411,7 +1593,7 @@ final class IntentAppModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard !Task.isCancelled, let self, self.activeSessionID == intention.id else { return }
                     if !windowIDs.isEmpty, !windowIDs.isSubset(of: Set(WorkspaceWindow.list(onScreen: false).map(\.id))) {
-                        self.activeLock?.stop()
+                        self.activeLock?.stopForSafety()
                         self.errorMessage = "A marked window closed, so the intention ended safely."
                         return
                     }
@@ -1421,7 +1603,7 @@ final class IntentAppModel: ObservableObject {
                               heartbeat.supports(.tabSessionIdentity, maxAge: 5),
                               BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
                             // Safety failures must release even a user-locked timer.
-                            self.activeLock?.stop()
+                            self.activeLock?.stopForSafety()
                             self.errorMessage = "The selected-tab intention stopped because Browser Guard disconnected or was turned off."
                             self.showOverlay()
                             return
@@ -1448,12 +1630,12 @@ final class IntentAppModel: ObservableObject {
             purposeUsageTracker = tracker
             tracker.start()
         }
-        saveSessionOnFinish = false
+        saveSessionOnFinish = false; endedEarly = false
         activeChecklist = intention.orderedFrictionNodes.flatMap { node -> [String] in
             if case .taskChecklist(let tasks) = node.friction { return tasks.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } }
             return []
         }
-        completedChecklist = []
+        completedChecklist = pendingResume?.completedTasks.filter { activeChecklist.indices.contains($0) } ?? []
         scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
         if let occurrence = activeSessionOccurrenceID, hasEligibleSessionControls {
             overlayPresenter?.showSessionControls(occurrenceID: occurrence)
@@ -1488,6 +1670,13 @@ final class IntentAppModel: ObservableObject {
                 try lock.run(onReady: { [weak self] in
                     Task { @MainActor [weak self] in
                         guard let self, self.activeSessionOccurrenceID == occurrence else { return }
+                        if let occurrence {
+                            self.currentRecord = IntentSessionRecord(id: occurrence, intention: intention, workspace: self.pendingWorkspace)
+                            self.journal.upsert(self.currentRecord!)
+                            if self.pendingResume?.id == self.journal.recovery?.id { self.journal.recovery = nil }
+                            self.pendingResume = nil
+                            self.persistJournal()
+                        }
                         if let onboardingOrigin {
                             self.onboarding.capture(intention)
                             self.onboarding.record(onboardingOrigin == .overview ? .overviewRun : .quickMarkRun)
@@ -1506,6 +1695,13 @@ final class IntentAppModel: ObservableObject {
             renewalQueue?.sync {}
             try? ActiveBrowserRulesStore().clear()
             Task { @MainActor in
+                if var record = self.currentRecord, record.id == occurrence {
+                    record.endedAt = Date(); record.completedTasks = self.completedChecklist
+                    record.remainingSeconds = self.activeSessionEndsAt.map { max(0, $0.timeIntervalSinceNow) }
+                    self.journal.upsert(record); self.persistJournal()
+                }
+                IntentExitPasscode.cancelAuthorization()
+                self.currentRecord = nil; self.pendingWorkspace = nil
                 let replacement = self.pendingReplacementIntention
                 let wasPurposeSession = self.purposeTemporaryIntention?.id == intention.id
                 let purposeUsage = self.purposeUsageTracker?.stop()
@@ -1523,7 +1719,7 @@ final class IntentAppModel: ObservableObject {
                 if lock.didStopForSafety {
                     self.emergencyStop()
                 } else if failureMessage == nil {
-                    self.beginCooldown(for: intention)
+                    if !self.endedEarly { self.beginCooldown(for: intention) }
                 } else {
                     self.emergencyStop(showMessage: false)
                     self.errorMessage = failureMessage
@@ -1573,33 +1769,37 @@ final class IntentAppModel: ObservableObject {
 
     private func scheduleZeroDriftLimit(until endDate: Date) {
         zeroDriftLimitTask?.cancel()
+        if endDate == .distantFuture { return }
         let duration = max(0.1, endDate.timeIntervalSinceNow)
         zeroDriftLimitTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
-            self.zeroDriftEndsAt = nil
-            self.zeroDriftLimitTask = nil
-            try? self.zeroDriftStore.clear()
-            self.zeroDriftIdleLock?.stop()
-            self.errorMessage = "Zero Drift finished."
+            self.finishWorkPeriod()
+            self.errorMessage = "Require an intention finished."
         }
     }
 
     private func startZeroDriftIdleLockIfNeeded() {
-        guard isZeroDriftActive,
+        guard isZeroDriftActive, breakEndsAt == nil,
               !hasActiveSession,
               zeroDriftIdleLock == nil else {
             return
         }
 
+        workPhase = .choosing
+        guard presentWorkspace?() == true else {
+            emergencyStop(showMessage: false); workPhase = .recovery
+            errorMessage = "Could not open your workspace. Restrictions have been released."
+            return
+        }
         let intentBundleIdentifier = Bundle.main.bundleIdentifier ?? "dev.loganmondi.intent"
         let spec = FocusSessionSpec(
-            displayName: "Zero Drift",
+            displayName: "Require an intention",
             startupSteps: [],
-            allowedBundleIdentifiers: [intentBundleIdentifier],
+            allowedBundleIdentifiers: Set(alwaysAllowedApps.map(\.bundleIdentifier)).union([intentBundleIdentifier]),
             fallbackBundleIdentifier: intentBundleIdentifier,
-            strictSingleApp: true,
-            blockAppSwitching: true,
+            strictSingleApp: false,
+            blockAppSwitching: false,
             blockNewApps: true,
             keepFocused: true,
             blockBrowserTabEscape: false,
@@ -1621,7 +1821,7 @@ final class IntentAppModel: ObservableObject {
                 try lock.run()
                 failureMessage = nil
             } catch {
-                failureMessage = "Zero Drift could not secure this Mac: \(error)"
+                failureMessage = "Require an intention could not secure this Mac: \(error)"
             }
 
             Task { @MainActor in
@@ -1640,6 +1840,7 @@ final class IntentAppModel: ObservableObject {
                 }
 
                 if let failureMessage {
+                    self.workPhase = .recovery
                     self.zeroDriftEndsAt = nil
                     self.zeroDriftLimitTask?.cancel()
                     self.zeroDriftLimitTask = nil
@@ -1660,7 +1861,7 @@ final class IntentAppModel: ObservableObject {
         guard let occurrence = activeSessionOccurrenceID else { return }
         let absoluteEnd = [intention.endTimeDate(after: now), runtimeEndDate].compactMap { $0 }.min()
         let policy = SessionExpiryPolicy(occurrenceID: occurrence,
-            duration: intention.timerMinutes.map { TimeInterval($0) * 60 }, absoluteEnd: absoluteEnd)
+            duration: pendingResume?.remainingSeconds ?? intention.timerMinutes.map { TimeInterval($0) * 60 }, absoluteEnd: pendingResume?.remainingSeconds != nil ? nil : absoluteEnd)
         sessionExpiryPolicy = policy
         activeSessionAbsoluteEndTime = absoluteEnd
         guard let remaining = policy.remaining(elapsed: 0, now: now) else {

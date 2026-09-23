@@ -207,7 +207,7 @@ struct IntentSettingsView: View {
                 }
                 Text("Open Intent: \(overlayShortcut.displayName) · Finish: \(finishShortcut.displayName) · Quick Focus: \(OverlayShortcut.quickSelectionShortcut.displayName)")
                     .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
-                Text("Safety stop: ⌃⌥⌘Esc releases all restrictions, including Zero Drift.")
+                Text("Safety stop: ⌃⌥⌘Esc releases all restrictions, including Require an intention.")
                     .font(.caption2).foregroundStyle(GraphTheme.muted(colorScheme))
                 if let shortcutResetError { Text(shortcutResetError).font(.caption).foregroundStyle(.red) }
             }

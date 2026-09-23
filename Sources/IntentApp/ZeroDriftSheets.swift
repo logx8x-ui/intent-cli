@@ -14,18 +14,18 @@ struct ZeroDriftWarningSheet: View {
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.green)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Zero Drift")
+                    Text("Require an intention")
                         .font(.title2.weight(.semibold))
                     Text("Intentions become the only way through.")
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Text("Until the time you choose, an intention must always be running. Between intentions, Intent stays open and blocks access to other apps.")
+            Text("Between intentions, choose your next workspace. Always-allowed apps stay available. You can take timed breaks from overview settings.")
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Need to recover? Press ⌃⌥⌘Esc for Safety Stop to release all restrictions immediately. Restarting Intent or your Mac also ends Zero Drift; it never resumes automatically.")
+            Text("Need to recover? Press ⌃⌥⌘Esc for Safety Stop to release all restrictions immediately. Restarting Intent or your Mac also ends Require an intention; it never resumes automatically.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -53,6 +53,7 @@ struct ZeroDriftTimingSheet: View {
     enum TimingMode: String, CaseIterable, Identifiable {
         case duration = "Duration"
         case endTime = "End time"
+        case indefinite = "Indefinitely"
 
         var id: String { rawValue }
     }
@@ -70,7 +71,7 @@ struct ZeroDriftTimingSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("How long should Zero Drift run?")
+                Text("How long should Require an intention run?")
                     .font(.title2.weight(.semibold))
                 Text("The lock releases automatically at the finish time.")
                     .foregroundStyle(.secondary)
@@ -91,6 +92,8 @@ struct ZeroDriftTimingSheet: View {
                         durationField("Hours", value: $hours)
                         durationField("Minutes", value: $minutes)
                     }
+                case .indefinite:
+                    Text("Until you end the work period. Restart and Safety Stop always release restrictions.")
                 case .endTime:
                     HStack {
                         Text(Date(), style: .time)
@@ -114,7 +117,7 @@ struct ZeroDriftTimingSheet: View {
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Start Zero Drift") {
+                Button("Start Require an intention") {
                     activate()
                 }
                 .buttonStyle(.borderedProminent)
@@ -145,6 +148,8 @@ struct ZeroDriftTimingSheet: View {
                 hours: hours,
                 minutes: minutes
             )
+        case .indefinite:
+            finishDate = .distantFuture
         case .endTime:
             finishDate = ZeroDriftTiming.nextEndDate(matching: endTime)
         }

@@ -46,11 +46,9 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let model = IntentRuntime.shared.model
-        guard model.isZeroDriftActive else { return .terminateNow }
-        model.errorMessage = "Zero Drift is active. Intent will remain open until its timer finishes."
-        model.showOverlay()
-        return .terminateCancel
+        // Never veto a Mac shutdown/restart to enforce a focus commitment.
+        IntentRuntime.shared.model.emergencyStop(showMessage: false)
+        return .terminateNow
     }
 }
 
@@ -172,15 +170,19 @@ final class IntentStatusItemController: NSObject {
 
             let finishItem = NSMenuItem(title: "Finish Intention", action: #selector(finishIntention), keyEquivalent: "")
             finishItem.target = self
-            finishItem.isEnabled = model.activeSessionCanFinishManually
+            finishItem.isEnabled = model.activeSessionCanFinishManually || IntentExitPasscode.isConfigured
             menu.addItem(finishItem)
         }
 
         if model.isZeroDriftActive {
-            let status = model.zeroDriftStatusText.map { "Zero Drift: \($0) remaining" } ?? "Zero Drift: Active"
+            let status = model.zeroDriftStatusText.map { "Require an intention: \($0) remaining" } ?? "Require an intention: Active"
             let zeroDriftItem = NSMenuItem(title: status, action: nil, keyEquivalent: "")
             zeroDriftItem.isEnabled = false
             menu.addItem(zeroDriftItem)
+            let breakItem = NSMenuItem(title: "Take a 5-minute break", action: #selector(takeWorkBreak), keyEquivalent: "")
+            breakItem.target = self; menu.addItem(breakItem)
+            let endPeriodItem = NSMenuItem(title: "End work period…", action: #selector(endWorkPeriod), keyEquivalent: "")
+            endPeriodItem.target = self; menu.addItem(endPeriodItem)
         }
 
         if model.activityRecorder.isRecording {
@@ -236,6 +238,9 @@ final class IntentStatusItemController: NSObject {
     }
 
     @objc private func safetyStop() { model.emergencyStop() }
+
+    @objc private func takeWorkBreak() { model.takeWorkBreak() }
+    @objc private func endWorkPeriod() { model.endWorkPeriod() }
 
     @objc private func finishIntention() {
         model.endActiveSession()
@@ -316,6 +321,7 @@ final class IntentRuntime {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        _ = quickSelectionController
 
         hotKeyManager = GlobalHotKeyManager {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {

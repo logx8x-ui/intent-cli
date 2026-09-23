@@ -59,7 +59,7 @@ struct QuickSelectionOptionsView: View {
                     }))
                     .help("Finish after a duration or at a time you choose.")
                     if let index = timerIndex {
-                        Text("Choose one: Duration OR Set end time. Finish shortcuts stay disabled until completion.").font(.caption).foregroundStyle(.secondary)
+                        Text("Choose one: Duration OR Set end time. Finish early with your exit passcode, or wait for completion.").font(.caption).foregroundStyle(.secondary)
                         HStack(spacing: 8) {
                             timerModeButton("Duration", clock: false, index: index)
                             timerModeButton("Set end time", clock: true, index: index)
@@ -82,7 +82,7 @@ struct QuickSelectionOptionsView: View {
                     }))
                     .help("Check off your tasks during the intention; completing them all ends it.")
                     if let index = checklistIndex {
-                        Text("Finish shortcuts are disabled. The last checked task finishes the intention.").font(.caption).foregroundStyle(.secondary)
+                        Text("The last checked task finishes the intention. Your exit passcode lets you stop early.").font(.caption).foregroundStyle(.secondary)
                         if case .taskChecklist(let tasks) = selection.frictionNodes[index].friction {
                             ForEach(tasks.indices, id: \.self) { taskIndex in
                                 HStack {

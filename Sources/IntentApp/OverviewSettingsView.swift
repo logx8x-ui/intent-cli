@@ -36,6 +36,7 @@ struct OverviewSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(.title2.weight(.semibold))
+            ScrollView { IntentWorkPeriodSettings(model: model).padding(.trailing, 6) }.frame(maxHeight: 260)
             HStack { Toggle("Show clock", isOn: $showClock); Spacer(); Toggle("Window titles", isOn: $showTitles) }.font(.caption)
             Divider()
             Text("App defaults").font(.headline)

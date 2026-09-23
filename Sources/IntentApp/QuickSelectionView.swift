@@ -24,6 +24,97 @@ final class QuickSelectionController: ObservableObject {
     @Published var windows: [WindowItem] = []
     @Published var snapshots: [BrowserTabSnapshot] = []
     @Published var selection = QuickSelection()
+    @Published var pendingName = ""
+    @Published var showingSlots = false
+    @Published var naming = true
+    private var namePromptOpen = false
+    private var resumeRecord: IntentSessionRecord?
+    private func resetSelectionKeepingName() {
+        let name = selection.name; selection = QuickSelection(); selection.name = name
+    }
+    func confirmName() {
+        let value = pendingName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        selection.name = value; naming = false; hasStagedSelection = true
+    }
+    func rename() { pendingName = selection.name; naming = true }
+    private func askName() -> Bool {
+        guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard !namePromptOpen else { return false }
+            namePromptOpen = true; defer { namePromptOpen = false }
+            let alert = NSAlert(); alert.messageText = "What did you come to do?"
+            alert.informativeText = "Name your intention first. Then choose the apps and tabs that belong to it."
+            alert.addButton(withTitle: "Choose my workspace"); alert.addButton(withTitle: "Cancel")
+            let field = NSTextField(frame: .init(x: 0, y: 0, width: 360, height: 30)); field.placeholderString = "Reply to emails, study chapter 2…"
+            alert.accessoryView = field; alert.window.initialFirstResponder = field; alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+            NSApp.activate(ignoringOtherApps: true)
+            while alert.runModal() == .alertFirstButtonReturn {
+                pendingName = field.stringValue
+                if !pendingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { confirmName(); return true }
+                alert.messageText = "Give this intention a name first"
+            }
+            return false
+        }
+        naming = false; return true
+    }
+    func toggleSlots() { showingSlots.toggle(); focusedBrowserWindow = nil }
+    func captureWorkspace() -> SessionWorkspace {
+        let native = WorkspaceWindow.list(onScreen: false)
+        let windows = selection.windowIDsByApp.flatMap { app, ids in native.filter { $0.bundle == app && ids.contains($0.id) }.map { SessionWorkspace.Window(app: app, title: $0.title) } }
+        let tabs = selection.tabs.compactMap { key -> SessionWorkspace.Tab? in
+            guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == key.browser }),
+                  let tab = (snapshot.allTabs ?? snapshot.tabs).first(where: { $0.id == key.id }) else { return nil }
+            return .init(browser: key.browser, url: tab.url, title: tab.title)
+        }
+        return SessionWorkspace(selection: selection, windows: windows, tabs: tabs)
+    }
+    func prepare(_ intention: Intention, workspace: SessionWorkspace?, resume: IntentSessionRecord? = nil, run: Bool = false) {
+        guard !model.hasActiveSession else { return }
+        refresh()
+        var draft = QuickSelection(); draft.name = intention.name; draft.accessMode = intention.accessMode
+        draft.restrictionNodes = intention.restrictionNodes.filter { $0.id != QuickSelection.startupSuppressionID }
+        draft.frictionNodes = intention.frictionNodes
+        var missing = 0
+        if let workspace {
+            let resolved = workspace.resolve(runningApps: Set(apps.map(\.id)),
+                windows: WorkspaceWindow.list(onScreen: false).map { .init(id: $0.id, app: $0.bundle, title: $0.title) }, snapshots: snapshots)
+            draft = resolved.selection; draft.name = intention.name; missing = resolved.missing
+        } else {
+            // Legacy saved tab setups have no stable replay snapshot. Never turn
+            // their old browser allowance into unrestricted whole-browser access.
+            let presets = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
+            for app in intention.allowedApps where !presets.contains(app.bundleIdentifier) {
+                if QuickSelection.browsers.contains(app.bundleIdentifier) { missing += 1 }
+                else if apps.contains(where: { $0.id == app.bundleIdentifier }) { draft.apps.insert(app.bundleIdentifier) }
+                else { missing += 1 }
+            }
+        }
+        if let seconds = resume?.remainingSeconds {
+            draft.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
+            draft.restrictionNodes.append(.init(kind: .timer, position: .zero, durationMinutes: max(1, Int(ceil(seconds / 60))), showsRemainingTime: true, locksSessionUntilTimerEnds: true))
+        }
+        draft.sourceIntentionID = intention.id
+        selection = draft; pendingName = draft.name; naming = draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        hasStagedSelection = true; showingSlots = false; resumeRecord = resume
+        message = missing == 0 ? "Ready when you are. Review your workspace, then Return." : "\(missing) items need choosing again. Review your apps and tabs before running."
+        if run && missing == 0 && !naming { runSelection() }
+    }
+    private func prepareRunMetadata() {
+        model.pendingWorkspace = captureWorkspace()
+        if var resumed = resumeRecord {
+            let oldTasks = resumed.intention.orderedFrictionNodes.flatMap { node -> [String] in if case .taskChecklist(let tasks) = node.friction { return tasks }; return [] }
+            let newTasks = selection.frictionNodes.flatMap { node -> [String] in if case .taskChecklist(let tasks) = node.friction { return tasks }; return [] }
+            resumed.completedTasks = Set(newTasks.indices.filter { index in
+                oldTasks.indices.contains(index) && oldTasks[index] == newTasks[index] && resumed.completedTasks.contains(index)
+            })
+            let displayed = selection.restrictionNodes.first { $0.kind == .timer }?.durationMinutes
+            if selection.restrictionNodes.contains(where: { $0.kind == .endTime }) || displayed != resumed.remainingSeconds.map({ max(1, Int(ceil($0 / 60))) }) {
+                resumed.remainingSeconds = nil
+            }
+            model.pendingResume = resumed
+        } else { model.pendingResume = nil }
+    }
+
     @Published var modificationOrder = QuickSelectionOptionsSection.ordered
     @Published var combinationNotice = false
     @Published var optionsSection: QuickSelectionOptionsSection?
@@ -123,6 +214,9 @@ final class QuickSelectionController: ObservableObject {
         openModification(modificationOrder[index])
     }
     func openModification(_ section: QuickSelectionOptionsSection) {
+        if panel?.isVisible == true { guard !naming else { return } }
+        else if !askName() { return }
+        if section == .timer || section == .checklist { IntentExitPasscode.offerOnce() }
         if panel?.isVisible != true, let frontmost = NSWorkspace.shared.frontmostApplication,
            frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             stagedPreviousApp = frontmost
@@ -188,6 +282,20 @@ final class QuickSelectionController: ObservableObject {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { toggle(); return }
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
+        if onboarding.isTeaching, !onboarding.purposeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            selection.name = onboarding.purposeName; naming = false
+        }
+        if selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let originalApp = NSRunningApplication(processIdentifier: window.pid)
+            guard askName() else { originalApp?.activate(options: [.activateIgnoringOtherApps]); return }
+            originalApp?.activate(options: [.activateIgnoringOtherApps])
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                guard let self, WorkspaceWindow.focused()?.id == window.id else { return }
+                self.markForeground(wholeWindow: wholeWindow, fromShortcut: fromShortcut)
+            }
+            return
+        }
         let markToken = markGeneration
         let previous = markTask
         markSequence += 1
@@ -211,7 +319,7 @@ final class QuickSelectionController: ObservableObject {
                     return
                 }
                 guard !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
-                if !self.hasStagedSelection { self.selection = QuickSelection() }
+                if !self.hasStagedSelection { self.resetSelectionKeepingName() }
                 guard self.ensureSelectionSession(window.bundle) else {
                     self.showMarkRecovery(for: window.bundle, fresh: fresh, detail: self.message)
                     return
@@ -227,7 +335,7 @@ final class QuickSelectionController: ObservableObject {
                     }
                 }
             } else {
-                if !self.hasStagedSelection { self.selection = QuickSelection() }
+                if !self.hasStagedSelection { self.resetSelectionKeepingName() }
                 self.selection.toggleWindow(window.id, app: window.bundle)
             }
             self.dismissMarkNotice()
@@ -261,8 +369,9 @@ final class QuickSelectionController: ObservableObject {
             guard self.selection.windowIDsByApp.values.allSatisfy({ $0.isSubset(of: current) }) else {
                 self.model.errorMessage = "A marked window closed. Open ` and review your selection."; self.model.showOverlay(); return
             }
+            self.prepareRunMetadata()
             if self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .quickMark) {
-                self.workspaceOutlines.stop(); self.hasStagedSelection = false; self.hideStagedModifiers()
+                self.workspaceOutlines.stop(); self.hasStagedSelection = false; self.hideStagedModifiers(); self.selection = QuickSelection(); self.naming = true; self.resumeRecord = nil
             } else { self.model.showOverlay() }
         }
     }
@@ -312,6 +421,7 @@ final class QuickSelectionController: ObservableObject {
         overviewOpenTask?.cancel(); overviewOpenTask = nil
         runMarkedTask?.cancel()
         selection.clearTargets()
+        selection.name = ""; selection.sourceIntentionID = nil; pendingName = ""; naming = true; resumeRecord = nil
         hasStagedSelection = false
         workspaceOutlines.stop()
     }
@@ -335,7 +445,14 @@ final class QuickSelectionController: ObservableObject {
     private var wasOverlayVisible = false
     private var generation = UUID()
 
-    init(model: IntentAppModel) { self.model = model }
+    init(model: IntentAppModel) {
+        self.model = model
+        model.presentWorkspace = { [weak self] in
+            guard let self else { return false }
+            if self.panel?.isVisible != true { self.toggle() }
+            return self.panel?.isVisible == true
+        }
+    }
     var windowlessApps: [AppItem] {
         guard hasPreviewPermission, !loading else { return [] }
         return apps.filter { app in !windows.contains { $0.appID == app.id } }
@@ -361,8 +478,8 @@ final class QuickSelectionController: ObservableObject {
             return
         }
         if panel?.isVisible == true { cancel(); return }
-        guard !model.hasActiveSession, !model.isZeroDriftActive,
-              model.pendingPurposeSessionSave == nil, model.pendingFriction == nil,
+        guard !model.hasActiveSession,
+              model.pendingFriction == nil,
               model.pendingEndTimeRequest == nil else {
             model.errorMessage = "Finish the current intention and save or dismiss its result before opening the field of view."
             model.showOverlay(); return
@@ -379,7 +496,11 @@ final class QuickSelectionController: ObservableObject {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?" + (screenMissing ? "Privacy_ScreenCapture" : "Privacy_Accessibility"))!)
             return
         }
-        if !hasStagedSelection { selection = QuickSelection() }
+        if !hasStagedSelection { selection = QuickSelection(); resumeRecord = nil }
+        if onboarding.isTeaching, !onboarding.purposeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { selection.name = onboarding.purposeName }
+        naming = selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        pendingName = selection.name; showingSlots = false
+        model.pendingPurposeSessionSave = nil
         workspaceOutlines.stop()
         hideStagedModifiers()
         optionsSection = nil; message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
@@ -419,6 +540,10 @@ final class QuickSelectionController: ObservableObject {
             }
             // Phrase/checklist editing must not switch Allow/Block when typing '/'.
             if self.panel?.firstResponder is NSTextView { return event }
+            if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+                if !event.isARepeat { self.toggleSlots() }; return nil
+            }
+            if self.naming || self.showingSlots { return event }
             if event.keyCode == 7, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty, self.focusedBrowserWindow != nil {
                 if !event.isARepeat { self.toggleAllFocusedTabs() }
                 return nil
@@ -508,7 +633,7 @@ final class QuickSelectionController: ObservableObject {
         return !selectable.isEmpty && selectable.allSatisfy { isTabSelected($0.id, browser: window.appID) }
     }
     func selectWindow(_ window: WindowItem) {
-        guard !closing else { return }
+        guard !closing, !naming else { return }
         if QuickSelection.browsers.contains(window.appID) {
             guard !browserLists(for: window.appID).isEmpty else {
                 focusedBrowserWindow = window.id
@@ -538,6 +663,7 @@ final class QuickSelectionController: ObservableObject {
             && selection.tabs.contains(.init(browser: browser, id: id))
     }
     func selectTab(_ tab: BrowserTabItem, browser: String, extendingRange: Bool) {
+        guard !naming else { return }
         message = nil
         guard ensureSelectionSession(browser) else { return }
         guard let window = windows.first(where: { $0.id == focusedBrowserWindow }), window.appID == browser else { return }
@@ -546,19 +672,21 @@ final class QuickSelectionController: ObservableObject {
         if hasStagedSelection { refreshStagedOutlines() }
     }
     func toggleAllFocusedTabs() {
+        guard !naming else { return }
         guard let window = windows.first(where: { $0.id == focusedBrowserWindow }),
               let id = displayedBrowserWindowID(for: window) else { return }
         guard ensureSelectionSession(window.appID) else { return }
         selection.toggleBrowserWindow(browser: window.appID, windowID: id, snapshots: snapshots)
     }
     func selectApp(_ app: AppItem) {
+        guard !naming else { return }
         if app.app.isBrowser && selection.accessMode == .whitelist {
             message = "Select website tabs above a Chrome or Firefox window."; return
         }
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
     }
     func runSelection() {
-        guard !closing, !loading, !selection.apps.isEmpty else { return }
+        guard !closing, !loading, !naming, !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !selection.apps.isEmpty else { return }
         refresh()
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
@@ -575,14 +703,17 @@ final class QuickSelectionController: ObservableObject {
             guard let self, self.generation == token else { return }
             if start {
                 self.refresh()
+                self.prepareRunMetadata()
                 guard self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .overview) else {
                     self.message = self.model.errorMessage; self.closing = false
                     withAnimation(.easeOut(duration: 0.2)) { self.expanded = true }; return
                 }
                 self.hasStagedSelection = false; self.workspaceOutlines.stop()
+                self.selection = QuickSelection(); self.naming = true; self.resumeRecord = nil
                 self.close()
                 if self.model.pendingFriction != nil || self.model.pendingEndTimeRequest != nil { self.model.showOverlay() }
             } else {
+                self.hasStagedSelection = !self.selection.name.isEmpty
                 self.close()
                 if self.hasStagedSelection { self.refreshStagedOutlines(); self.showStagedModifiers() }
                 if self.wasOverlayVisible { self.model.showOverlay() } else { self.previousApp?.activate(options: []) }
@@ -812,7 +943,7 @@ private struct QuickSelectionView: View {
             let presetIDs = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
             let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
-            let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
+            let tabWidth: CGFloat = focused == nil ? 260 : min(440, geometry.size.width * 0.38)
             let header = controller.topSafeInset + 48 + (onboarding.isTeaching ? 60 : 0)
             let footer: CGFloat = controller.message == nil ? 140 : 210
             let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - footer - 12))
@@ -823,8 +954,10 @@ private struct QuickSelectionView: View {
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
+                if !controller.naming && !controller.showingSlots {
                 ForEach(Array(visibleWindows.enumerated()), id: \.element.id) { index, window in
                     if index < frames.count { windowCard(window, frame: frames[index]) }
+                }
                 }
                 VStack {
                     HStack {
@@ -838,13 +971,16 @@ private struct QuickSelectionView: View {
                             Text("ntent")
                         }.font(.system(size: 27, weight: .medium, design: .serif)).accessibilityElement(children: .ignore).accessibilityLabel("Intent")
                     }.padding(.horizontal, 28).frame(height: 48).padding(.top, controller.topSafeInset)
+                    if !controller.naming && !controller.showingSlots {
+                        Button(controller.selection.name + " · rename") { controller.rename() }.buttonStyle(.plain).font(.callout)
+                    }
                     if onboarding.isTeaching {
                         OnboardingSelectionHint(coordinator: controller.onboarding)
                             .frame(height: 60).padding(.horizontal, 28)
                     }
                 }.frame(width: geometry.size.width)
                 VStack(spacing: 8) {
-                    ModificationStrip(controller: controller).frame(maxWidth: 680).padding(.horizontal, 28)
+                    ModificationStrip(controller: controller).disabled(controller.naming || controller.showingSlots).frame(maxWidth: 680).padding(.horizontal, 28)
                     if let message = controller.message {
                         Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
                             .padding(8).frame(maxWidth: geometry.size.width - 56).frame(height: 52)
@@ -856,11 +992,12 @@ private struct QuickSelectionView: View {
                     }.padding(.horizontal, 28).frame(height: 26)
                     HStack {
                         Button("Close · ` / Esc") { controller.cancel() }.buttonStyle(.plain)
+                        Button(controller.showingSlots ? "Workspace · Space" : "Saved · Space") { controller.toggleSlots() }.buttonStyle(.plain)
                         Spacer()
                         Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
                         Spacer()
                         Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
-                            .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing)
+                            .disabled(controller.naming || controller.showingSlots || controller.selection.apps.isEmpty || controller.loading || controller.closing)
                         Button { controller.settingsOpen.toggle() } label: {
                             Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 32, height: 32)
                                 .background(.ultraThinMaterial, in: Circle())
@@ -875,9 +1012,30 @@ private struct QuickSelectionView: View {
                     ProgressView("Gathering your apps…").padding(18).background(.regularMaterial, in: Capsule())
                         .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
                 }
-                if let focused {
+                if let focused, !controller.naming, !controller.showingSlots {
                     tabGrid(focused).frame(width: tabWidth - 20, height: area.height)
                         .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
+                }
+                if controller.showingSlots {
+                    IntentSavedSlotsView(controller: controller, model: model)
+                        .frame(width: min(650, geometry.size.width - 80), height: max(200, area.height - 24))
+                        .position(x: geometry.size.width / 2, y: area.midY)
+                } else if controller.naming {
+                    IntentNameFirstView(controller: controller)
+                        .frame(width: min(460, geometry.size.width - 80))
+                        .position(x: geometry.size.width / 2, y: area.midY)
+                }
+                if !controller.showingSlots && focused == nil {
+                    IntentSessionNotesView(controller: controller, model: model)
+                        .frame(width: 220, height: min(220, area.height * 0.35))
+                        .position(x: geometry.size.width - 140, y: area.minY + min(220, area.height * 0.35) / 2)
+                }
+                if let recovery = model.journal.recovery {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack { Text("Continue \(recovery.intention.name)?").lineLimit(1); Button { model.dismissRecovery() } label: { Image(systemName: "xmark") } }
+                        Button("Jump back in") { controller.prepare(recovery.intention, workspace: recovery.workspace, resume: recovery) }
+                    }.font(.callout).padding(14).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .frame(width: 280).position(x: geometry.size.width - 170, y: controller.topSafeInset + 88)
                 }
                 RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)
