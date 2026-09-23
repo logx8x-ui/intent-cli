@@ -75,3 +75,37 @@ has no permanent add-on; the normal Firefox profile has the matching package.
 Changes are pushed on `codex/name-first-intentions`, not main's automatic beta
 channel. Creating a draft PR through the GitHub integration returned HTTP 403;
 the branch remains available for review. Complete live acceptance before merge.
+
+### Live follow-up: 2026-09-23
+
+Verified in the installed app with native UI controls:
+
+- Blank/whitespace names keep Choose disabled; no app cards can be selected
+  before naming. A valid name reveals the workspace and enables modifiers.
+- Saved intentions display their names, app icons, Review and Run. Space returns
+  to the existing named workspace without losing the draft.
+- Selecting Reminders enables Run. A normal session started, finished through
+  the File menu, and appeared in Today. Clicking history restored the named
+  selection without starting it.
+- A one-minute timer displayed remaining time. Ordinary Finish showed the
+  locked-session explanation. It ended automatically after approximately 60.5
+  seconds; the persisted occurrence has zero remaining time and an end date.
+- A one-task checklist displayed its unchecked task. Checking it ended the
+  session and persisted completedTasks [0].
+- Firefox supplied its current tab list. Chrome initially supplied no current
+  tabs, then reconnected during inspection without extension modification;
+  both heartbeat files became fresh on extension 0.2.14. Chrome selection and
+  deselection enabled and disabled Run respectively.
+- The first timer setup offered the recommended exit-passcode dialog. Not now
+  was selected for QA; no user credential was entered or changed.
+
+Not yet verified: physical global single/double-backtick timing (synthetic key
+input did not exercise the global path), user-entered passcode and recovery,
+work-period schedules/breaks, drag reorder, multi-window browser replay and
+sleep/reboot behavior. Native menu clicks are not evidence of global-hotkey
+acceptance. Chrome extension settings could not be opened because computer-use
+URL policy blocks that page; no workaround was attempted. The actual Intent
+tab picker was rechecked after its independently observed heartbeat recovered.
+
+Three locally named QA runs remain in Today as evidence; existing user
+intentions were preserved. No public beta release was published by this pass.
