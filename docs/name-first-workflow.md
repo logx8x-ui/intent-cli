@@ -58,3 +58,20 @@ automatically. They do not start sessions.
 
 Before ten external testers, also exercise sleep/wake, multi-display gestures,
 passcode entry/recovery, and real Chrome/Firefox selections on their machines.
+
+### Implementation pass: 2026-09-23
+
+Debug and release builds, all three Swift suites, the complete extension suite,
+and native-host specs passed. The final development bundle was installed and
+relaunched at `~/Applications/Intent.app`. The installer used macOS Python after
+the Homebrew Python/expat combination failed; no user data was reset.
+
+Live computer control reported that the Mac was locked. Consequently, rendered
+UI, physical shortcut timing, Keychain credential entry and live Chrome/Firefox
+multi-window acceptance are still pending. Normal Firefox's heartbeat was fresh;
+Chrome's heartbeat was stale at inspection. The auxiliary Firefox QA profile
+has no permanent add-on; the normal Firefox profile has the matching package.
+
+Changes are pushed on `codex/name-first-intentions`, not main's automatic beta
+channel. Creating a draft PR through the GitHub integration returned HTTP 403;
+the branch remains available for review. Complete live acceptance before merge.

@@ -58,7 +58,7 @@ enum IntentExitPasscode {
             q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let status = SecItemAdd(q as CFDictionary, nil)
             if status == errSecSuccess { return }
-            alert.messageText = "Could not save in Keychain. Try again." 
+            alert.messageText = "Could not save in Keychain. Try again."
         }
     }
     private static var authorizationPanel: NSPanel?
