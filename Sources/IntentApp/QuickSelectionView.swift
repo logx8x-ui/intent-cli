@@ -965,7 +965,7 @@ private struct QuickSelectionView: View {
             let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
-            let header = controller.topSafeInset + 48 + (onboarding.isTeaching ? 60 : 0)
+            let header = controller.topSafeInset + 48 + (!controller.naming && !controller.showingSlots ? 30 : 0) + (onboarding.isTeaching ? 60 : 0)
             let footer: CGFloat = controller.message == nil ? 140 : 210
             let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - footer - 12))
             let notesSize = CGSize(width: 240, height: min(260, area.height * 0.45))
@@ -1054,11 +1054,14 @@ private struct QuickSelectionView: View {
                     VStack(spacing: 0) {
                         Label("Drag to move", systemImage: "line.3.horizontal")
                             .font(.caption).frame(maxWidth: .infinity).padding(10).contentShape(Rectangle())
-                            .gesture(DragGesture(minimumDistance: 4)
+                            .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
                                 .onChanged { slotsDrag = $0.translation }
-                                .onEnded { _ in
-                                    slotsX = (slotsFrame.minX - area.minX) / max(1, area.width - slotsSize.width)
-                                    slotsY = (slotsFrame.minY - area.minY) / max(1, area.height - slotsSize.height)
+                                .onEnded { value in
+                                    let final = FieldOfViewLayout.panel(origin: CGPoint(
+                                        x: area.minX + (area.width - slotsSize.width) * slotsX + value.translation.width,
+                                        y: area.minY + (area.height - slotsSize.height) * slotsY + value.translation.height), size: slotsSize, in: area)
+                                    slotsX = (final.minX - area.minX) / max(1, area.width - slotsSize.width)
+                                    slotsY = (final.minY - area.minY) / max(1, area.height - slotsSize.height)
                                     slotsDrag = .zero
                                 })
                             .contextMenu { Button("Reset position") { slotsX = 0.5; slotsY = 0.5; slotsDrag = .zero } }
@@ -1081,11 +1084,14 @@ private struct QuickSelectionView: View {
                         }.font(.caption.weight(.medium)).padding(12).contentShape(Rectangle())
                             .help("Drag to move; your apps make room")
                             .accessibilityLabel("Move recent intentions")
-                            .gesture(DragGesture(minimumDistance: 4)
+                            .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
                                 .onChanged { notesDrag = $0.translation }
-                                .onEnded { _ in
-                                    notesX = (notesFrame.minX - area.minX) / max(1, area.width - notesSize.width)
-                                    notesY = (notesFrame.minY - area.minY) / max(1, area.height - notesSize.height)
+                                .onEnded { value in
+                                    let final = FieldOfViewLayout.panel(origin: CGPoint(
+                                        x: area.minX + (area.width - notesSize.width) * notesX + value.translation.width,
+                                        y: area.minY + (area.height - notesSize.height) * notesY + value.translation.height), size: notesSize, in: area)
+                                    notesX = (final.minX - area.minX) / max(1, area.width - notesSize.width)
+                                    notesY = (final.minY - area.minY) / max(1, area.height - notesSize.height)
                                     notesDrag = .zero
                                 })
                             .contextMenu { Button("Reset position") { notesX = 1; notesY = 0; notesDrag = .zero } }

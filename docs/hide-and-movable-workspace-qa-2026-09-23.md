@@ -25,8 +25,8 @@
 
 Do not confuse these source/build checks with certifying every Mac/browser configuration.
 
-- Install signed Firefox 0.2.16 and verify tab hiding/restoration in Logan's normal profile. CLI signing credentials are absent; the developer hub is signed out in Chrome, and its Firefox session could not be checked after the Mac locked. The source ZIP is not a permanently installable signed XPI.
-- Verify Chrome 0.2.16 is actually running after the local helper/source update, then test a complete live tab session.
+- Firefox 0.2.16 is now approved and signed by Mozilla (version 6508703, file 5052855). Its signed XPI is downloaded locally. Installation is waiting for Logan to approve the new recently-closed-tabs and hide/show-tab permissions; normal-profile Firefox hide/restore remains unverified. The public update feed has not been advanced from 0.2.14.
+- Chrome 0.2.16 normal-profile tab parking/restoration passed the live check below. Other profiles and browser-restart recovery still require live acceptance.
 - Physical single/double-key timing, trackpad Spaces/Mission Control, multiple displays, fullscreen and actual sleep/reboot remain a hardware acceptance matrix.
 - Real email verification/delivery, a second account's data isolation, and the public update/install path require separate release/environment acceptance. Unit tests do not establish those external outcomes.
 - Passcode entry/reset is user-owned credential interaction; automated QA does not create a real user passcode.
@@ -37,22 +37,14 @@ Hiding is worth testing because the workspace becomes quieter. Keep it optional 
 
 References: [Firefox tab hiding](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/tabs/hide), [Firefox persistent tab identity](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/sessions/getTabValue), [Chrome Tabs API](https://developer.chrome.com/docs/extensions/reference/api/tabs).
 
-## Final installed evidence
+## Installed follow-up — 24 September 2026
 
-The final release builds and data-preserving development installation passed.
-Deep/strict code-signature verification passed. The installed app's Mach-O UUID
-matches the source build: `EE40000A-745C-37EA-A903-105AC6E96EC8`; the embedded
-native helper matches `F2D918A6-8B0C-3A49-8EE5-CF48F8867648`. The development
-updater opt-out remains enabled. Both packaged visibility modules exactly match
-source. Chrome's actual heartbeat reports 0.2.16 and the hide capability; Firefox's
-actual normal-profile heartbeat remains 0.2.14.
+- Fixed a live drag failure in both list panels: use global gesture coordinates and persist the final translation instead of a stale rendered frame. Both Recent and Saved panels moved successfully; window previews rearranged around them, and saved relative coordinates changed. Recent position survived a reinstall. Saved reset-position action also passed.
+- Added header clearance for the named intention to avoid overlapping the first preview.
+- Native visibility work now runs on the main thread. A bounded recovery retry re-reads asynchronous macOS visibility state; a generation guard prevents old retries from touching a newer session.
+- Live native sessions hid six disallowed apps while preserving the selected Reminders app and the always-allowed apps. Normal finish and Safety Stop restored all six and cleared the recovery journal. Cmd-Q during an active test also released all owned visibility; the app was subsequently available again. Actual OS shutdown/reboot remains untested.
+- Chrome normal-profile heartbeat reports 0.2.16. With a disposable Example Domain tab selected, five original tabs moved into a holding window. After finish, the seven original tab IDs survived, the holding page was gone, and native Chrome UI showed the original tab order in the original window. Grouped test tabs exercised the documented fallback. Inactive Browser Guard intentionally clears its tab snapshot, so the final UI and live browser inventory were used instead of interpreting that cleared snapshot as tab loss.
+- Swift core, purpose and account suites passed again, including 100 repeated gesture sequences and layout checks for 1–50 windows. Release build and development install passed; strict/deep code-signature verification passed. Installed app UUID: `C6FFCC09-4B40-3933-A9DC-B7E61EFD44AB`.
+- No active restrictions or hidden native recovery entries remain. Disposable Chrome example tabs were closed. QA session records are backed up and removed separately from user intentions.
 
-macOS locked before the new installed UI could be exercised. The user has been
-asked to unlock it. No new live drag/hide/restore/quit/Spaces acceptance is claimed.
-Final browser rules are inactive and there are no pending hidden native resources.
-No QA intentions or history entries were created during this pass.
-
-The naming prompt now makes room for the movable history panel too; the recovery
-button lives inside that panel rather than overlapping it as a separate floating
-card. The source, automated verification and installed artifacts are ready for
-review, but this is not a completed ten-tester release gate or a zero-bug claim.
+This is verified local development progress, not a public app release or a completed ten-tester gate. Firefox permission/install acceptance, physical gestures/multiple displays/sleep/reboot, email delivery/account isolation and public update acceptance remain explicit gates above.

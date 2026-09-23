@@ -11,8 +11,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var window: UInt32? // nil means this controller hid the whole app
     }
     private static let file = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("hidden-workspace.json")
+    // Main-thread generation prevents a recovery retry from touching a newer session.
+    private static var recoveryGeneration = 0
     private let spec: FocusSessionSpec
-    private let queue = DispatchQueue(label: "intent.visibility")
+    // AppKit visibility requests must run on the application main thread.
+    // A background unhide can fail even after hide succeeded.
+    private let queue = DispatchQueue.main
     private var timer: DispatchSourceTimer?
     private var entries: [Entry] = []
     private var stopped = false
@@ -20,8 +24,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
 
     public func start() {
         guard spec.hideDistractions && spec.requiresEnforcement else { return }
-        queue.sync {
+        onMain {
             guard !stopped, timer == nil else { return }
+            Self.recoveryGeneration &+= 1
             entries = Self.restore()
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now(), repeating: 0.5)
@@ -30,14 +35,40 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
     }
     public func stop() {
-        queue.sync {
+        onMain {
             stopped = true
             guard timer != nil else { return }
             timer?.cancel(); timer = nil
-            entries = Self.restore()
+            entries = Self.beginRecovery()
         }
     }
-    public static func restoreInterruptedSession() { _ = restore() }
+    public static func restoreInterruptedSession() {
+        if Thread.isMainThread { _ = beginRecovery() }
+        else { DispatchQueue.main.sync { _ = beginRecovery() } }
+    }
+    private func onMain(_ action: () -> Void) {
+        if Thread.isMainThread { action() }
+        else { DispatchQueue.main.sync(execute: action) }
+    }
+
+    @discardableResult private static func beginRecovery() -> [Entry] {
+        recoveryGeneration &+= 1
+        let generation = recoveryGeneration
+        let pending = restore()
+        if !pending.isEmpty { retryRecovery(generation: generation, attempts: 4) }
+        return pending
+    }
+    private static func retryRecovery(generation: Int, attempts: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard generation == recoveryGeneration else { return }
+            // unhide() may report false while the visibility request is still in flight.
+            // Re-read macOS state before discarding ownership, or retry if it really failed.
+            let pending = restore()
+            if !pending.isEmpty && attempts > 1 {
+                retryRecovery(generation: generation, attempts: attempts - 1)
+            }
+        }
+    }
 
     private func refresh() {
         guard !stopped else { return }
