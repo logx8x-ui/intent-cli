@@ -18,6 +18,14 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         case .cooldown: selection.restrictionNodes.append(.init(kind: .coolDown, position: .init(x: 240, y: 390), durationMinutes: 30))
         }
     }
+    func disable(in selection: inout QuickSelection) {
+        switch self {
+        case .timer: selection.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
+        case .checklist: selection.frictionNodes.removeAll { if case .taskChecklist = $0.friction { return true }; return false }
+        case .searches: selection.restrictionNodes.removeAll { $0.kind == .allowBrowserSearches }
+        case .cooldown: selection.restrictionNodes.removeAll { $0.kind == .coolDown }
+        }
+    }
     var icon: String {
         switch self { case .timer: return "timer"; case .checklist: return "checklist"; case .searches: return "magnifyingglass"; case .cooldown: return "hourglass" }
     }

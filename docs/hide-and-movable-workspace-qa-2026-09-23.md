@@ -25,7 +25,7 @@
 
 Do not confuse these source/build checks with certifying every Mac/browser configuration.
 
-- Firefox 0.2.16 is now approved and signed by Mozilla (version 6508703, file 5052855). Its signed XPI is downloaded locally. Installation is waiting for Logan to approve the new recently-closed-tabs and hide/show-tab permissions; normal-profile Firefox hide/restore remains unverified. The public update feed has not been advanced from 0.2.14.
+- Firefox 0.2.16 is now approved and signed by Mozilla (version 6508703, file 5052855). Its signed XPI is downloaded locally. Logan installed it and the normal-profile heartbeat confirms 0.2.16; normal-profile Firefox hide/restore remains unverified. The public update feed has not been advanced from 0.2.14.
 - Chrome 0.2.16 normal-profile tab parking/restoration passed the live check below. Other profiles and browser-restart recovery still require live acceptance.
 - Physical single/double-key timing, trackpad Spaces/Mission Control, multiple displays, fullscreen and actual sleep/reboot remain a hardware acceptance matrix.
 - Real email verification/delivery, a second account's data isolation, and the public update/install path require separate release/environment acceptance. Unit tests do not establish those external outcomes.
@@ -48,3 +48,14 @@ References: [Firefox tab hiding](https://developer.mozilla.org/en-US/docs/Mozill
 - No active restrictions or hidden native recovery entries remain. Disposable Chrome example tabs were closed. QA session records are backed up and removed separately from user intentions.
 
 This is verified local development progress, not a public app release or a completed ten-tester gate. Firefox permission/install acceptance, physical gestures/multiple displays/sleep/reboot, email delivery/account isolation and public update acceptance remain explicit gates above.
+
+## Calm movement, finish focus and modifier toggles — 24 September follow-up
+
+- App-created focus locks no longer reactivate the pre-session app on completion. This removes the stale Firefox return target while leaving the CLI's explicit return behaviour intact.
+- During Recent/Saved panel dragging, the panel follows the pointer but preview packing uses its last settled position. On release previews reflow once over 650 ms; Reduce Motion still disables animation. This avoids repeated packing changes on every mouse event, including dragging beyond screen edges.
+- Backtick-number handlers disable an already-enabled modification and close its open editor. Enabling still opens settings; clicking an enabled modification still opens its settings. Timer off removes either duration or end-time configuration; other modifications stay untouched.
+- Swift suites passed; the new reproducible `scripts/test-modifier-toggles.sh` compiles the actual app enum and checks all four disable/re-enable paths, independence, repeated enable calls, and end-time removal.
+- Release build, development installation and deep/strict signature validation passed. Installed UUID: `AAAE8985-1EAB-358A-ADD5-0C4BECF6BFCB`.
+- Live manual finish via Intent's menu stayed in Intent instead of jumping to Firefox. A separate one-minute timer ran with Reminders frontmost; Reminders remained frontmost after automatic completion, both QA records ended, and hidden-resource ownership returned to zero. No normal-finish overlay was shown.
+- The UI automation tool rejects chords containing two non-modifier keys, so physical backtick-number delivery is not claimed as live-tested. The toggle implementation and existing gesture-sequence suite passed separately. Animation feel is still a user-experience check, not a claim from a static screenshot.
+- Firefox's normal-profile heartbeat now reports 0.2.16 after Logan completed its installation. Signed-extension distribution and wider tester release gates remain separate from this app fix.

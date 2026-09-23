@@ -1576,6 +1576,9 @@ final class IntentAppModel: ObservableObject {
             lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
         }
         lockSpec.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
+        // Finishing should leave the user where they are, not reactivate the
+        // application that happened to be frontmost before the session.
+        lockSpec.restorePreviousApplicationOnStop = false
         let lock = FocusLock(spec: lockSpec)
         lock.onManualFinishRequest = { [weak self] in Task { @MainActor [weak self] in self?.endActiveSession() } }
         pendingOnboardingReplacement = nil

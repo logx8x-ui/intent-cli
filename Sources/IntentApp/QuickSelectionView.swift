@@ -213,7 +213,14 @@ final class QuickSelectionController: ObservableObject {
     func openModification(_ index: Int) {
         guard !model.hasActiveSession, modificationOrder.indices.contains(index) else { return }
         if !hasStagedSelection && panel?.isVisible != true { selection = QuickSelection(); hasStagedSelection = true }
-        openModification(modificationOrder[index])
+        let section = modificationOrder[index]
+        if section.enabled(in: selection) {
+            section.disable(in: &selection)
+            combinationNotice = false
+            if optionsSection == section { closeModification() }
+        } else {
+            openModification(section)
+        }
     }
     func openModification(_ section: QuickSelectionOptionsSection) {
         if panel?.isVisible == true { guard !naming else { return } }
@@ -976,8 +983,17 @@ private struct QuickSelectionView: View {
             let slotsFrame = FieldOfViewLayout.panel(origin: CGPoint(
                 x: area.minX + (area.width - slotsSize.width) * slotsX + slotsDrag.width,
                 y: area.minY + (area.height - slotsSize.height) * slotsY + slotsDrag.height), size: slotsSize, in: area)
+            // The panel follows the pointer immediately; previews reflow only on
+            // release. Repacking every pointer event flips between competing
+            // layouts and creates distracting rapid movement.
+            let settledNotesFrame = FieldOfViewLayout.panel(origin: CGPoint(
+                x: area.minX + (area.width - notesSize.width) * notesX,
+                y: area.minY + (area.height - notesSize.height) * notesY), size: notesSize, in: area)
+            let settledSlotsFrame = FieldOfViewLayout.panel(origin: CGPoint(
+                x: area.minX + (area.width - slotsSize.width) * slotsX,
+                y: area.minY + (area.height - slotsSize.height) * slotsY), size: slotsSize, in: area)
             let frames = focused == nil || controller.showingSlots
-                ? FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, avoiding: controller.showingSlots ? slotsFrame : notesFrame)
+                ? FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, avoiding: controller.showingSlots ? settledSlotsFrame : settledNotesFrame)
                 : FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, tabHeight: 0)
             ZStack(alignment: .topLeading) {
                 Group {
@@ -989,7 +1005,7 @@ private struct QuickSelectionView: View {
                 ForEach(Array(visibleWindows.enumerated()), id: \.element.id) { index, window in
                     if index < frames.count {
                         windowCard(window, frame: frames[index])
-                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: frames[index])
+                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: frames[index])
                     }
                 }
                 }
@@ -1074,7 +1090,7 @@ private struct QuickSelectionView: View {
                     IntentNameFirstView(controller: controller)
                         .frame(width: min(460, max(180, namingArea.width - 24)))
                         .position(x: namingArea.midX, y: namingArea.midY)
-                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: namingArea)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: namingArea)
                 }
                 if !controller.showingSlots && focused == nil {
                     VStack(spacing: 0) {

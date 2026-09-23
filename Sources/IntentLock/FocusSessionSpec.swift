@@ -23,7 +23,7 @@ public struct FocusSessionSpec {
     public let finishShortcut: FocusKeyboardShortcut
     public let allowsManualFinish: Bool
     public let closeSessionResourcesOnFinish: Bool
-    public let restorePreviousApplicationOnStop: Bool
+    public var restorePreviousApplicationOnStop: Bool
     public let allowedWebsitesByBrowser: [String: [String]]
 
     public init(
