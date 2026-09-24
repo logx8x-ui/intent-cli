@@ -33,7 +33,7 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         switch self {
         case .timer: return "Finish after a duration or at a time you choose."
         case .checklist: return "Check off your tasks; completing them all ends the intention."
-        case .searches: return "Allow search pages in website-based intentions; selected tabs already allow navigation."
+        case .searches: return "Allow Google searches and results. Search tabs cannot open other websites."
         case .cooldown: return "Wait before starting this saved intention again."
         }
     }

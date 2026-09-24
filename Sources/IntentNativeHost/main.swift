@@ -84,7 +84,7 @@ struct HostRuleState: Codable, Equatable {
 
 struct HostResponse: Codable {
     var hideDistractions: Bool
-    var bundledExtensionVersion: String = "0.2.16"
+    var bundledExtensionVersion: String = "0.2.17"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?

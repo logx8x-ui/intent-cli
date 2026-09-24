@@ -26,7 +26,9 @@ final class QuickSelectionController: ObservableObject {
     @Published var selection = QuickSelection()
     @Published var pendingName = ""
     @Published var showingSlots = false
-    @Published var naming = true
+    @Published var naming = false
+    private var pendingFirstWindow: WindowItem?
+    private var pendingFirstApp: AppItem?
     private var namePromptOpen = false
     private var resumeRecord: IntentSessionRecord?
     private func resetSelectionKeepingName() {
@@ -36,24 +38,28 @@ final class QuickSelectionController: ObservableObject {
         let value = pendingName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         selection.name = value; naming = false; hasStagedSelection = true
+        if let window = pendingFirstWindow { pendingFirstWindow = nil; selectWindow(window) }
+        if let app = pendingFirstApp { pendingFirstApp = nil; selectApp(app) }
     }
-    func rename() { pendingName = selection.name; naming = true }
+    func rename() {
+        guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        pendingName = selection.name; naming = true
+    }
     private func askName() -> Bool {
         guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             guard !namePromptOpen else { return false }
             namePromptOpen = true; defer { namePromptOpen = false }
-            let alert = NSAlert(); alert.messageText = "What did you come to do?"
-            alert.informativeText = "Name your intention first. Then choose the apps and tabs that belong to it."
-            alert.addButton(withTitle: "Choose my workspace"); alert.addButton(withTitle: "Cancel")
-            let field = NSTextField(frame: .init(x: 0, y: 0, width: 360, height: 30)); field.placeholderString = "Reply to emails, study chapter 2…"
-            alert.accessoryView = field; alert.window.initialFirstResponder = field; alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
-            NSApp.activate(ignoringOtherApps: true)
-            while alert.runModal() == .alertFirstButtonReturn {
-                pendingName = field.stringValue
-                if !pendingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { confirmName(); return true }
-                alert.messageText = "Give this intention a name first"
-            }
-            return false
+            let prompt = SelectionPanel(contentRect: .init(x: 0, y: 0, width: 480, height: 112), styleMask: [.borderless], backing: .buffered, defer: false)
+            prompt.isReleasedWhenClosed = false; prompt.isOpaque = false; prompt.backgroundColor = .clear
+            prompt.level = .popUpMenu; prompt.center()
+            var accepted = false
+            prompt.contentView = NSHostingView(rootView: IntentNameBar(name: Binding(get: { self.pendingName }, set: { self.pendingName = $0 })) {
+                guard !self.pendingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                self.confirmName(); accepted = true; NSApp.stopModal()
+            }.onExitCommand { NSApp.abortModal() })
+            NSApp.activate(ignoringOtherApps: true); prompt.makeKeyAndOrderFront(nil)
+            NSApp.runModal(for: prompt); prompt.orderOut(nil)
+            return accepted
         }
         naming = false; return true
     }
@@ -211,6 +217,7 @@ final class QuickSelectionController: ObservableObject {
     private var stagedModifiersPanel: NSPanel?
     private var stagedPreviousApp: NSRunningApplication?
     func openModification(_ index: Int) {
+        guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard !model.hasActiveSession, modificationOrder.indices.contains(index) else { return }
         if !hasStagedSelection && panel?.isVisible != true { selection = QuickSelection(); hasStagedSelection = true }
         let section = modificationOrder[index]
@@ -431,7 +438,7 @@ final class QuickSelectionController: ObservableObject {
         overviewOpenTask?.cancel(); overviewOpenTask = nil
         runMarkedTask?.cancel()
         selection.clearTargets()
-        selection.name = ""; selection.sourceIntentionID = nil; pendingName = ""; naming = true; resumeRecord = nil
+        selection.name = ""; selection.sourceIntentionID = nil; pendingName = ""; naming = false; pendingFirstWindow = nil; pendingFirstApp = nil; resumeRecord = nil
         hasStagedSelection = false
         workspaceOutlines.stop()
     }
@@ -462,7 +469,7 @@ final class QuickSelectionController: ObservableObject {
             self.workspaceOutlines.stop(); self.hideStagedModifiers()
             self.hasStagedSelection = false
             self.selection = QuickSelection(); self.pendingName = ""
-            self.naming = true; self.resumeRecord = nil
+            self.naming = false; self.pendingFirstWindow = nil; self.pendingFirstApp = nil; self.resumeRecord = nil
         }
         model.restoreInterruptedWorkspace = { [weak self] intention, workspace in
             self?.prepare(intention, workspace: workspace)
@@ -519,7 +526,7 @@ final class QuickSelectionController: ObservableObject {
         }
         if !hasStagedSelection { selection = QuickSelection(); resumeRecord = nil }
         if onboarding.isTeaching, !onboarding.purposeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { selection.name = onboarding.purposeName }
-        naming = selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        naming = false; pendingFirstWindow = nil; pendingFirstApp = nil
         pendingName = selection.name; showingSlots = false
         model.pendingPurposeSessionSave = nil
         workspaceOutlines.stop()
@@ -655,6 +662,9 @@ final class QuickSelectionController: ObservableObject {
     }
     func selectWindow(_ window: WindowItem) {
         guard !closing, !naming else { return }
+        if selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingFirstWindow = window; naming = true; return
+        }
         if QuickSelection.browsers.contains(window.appID) {
             guard !browserLists(for: window.appID).isEmpty else {
                 focusedBrowserWindow = window.id
@@ -701,6 +711,9 @@ final class QuickSelectionController: ObservableObject {
     }
     func selectApp(_ app: AppItem) {
         guard !naming else { return }
+        if selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingFirstApp = app; naming = true; return
+        }
         if app.app.isBrowser && selection.accessMode == .whitelist {
             message = "Select website tabs above a Chrome or Firefox window."; return
         }
@@ -1001,13 +1014,11 @@ private struct QuickSelectionView: View {
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
-                if !controller.naming {
                 ForEach(Array(visibleWindows.enumerated()), id: \.element.id) { index, window in
                     if index < frames.count {
                         windowCard(window, frame: frames[index])
                             .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: frames[index])
                     }
-                }
                 }
                 VStack {
                     HStack {
@@ -1030,7 +1041,7 @@ private struct QuickSelectionView: View {
                     }
                 }.frame(width: geometry.size.width)
                 VStack(spacing: 8) {
-                    ModificationStrip(controller: controller).disabled(controller.naming || controller.showingSlots).frame(maxWidth: 680).padding(.horizontal, 28)
+                    ModificationStrip(controller: controller).disabled(controller.naming || controller.showingSlots || controller.selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).frame(maxWidth: 680).padding(.horizontal, 28)
                     if let message = controller.message {
                         Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
                             .padding(8).frame(maxWidth: geometry.size.width - 56).frame(height: 52)
@@ -1086,9 +1097,9 @@ private struct QuickSelectionView: View {
                         .frame(width: slotsFrame.width, height: slotsFrame.height)
                         .position(x: slotsFrame.midX, y: slotsFrame.midY)
                 } else if controller.naming {
-                    let namingArea = FieldOfViewLayout.workspace(around: notesFrame, in: area)
+                    let namingArea = area
                     IntentNameFirstView(controller: controller)
-                        .frame(width: min(460, max(180, namingArea.width - 24)))
+                        .frame(width: min(480, max(180, namingArea.width - 24)))
                         .position(x: namingArea.midX, y: namingArea.midY)
                         .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: namingArea)
                 }
@@ -1169,7 +1180,8 @@ private struct QuickSelectionView: View {
                 if browser {
                     Button {
                         controller.explicitBrowserWindow = nil
-                        controller.focusedBrowserWindow = controller.focusedBrowserWindow == window.id ? nil : window.id
+                        if controller.focusedBrowserWindow == window.id { controller.focusedBrowserWindow = nil }
+                        else { controller.selectWindow(window) }
                     } label: {
                         Image(systemName: "list.bullet").font(.system(size: 11, weight: .semibold))
                             .padding(.horizontal, 5).frame(height: 20)

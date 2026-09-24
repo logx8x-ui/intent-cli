@@ -304,6 +304,12 @@ async function run() {
     assert.equal(navigation.tabs.get(1).url, "https://discord.com/channels/b", "Typed arbitrary destinations return to the last committed page");
     await navigation.commit(1, "https://www.google.com/search?q=study", "generated");
     assert.equal(navigation.tabs.get(1).url, searches ? "https://www.google.com/search?q=study" : "https://discord.com/channels/b", "Address-bar searches require Searches");
+    if (searches) {
+      assert.ok(navigation.sessionRules.some(rule => rule.id === 23002 && rule.action.type === "allow" && rule.priority > 1000), "Selected-tab network enforcement allows search pages");
+      assert.ok(navigation.sessionRules.some(rule => rule.id === 23001 && rule.condition.tabIds.includes(1)), "Search tabs have a network block for non-search destinations");
+      await navigation.commit(1, "https://unrelated.example/result", "link");
+      assert.equal(navigation.tabs.get(1).url, "https://www.google.com/search?q=study", "Search result links stay on results even in a selected tab");
+    }
   }
 
   const commands = createHarness({ active: false }, [

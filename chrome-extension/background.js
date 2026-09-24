@@ -577,14 +577,18 @@ async function updateNetworkRules() {
   // blocks new, unselected tabs before their first document loads.
   if (typeof chrome.declarativeNetRequest.updateSessionRules === "function") {
     const selected = rules.active && Array.isArray(rules.selectedTabIDs) ? rules.selectedTabIDs : null;
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [23000],
-      addRules: selected === null || (rules.accessMode === "blacklist" && selected.length === 0) ? [] : [{
-        id: 23000, priority: 1000, action: { type: "block" },
-        condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"],
-          ...(rules.accessMode === "blacklist" ? { tabIds: selected } : (selected.length ? { excludedTabIds: selected } : {})) }
-      }]
-    });
+    const sessionRules = selected === null || (rules.accessMode === "blacklist" && selected.length === 0) ? [] : [{
+      id: 23000, priority: 1000, action: { type: "block" },
+      condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"],
+        ...(rules.accessMode === "blacklist" ? { tabIds: selected } : (selected.length ? { excludedTabIds: selected } : {})) }
+    }];
+    if (rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist") {
+      if (searchSessionTabs.size) sessionRules.push({id: 23001, priority: 1001, action: {type: "block"},
+        condition: {regexFilter: "^https?://", resourceTypes: ["main_frame"], tabIds: [...searchSessionTabs]}});
+      sessionRules.push({id: 23002, priority: 1002, action: {type: "allow"}, condition: {
+        regexFilter: "^https?://(www\\.)?google\\.[a-z.]+/(search([?].*)?|([?].*)?)$", resourceTypes: ["main_frame"]}});
+    }
+    await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [23000, 23001, 23002], addRules: sessionRules});
   }
   const nextRules = desiredNetworkRules();
   const nextFingerprint = JSON.stringify(nextRules);
@@ -624,8 +628,24 @@ function isFreshBlankTab(tab) {
   return Boolean(tab?.id && freshBlankTabIds.has(tab.id) && isSearchStagingURL(tab.url));
 }
 
+function searchOnlyNavigation(tabId, url) {
+  if (!rules.active || !rules.allowGoogleSearchTabs || rules.accessMode === "blacklist") return false;
+  if (IntentBrowserRules.isGoogleSearchURL(url) && !searchSessionTabs.has(tabId)) {
+    searchSessionTabs.add(tabId); updateNetworkRules().catch(() => {});
+  }
+  return searchSessionTabs.has(tabId) && !IntentBrowserRules.isSearchStagingURL(url) && !IntentBrowserRules.isGoogleSearchURL(url);
+}
+async function restoreSearchPage(tabId) {
+  const candidates = [lastAllowedURLByTab.get(tabId), committedURLByTab.get(tabId)];
+  const previous = candidates.find(url => url && IntentBrowserRules.isGoogleSearchURL(url)) || candidates.find(url => url && isSearchStagingURL(url));
+  const url = previous && (IntentBrowserRules.isGoogleSearchURL(previous) || isSearchStagingURL(previous)) ? previous : 'https://www.google.com/';
+  await chrome.tabs.update(tabId, {url}).catch(() => {});
+}
+
 function isRuntimeAllowedTab(tab) {
-  // Explicit tab selection follows that tab across URLs, redirects and SPA routes.
+  if (rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id) && tab?.url
+      && !isSearchStagingURL(tab.url) && !IntentBrowserRules.isGoogleSearchURL(tab.url)) return false;
+  // Explicit selections remain independent; search-created tabs are search-only.
   if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.accessMode === "blacklist" ? !rules.selectedTabIDs.includes(tab?.id) : (rules.selectedTabIDs.includes(tab?.id) || (rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id)));
   return Boolean(tab?.url && (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab)));
 }
@@ -633,6 +653,7 @@ function isRuntimeAllowedTab(tab) {
 async function primeAllowedTab() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
+    if (tab.id != null && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist" && IntentBrowserRules.isGoogleSearchURL(tab.url)) searchSessionTabs.add(tab.id);
     if (tab.id != null && isRuntimeAllowedTab(tab)) lastAllowedURLByTab.set(tab.id, tab.url);
   }
   const activeAllowed = tabs.find((tab) => tab.active && isRuntimeAllowedTab(tab));
@@ -1067,6 +1088,7 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0 || details.tabId < 0) return;
   Promise.resolve().then(async () => {
     if (!rules.active || !rules.blockNavigation) return;
+    if (searchOnlyNavigation(details.tabId, details.url)) { await restoreSearchPage(details.tabId); return; }
     if (Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: details.tabId})) {
       await returnToAllowedTab();
       return;
@@ -1106,6 +1128,7 @@ setInterval(sendHeartbeat, HEARTBEAT_MS);
 // and SPA navigation; native input guards prevent address editing when Searches is off.
 chrome.webNavigation?.onCommitted?.addListener(async (details) => {
   if (details.frameId !== 0 || details.tabId < 0) return;
+  if (searchOnlyNavigation(details.tabId, details.url)) { await restoreSearchPage(details.tabId); return; }
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: details.tabId})) return;
   const previous = committedURLByTab.get(details.tabId);
   const direct = ["typed", "generated", "keyword", "keyword_generated", "auto_bookmark"].includes(details.transitionType)

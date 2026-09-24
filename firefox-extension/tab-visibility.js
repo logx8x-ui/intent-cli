@@ -20,7 +20,10 @@
       this.state.recovered ||= [];
     }
     async save() {
-      if (!this.api.storage.session) throw new Error('Safe visibility storage unavailable');
+      if (!this.api.storage.session) {
+        if (this.firefox && this.api.sessions) return; // Persistent Firefox session markers own recovery.
+        throw new Error('Safe visibility storage unavailable');
+      }
       try { await this.api.storage.session.set({ [this.key]: this.state }); }
       catch (error) { this.state = null; throw error; }
     }
@@ -31,7 +34,7 @@
         await this.restore(); this.recoveredOnce = true; return;
       }
       this.recoveredOnce = false;
-      if (!this.api.storage.session) return;
+      if (!this.api.storage.session && !(this.firefox && this.api.sessions)) return;
       const policy = JSON.stringify([rules.startupSessionID, rules.accessMode, rules.selectedTabIDs, rules.allowedWebsites]);
       if (this.state.policy && this.state.policy !== policy) await this.restore();
       this.state.policy = policy;
@@ -109,7 +112,7 @@
           const owned = await this.api.sessions.getWindowValue(window.id, this.key).catch(() => null);
           if (!owned) continue;
           try {
-            if (window.state === 'minimized') await this.api.windows.update(window.id, {state: owned.state});
+            if (window.state === 'minimized') await this.api.windows.update(window.id, {state: owned.state, focused: false});
             await this.api.sessions.removeWindowValue(window.id, this.key);
           } catch (_) { /* Keep the ownership marker for a later retry. */ }
         }
@@ -120,7 +123,7 @@
         for (const tab of await this.api.tabs.query({})) {
           if (tab.url !== this.api.runtime.getURL('parked.html') || this.state.parking.includes(tab.windowId) || this.state.recovered.includes(tab.windowId)) continue;
           try {
-            await this.api.windows.update(tab.windowId, {state: 'normal'});
+            await this.api.windows.update(tab.windowId, {state: 'normal', focused: false});
             this.state.recovered.push(tab.windowId); await this.save();
           } catch (_) { /* Retry next heartbeat if the browser is busy. */ }
         }
@@ -137,7 +140,7 @@
           catch (_) {
             // The user may have closed the original window. Keep their live
             // tab intact and make the holding window visible for recovery.
-            await this.api.windows.update(item.parking, {state: 'normal'}).catch(() => {});
+            await this.api.windows.update(item.parking, {state: 'normal', focused: false}).catch(() => {});
             if (await this.api.windows.get(item.windowId).catch(() => null)) continue;
             // Original window is gone: relinquish ownership of the recovered tabs.
             this.state.recovered.push(item.parking);
@@ -148,7 +151,7 @@
       for (const item of [...this.state.minimized]) {
         const window = await this.api.windows.get(item.id).catch(() => null);
         if (window?.state === 'minimized') {
-          try { await this.api.windows.update(item.id, {state: item.state}); } catch (_) { continue; }
+          try { await this.api.windows.update(item.id, {state: item.state, focused: false}); } catch (_) { continue; }
         }
         this.state.minimized = this.state.minimized.filter(x => x.id !== item.id); await this.save();
       }
@@ -156,7 +159,7 @@
         const tabs = await this.api.tabs.query({windowId: id}).catch(() => []);
         // Close only our own empty holding page, never a user's tab/window.
         if (tabs.length === 1 && tabs[0].url === this.api.runtime.getURL('parked.html')) await this.api.tabs.remove(tabs[0].id).catch(() => {});
-        else if (tabs.length) await this.api.windows.update(id, {state: 'normal'}).catch(() => {});
+        else if (tabs.length) await this.api.windows.update(id, {state: 'normal', focused: false}).catch(() => {});
         if (!this.state.moved.some(x => x.parking === id)) this.state.parking = this.state.parking.filter(x => x !== id);
         await this.save();
       }

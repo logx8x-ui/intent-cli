@@ -40,6 +40,15 @@ function fixture() {
 }
 (async()=>{
   const active={active:true,hideDistractions:true,startupSessionID:'one',selectedTabIDs:[1]};
+  {
+    const f=fixture(); delete f.api.storage.session;
+    const v=new Visibility(f.api,true);
+    await v.sync(active,t=>t.id===1);
+    assert.equal(f.tabs[1].hidden,true,'Firefox hides without storage.session using session markers');
+    await new Visibility(f.api,true).sync({active:false},()=>true);
+    assert.equal(f.tabs[1].hidden,false,'Firefox markers restore after a worker restart without session storage');
+  }
+
   for(const firefox of [true,false]) {
     const f=fixture(), v=new Visibility(f.api,firefox);
     f.tabs[3].pinned=true;
@@ -59,10 +68,11 @@ function fixture() {
     assert.equal(f.windows[1].state,'minimized'); // Preserve preexisting minimization.
     assert(!f.removed.some(id=>id<=5));
   }
-  {const f=fixture(),v=new Visibility(f.api,false);
+  for (const firefox of [true, false]) {const f=fixture(),v=new Visibility(f.api,firefox);
     await v.sync(active,()=>false); assert.equal(f.windows[0].state,'minimized');
     assert.equal(f.tabs.length,5); // Whole blocked windows are never emptied.
-    await v.sync({active:false},()=>true); assert.equal(f.windows[0].state,'normal');}
+    await v.sync({active:false},()=>true); assert.equal(f.windows[0].state,'normal');
+    assert.equal(f.windows[0].focused,false,'Restoring a browser window must not steal focus');}
   {const f=fixture(),v=new Visibility(f.api,false);
     await v.sync(active,t=>t.id===1); const parking=f.tabs[1].windowId;
     f.windows.splice(f.windows.findIndex(w=>w.id===1),1);

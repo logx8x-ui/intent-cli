@@ -3,26 +3,30 @@ import SwiftUI
 import IntentCore
 import UniformTypeIdentifiers
 
-struct IntentNameFirstView: View {
-    @ObservedObject var controller: QuickSelectionController
+struct IntentNameBar: View {
+    @Binding var name: String
+    let submit: () -> Void
     @FocusState private var focused: Bool
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("NAME → CHOOSE → START").font(.caption.weight(.semibold)).foregroundStyle(.green)
-            Text("What did you come to do?").font(.system(size: 28, weight: .medium, design: .serif))
-            TextField("Reply to emails, study chapter 2…", text: $controller.pendingName)
-                .textFieldStyle(.plain).font(.title3).focused($focused).onSubmit { controller.confirmName() }
-            Rectangle().fill(.white.opacity(0.35)).frame(height: 1)
-            Text("Name it first. Then choose only what belongs to it.").font(.callout).foregroundStyle(.secondary)
-            HStack {
-                Button("Use a saved intention") { controller.toggleSlots() }.buttonStyle(.plain)
-                Spacer()
-                Button("Choose my workspace") { controller.confirmName() }.buttonStyle(.borderedProminent).tint(.green)
-                    .disabled(controller.pendingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("What did you come to do?").font(.system(size: 17, weight: .medium))
+            HStack(spacing: 12) {
+                TextField("Reply to emails, study chapter 2…", text: $name)
+                    .textFieldStyle(.plain).font(.system(size: 16)).focused($focused).onSubmit(submit)
+                Button(action: submit) { Image(systemName: "arrow.right").frame(width: 24, height: 24) }
+                    .buttonStyle(.plain).tint(.green).accessibilityLabel("Confirm intention name")
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        }.padding(28).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
-            .onAppear { focused = true }
+            Rectangle().fill(.white.opacity(0.25)).frame(height: 1)
+        }.padding(.horizontal, 22).padding(.vertical, 16)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18)))
+            .preferredColorScheme(.dark).onAppear { focused = true }
     }
+}
+struct IntentNameFirstView: View {
+    @ObservedObject var controller: QuickSelectionController
+    var body: some View { IntentNameBar(name: $controller.pendingName, submit: controller.confirmName) }
 }
 
 struct IntentSavedSlotsView: View {

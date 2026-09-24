@@ -161,7 +161,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
             }
         }
         if newOccurrence { timerPanel.setFrame(frame, display: true) }
-        if sessionOverlayState.expanded { timerPanel.orderFrontRegardless() }
+        timerPanel.orderFrontRegardless()
     }
 
     func hideSessionTimer() {
@@ -174,7 +174,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     @discardableResult
     func collapseSessionControlsIfExpanded() -> Bool {
         guard sessionOverlayState.collapse() else { return false }
-        sessionTimerPanel?.orderOut(nil)
+        resizeSessionControls()
         return true
     }
 
@@ -313,17 +313,25 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         guard model.hasEligibleSessionControls, let occurrence = model.activeSessionOccurrenceID else { return }
         if sessionOverlayState.occurrenceID != occurrence { showSessionControls(occurrenceID: occurrence); return }
         if isSessionControlsExpanded { _ = collapseSessionControlsIfExpanded() }
-        else { sessionOverlayState.toggle(); sessionTimerPanel?.orderFrontRegardless() }
+        else { sessionOverlayState.toggle(); resizeSessionControls() }
     }
 
+    private func resizeSessionControls() {
+        guard let panel = sessionTimerPanel else { return }
+        let size = sessionTimerSize
+        let old = panel.frame
+        panel.setFrame(NSRect(x: old.minX, y: old.maxY - size.height, width: size.width, height: size.height), display: true)
+        installSessionTimerContent(); panel.orderFrontRegardless()
+    }
     private var sessionTimerSize: NSSize {
+        if !sessionOverlayState.expanded { return NSSize(width: 300, height: 48) }
         let timerHeight: CGFloat = model.activeSessionEndsAt == nil ? 0 : (model.activeSessionAbsoluteEndTime == nil ? 54 : 74)
         let checklistHeight: CGFloat = model.activeChecklist.isEmpty ? 0 : 28 + min(230, CGFloat(model.activeChecklist.count) * 36)
         return NSSize(width: 336, height: 86 + timerHeight + checklistHeight)
     }
 
     private func installSessionTimerContent() {
-        sessionTimerPanel?.contentViewController = NSHostingController(rootView: SessionControlsView(model: model))
+        sessionTimerPanel?.contentViewController = NSHostingController(rootView: SessionControlsView(model: model, expanded: sessionOverlayState.expanded).frame(width: sessionTimerSize.width, height: sessionTimerSize.height))
     }
 
 }
@@ -349,6 +357,7 @@ private final class IntentOverlayPanel: NSPanel {
 
 private struct SessionControlsView: View {
     @ObservedObject var model: IntentAppModel
+    let expanded: Bool
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -358,11 +367,21 @@ private struct SessionControlsView: View {
                     Text(model.activeSessionName ?? "Intent").font(.system(size: 14, weight: .semibold)).lineLimit(1).allowsHitTesting(false)
                     SessionTimerDragRegion()
                 }.frame(height: 22)
-                Button { model.collapseSessionControlsIfExpanded() } label: {
-                    Image(systemName: "chevron.up").font(.system(size: 12, weight: .semibold)).frame(width: 24, height: 24)
-                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Hide controls · `").accessibilityLabel("Hide running controls")
+                if !expanded {
+                    if let end = model.activeSessionEndsAt {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(SessionTimerFormatter.countdownText(until: end, now: context.date)).monospacedDigit().font(.system(size: 12))
+                        }
+                    }
+                    if !model.activeChecklist.isEmpty {
+                        Text("\(model.completedChecklist.count)/\(model.activeChecklist.count)").font(.system(size: 12)).monospacedDigit()
+                    }
+                }
+                Button { model.toggleSessionControls() } label: {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 12, weight: .semibold)).frame(width: 24, height: 24)
+                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Expand or collapse controls · `").accessibilityLabel(expanded ? "Collapse running controls" : "Expand running controls")
             }
-            if model.activeSessionEndsAt != nil {
+            if expanded, model.activeSessionEndsAt != nil {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     VStack(alignment: .leading, spacing: 3) {
                         if let end = model.activeSessionEndsAt {
@@ -378,7 +397,7 @@ private struct SessionControlsView: View {
                     }
                 }
             }
-            if !model.activeChecklist.isEmpty {
+            if expanded, !model.activeChecklist.isEmpty {
                 HStack {
                     Text("TASKS").font(.system(size: 10, weight: .semibold)).tracking(1)
                     Spacer()
@@ -394,8 +413,8 @@ private struct SessionControlsView: View {
                     }
                 }
             }
-            Text(verbatim: "` hide controls").font(.system(size: 10)).foregroundStyle(.secondary)
-        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if expanded { Text(verbatim: "` collapse controls").font(.system(size: 10)).foregroundStyle(.secondary) }
+        }.padding(expanded ? 16 : 12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background { if reduceTransparency { RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.13)) } else { RoundedRectangle(cornerRadius: 18).fill(.regularMaterial) } }
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18)))
             .tint(.green).preferredColorScheme(.dark)
