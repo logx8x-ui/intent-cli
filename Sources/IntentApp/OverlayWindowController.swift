@@ -142,7 +142,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         guard sessionOverlayState.eligible else { hideSessionTimer(); return }
         let timerPanel = sessionTimerPanel ?? makeSessionTimerPanel()
         sessionTimerPanel = timerPanel
-        if newOccurrence { installSessionTimerContent() }
+        if newOccurrence || timerPanel.contentViewController == nil { installSessionTimerContent() }
 
         let screen = workingScreen()
         guard let screen else { return }
@@ -161,7 +161,8 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
             }
         }
         if newOccurrence { timerPanel.setFrame(frame, display: true) }
-        timerPanel.orderFrontRegardless()
+        if sessionOverlayState.visible { timerPanel.orderFrontRegardless() }
+        else { timerPanel.orderOut(nil) }
     }
 
     func hideSessionTimer() {
@@ -301,7 +302,8 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         panel.hasShadow = true
         panel.ignoresMouseEvents = false
         panel.isReleasedWhenClosed = false
-        panel.isMovableByWindowBackground = true
+        // Manual header dragging avoids macOS edge-tiling/snap gestures.
+        panel.isMovableByWindowBackground = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -312,16 +314,30 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     func toggleSessionControls() {
         guard model.hasEligibleSessionControls, let occurrence = model.activeSessionOccurrenceID else { return }
         if sessionOverlayState.occurrenceID != occurrence { showSessionControls(occurrenceID: occurrence); return }
-        if isSessionControlsExpanded { _ = collapseSessionControlsIfExpanded() }
-        else { sessionOverlayState.toggle(); resizeSessionControls() }
+        sessionOverlayState.toggleVisibility()
+        if sessionOverlayState.visible { showSessionControls(occurrenceID: occurrence) }
+        else { sessionTimerPanel?.orderOut(nil) }
+    }
+
+    func toggleSessionControlsExpansion() {
+        guard sessionOverlayState.eligible else { return }
+        sessionOverlayState.toggle()
+        resizeSessionControls()
     }
 
     private func resizeSessionControls() {
         guard let panel = sessionTimerPanel else { return }
         let size = sessionTimerSize
         let old = panel.frame
-        panel.setFrame(NSRect(x: old.minX, y: old.maxY - size.height, width: size.width, height: size.height), display: true)
-        installSessionTimerContent(); panel.orderFrontRegardless()
+        var frame = NSRect(x: old.minX, y: old.maxY - size.height, width: size.width, height: size.height)
+        if let screen = panel.screen {
+            // Keep the header reachable when expanding beside a screen edge.
+            frame.origin.x = min(max(frame.minX, screen.visibleFrame.minX), screen.visibleFrame.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, screen.visibleFrame.minY), screen.visibleFrame.maxY - frame.height)
+        }
+        panel.setFrame(frame, display: true)
+        installSessionTimerContent()
+        if sessionOverlayState.visible { panel.orderFrontRegardless() }
     }
     private var sessionTimerSize: NSSize {
         if !sessionOverlayState.expanded { return NSSize(width: 300, height: 48) }
@@ -344,8 +360,19 @@ private struct SessionTimerDragRegion: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class DragView: NSView {
+        private var dragOrigin: NSPoint?
+        private var windowOrigin: NSPoint?
         override func mouseDown(with event: NSEvent) {
-            window?.performDrag(with: event)
+            dragOrigin = NSEvent.mouseLocation
+            windowOrigin = window?.frame.origin
+        }
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = dragOrigin, let origin = windowOrigin else { return }
+            let current = NSEvent.mouseLocation
+            window?.setFrameOrigin(NSPoint(x: origin.x + current.x - start.x, y: origin.y + current.y - start.y))
+        }
+        override func mouseUp(with event: NSEvent) {
+            dragOrigin = nil; windowOrigin = nil
         }
     }
 }
@@ -377,9 +404,9 @@ private struct SessionControlsView: View {
                         Text("\(model.completedChecklist.count)/\(model.activeChecklist.count)").font(.system(size: 12)).monospacedDigit()
                     }
                 }
-                Button { model.toggleSessionControls() } label: {
+                Button { model.toggleSessionControlsExpansion() } label: {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 12, weight: .semibold)).frame(width: 24, height: 24)
-                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Expand or collapse controls · `").accessibilityLabel(expanded ? "Collapse running controls" : "Expand running controls")
+                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Expand or collapse controls").accessibilityLabel(expanded ? "Collapse running controls" : "Expand running controls")
             }
             if expanded, model.activeSessionEndsAt != nil {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -413,7 +440,7 @@ private struct SessionControlsView: View {
                     }
                 }
             }
-            if expanded { Text(verbatim: "` collapse controls").font(.system(size: 10)).foregroundStyle(.secondary) }
+            if expanded { Text(verbatim: "` hide / show controls").font(.system(size: 10)).foregroundStyle(.secondary) }
         }.padding(expanded ? 16 : 12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background { if reduceTransparency { RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.13)) } else { RoundedRectangle(cornerRadius: 18).fill(.regularMaterial) } }
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18)))

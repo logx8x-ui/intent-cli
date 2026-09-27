@@ -39,19 +39,20 @@ public struct SessionOverlayPolicy {
     public private(set) var occurrenceID: UUID?
     public private(set) var eligible = false
     public private(set) var expanded = false
+    public private(set) var visible = false
     public init() {}
 
     public mutating func update(occurrenceID: UUID, hasTimer: Bool, hasChecklist: Bool) {
         let isNewRun = self.occurrenceID != occurrenceID
         self.occurrenceID = occurrenceID
         eligible = hasTimer || hasChecklist
-        if isNewRun { expanded = eligible }
-        else if !eligible { expanded = false }
+        if isNewRun { expanded = eligible; visible = eligible }
+        else if !eligible { expanded = false; visible = false }
     }
 
     @discardableResult
     public mutating func collapse() -> Bool {
-        guard eligible && expanded else { return false }
+        guard eligible && visible && expanded else { return false }
         expanded = false
         return true
     }
@@ -59,6 +60,11 @@ public struct SessionOverlayPolicy {
     public mutating func toggle() {
         guard eligible else { return }
         expanded.toggle()
+    }
+
+    public mutating func toggleVisibility() {
+        guard eligible else { return }
+        visible.toggle()
     }
 
     public mutating func end() { self = Self() }

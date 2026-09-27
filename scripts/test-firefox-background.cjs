@@ -40,6 +40,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
 
   const browser = {
     runtime: {
+      getURL: path => 'extension://intent/' + path,
       getManifest: () => require("../firefox-extension/manifest.json"),
       onMessage: { addListener: (listener) => listeners.onMessage.push(listener) },
       sendNativeMessage: async (_hostName, message) => {
@@ -151,6 +152,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   return {
     tabs,
     effectiveRules: context.effectiveRules,
+    allowedTabIDs: () => [...tabs.values()].filter(context.isRuntimeAllowedTab).map(tab => tab.id),
     browserSessionID: () => vm.runInNewContext("browserSessionID", context),
     async command(message) {
       await context.handleRequestedTab(message);
@@ -258,6 +260,32 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  // Old blank/result tabs must not inherit the fresh-search allowance.
+  {
+    const searchRules = {active: true, hideDistractions: true, accessMode: 'whitelist', selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], startupSessionID: 'fresh-search-regression', blockTabSwitching: true, blockNavigation: true, blockNewTabs: true, allowGoogleSearchTabs: true};
+    const sessionStorage = {};
+    const freshSearch = createHarness(searchRules, [
+      {id: 1, windowId: 1, active: true, url: 'https://example.com/work'},
+      {id: 2, windowId: 1, active: false, url: 'about:blank'},
+      {id: 3, windowId: 1, active: false, url: 'https://www.google.com/search?q=old'}
+    ], {sessionStorage});
+    await freshSearch.ready();
+    assert.deepEqual(freshSearch.allowedTabIDs(), [1], 'Existing blank/search tabs stay outside the intention');
+    await freshSearch.activate(3);
+    assert.equal(freshSearch.tabs.get(1).active, true, 'An old results tab cannot be activated');
+    await freshSearch.create({id: 9, windowId: 1, active: true, url: 'about:blank'});
+    assert.deepEqual(freshSearch.allowedTabIDs(), [1,9], 'A tab created during the intention can search');
+    await freshSearch.update(9, {url: 'https://www.google.com/search?q=focus'});
+    assert.equal(freshSearch.tabs.get(9).url, 'https://www.google.com/search?q=focus');
+    const blocked = await freshSearch.update(9, {url: 'https://example.org/'}); assert.equal(blocked.cancel, true);
+    assert.equal(freshSearch.tabs.get(9).url, 'https://www.google.com/search?q=focus', 'Fresh search tabs cannot leave search results');
+    await freshSearch.create({id: 10, windowId: 2, active: false, url: 'about:blank'});
+    await freshSearch.commit(10, 'extension://intent/parked.html', 'auto_toplevel');
+    assert.equal(freshSearch.tabs.get(10).url, 'extension://intent/parked.html', 'Holding page must not be rewritten as a search tab');
+    assert(!freshSearch.allowedTabIDs().includes(10), 'Holding sentinel never becomes search-authorized');
+
+  }
+
   for (const searches of [false, true]) {
     const navigation = createHarness({active: true, accessMode: "whitelist", selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], blockNavigation: true, allowGoogleSearchTabs: searches}, [{id: 1, windowId: 1, active: true, url: "https://discord.com/channels/a"}]);
     await navigation.ready();

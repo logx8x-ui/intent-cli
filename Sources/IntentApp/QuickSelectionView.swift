@@ -217,9 +217,10 @@ final class QuickSelectionController: ObservableObject {
     private var stagedModifiersPanel: NSPanel?
     private var stagedPreviousApp: NSRunningApplication?
     func openModification(_ index: Int) {
+        hoverModification(nil)
         guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard !model.hasActiveSession, modificationOrder.indices.contains(index) else { return }
-        if !hasStagedSelection && panel?.isVisible != true { selection = QuickSelection(); hasStagedSelection = true }
+        if !hasStagedSelection && panel?.isVisible != true { resetSelectionKeepingName() }
         let section = modificationOrder[index]
         if section.enabled(in: selection) {
             section.disable(in: &selection)
@@ -236,6 +237,14 @@ final class QuickSelectionController: ObservableObject {
         if panel?.isVisible != true, let frontmost = NSWorkspace.shared.frontmostApplication,
            frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             stagedPreviousApp = frontmost
+        }
+        hoverModification(nil)
+        if section == .searches {
+            if section.enabled(in: selection) { section.disable(in: &selection) }
+            else { section.enable(in: &selection) }
+            optionsSection = nil
+            if panel?.isVisible != true { showStagedModifiers() }
+            return
         }
         section.enable(in: &selection)
         optionsSection = section
@@ -275,16 +284,39 @@ final class QuickSelectionController: ObservableObject {
     func closeModification() {
         optionsSection = nil
         if panel?.isVisible != true {
-            showStagedModifiers()
+            // A popover may dismiss after overview has closed. Never recreate
+            // its strip here: only a new quick mark or shortcut can show it.
+            if selection.apps.isEmpty { hideStagedModifiers() }
             stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps])
             stagedPreviousApp = nil
         }
     }
     private func hideStagedModifiers() {
+        hoverModification(nil)
         optionsSection = nil
         let previousPanel = stagedModifiersPanel
         stagedModifiersPanel = nil
         previousPanel?.orderOut(nil)
+    }
+    private var modifierHintTask: Task<Void, Never>?
+    private var modifierHintPanel: NSPanel?
+    func hoverModification(_ section: QuickSelectionOptionsSection?) {
+        modifierHintTask?.cancel(); modifierHintTask = nil
+        modifierHintPanel?.orderOut(nil); modifierHintPanel = nil
+        guard let section, optionsSection == nil, !closing else { return }
+        modifierHintTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            guard let self, !Task.isCancelled, !self.closing, self.optionsSection == nil,
+                  self.panel?.isVisible == true || self.stagedModifiersPanel?.isVisible == true,
+                  let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) else { return }
+            let mouse = NSEvent.mouseLocation
+            let tip = NSPanel(contentRect: CGRect(x: min(max(screen.visibleFrame.minX + 8, mouse.x - 120), screen.visibleFrame.maxX - 248), y: min(mouse.y + 24, screen.visibleFrame.maxY - 82), width: 240, height: 74), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            tip.isOpaque = false; tip.backgroundColor = .clear; tip.hasShadow = true
+            tip.ignoresMouseEvents = true; tip.level = .popUpMenu
+            tip.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            tip.contentView = NSHostingView(rootView: Text(section.hint).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true).padding(12).frame(width: 240, height: 74).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).preferredColorScheme(.dark))
+            self.modifierHintPanel = tip; tip.orderFrontRegardless()
+        }
     }
     private func refreshStagedOutlines() {
         guard hasStagedSelection, !selection.apps.isEmpty,
@@ -300,17 +332,6 @@ final class QuickSelectionController: ObservableObject {
         guard let window = WorkspaceWindow.focused(), window.pid != ProcessInfo.processInfo.processIdentifier else { return }
         if onboarding.isTeaching, !onboarding.purposeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             selection.name = onboarding.purposeName; naming = false
-        }
-        if selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let originalApp = NSRunningApplication(processIdentifier: window.pid)
-            guard askName() else { originalApp?.activate(options: [.activateIgnoringOtherApps]); return }
-            originalApp?.activate(options: [.activateIgnoringOtherApps])
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 180_000_000)
-                guard let self, WorkspaceWindow.focused()?.id == window.id else { return }
-                self.markForeground(wholeWindow: wholeWindow, fromShortcut: fromShortcut)
-            }
-            return
         }
         let markToken = markGeneration
         let previous = markTask
@@ -334,7 +355,18 @@ final class QuickSelectionController: ObservableObject {
                     self.showMarkRecovery(for: window.bundle, fresh: fresh)
                     return
                 }
-                guard !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+                // Freeze the browser's whole highlighted group before presenting
+                // the name editor: sidebars may clear their selection on blur.
+                let groupIDs = Set((snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == browserWindow && $0.highlighted == true }.map(\.id))
+                let neededName = self.selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                guard await self.nameMarkTarget(window), !Task.isCancelled, self.markGeneration == markToken,
+                      !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
+                if neededName {
+                    guard await self.freshSnapshots(for: [window.bundle]),
+                          let current = self.snapshots.first(where: { $0.browserBundleIdentifier == window.bundle }),
+                          current.browserSessionID == snapshot.browserSessionID,
+                          groupIDs.isSubset(of: Set((current.allTabs ?? current.tabs).filter { $0.windowID == browserWindow }.map(\.id))) else { return }
+                }
                 if !self.hasStagedSelection { self.resetSelectionKeepingName() }
                 guard self.ensureSelectionSession(window.bundle) else {
                     self.showMarkRecovery(for: window.bundle, fresh: fresh, detail: self.message)
@@ -351,6 +383,7 @@ final class QuickSelectionController: ObservableObject {
                     }
                 }
             } else {
+                guard await self.nameMarkTarget(window), !Task.isCancelled, self.markGeneration == markToken else { return }
                 if !self.hasStagedSelection { self.resetSelectionKeepingName() }
                 self.selection.toggleWindow(window.id, app: window.bundle)
             }
@@ -365,6 +398,15 @@ final class QuickSelectionController: ObservableObject {
                 if fromShortcut && !wholeWindow { self.onboarding.record(.quickMarkShortcut) }
             }
         }
+    }
+    private func nameMarkTarget(_ window: WorkspaceWindow) async -> Bool {
+        guard selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+        let originalApp = NSRunningApplication(processIdentifier: window.pid)
+        let named = askName()
+        originalApp?.activate(options: [.activateIgnoringOtherApps])
+        guard named else { return false }
+        do { try await Task.sleep(nanoseconds: 180_000_000) } catch { return false }
+        return WorkspaceWindow.focused()?.id == window.id
     }
     func runMarked() {
         if panel?.isVisible == true { runSelection(); return }
@@ -749,12 +791,14 @@ final class QuickSelectionController: ObservableObject {
             } else {
                 self.hasStagedSelection = !self.selection.name.isEmpty
                 self.close()
-                if self.hasStagedSelection { self.refreshStagedOutlines(); self.showStagedModifiers() }
+                if self.hasStagedSelection { self.refreshStagedOutlines() }
                 if self.wasOverlayVisible { self.model.showOverlay() } else { self.previousApp?.activate(options: []) }
             }
         }
     }
     private func close() {
+        hideStagedModifiers()
+        hoverModification(nil)
         optionsSection = nil
         hoverTask?.cancel(); hoverTask = nil; hoveredTab = nil; tabPreview = nil; tabPreviewLoading = false
         for browser in QuickSelection.browsers { try? FileManager.default.removeItem(at: BrowserTabPreview.fileURL(browser: browser)) }
@@ -1321,14 +1365,17 @@ private struct ModificationStrip: View {
                         Image(systemName: section.icon)
                         Text(section.rawValue)
                         Text("` + \(index + 1)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                        if enabled { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
+                        if enabled { Circle().fill(accent).frame(width: 5, height: 5) }
                     }.font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
                         .overlay(Capsule().stroke(enabled ? accent.opacity(0.8) : .white.opacity(0.2)))
-                }.buttonStyle(.plain).help(section.hint + " Hold and drag to swap positions.")
+                }.buttonStyle(.plain)
+                    .accessibilityLabel("\(section.rawValue), \(enabled ? "on" : "off"), backtick plus \(index + 1)")
+                    .onHover { controller.hoverModification($0 ? section : nil) }
+                    .onDisappear { controller.hoverModification(nil) }
                     .offset(x: dragged == section ? dragOffset : 0).zIndex(dragged == section ? 1 : 0)
                     .highPriorityGesture(DragGesture(minimumDistance: 10)
-                        .onChanged { value in dragged = section; dragOffset = value.translation.width }
+                        .onChanged { value in controller.hoverModification(nil); dragged = section; dragOffset = value.translation.width }
                         .onEnded { value in
                             let slot = (geometry.size.width + 8) / CGFloat(controller.modificationOrder.count)
                             let destination = min(controller.modificationOrder.count - 1, max(0, index + Int((value.translation.width / slot).rounded())))
@@ -1346,7 +1393,7 @@ private struct ModificationStrip: View {
                                 Divider()
                             }
                             QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.closeModification() }
-                                .frame(height: section == .checklist ? 360 : 300)
+                                .frame(height: section == .checklist ? 310 : (section == .cooldown ? 160 : 240))
                         }.frame(width: 360)
                     }
             }

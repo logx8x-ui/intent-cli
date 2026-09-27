@@ -18,6 +18,8 @@
       this.state = store ? (await store.get(this.key))[this.key] : null;
       this.state ||= { hidden: [], moved: [], minimized: [], parking: [] };
       this.state.recovered ||= [];
+      this.state.groups ||= [];
+      this.state.orders ||= [];
     }
     async save() {
       if (!this.api.storage.session) {
@@ -30,7 +32,7 @@
     async reconcile(rules, allowed) {
       await this.load();
       if (!rules.active || !rules.hideDistractions) {
-        if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length) return;
+        if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length && !this.state.groups.length && !this.state.orders.length) return;
         await this.restore(); this.recoveredOnce = true; return;
       }
       this.recoveredOnce = false;
@@ -41,7 +43,7 @@
       const tabs = await this.api.tabs.query({});
       const windows = await this.api.windows.getAll({populate: false});
       const parked = new Set(this.state.parking);
-      const moved = new Set(this.state.moved.map(x => x.id));
+      const moved = new Set(this.state.moved.filter(x => tabs.some(t => t.id === x.id && t.windowId === x.parking)).map(x => x.id));
       const byWindow = new Map();
       for (const tab of tabs) {
         if (parked.has(tab.windowId) || moved.has(tab.id)) continue;
@@ -53,7 +55,7 @@
       }
       for (const [windowId, group] of byWindow) {
         const window = windows.find(w => w.id === windowId);
-        if (!window || window.type !== 'normal' || window.incognito) continue;
+        if (!window || window.type !== 'normal') continue;
         const blocked = group.filter(t => !allowed(t));
         if (!blocked.length) continue;
         const permitted = group.filter(allowed);
@@ -69,40 +71,83 @@
           continue;
         }
         if (blocked.some(t => t.active)) await this.api.tabs.update(permitted[0].id, {active: true});
-        if (this.firefox && this.api.tabs.hide) {
-          for (const tab of blocked) {
-            // Firefox forbids hiding pinned/capturing tabs. Existing enforcement
-            // remains the fallback; never unpin or interrupt a call to hide it.
-            if (tab.hidden || tab.pinned || tab.sharingState?.screen || tab.sharingState?.camera || tab.sharingState?.microphone) continue;
-            if (!this.state.hidden.includes(tab.id)) { this.state.hidden.push(tab.id); await this.save(); }
-            if (!this.api.sessions?.setTabValue) continue;
-            await this.api.sessions.setTabValue(tab.id, this.key, true);
-            await this.api.tabs.hide(tab.id).catch(() => {});
-          }
-        } else if (!this.firefox) {
-          const candidates = blocked.filter(t => !t.pinned && (t.groupId == null || t.groupId < 0) && (t.splitViewId == null || t.splitViewId < 0));
-          if (!candidates.length) continue;
-          let parking = this.state.parking.find(id => windows.some(w => w.id === id));
-          if (parking == null) {
-            const made = await this.api.windows.create({url: this.api.runtime.getURL('parked.html'), focused: false, state: 'minimized'});
-            parking = made.id; this.state.parking.push(parking); await this.save();
-          }
-          for (const tab of candidates.sort((a,b) => a.index - b.index)) {
-            if (!this.state.moved.some(x => x.id === tab.id)) {
-              this.state.moved.push({id: tab.id, windowId, index: tab.index, parking});
-              await this.save(); // Write intent before the move, including crash recovery.
-            }
-            await this.api.tabs.move(tab.id, {windowId: parking, index: -1}).catch(() => {});
-          }
-          await this.api.windows.update(parking, {state: 'minimized'}).catch(() => {});
+        // Move distractions out of the working window in both browsers.
+        // tabs.hide is still visible in third-party sidebars such as Sidebery.
+        // Preserve hidden tabs owned by other extensions, plus split pairs whose
+        // other member is allowed (moving one can also move its allowed partner).
+        let candidates = blocked.filter(t => !t.hidden && (t.splitViewId == null || t.splitViewId < 0 ||
+          group.filter(other => other.splitViewId === t.splitViewId).every(other => !allowed(other))));
+        if (!candidates.length) continue;
+        let parking = this.state.parking.find(id => windows.some(w => w.id === id && Boolean(w.incognito) === Boolean(window.incognito)));
+        if (parking == null) {
+          const made = await this.api.windows.create({url: this.api.runtime.getURL('parked.html'), focused: false, state: 'minimized', incognito: Boolean(window.incognito)});
+          parking = made.id; this.state.parking.push(parking); await this.save();
         }
+        let sourceToken = null;
+        if (this.firefox && this.api.sessions) {
+          sourceToken = await this.api.sessions.getWindowValue(windowId, this.key + 'Source').catch(() => null);
+          sourceToken ||= globalThis.crypto?.randomUUID?.() || `${Date.now()}-${windowId}-${Math.random()}`;
+          await this.api.sessions.setWindowValue(windowId, this.key + 'Source', sourceToken);
+        }
+        // Group metadata is recorded before a cross-window move dissolves it.
+        for (const tab of candidates) {
+          if (tab.groupId == null || tab.groupId < 0 || this.state.groups.some(g => g.id === tab.groupId)) continue;
+          if (!this.api.tabGroups?.get || !this.api.tabs.group) continue;
+          const metadata = await this.api.tabGroups.get(tab.groupId).catch(() => null);
+          if (metadata) {
+            this.state.groups.push({id: tab.groupId, windowId, title: metadata.title, color: metadata.color, collapsed: metadata.collapsed,
+              tabIDs: group.filter(t => t.groupId === tab.groupId).map(t => t.id)});
+            await this.save();
+          }
+        }
+        // Never dissolve a group unless its restore metadata is safely recorded.
+        candidates = candidates.filter(t => t.groupId == null || t.groupId < 0 || this.state.groups.some(g => g.id === t.groupId));
+        if (candidates.length && !this.state.orders.some(entry => entry.windowId === windowId)) {
+          this.state.orders.push({windowId, tabIDs: group.slice().sort((a,b) => a.index - b.index).map(t => t.id)});
+          await this.save();
+        }
+        const processed = new Set();
+        for (const tab of candidates.sort((a,b) => a.index - b.index)) {
+          if (processed.has(tab.id)) continue;
+          // Move a fully blocked split pair together to retain its relationship.
+          const batch = tab.splitViewId != null && tab.splitViewId >= 0
+            ? candidates.filter(t => t.splitViewId === tab.splitViewId) : [tab];
+          for (const member of batch) {
+            processed.add(member.id);
+            if (!this.state.moved.some(x => x.id === member.id)) {
+              const entry = {id: member.id, windowId, index: member.index, parking, pinned: Boolean(member.pinned), splitViewId: member.splitViewId, sourceToken};
+              this.state.moved.push(entry);
+              await this.save(); // Durable ownership before changing any user's tab.
+              if (this.firefox && this.api.sessions) await this.api.sessions.setTabValue(member.id, this.key, {...entry, kind: 'moved'});
+            }
+          }
+          const pinnedCount = tab.pinned ? (await this.api.tabs.query({windowId: parking})).filter(t => t.pinned).length : -1;
+          await this.api.tabs.move(batch.length === 1 ? tab.id : batch.map(t => t.id), {windowId: parking, index: pinnedCount}).catch(() => {});
+        }
+        await this.api.windows.update(parking, {state: 'minimized'}).catch(() => {});
       }
     }
     async restore() {
       // Firefox session values follow the real tab/window across browser restarts.
       if (this.firefox && this.api.sessions) {
+        const sourceWindows = new Map();
+        for (const window of await this.api.windows.getAll({populate: false})) {
+          const token = await this.api.sessions.getWindowValue(window.id, this.key + 'Source').catch(() => null);
+          if (token) sourceWindows.set(token, window.id);
+        }
         for (const tab of await this.api.tabs.query({})) {
-          if (!await this.api.sessions.getTabValue(tab.id, this.key).catch(() => false)) continue;
+          const owned = await this.api.sessions.getTabValue(tab.id, this.key).catch(() => false);
+          if (!owned) continue;
+          if (owned.kind === 'moved') {
+            if (!this.state.moved.some(item => item.id === tab.id)) {
+              this.state.moved.push({...owned, id: tab.id, windowId: sourceWindows.get(owned.sourceToken) ?? -1, parking: tab.windowId});
+              if (!this.state.parking.includes(tab.windowId)) this.state.parking.push(tab.windowId);
+              await this.save();
+            }
+            continue;
+          }
+          // Recover tabs hidden by older Intent versions without touching
+          // hidden state owned by Sidebery or another extension.
           try {
             if (tab.hidden) await this.api.tabs.show(tab.id);
             await this.api.sessions.removeTabValue(tab.id, this.key);
@@ -119,7 +164,7 @@
       }
       // Browser restart discards session-scoped IDs. Recognize only our holding
       // page and reveal its window, never guess identities from a user's URLs.
-      if (!this.firefox) {
+      {
         for (const tab of await this.api.tabs.query({})) {
           if (tab.url !== this.api.runtime.getURL('parked.html') || this.state.parking.includes(tab.windowId) || this.state.recovered.includes(tab.windowId)) continue;
           try {
@@ -133,10 +178,19 @@
         if (tab?.hidden) { try { await this.api.tabs.show(id); } catch (_) { continue; } }
         this.state.hidden = this.state.hidden.filter(x => x !== id); await this.save();
       }
+      const restoredIDs = new Set();
       for (const item of [...this.state.moved].sort((a,b) => a.windowId - b.windowId || a.index - b.index)) {
+        if (restoredIDs.has(item.id)) continue;
+        const batch = item.splitViewId != null && item.splitViewId >= 0
+          ? this.state.moved.filter(other => other.windowId === item.windowId && other.parking === item.parking && other.splitViewId === item.splitViewId).sort((a,b) => a.index - b.index) : [item];
         const tab = await this.api.tabs.get(item.id).catch(() => null);
         if (tab && tab.windowId === item.parking) {
-          try { await this.api.tabs.move(item.id, {windowId: item.windowId, index: item.index}); }
+          try {
+            await this.api.tabs.move(batch.length === 1 ? item.id : batch.map(member => member.id), {windowId: item.windowId, index: item.index});
+            // Firefox may silently refuse a move; retain ownership until it is verified.
+            const returned = await this.api.tabs.get(item.id);
+            if (returned.windowId !== item.windowId) continue;
+          }
           catch (_) {
             // The user may have closed the original window. Keep their live
             // tab intact and make the holding window visible for recovery.
@@ -146,7 +200,55 @@
             this.state.recovered.push(item.parking);
           }
         }
-        this.state.moved = this.state.moved.filter(x => x.id !== item.id); await this.save();
+        for (const member of batch) {
+          restoredIDs.add(member.id);
+          if (this.firefox && this.api.sessions && tab) await this.api.sessions.removeTabValue(member.id, this.key).catch(() => {});
+          this.state.moved = this.state.moved.filter(x => x.id !== member.id);
+        }
+        await this.save();
+      }
+      // Sidebars can reorder newly attached tabs while individual restores run.
+      // Normalize once after all cross-window moves, keeping newly created tabs.
+      for (const order of [...this.state.orders]) {
+        if (this.state.moved.some(item => item.windowId === order.windowId)) continue;
+        try {
+          let current = await this.api.tabs.query({windowId: order.windowId});
+          const existing = new Map(current.map(tab => [tab.id, tab]));
+          const originals = order.tabIDs.filter(id => existing.has(id));
+          const added = current.filter(tab => !order.tabIDs.includes(tab.id)).map(tab => tab.id);
+          const desired = [...originals, ...added];
+          const expected = [true, false].flatMap(pinned => desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned));
+          if (current.map(tab => tab.id).join(',') === expected.join(',')) {
+            this.state.orders = this.state.orders.filter(entry => entry !== order); await this.save(); continue;
+          }
+          // Pinned and ordinary tabs have distinct insertion ranges.
+          for (const pinned of [true, false]) {
+            const ids = desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned);
+            if (ids.length) await this.api.tabs.move(ids, {windowId: order.windowId,
+              index: pinned ? 0 : current.filter(tab => tab.pinned).length});
+          }
+          current = await this.api.tabs.query({windowId: order.windowId});
+          if (current.map(tab => tab.id).join(',') !== expected.join(',')) continue;
+          this.state.orders = this.state.orders.filter(entry => entry !== order); await this.save();
+        } catch (_) {
+          if (!await this.api.windows.get(order.windowId).catch(() => null)) {
+            this.state.orders = this.state.orders.filter(entry => entry !== order); await this.save();
+          }
+        }
+      }
+      for (const group of [...this.state.groups]) {
+        if (this.state.moved.some(item => group.tabIDs.includes(item.id))) continue;
+        const members = (await this.api.tabs.query({windowId: group.windowId}).catch(() => []))
+          .filter(t => group.tabIDs.includes(t.id) && !t.pinned && (t.groupId == null || t.groupId < 0 || t.groupId === group.id));
+        try {
+          if (members.length && this.api.tabs.group) {
+            const current = await this.api.tabGroups.get(group.id).catch(() => null);
+            const id = await this.api.tabs.group({tabIds: members.map(t => t.id),
+              ...(current?.windowId === group.windowId ? {groupId: group.id} : {createProperties: {windowId: group.windowId}})});
+            await this.api.tabGroups.update(id, {title: group.title || '', color: group.color, collapsed: Boolean(group.collapsed)});
+          }
+          this.state.groups = this.state.groups.filter(g => g.id !== group.id); await this.save();
+        } catch (_) { /* Keep metadata for the next restore attempt. */ }
       }
       for (const item of [...this.state.minimized]) {
         const window = await this.api.windows.get(item.id).catch(() => null);

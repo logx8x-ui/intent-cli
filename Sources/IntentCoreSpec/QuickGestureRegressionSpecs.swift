@@ -37,9 +37,14 @@ func runQuickGestureRegressionSpecs() throws {
     try expect(gesture.expire(now: 1) == nil, "Changing modifiers during a held gesture cannot fire a stale single")
     gesture.reset()
     _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
-    _ = gesture.key(code: 18, down: true, modified: false, repeatKey: false, now: 0.1)
-    _ = gesture.key(code: 19, down: true, modified: false, repeatKey: false, now: 0.2)
-    try expect(gesture.key(code: 19, down: false, modified: false, repeatKey: false, now: 0.3).consume, "Suppressed extra chord keys consume their matching release")
+    for (n, code) in [18, 19, 20, 21, 18].enumerated() {
+        let time = 0.1 + Double(n) * 0.1
+        try expect(gesture.key(code: code, down: true, modified: false, repeatKey: false, now: time).action == .modification([18,19,20,21].firstIndex(of: code)!), "One backtick hold supports all modifier numbers and toggling the same one again")
+        try expect(gesture.key(code: code, down: true, modified: false, repeatKey: true, now: time + 0.01).action == nil, "A held number cannot repeatedly toggle a modifier")
+        try expect(gesture.key(code: code, down: false, modified: false, repeatKey: false, now: time + 0.02).consume, "Each chord release is consumed")
+    }
+    _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.7)
+    try expect(gesture.expire(now: 1) == nil, "A multi-modifier hold cannot open overview on release")
     gesture.reset()
     _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
     _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.02)

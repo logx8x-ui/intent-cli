@@ -49,7 +49,7 @@ final class FocusBlurController: @unchecked Sendable {
     }
 
     func start() {
-        guard spec.requiresEnforcement else { return }
+        guard spec.requiresEnforcement && !spec.hideDistractions else { return }
         mutex.lock(); generation += 1; let token = generation; mutex.unlock()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: 0.15)

@@ -6,6 +6,7 @@ public struct QuickMarkGesture {
     public struct Result { public let consume: Bool; public let action: Action? }
     public static let doublePressInterval: TimeInterval = 0.28
     private var held = false
+    public var isHoldingPrefix: Bool { held }
     private var usedChord = false
     private var pendingSingle: TimeInterval?
     private var swallowed: Set<Int> = []
@@ -43,7 +44,9 @@ public struct QuickMarkGesture {
         }
         if down, held, !modified, [36, 76, 11, 53, 48, 18, 19, 20, 21].contains(code) {
             swallowed.insert(code)
-            guard !repeatKey, !usedChord else { return .init(consume: true, action: nil) }
+            // Each physical chord press is independent while the prefix stays down.
+            // usedChord only suppresses the delayed single on prefix release.
+            guard !repeatKey else { return .init(consume: true, action: nil) }
             usedChord = true; pendingSingle = nil
             return .init(consume: true, action: code == 48 ? .markWindow : (code == 53 ? .clear : (code == 11 ? .toggleMode : ([18,19,20,21].contains(code) ? .modification([18,19,20,21].firstIndex(of: code)!): .run))))
         }

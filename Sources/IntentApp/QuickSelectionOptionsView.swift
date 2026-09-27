@@ -33,7 +33,7 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         switch self {
         case .timer: return "Finish after a duration or at a time you choose."
         case .checklist: return "Check off your tasks; completing them all ends the intention."
-        case .searches: return "Allow Google searches and results. Search tabs cannot open other websites."
+        case .searches: return "Open fresh tabs for Google searches and results during this intention. Other websites stay blocked."
         case .cooldown: return "Wait before starting this saved intention again."
         }
     }
@@ -61,11 +61,6 @@ struct QuickSelectionOptionsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if section == .timer {
-                    Toggle("Timer", isOn: Binding(get: { timerIndex != nil }, set: { enabled in
-                        selection.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
-                        if enabled { selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: true)) }
-                    }))
-                    .help("Finish after a duration or at a time you choose.")
                     if let index = timerIndex {
                         Text("Choose one: Duration OR Set end time. Finish early with your exit passcode, or wait for completion.").font(.caption).foregroundStyle(.secondary)
                         HStack(spacing: 8) {
@@ -84,11 +79,6 @@ struct QuickSelectionOptionsView: View {
                     }
                     }
                     if section == .checklist {
-                    Toggle("Task checklist", isOn: Binding(get: { checklistIndex != nil }, set: { enabled in
-                        selection.frictionNodes.removeAll { if case .taskChecklist = $0.friction { return true }; return false }
-                        if enabled { selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260))) }
-                    }))
-                    .help("Check off your tasks during the intention; completing them all ends it.")
                     if let index = checklistIndex {
                         Text("The last checked task finishes the intention. Your exit passcode lets you stop early.").font(.caption).foregroundStyle(.secondary)
                         if case .taskChecklist(let tasks) = selection.frictionNodes[index].friction {
@@ -109,18 +99,17 @@ struct QuickSelectionOptionsView: View {
                         }
                     }
                     }
-                    if section == .searches {
-                    Toggle("Allow browser searches", isOn: option(.allowBrowserSearches)).help("Allow address-bar searches and new search tabs. Direct website addresses stay blocked.")
-                    }
                     if section == .cooldown {
-                    Toggle("Cooldown before replay", isOn: option(.coolDown)).help("Wait before starting this saved intention again.")
                     if let index = selection.restrictionNodes.firstIndex(where: { $0.kind == .coolDown }) {
                         HStack { TextField("Minutes", value: Binding(get: { selection.restrictionNodes[index].durationMinutes ?? 30 }, set: { selection.restrictionNodes[index].durationMinutes = min(1440, max(1, $0)) }), format: .number).textFieldStyle(.roundedBorder); Text("minutes") }
                     }
                     }
                 }.padding(2)
             }
-        }.padding(20).tint(.green)
+            Button("Remove \(section.rawValue.lowercased())") {
+                section.disable(in: &selection); close()
+            }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+        }.padding(18).tint(.green)
     }
     private func timerModeButton(_ title: String, clock: Bool, index: Int) -> some View {
         let selected = (selection.restrictionNodes[index].kind == .endTime) == clock
@@ -138,11 +127,5 @@ struct QuickSelectionOptionsView: View {
     private func setEnd(_ date: Date, index: Int) {
         selection.restrictionNodes[index].endTimeHour = Calendar.current.component(.hour, from: date)
         selection.restrictionNodes[index].endTimeMinute = Calendar.current.component(.minute, from: date)
-    }
-    private func option(_ kind: RestrictionKind) -> Binding<Bool> {
-        Binding(get: { selection.restrictionNodes.contains { $0.kind == kind } }, set: { enabled in
-            selection.restrictionNodes.removeAll { $0.kind == kind }
-            if enabled { selection.restrictionNodes.append(.init(kind: kind, position: .init(x: 240, y: 390), durationMinutes: 30)) }
-        })
     }
 }

@@ -35,7 +35,7 @@ final class QuickMarkKeyMonitor {
             }
             // Preserve Intent's text editors and marked IME composition. The
             // physical-key gesture is only active outside those text contexts.
-            if owner.editingText { owner.cancelPending(); return Unmanaged.passUnretained(event) }
+            if owner.editingText && !owner.gesture.isHoldingPrefix { owner.cancelPending(); return Unmanaged.passUnretained(event) }
             let result = owner.gesture.key(code: Int(event.getIntegerValueField(.keyboardEventKeycode)), down: type == .keyDown,
                 modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
                 repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0, now: ProcessInfo.processInfo.systemUptime)
@@ -54,7 +54,7 @@ final class QuickMarkKeyMonitor {
         CGEvent.tapEnable(tap: tap, enable: true)
         timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if self.editingText { self.cancelPending(); return }
+            if self.editingText && !self.gesture.isHoldingPrefix { self.cancelPending(); return }
             guard let action = self.gesture.expire(now: ProcessInfo.processInfo.systemUptime) else { return }
             self.onAction?(action)
         }

@@ -353,7 +353,6 @@ final class IntentRuntime {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if self.quickSelectionController.isSelectionSurfaceVisible { self.quickSelectionController.toggle() }
-                else if self.model.collapseSessionControlsIfExpanded() { return }
                 else if self.model.hasActiveSession { self.model.toggleSessionControls() }
                 else {
                     self.quickSelectionController.toggle()

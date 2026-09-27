@@ -34,6 +34,25 @@ let initialized = false;
 let freshBlankTabIds = new Set();
 const lastAllowedURLByTab = new Map();
 const searchSessionTabs = new Set();
+let searchLedgerSession = null;
+let searchLedgerWrites = Promise.resolve();
+async function restoreSearchLedger(nextRules) {
+  if (nextRules.startupSessionID === searchLedgerSession && nextRules.active) return;
+  searchSessionTabs.clear(); freshBlankTabIds.clear();
+  searchLedgerSession = nextRules.active ? nextRules.startupSessionID : null;
+  if (searchLedgerSession && browser.storage.session) {
+    const saved = (await browser.storage.session.get('intentSearchTabs').catch(() => ({}))).intentSearchTabs;
+    if (saved?.session === searchLedgerSession && saved.browser === browserSessionID) {
+      for (const id of saved.ids || []) if (Number.isInteger(id)) searchSessionTabs.add(id);
+    }
+  }
+}
+function saveSearchLedger() {
+  if (!browser.storage.session) return Promise.resolve();
+  const record = {session: searchLedgerSession, browser: browserSessionID, ids: [...searchSessionTabs]};
+  searchLedgerWrites = searchLedgerWrites.then(() => browser.storage.session.set({intentSearchTabs: record})).catch(() => {});
+  return searchLedgerWrites;
+}
 const committedURLByTab = new Map();
 
 // Firefox can deliver the completed about:blank event for a reused startup tab
@@ -408,7 +427,7 @@ async function applyNativeRules(nativeRules) {
   const previousFingerprint = rulesFingerprint;
   const nextRules = effectiveRules(nativeRules);
   if (!nextRules.active) await tabVisibility?.sync(nextRules, () => true);
-  if (nextRules.startupSessionID !== rules.startupSessionID) searchSessionTabs.clear();
+  await restoreSearchLedger(nextRules);
   rules = nextRules;
 
   rulesFingerprint = fingerprintRules(rules);
@@ -426,7 +445,7 @@ async function applyNativeRules(nativeRules) {
     lastAllowedTabId = null;
     freshBlankTabIds.clear();
     lastAllowedURLByTab.clear();
-    searchSessionTabs.clear(); committedURLByTab.clear();
+    searchSessionTabs.clear(); await saveSearchLedger(); committedURLByTab.clear();
     startupNavigationURLByTab.clear();
     completedStartupFingerprint = null;
   }
@@ -450,9 +469,24 @@ function isFreshBlankTab(tab) {
   return Boolean(tab?.id && freshBlankTabIds.has(tab.id) && isSearchStagingURL(tab.url));
 }
 
+// Our holding page is infrastructure, never a user-created search tab.
+// Browsers can emit onCreated as about:blank before its extension URL loads.
+function isHoldingPage(url) {
+  return Boolean(url && url === browser.runtime.getURL?.('parked.html'));
+}
+function forgetHoldingSearch(tabId) {
+  if (searchSessionTabs.delete(tabId)) saveSearchLedger();
+  freshBlankTabIds.delete(tabId);
+  committedURLByTab.delete(tabId);
+  lastAllowedURLByTab.delete(tabId);
+}
+
 function searchOnlyNavigation(tabId, url) {
+  if (isHoldingPage(url)) { forgetHoldingSearch(tabId); return false; }
   if (!rules.active || !rules.allowGoogleSearchTabs || rules.accessMode === "blacklist") return false;
-  if (IntentBrowserRules.isGoogleSearchURL(url)) searchSessionTabs.add(tabId);
+  if (IntentBrowserRules.isGoogleSearchURL(url) && rules.selectedTabIDs?.includes(tabId)) {
+    searchSessionTabs.add(tabId); saveSearchLedger();
+  }
   return searchSessionTabs.has(tabId) && !IntentBrowserRules.isSearchStagingURL(url) && !IntentBrowserRules.isGoogleSearchURL(url);
 }
 async function restoreSearchPage(tabId) {
@@ -465,18 +499,18 @@ async function restoreSearchPage(tabId) {
 function isRuntimeAllowedTab(tab) {
   if (rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id) && tab?.url
       && !isSearchStagingURL(tab.url) && !IntentBrowserRules.isGoogleSearchURL(tab.url)) return false;
+  if (rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id)) return true;
   // Explicit selections remain independent; search-created tabs are search-only.
   if (rules.active && Array.isArray(rules.selectedTabIDs)) return rules.accessMode === "blacklist" ? !rules.selectedTabIDs.includes(tab?.id) : (rules.selectedTabIDs.includes(tab?.id) || (rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id)));
   return Boolean(
     tab?.url &&
-    (isAllowedURL(tab.url, rules) || isFreshBlankTab(tab))
+    (isAllowedURL(tab.url, {...rules, allowGoogleSearchTabs: false}) || isFreshBlankTab(tab))
   );
 }
 
 async function primeAllowedTab() {
   const tabs = await browser.tabs.query({});
   for (const tab of tabs) {
-    if (tab.id != null && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist" && IntentBrowserRules.isGoogleSearchURL(tab.url)) searchSessionTabs.add(tab.id);
     if (tab.id != null && isRuntimeAllowedTab(tab)) {
       lastAllowedURLByTab.set(tab.id, tab.url);
     }
@@ -819,6 +853,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
 browser.tabs.onHighlighted?.addListener(() => scheduleTabSnapshot());
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (isHoldingPage(changeInfo.url || tab.url)) { forgetHoldingSearch(tabId); return; }
   scheduleTabSnapshot();
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
     if (tab.active) await returnToAllowedTab();
@@ -890,7 +925,10 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 browser.tabs.onCreated.addListener(async (tab) => {
   if (tab.url === browser.runtime.getURL?.('parked.html')) return;
   committedURLByTab.set(tab.id, tab.url || "about:blank");
-  if (rules.active && rules.allowGoogleSearchTabs && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) searchSessionTabs.add(tab.id);
+  if (rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist" && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) {
+    searchSessionTabs.add(tab.id);
+    await saveSearchLedger();
+  }
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab(tab)) {
     await returnToAllowedTab();
     return;
@@ -939,7 +977,7 @@ for (const event of [browser.tabs.onMoved, browser.tabs.onAttached, browser.tabs
 }
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
-  searchSessionTabs.delete(tabId); committedURLByTab.delete(tabId);
+  searchSessionTabs.delete(tabId); saveSearchLedger(); committedURLByTab.delete(tabId);
   scheduleTabSnapshot();
   if (!rules.active) {
     return;
@@ -959,6 +997,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (isHoldingPage(details.url)) { forgetHoldingSearch(details.tabId); return {}; }
     if (searchOnlyNavigation(details.tabId, details.url)) {
       setTimeout(() => restoreSearchPage(details.tabId), 0); return { cancel: true };
     }
@@ -1008,6 +1047,7 @@ setInterval(sendHeartbeat, HEARTBEAT_MS);
 // and SPA navigation; native input guards prevent address editing when Searches is off.
 browser.webNavigation?.onCommitted?.addListener(async (details) => {
   if (details.frameId !== 0 || details.tabId < 0) return;
+  if (isHoldingPage(details.url)) { forgetHoldingSearch(details.tabId); return; }
   if (searchOnlyNavigation(details.tabId, details.url)) { await restoreSearchPage(details.tabId); return; }
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: details.tabId})) return;
   const previous = committedURLByTab.get(details.tabId);

@@ -1301,11 +1301,12 @@ do {
     let defaultAlwaysAllowedApps = try alwaysAllowedStore.load()
     try expect(
         defaultAlwaysAllowedApps == AlwaysAllowedAppStore.defaults,
-        "Finder, System Settings, TextEdit and QuickTime Player are first-install defaults"
+        "Finder, System Settings, TextEdit, QuickTime Player and Preview are first-install defaults"
     )
-    try expect(Set(defaultAlwaysAllowedApps.map(\.bundleIdentifier)) == ["com.apple.finder", "com.apple.systempreferences", "com.apple.TextEdit", "com.apple.QuickTimePlayerX"], "All four requested defaults use their real bundle identifiers")
+    try expect(Set(defaultAlwaysAllowedApps.map(\.bundleIdentifier)) == ["com.apple.finder", "com.apple.systempreferences", "com.apple.TextEdit", "com.apple.QuickTimePlayerX", "com.apple.Preview"], "All five requested defaults use their real bundle identifiers")
     for (name, prior, expected) in [
         ("old-defaults", [AlwaysAllowedAppStore.finder, AlwaysAllowedAppStore.systemSettings], AlwaysAllowedAppStore.defaults),
+        ("v3-defaults", [AlwaysAllowedAppStore.finder, AlwaysAllowedAppStore.systemSettings, AlwaysAllowedAppStore.textEdit, AlwaysAllowedAppStore.quickTimePlayer], AlwaysAllowedAppStore.defaults),
         ("custom", [AllowedApp(name: "Music", bundleIdentifier: "com.apple.Music")], [AllowedApp(name: "Music", bundleIdentifier: "com.apple.Music")]),
         ("empty", [], []),
         ("removed-settings", [AlwaysAllowedAppStore.finder], [AlwaysAllowedAppStore.finder])

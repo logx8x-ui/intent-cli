@@ -15,6 +15,7 @@ protocol IntentOverlayPresenting: AnyObject {
     var isSessionControlsExpanded: Bool { get }
     @discardableResult func collapseSessionControlsIfExpanded() -> Bool
     func toggleSessionControls()
+    func toggleSessionControlsExpansion()
     func hideSessionTimer()
     func showSessionExpiry(occurrenceID: UUID, name: String)
     func hideSessionExpiry()
@@ -1287,6 +1288,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
+    func toggleSessionControlsExpansion() { overlayPresenter?.toggleSessionControlsExpansion() }
 
     var hasEligibleSessionControls: Bool { hasActiveSession && (activeSessionEndsAt != nil || !activeChecklist.isEmpty) }
     var isSessionControlsExpanded: Bool { overlayPresenter?.isSessionControlsExpanded == true }
