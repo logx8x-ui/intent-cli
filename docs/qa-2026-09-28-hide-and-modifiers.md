@@ -52,11 +52,18 @@ Firefox final signed 0.2.20 acceptance:
 - A fresh one-minute session hid the three unselected tabs from the controlled working window; a fresh search tab remained usable.
 - After completion, all 26 pre-test tab IDs returned to their original windows and indices with zero order differences. The new search tab was retained after the original tabs. No holding page or extra holding window remained. Active rules cleared.
 
-Chrome heartbeat reported 0.2.20 after the existing idle update mechanism ran. Final live browser verification is not yet complete.
+Chrome 0.2.20 live acceptance after restarting Chrome:
+- Existing Logavix profile reconnected. Two windows both titled New tab and with identical geometry reproduced an empty overview tab list despite a healthy bridge.
+- Overview now resolves ambiguous windows by focusing each existing active tab through the session-validated bridge, pairing fresh extension focus with native window identity, and caching that pairing only for the open overview/browser lifetime. Both previews were checked: one showed its four tabs and the other its single tab, with no manual window selector.
+- Core specs passed, including 100 gesture sequences and 1–50 window layouts; release app/native-host builds and development installation passed.
+- A controlled Chrome intention with Searches enabled left only the selected fixture visible; old New tab, hidden fixture and pre-session search tabs were removed from the working strip.
+- Normal in-page navigation from the selected fixture succeeded. A fresh search tab worked; clicking a result stayed on search, and direct URL entry returned to the selected allowed page.
+- After finishing through the app's End control, all five original tab IDs returned to their exact original window IDs and indices (zero differences). The fresh search tab remained at the end. Browser inventory confirmed no holding page remained. Temporary test tabs were closed afterward.
+- Synthetic Shift-backtick did not reach the global shortcut, so ending via physical hotkey and its focus preservation are not claimed as live passes.
 
 ## Outstanding acceptance / release limits
 
-- Chrome's extensions management page was blocked by browser automation URL policy. No alternate route to that page was used. Its normal idle mechanism updated Chrome; the browser tool then paused because another extension UI was open. User handoff requested to dismiss that popup/side panel; live browser tests remain pending.
+- Chrome live hide/search/restore verification is complete for the controlled normal-profile session above; this does not cover every browser profile, private window, or crash scenario.
 - Synthetic CUA global backticks were not reliably delivered to the macOS event tap. Physical double-tap group marking, held-prefix modifier combinations and full hide/show require physical acceptance; deterministic state-machine tests passed.
 - A split-view pair with only one side allowed cannot safely move one member without affecting its partner. It stays guarded in place; select both members together. If native group metadata cannot be read, group tabs stay guarded in place rather than destroying the group.
 - Browser crash/restart and disappearing source-window scenarios have simulated recovery coverage, not an exhaustive live matrix. Chrome restart recovery reveals preserved parked tabs; original placement cannot always be reconstructed from session-scoped IDs.
@@ -67,9 +74,9 @@ Chrome heartbeat reported 0.2.20 after the existing idle update mechanism ran. F
 Workspace: /Users/loganmondi/Documents/Codex/intent-waitlist
 Preview: http://localhost:5173/
 
-Complete new visual direction: warm neutral background, indigo accent, large concise headline, rounded signup, interactive workspace showing distractions tucked away, name/choose/do explanation and timer/checklist section. Existing signup/email backend preserved.
+The rejected redesign was replaced with the original moving mixed-font word wall and centered identity. Foreground text/form have measured clear space so moving letters do not overlap them, without a fade/blur backdrop. Occasional messages such as wewilltakebacktechnology replace the wall for 700 ms, then return; reduced-motion and pause are supported. The user's editable bottom copy and signup/email backend are preserved.
 
-Website production build and lint passed. Desktop 1440 and phone 390 layouts checked; phone horizontal overflow was zero. Focus-preview toggle checked both directions. No signup email was sent for this design-only QA. No website commit, push, deploy or publication was performed.
+Website build and lint passed. Desktop 1440, phone 390 and narrow 320 were checked without horizontal overflow; extra-info navigation and pause were checked. A live sampled burst returned to normal without layout movement. Local preview only: no website commit, push, deployment, publication or signup email.
 
 ## Product recommendations (not silently implemented)
 

@@ -135,6 +135,9 @@ final class QuickSelectionController: ObservableObject {
     @Published var settingsOpen = false
     @Published var explicitBrowserWindow: QuickSelectionBrowserWindow?
     @Published var focusedBrowserWindow: CGWindowID?
+    @Published private(set) var resolvingBrowserWindow = false
+    private var windowResolutionTask: Task<Void, Never>?
+    private var confirmedBrowserWindows: [CGWindowID: (session: String, browser: String, id: Int)] = [:]
     @Published var hoveredTab: BrowserTabItem?
     @Published var tabPreview: NSImage?
     @Published var tabPreviewError: String?
@@ -661,8 +664,62 @@ final class QuickSelectionController: ObservableObject {
     func reloadBrowserTabs(_ browser: String) async {
         _ = await freshSnapshots(for: [browser])
     }
+    // Equal titles and geometry cannot identify a native window. Ask each
+    // browser window to focus its existing active tab, then confirm both
+    // native and extension focus before retaining the session-local pairing.
+    private func resolveBrowserWindow(_ window: WindowItem) {
+        windowResolutionTask?.cancel()
+        let token = generation
+        windowResolutionTask = Task { [weak self] in
+            guard let self else { return }
+            self.resolvingBrowserWindow = true
+            defer {
+                if self.generation == token {
+                    self.resolvingBrowserWindow = false
+                    if !self.closing, self.panel?.isVisible == true {
+                        NSApp.activate(ignoringOtherApps: true)
+                        self.panel?.makeKeyAndOrderFront(nil)
+                    }
+                }
+            }
+            guard await self.freshSnapshots(for: [window.appID]), !Task.isCancelled,
+                  self.generation == token, self.browserWindowID(for: window) == nil,
+                  let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.appID }),
+                  let session = snapshot.browserSessionID else { return }
+            let candidates = (snapshot.allTabs ?? snapshot.tabs).filter(\.active)
+            for tab in candidates {
+                guard !Task.isCancelled, self.generation == token, !self.closing,
+                      self.focusedBrowserWindow == window.id else { return }
+                let requestedAt = Date()
+                try? BrowserTabCommandStore(browserBundleIdentifier: window.appID).write(
+                    .init(tabID: tab.id, windowID: tab.windowID, browserSessionID: session))
+                // Do not confuse a fresh snapshot taken before activation with
+                // an acknowledgement that this particular window was focused.
+                for _ in 0..<20 {
+                    do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
+                    guard self.generation == token, !self.closing,
+                          let current = BrowserTabSnapshotStore(browserBundleIdentifier: window.appID).load(),
+                          current.browserSessionID == session, current.updatedAt >= requestedAt,
+                          let native = WorkspaceWindow.focused(), native.bundle == window.appID,
+                          (current.allTabs ?? current.tabs).contains(where: {
+                              $0.windowID == tab.windowID && $0.active && $0.windowFocused == true
+                          }) else { continue }
+                    guard BrowserWindowMatching.match(title: native.title, tabs: current.allTabs ?? current.tabs,
+                        nativeWindowCount: candidates.count, frame: native.frame, isFocused: true) == tab.windowID else { continue }
+                    self.confirmedBrowserWindows[native.id] = (session, window.appID, tab.windowID)
+                    self.snapshots.removeAll { $0.browserBundleIdentifier == window.appID }
+                    self.snapshots.append(current)
+                    break
+                }
+                if self.browserWindowID(for: window) != nil { return }
+            }
+        }
+    }
     func browserWindowID(for window: WindowItem) -> Int? {
         guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == window.appID }) else { return nil }
+        if let confirmed = confirmedBrowserWindows[window.id], confirmed.browser == window.appID,
+           confirmed.session == snapshot.browserSessionID,
+           (snapshot.allTabs ?? snapshot.tabs).contains(where: { $0.windowID == confirmed.id }) { return confirmed.id }
         let siblings = windows.filter { $0.appID == window.appID }
         guard let id = BrowserWindowMatching.match(title: window.title, tabs: snapshot.allTabs ?? snapshot.tabs, nativeWindowCount: siblings.count, frame: window.sourceFrame) else { return nil }
         // Never attach the same tab strip to two windows with ambiguous titles.
@@ -716,7 +773,7 @@ final class QuickSelectionController: ObservableObject {
             explicitBrowserWindow = nil
             focusedBrowserWindow = window.id
             hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
-            Task { await reloadBrowserTabs(window.appID) }
+            resolveBrowserWindow(window)
             message = nil
         } else if selection.windowIDsByApp[window.appID] != nil { selection.toggleWindow(window.id, app: window.appID) }
         else if let app = apps.first(where: { $0.id == window.appID }) { selectApp(app) }
@@ -803,6 +860,8 @@ final class QuickSelectionController: ObservableObject {
         hoverTask?.cancel(); hoverTask = nil; hoveredTab = nil; tabPreview = nil; tabPreviewLoading = false
         for browser in QuickSelection.browsers { try? FileManager.default.removeItem(at: BrowserTabPreview.fileURL(browser: browser)) }
         generation = UUID(); previewTask?.cancel(); previewTask = nil
+        windowResolutionTask?.cancel(); windowResolutionTask = nil
+        resolvingBrowserWindow = false; confirmedBrowserWindows = [:]
         refreshTimer?.invalidate(); refreshTimer = nil
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
         panel?.orderOut(nil); panel = nil
@@ -1252,7 +1311,7 @@ private struct QuickSelectionView: View {
                     Button { controller.focusedBrowserWindow = nil; controller.hoveredTab = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Close tabs")
                 }
                 if controller.tabs(for: window).isEmpty {
-                    Label("Connect Browser Guard in this window’s browser profile to see its tabs.", systemImage: "puzzlepiece.extension")
+                    Label(controller.resolvingBrowserWindow ? "Finding this window’s tabs…" : controller.unavailableTabsMessage(for: window.appID), systemImage: "puzzlepiece.extension")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Refresh tabs") { Task { await controller.reloadBrowserTabs(window.appID) } }
                         .buttonStyle(.bordered)
