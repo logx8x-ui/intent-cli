@@ -23,9 +23,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
     public init(spec: FocusSessionSpec) { self.spec = spec }
 
     public func start() {
-        guard spec.hideDistractions && spec.requiresEnforcement else { return }
         onMain {
-            guard !stopped, timer == nil else { return }
+            RestorationFocusGuard.cancel()
+            guard spec.hideDistractions && spec.requiresEnforcement, !stopped, timer == nil else { return }
             Self.recoveryGeneration &+= 1
             entries = Self.restore()
             let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -36,8 +36,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
     public func stop() {
         onMain {
+            guard !stopped else { return }
             stopped = true
-            guard timer != nil else { return }
             timer?.cancel(); timer = nil
             entries = Self.beginRecovery()
         }
@@ -54,7 +54,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
     @discardableResult private static func beginRecovery() -> [Entry] {
         recoveryGeneration &+= 1
         let generation = recoveryGeneration
+        let saved = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([Entry].self, from: $0) } ?? []
+        var restoringPIDs = Set(saved.map(\.pid))
+        // Browser Guard restores parked tabs after the shared rules clear.
+        for app in NSWorkspace.shared.runningApplications where
+            ["org.mozilla.firefox", "com.google.Chrome"].contains(app.bundleIdentifier ?? "") {
+            restoringPIDs.insert(app.processIdentifier)
+        }
+        RestorationFocusGuard.begin(restoringPIDs: restoringPIDs)
         let pending = restore()
+        RestorationFocusGuard.preserveCurrent()
         if !pending.isEmpty { retryRecovery(generation: generation, attempts: 4) }
         return pending
     }
@@ -117,8 +126,10 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 guard let element = element(window) else { pending.append(entry); continue }
                 if AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success { pending.append(entry) }
             } else if app.isHidden && !app.unhide() { pending.append(entry) }
+            RestorationFocusGuard.preserveCurrent()
         }
         _ = save(pending)
+        RestorationFocusGuard.preserveCurrent()
         return pending
     }
     private static func value(_ element: AXUIElement, _ key: String) -> CFTypeRef? {

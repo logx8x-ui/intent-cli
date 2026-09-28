@@ -190,6 +190,8 @@ public final class FocusLock {
     public var isStopRequested: Bool { isStopped }
 
     public func run(onReady: (@Sendable () -> Void)? = nil) throws {
+        if Thread.isMainThread { RestorationFocusGuard.cancel() }
+        else { DispatchQueue.main.sync { RestorationFocusGuard.cancel() } }
         returnApplication = NSWorkspace.shared.frontmostApplication
         if let returnApplication,
            let bundleIdentifier = returnApplication.bundleIdentifier,
