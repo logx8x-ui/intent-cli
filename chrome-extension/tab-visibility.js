@@ -208,27 +208,35 @@
         await this.save();
       }
       // Sidebars can reorder newly attached tabs while individual restores run.
-      // Normalize once after all cross-window moves, keeping newly created tabs.
+      // Normalize after cross-window moves settle, keeping newly created tabs.
       for (const order of [...this.state.orders]) {
         if (this.state.moved.some(item => item.windowId === order.windowId)) continue;
         try {
-          let current = await this.api.tabs.query({windowId: order.windowId});
-          const existing = new Map(current.map(tab => [tab.id, tab]));
-          const originals = order.tabIDs.filter(id => existing.has(id));
-          const added = current.filter(tab => !order.tabIDs.includes(tab.id)).map(tab => tab.id);
-          const desired = [...originals, ...added];
-          const expected = [true, false].flatMap(pinned => desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned));
-          if (current.map(tab => tab.id).join(',') === expected.join(',')) {
-            this.state.orders = this.state.orders.filter(entry => entry !== order); await this.save(); continue;
+          // onAttached handlers in sidebar extensions run after tabs.move resolves.
+          // Require two quiet observations before relinquishing the saved order;
+          // an immediate readback alone can pass before Sidebery changes it again.
+          let stable = 0;
+          for (let attempt = 0; attempt < 4 && stable < 2; attempt++) {
+            let current = await this.api.tabs.query({windowId: order.windowId});
+            const existing = new Map(current.map(tab => [tab.id, tab]));
+            const originals = order.tabIDs.filter(id => existing.has(id));
+            const added = current.filter(tab => !order.tabIDs.includes(tab.id)).map(tab => tab.id);
+            const desired = [...originals, ...added];
+            const expected = [true, false].flatMap(pinned => desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned));
+            if (current.map(tab => tab.id).join(',') !== expected.join(',')) {
+              stable = 0;
+              // Pinned and ordinary tabs have distinct insertion ranges.
+              for (const pinned of [true, false]) {
+                const ids = desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned);
+                if (ids.length) await this.api.tabs.move(ids, {windowId: order.windowId,
+                  index: pinned ? 0 : current.filter(tab => tab.pinned).length});
+              }
+            }
+            await new Promise(resolve => setTimeout(resolve, 250));
+            current = await this.api.tabs.query({windowId: order.windowId});
+            stable = current.map(tab => tab.id).join(',') === expected.join(',') ? stable + 1 : 0;
           }
-          // Pinned and ordinary tabs have distinct insertion ranges.
-          for (const pinned of [true, false]) {
-            const ids = desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned);
-            if (ids.length) await this.api.tabs.move(ids, {windowId: order.windowId,
-              index: pinned ? 0 : current.filter(tab => tab.pinned).length});
-          }
-          current = await this.api.tabs.query({windowId: order.windowId});
-          if (current.map(tab => tab.id).join(',') !== expected.join(',')) continue;
+          if (stable < 2) continue; // Keep ownership for a later safe retry.
           this.state.orders = this.state.orders.filter(entry => entry !== order); await this.save();
         } catch (_) {
           if (!await this.api.windows.get(order.windowId).catch(() => null)) {

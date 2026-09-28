@@ -79,6 +79,29 @@ function fixture() {
   }
   for (const firefox of [true, false]) {
     const f=fixture(), v=new Visibility(f.api,firefox);
+    const move=f.api.tabs.move;
+    let delayed;
+    f.api.tabs.move=async(ids,value)=>{
+      const id=Array.isArray(ids)?ids[0]:ids;
+      const attaching=f.tabs.find(t=>t.id===id).windowId!==value.windowId;
+      const result=await move(ids,value);
+      if(attaching && value.windowId===1 && id===4) {
+        delayed=new Promise(resolve=>setTimeout(async()=>{
+          await move(3,{windowId:1,index:0}); resolve();
+        },75));
+      }
+      return result;
+    };
+    await v.sync(active,t=>t.id===1);
+    f.tabs.push({id:80,windowId:1,index:1,url:'https://example.com/fresh'});
+    await v.sync({active:false},()=>true);
+    await delayed;
+    assert.deepEqual((await f.api.tabs.query({windowId:1})).map(t=>t.id),[1,2,3,4,80],
+      'Delayed sidebar reorder must settle before saved order is discarded; fresh tabs survive');
+    assert.equal(v.state.orders.length,0);
+  }
+  for (const firefox of [true, false]) {
+    const f=fixture(), v=new Visibility(f.api,firefox);
     f.windows.push({id:3,type:'normal',state:'normal',incognito:true});
     f.tabs.push({id:6,windowId:3,index:0,active:true,url:'https://private.example/allowed'},
       {id:7,windowId:3,index:1,active:false,url:'https://private.example/blocked'});

@@ -45,7 +45,7 @@ struct OverviewSettingsView: View {
             }.pickerStyle(.segmented)
             Text("Hide puts distractions away until you finish or use Safety Stop. Nothing is closed. Choose Blur to switch back for your next intention.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("Browser Guard 0.2.19 puts distractions in a temporary minimized window and brings them back when you finish. Select both sides of a split-view pair together.")
+            Text("Browser Guard 0.2.20 puts distractions in a temporary minimized window and brings them back when you finish. Select both sides of a split-view pair together.")
                 .font(.caption2).foregroundStyle(.secondary)
             Divider()
             Text("App defaults").font(.headline)
