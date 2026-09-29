@@ -162,7 +162,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         tabs.delete(id);
         for (const listener of tabRemoved.listeners) await listener(id);
       },
-      sendMessage: async () => ({})
+      sendMessage: async () => options.rejectWebsiteGuard ? {} : ({websiteFeatures:true})
     },
     windows: {
       getAll: async () => {
@@ -187,6 +187,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const context = {
     chrome,
     IntentBrowserRules: helpers,
+    IntentWebsiteFeatures: require("../chrome-extension/website-features.js"),
     URL,
     importScripts: () => {},
     setInterval: (callback, delay) => {
@@ -1093,6 +1094,21 @@ async function run() {
   await current.receiveNative({active: false, guardEnabled: true, bundledExtensionVersion: require('../chrome-extension/manifest.json').version});
   assert.equal(current.extensionReloads.length, 0, "Matching extensions must not reload");
   console.log("Chrome background behavior spec passed");
+  const scopedSite = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[71], startupSessionID:"site-test",
+    websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [
+      {id:71,windowId:1,active:true,url:"https://www.youtube.com/watch?v=test"},
+      {id:72,windowId:1,active:false,url:"https://www.youtube.com/shorts/test"}
+    ]);
+  await scopedSite.settle();
+  assert.ok(scopedSite.nativeMessages.some(m=>m.type === "websitePolicyReady" && m.appliedWebsitePolicySessionID === "site-test"), "Acknowledge the installed network and content policy");
+  assert.ok(scopedSite.sessionRules.some(r=>r.id >= 24000 && r.action.type === "block"), "Selected tabs retain site-level network restrictions");
+  assert.ok(scopedSite.sessionRules.some(r=>r.id === 23000), "Site policy does not replace exact-tab restrictions");
+  const unavailableSite = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[71], startupSessionID:"failed-site-test",
+    websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [
+      {id:71,windowId:1,active:true,url:"https://www.youtube.com/watch?v=test"}
+    ], {rejectWebsiteGuard:true});
+  await unavailableSite.settle();
+  assert.equal(unavailableSite.nativeMessages.some(m=>m.type === "websitePolicyReady"), false, "Never confirm a page guard that failed to install");
 }
 
 run().catch((error) => {

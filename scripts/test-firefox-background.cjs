@@ -57,6 +57,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
       }
     },
     tabs: {
+      sendMessage: async () => ({websiteFeatures:true}),
       onActivated: { addListener: (listener) => listeners.onActivated.push(listener) },
       onUpdated: { addListener: (listener) => listeners.onUpdated.push(listener) },
       onCreated: { addListener: (listener) => listeners.onCreated.push(listener) },
@@ -133,6 +134,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const context = {
     browser,
     IntentBrowserRules: helpers,
+    IntentWebsiteFeatures: require("../firefox-extension/website-features.js"),
     URL,
     setInterval: (callback, delay) => {
       intervals.push({ callback, delay });
@@ -260,6 +262,13 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  const website = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[7],
+    websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [
+      {id:7,windowId:1,active:true,url:"https://www.youtube.com/watch?v=test"}
+    ]);
+  await website.ready();
+  assert.equal(website.listeners.onBeforeRequest[0]({tabId:7,url:"https://www.youtube.com/shorts/test"}).cancel, true, "A selected Firefox tab must not bypass its No Shorts policy");
+  assert.equal(website.listeners.onBeforeRequest[0]({tabId:7,url:"https://www.youtube.com/watch?v=test"}).cancel, undefined, "Normal videos remain usable");
   // Old blank/result tabs must not inherit the fresh-search allowance.
   {
     const searchRules = {active: true, hideDistractions: true, accessMode: 'whitelist', selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], startupSessionID: 'fresh-search-regression', blockTabSwitching: true, blockNavigation: true, blockNewTabs: true, allowGoogleSearchTabs: true};

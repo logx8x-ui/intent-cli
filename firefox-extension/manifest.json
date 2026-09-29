@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Intent Browser Guard",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "description": "Enforces active Intent browser rules inside Firefox.",
   "icons": {
     "48": "icons/intent-48.svg",
@@ -42,7 +42,13 @@
     "scripts": [
       "rule-helpers.js",
       "tab-visibility.js",
+      "website-features.js",
       "background.js"
     ]
-  }
+  },
+  "content_scripts": [{
+    "matches": ["*://*.instagram.com/*", "*://*.youtube.com/*"],
+    "js": ["website-features.js", "site-feature-guard.js"],
+    "run_at": "document_start"
+  }]
 }

@@ -79,6 +79,7 @@ final class QuickSelectionController: ObservableObject {
         refresh()
         var draft = QuickSelection(); draft.name = intention.name; draft.accessMode = intention.accessMode
         draft.restrictionNodes = intention.restrictionNodes.filter { $0.id != QuickSelection.startupSuppressionID }
+        draft.websiteFeaturePolicies = intention.websiteFeaturePolicies
         draft.frictionNodes = intention.frictionNodes
         var missing = 0
         if let workspace {
@@ -91,6 +92,7 @@ final class QuickSelectionController: ObservableObject {
             let presets = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
             for app in intention.allowedApps where !presets.contains(app.bundleIdentifier) {
                 if QuickSelection.browsers.contains(app.bundleIdentifier) { missing += 1 }
+                else if intention.selectionRequiresTabReselection { missing += 1 }
                 else if apps.contains(where: { $0.id == app.bundleIdentifier }) { draft.apps.insert(app.bundleIdentifier) }
                 else { missing += 1 }
             }
@@ -135,6 +137,8 @@ final class QuickSelectionController: ObservableObject {
     @Published var settingsOpen = false
     @Published var explicitBrowserWindow: QuickSelectionBrowserWindow?
     @Published var focusedBrowserWindow: CGWindowID?
+    @Published var frontWindowByApp: [String: UInt32] = [:]
+    @Published var expandedStack: String?
     @Published private(set) var resolvingBrowserWindow = false
     private var windowResolutionTask: Task<Void, Never>?
     private var confirmedBrowserWindows: [CGWindowID: (session: String, browser: String, id: Int)] = [:]
@@ -608,6 +612,7 @@ final class QuickSelectionController: ObservableObject {
             guard let self, self.panel?.isVisible == true else { return event }
             if self.settingsOpen { return event }
             if event.keyCode == 53 {
+                if self.expandedStack != nil { self.expandedStack = nil; return nil }
                 if self.optionsSection != nil { self.optionsSection = nil } else { self.cancel() }
                 return nil
             }
@@ -761,10 +766,17 @@ final class QuickSelectionController: ObservableObject {
     }
     func selectWindow(_ window: WindowItem) {
         guard !closing, !naming else { return }
+        if let app = apps.first(where: { $0.id == window.appID }), window.id == UInt32.max - UInt32(app.pid),
+           !QuickSelection.browsers.contains(window.appID) {
+            message = "No selectable window is available for this app. Open its window, then reopen the overview."
+            return
+        }
         if selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             pendingFirstWindow = window; naming = true; return
         }
+        frontWindowByApp[window.appID] = window.id
         if QuickSelection.browsers.contains(window.appID) {
+            expandedStack = nil
             guard !browserLists(for: window.appID).isEmpty else {
                 focusedBrowserWindow = window.id
                 Task { await reloadBrowserTabs(window.appID) }
@@ -775,8 +787,7 @@ final class QuickSelectionController: ObservableObject {
             hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
             resolveBrowserWindow(window)
             message = nil
-        } else if selection.windowIDsByApp[window.appID] != nil { selection.toggleWindow(window.id, app: window.appID) }
-        else if let app = apps.first(where: { $0.id == window.appID }) { selectApp(app) }
+        } else { selection.toggleWindow(window.id, app: window.appID) }
     }
     private func ensureSelectionSession(_ browser: String) -> Bool {
         guard BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.tabSessionIdentity, maxAge: 5),
@@ -821,6 +832,11 @@ final class QuickSelectionController: ObservableObject {
     func runSelection() {
         guard !closing, !loading, !naming, !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !selection.apps.isEmpty else { return }
         refresh()
+        for (key, policy) in selection.websiteFeaturePolicies ?? [:] {
+            guard let site = FocusWebsite(rawValue: key), policy.isValid(for: site) else {
+                message = "Choose at least one allowed area for each website."; return
+            }
+        }
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
         dismissAnimated(start: true)
@@ -854,6 +870,7 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        expandedStack = nil
         hideStagedModifiers()
         hoverModification(nil)
         optionsSection = nil
@@ -1017,7 +1034,7 @@ final class QuickSelectionController: ObservableObject {
                           sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil)
                 }
                 self.expanded = true
-                self.message = "Window images are temporarily unavailable. You can still choose your apps."
+                self.message = "Windows are temporarily unavailable. Reopen the overview to try again; browser tabs can still be selected."
             }
         }
     }
@@ -1085,7 +1102,7 @@ private struct QuickSelectionView: View {
     var body: some View {
         GeometryReader { geometry in
             let presetIDs = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
-            let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
+            let visibleWindows = controller.windows.filter { !Set(model.alwaysBlockedApps.map(\.bundleIdentifier)).contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
             let header = controller.topSafeInset + 48 + (!controller.naming && !controller.showingSlots ? 30 : 0) + (onboarding.isTeaching ? 60 : 0)
@@ -1108,20 +1125,18 @@ private struct QuickSelectionView: View {
             let settledSlotsFrame = FieldOfViewLayout.panel(origin: CGPoint(
                 x: area.minX + (area.width - slotsSize.width) * slotsX,
                 y: area.minY + (area.height - slotsSize.height) * slotsY), size: slotsSize, in: area)
-            let frames = focused == nil || controller.showingSlots
-                ? FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, avoiding: controller.showingSlots ? settledSlotsFrame : settledNotesFrame)
-                : FieldOfViewLayout.frames(sourceFrames: visibleWindows.map(\.sourceFrame), in: area, tabHeight: 0)
             ZStack(alignment: .topLeading) {
                 Group {
                     if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
-                ForEach(Array(visibleWindows.enumerated()), id: \.element.id) { index, window in
-                    if index < frames.count {
-                        windowCard(window, frame: frames[index])
-                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: frames[index])
-                    }
+                AppStackOverview(items: visibleWindows.map { .init(id: $0.id, app: $0.appID, source: $0.sourceFrame, tabCount: controller.tabs(for: $0).count) },
+                                 area: area, obstacle: focused == nil || controller.showingSlots ? (controller.showingSlots ? settledSlotsFrame : settledNotesFrame) : nil,
+                                 selected: Set(visibleWindows.filter { controller.isSelected($0) }.map(\.id)),
+                                 names: Dictionary(uniqueKeysWithValues: controller.apps.map { ($0.id, $0.app.name) }),
+                                 fronts: $controller.frontWindowByApp, expanded: $controller.expandedStack) { id, frame, showsCaption in
+                    Group { if let window = visibleWindows.first(where: { $0.id == id }) { windowCard(window, frame: frame, showsCaption: showsCaption) } }
                 }
                 VStack {
                     HStack {
@@ -1206,7 +1221,7 @@ private struct QuickSelectionView: View {
                         .position(x: namingArea.midX, y: namingArea.midY)
                         .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: namingArea)
                 }
-                if !controller.showingSlots && focused == nil {
+                if !controller.showingSlots && focused == nil && controller.expandedStack == nil {
                     VStack(spacing: 0) {
                         HStack {
                             Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
@@ -1235,14 +1250,14 @@ private struct QuickSelectionView: View {
             }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
                 .clipped().foregroundStyle(.white).preferredColorScheme(.dark)
                 .onChange(of: presetIDs) { ids in
-                    for id in ids where controller.selection.apps.contains(id) {
+                    for id in ids where controller.selection.apps.contains(id) && controller.selection.windowIDsByApp[id] == nil {
                         controller.selection.toggleApp(id, snapshots: controller.snapshots)
                     }
                     if let focused, ids.contains(focused.appID) { controller.focusedBrowserWindow = nil }
                 }
         }.ignoresSafeArea()
     }
-    private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect) -> some View {
+    private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect, showsCaption: Bool) -> some View {
         let app = controller.apps.first { $0.id == window.appID }
         let selected = controller.isSelected(window)
         let browser = QuickSelection.browsers.contains(window.appID)
@@ -1272,7 +1287,7 @@ private struct QuickSelectionView: View {
                     .contentShape(RoundedRectangle(cornerRadius: radius))
             }.buttonStyle(.plain)
                 .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
-            HStack(spacing: 5) {
+            if showsCaption { HStack(spacing: 5) {
                 Button { controller.selectWindow(window) } label: {
                     HStack(spacing: 5) {
                         if let app { Image(nsImage: app.icon).resizable().frame(width: 16, height: 16) }
@@ -1293,6 +1308,7 @@ private struct QuickSelectionView: View {
             }.font(.system(size: 12, weight: .medium)).padding(.horizontal, 5)
                 .frame(maxWidth: captionWidth, minHeight: 20, maxHeight: 20)
                 .background(.black.opacity(hovered || selected ? 0.5 : 0.25), in: Capsule())
+            }
         }.frame(width: captionWidth, height: frame.height + captionHeight, alignment: .top)
             .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }
             .help("\(app?.app.name ?? window.appID) — \(label)")
@@ -1323,6 +1339,18 @@ private struct QuickSelectionView: View {
                     HStack { Text("Select all"); Spacer(); Text("X").font(.caption.monospaced()).foregroundStyle(.secondary) }
                 }.toggleStyle(.checkbox).tint(accent)
                 Text("Click to select · Shift-click for a range").font(.caption2).foregroundStyle(.secondary)
+                if controller.selection.accessMode == .whitelist {
+                ScrollView {
+                WebsiteFeatureControls(policies: $controller.selection.websiteFeaturePolicies,
+                    sites: FocusWebsite.allCases.filter { site in
+                        controller.snapshots.contains { snapshot in
+                            (snapshot.allTabs ?? snapshot.tabs).contains { tab in
+                                controller.isTabSelected(tab.id, browser: snapshot.browserBundleIdentifier) && FocusWebsite.matching(tab.url) == site
+                            }
+                        }
+                    }, isNewIntention: controller.selection.sourceIntentionID == nil)
+                }.frame(maxHeight: 180).fixedSize(horizontal: false, vertical: true)
+                }
                 let tabs = controller.tabs(for: window)
                 ScrollView {
                     LazyVStack(spacing: 4) {
@@ -1346,7 +1374,7 @@ private struct QuickSelectionView: View {
                                 .accessibilityLabel("Tab: \(tab.displayTitle), \(selected ? "selected" : "not selected")")
                         }
                     }.padding(2)
-                }.frame(height: max(60, (geometry.size.height - 94) / 2))
+                }.frame(height: max(80, min(240, (geometry.size.height - 94) / 2)))
                 Divider()
                 ZStack {
                     RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.12))

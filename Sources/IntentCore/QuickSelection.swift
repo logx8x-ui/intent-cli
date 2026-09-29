@@ -16,11 +16,13 @@ public struct QuickSelectionBrowserWindow: Hashable, Codable {
 public struct QuickSelection: Codable {
     public var name: String = ""
     public var sourceIntentionID: String?
+    public var websiteFeaturePolicies: [String: WebsiteFeaturePolicy]?
 
     /// Replay current saved settings while retaining conservatively resolved targets.
     public mutating func applySessionConfiguration(_ intention: Intention) {
         name = intention.name
         sourceIntentionID = intention.id
+        websiteFeaturePolicies = intention.websiteFeaturePolicies
         accessMode = intention.accessMode
         restrictionNodes = intention.restrictionNodes.filter { $0.id != Self.startupSuppressionID }
         frictionNodes = intention.frictionNodes
@@ -234,8 +236,19 @@ public struct QuickSelection: Codable {
         )
         intention.accessMode = accessMode
         intention.selectionOnly = true
+        intention.websiteFeaturePolicies = websiteFeaturePolicies ?? [:]
+        if sourceIntentionID == nil && accessMode == .whitelist {
+            for website in websites {
+                if let site = FocusWebsite.matching(website.value), intention.websiteFeaturePolicies[site.rawValue] == nil {
+                    intention.websiteFeaturePolicies[site.rawValue] = .init(site: site)
+                }
+            }
+        }
+        guard intention.websiteFeaturePolicies.allSatisfy({ key, policy in
+            FocusWebsite(rawValue: key).map { policy.isValid(for: $0) } == true
+        }) else { throw QuickSelectionError.invalidWebsitePolicy }
         intention.selectionBrowserBundleIdentifiers = Array(Set(tabs.map(\.browser))).sorted()
-        intention.selectionRequiresTabReselection = requiresTabReselection
+        intention.selectionRequiresTabReselection = requiresTabReselection || !windowIDsByApp.isEmpty
         return intention
     }
 
@@ -245,9 +258,10 @@ public struct QuickSelection: Codable {
 }
 
 public enum QuickSelectionError: LocalizedError {
-    case changedApps, changedTabs, browserUnavailable, browserSessionChanged, chooseTabs, emptyFriction
+    case changedApps, changedTabs, browserUnavailable, browserSessionChanged, chooseTabs, emptyFriction, invalidWebsitePolicy
     public var errorDescription: String? {
         switch self {
+        case .invalidWebsitePolicy: "Review the website controls and choose at least one allowed Instagram area."
         case .changedApps: "Choose at least one running app. If an app has quit, refresh your selection."
         case .changedTabs: "A selected tab has changed or closed. Review your tabs and try again."
         case .browserSessionChanged: "The browser restarted or its connection changed. Clear the selection and choose your tabs again."

@@ -8,7 +8,7 @@ const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
-const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1"];
+const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "website-features-v1"];
 const browserSessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
@@ -151,7 +151,7 @@ function connectCommandPort() {
         sendHeartbeat();
       }
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
-      await applyNativeRules(message);
+      await applyNativeRules(message).catch(() => {});
       settlePendingRuleRefresh();
     });
     port.onDisconnect.addListener(() => {
@@ -183,6 +183,7 @@ function postCommandPort(message) {
   try {
     commandPort.postMessage({
       ...message,
+      browserSessionID,
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
       extensionCapabilities: advertisedCapabilities()
@@ -364,6 +365,7 @@ function effectiveRules(nativeRules) {
   return {
     ...inactiveRules(),
     active: true,
+    websiteFeaturePolicies: nativeRules.websiteFeaturePolicies || {},
     hideDistractions: Boolean(nativeRules.hideDistractions),
     accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
@@ -430,10 +432,18 @@ async function applyNativeRules(nativeRules) {
   await restoreSearchLedger(nextRules);
   rules = nextRules;
 
-  rulesFingerprint = fingerprintRules(rules);
-  if (rulesFingerprint === previousFingerprint) {
+  const nextFingerprint = fingerprintRules(rules);
+  if (nextFingerprint === previousFingerprint) {
     return;
   }
+  rulesFingerprint = nextFingerprint;
+  if (rules.active && Object.keys(rules.websiteFeaturePolicies || {}).length) {
+    try { await installWebsiteGuards(); } catch (error) { rulesFingerprint = ""; throw error; }
+  }
+
+  browser.tabs.query({}).then(tabs => {
+    for (const tab of tabs) browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules}).catch(() => {});
+  }).catch(() => {});
 
   if (rules.active) {
     await removeAlreadyBlockedTabs();
@@ -455,6 +465,21 @@ async function applyNativeRules(nativeRules) {
 
 async function removeAlreadyBlockedTabs() {
   // Blacklisting preserves every tab; native blur and activation guards block access.
+}
+
+async function installWebsiteGuards() {
+  if (!rules.active || !Object.keys(rules.websiteFeaturePolicies || {}).length) return;
+  for (const tab of await browser.tabs.query({})) {
+    if (!isRuntimeAllowedTab(tab) || !rules.websiteFeaturePolicies[IntentWebsiteFeatures.siteOf(tab.url)]) continue;
+    let receipt = await browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules}).catch(() => null);
+    if (!receipt?.websiteFeatures) {
+      await browser.tabs.executeScript(tab.id, {file: "website-features.js", runAt: "document_start"});
+      await browser.tabs.executeScript(tab.id, {file: "site-feature-guard.js", runAt: "document_start"});
+      receipt = await browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules});
+    }
+    if (!receipt?.websiteFeatures) throw new Error("Website controls did not acknowledge installation");
+  }
+  postCommandPort({type: "websitePolicyReady", browserSessionID, appliedWebsitePolicySessionID: rules.startupSessionID});
 }
 
 async function getAllowedTab(tabId) {
@@ -788,6 +813,7 @@ async function recoverBlockedNavigation(tabId) {
 }
 
 browser.runtime.onMessage.addListener((message) => {
+  if (message?.type === "getActiveRules") return Promise.resolve(rules);
   if (message?.type === "getGuardStatus") {
     return ensureInitialized().then(() => { recoverForegroundConnection(); postCommandPort({ type: "getRules" }); return guardStatus(); });
   }
@@ -998,6 +1024,7 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (isHoldingPage(details.url)) { forgetHoldingSearch(details.tabId); return {}; }
+    if (rules.active && !IntentWebsiteFeatures.permits(details.url, rules.websiteFeaturePolicies)) return {cancel: true};
     if (searchOnlyNavigation(details.tabId, details.url)) {
       setTimeout(() => restoreSearchPage(details.tabId), 0); return { cancel: true };
     }
@@ -1042,6 +1069,13 @@ ensureInitialized().then(() => {
   }
 });
 setInterval(sendHeartbeat, HEARTBEAT_MS);
+
+// SPA route changes do not create main-frame network requests. Wake the page
+// guard immediately; its DOM observer also handles dynamically inserted UI.
+browser.webNavigation?.onHistoryStateUpdated?.addListener(details => {
+  if (details.frameId !== 0 || !rules.active || !Object.keys(rules.websiteFeaturePolicies || {}).length) return;
+  browser.tabs.sendMessage(details.tabId, {type: "rulesUpdated", rules}).catch(() => {});
+});
 
 // Browser-reported transitions distinguish address-bar input from ordinary links
 // and SPA navigation; native input guards prevent address editing when Searches is off.
