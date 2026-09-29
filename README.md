@@ -78,17 +78,19 @@ an email and password. Guest mode includes the full Intent experience and saves
 only on that Mac. An account keeps each device on the same private workspace;
 a brand-new account always starts with zero intentions. See [Intent Accounts](docs/ACCOUNTS.md).
 
-- Click an intention to run it.
-- Press `` ` `` to select running apps and Chrome/Firefox tabs in [Quick Focus](docs/QUICK_FOCUS.md), then press Return to start. Requires a matching Browser Guard; Shift-backtick finishes without saving, and Command-Shift-backtick finishes and saves unlocked sessions.
-- Press `Cmd+G` to show or hide Intent, or change that shortcut in Settings.
-- Press `Tab` to edit, then `I`, `R`, or `F` to add an intention, restriction, or friction.
-- Pinch to zoom and use two fingers to pan.
-- Press `Cmd+Shift+M` to finish an active intention.
-- Press `Shift+W` for whitelist Purpose Mode or `Shift+B` for blacklist Purpose Mode while you are not typing.
-- Whitelist intentions allow only their selected resources. Blacklist intentions block their selected apps and browser websites while leaving everything else available.
-- Open **Recording Mode** from the record-circle control to learn aggregate app and browser-domain usage for 24 hours, one week, or until you stop it, then review up to seven local Allow Only suggestions.
-- Add a **Timer** restriction to end a session automatically.
-- Add a **Cooldown** restriction to prevent restarting an intention for a chosen period after it ends.
+- Press backtick to open Mission Control. Name your intention, choose apps/windows or Chrome/Firefox tabs, then start.
+- Double-tap backtick to mark the current tab or window. The same draft is available in Mission Control.
+- Hold backtick and press a number from 1 to 6 to toggle that modification in your saved order. Keep holding backtick to toggle another.
+- **Add as you go** is off by default and can only be chosen before starting. It allows ordinary app/tab opening and navigation; explicit blocks and always-banned apps still apply.
+- **Stopwatch** counts elapsed time, including sleep, and does not lock finishing. Timer and Checklist keep their completion rules.
+- To add an installed app, put one backtick before or after its search in Apple Spotlight and press Return on the app result. Intent requires the exact selected app URL from macOS accessibility; unsupported results leave the selection unchanged and show an explanation.
+- Spotlight allow selections open in the background by default. Change this in Settings. Block selections never launch the blocked app.
+- Use Settings for app defaults, visibility, shortcuts, account and login preferences. Saved intentions remain on the home screen.
+- Finish using your configured shortcut. A running timer or unfinished checklist keeps its existing finish requirements. Safety Stop remains available with Control–Option–Command–Escape.
+
+### Legacy compatibility
+
+The canvas, AI builder and experimental navigation are no longer exposed in the normal app interface. Their code and stored data remain for compatibility. The following describes those older implementations, not current home-screen controls.
 
 ### Build with AI
 

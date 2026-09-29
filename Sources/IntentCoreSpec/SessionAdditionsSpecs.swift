@@ -17,6 +17,11 @@ func runSessionAdditionsSpecs() throws {
     try expect(!FocusSessionSpec.make(for: browserApp).blockBrowserTabEscape && browserApp.wholeBrowserBundleIdentifiers == ["org.mozilla.firefox"], "Explicit Spotlight application selection can prepare an unopened whole browser")
     let browserRoundTrip = try JSONDecoder().decode(Intention.self, from: JSONEncoder().encode(browserApp))
     try expect(browserRoundTrip.wholeBrowserBundleIdentifiers == ["org.mozilla.firefox"], "Explicit whole-browser scope survives saving")
+    let workspace = SessionWorkspace(selection: appSelection, windows: [], tabs: [])
+    var replay = workspace.resolve(runningApps: ["org.mozilla.firefox"], windows: [], snapshots: []).selection
+    replay.applySessionConfiguration(browserRoundTrip)
+    let replayedBrowser = try replay.makeIntention(apps: [.init(name: "Firefox", bundleIdentifier: "org.mozilla.firefox")], snapshots: [])
+    try expect(replayedBrowser.wholeBrowserBundleIdentifiers == ["org.mozilla.firefox"] && replay.startupAppIDs == ["org.mozilla.firefox"], "Saved explicit whole-browser startup survives workspace replay")
     var intention = Intention(id: "additions", name: "Write", icon: "pencil", colorHex: "#34C759", folder: "",
         allowedApps: [.init(name: "Notes", bundleIdentifier: "com.apple.Notes")], allowedWebsites: [], startupActions: [], restrictions: .init())
     let old = try JSONDecoder().decode(Intention.self, from: legacyIntentionData(intention))

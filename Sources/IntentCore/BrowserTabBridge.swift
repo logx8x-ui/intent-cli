@@ -152,6 +152,7 @@ public final class BrowserTabSnapshotStore {
     }
 
     public func load(maxAge: TimeInterval = 3, now: Date = Date()) -> BrowserTabSnapshot? {
+        if let merged = BrowserProfileSnapshots.merged(BrowserProfileSnapshots.sessions(base: fileURL, now: now)) { return merged }
         guard let data = try? Data(contentsOf: fileURL),
               let snapshot = try? JSONDecoder().decode(BrowserTabSnapshot.self, from: data) else {
             return nil
@@ -195,6 +196,25 @@ public final class BrowserTabCommandStore {
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        // Route commands before any native host can consume another profile's
+        // same-numbered tab. Snapshot requests are intentionally broadcast.
+        let snapshotBase = fileURL.deletingLastPathComponent().appendingPathComponent(
+            fileURL.lastPathComponent.replacingOccurrences(of: "browser-tab-command-", with: "browser-tabs-"))
+        let profiles = BrowserProfileSnapshots.sessions(base: snapshotBase)
+        if !profiles.isEmpty {
+            if let expected = command.browserSessionID, expected != BrowserProfileSnapshots.nonce(profiles) { return }
+            for profile in profiles {
+                guard let session = profile.browserSessionID else { continue }
+                let row = (profile.allTabs ?? profile.tabs).first {
+                    (profiles.count > 1 ? BrowserProfileSnapshots.compositeID(session: session, id: $0.id) : $0.id) == command.tabID
+                }
+                guard command.action == .snapshot || row != nil else { continue }
+                var scoped = command; scoped.browserSessionID = session
+                if let row { scoped.tabID = row.id; scoped.windowID = row.windowID }
+                try JSONEncoder().encode(scoped).write(to: BrowserProfileSnapshots.partition(fileURL, session: session), options: .atomic)
+            }
+            return
+        }
         try JSONEncoder().encode(command).write(to: fileURL, options: .atomic)
     }
 

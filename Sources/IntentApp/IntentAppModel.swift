@@ -1157,7 +1157,12 @@ final class IntentAppModel: ObservableObject {
         if requestedIntention.sessionLocksManualFinish || requestedIntention.orderedFrictionNodes.contains(where: { if case .taskChecklist = $0.friction { return true }; return false }) {
             IntentExitPasscode.offerOnce()
         }
-        let intention = SessionAppPresets.applying(allowed: alwaysAllowedApps, blocked: alwaysBlockedApps, to: requestedIntention)
+        let startupApps = Set(IntentionStartupPlanner.steps(for: requestedIntention).compactMap { step -> String? in
+            if case .openBundle(let bundle) = step { return bundle }; return nil
+        })
+        let explicitApps = quickSelectionIntentionID == requestedIntention.id
+            ? Set(quickSelectionWindowIDs.keys).union((quickSelectionTabIDs ?? [:]).keys).union(startupApps) : Set<String>()
+        let intention = SessionAppPresets.applying(allowed: alwaysAllowedApps.filter { !explicitApps.contains($0.bundleIdentifier) }, blocked: alwaysBlockedApps, to: requestedIntention)
         do {
             if let nextAllowedDate = try cooldownStore.nextAllowedDate(for: intention.id) {
                 cooldownExpirations[intention.id] = nextAllowedDate
@@ -1468,10 +1473,10 @@ final class IntentAppModel: ObservableObject {
     private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
         defer { releaseWorkPeriodAfterFailedStart() }
         guard !intention.selectionRequiresTabReselection || quickSelectionIntentionID == intention.id else {
-            errorMessage = "This intention used specific browser tabs. Open ` and choose the current tabs before running it again."
+            errorMessage = "This intention used specific windows or tabs. Open ` to review the current workspace before running it again."
             return
         }
-        let presetIDs = Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier))
+        let presetIDs = Set(alwaysBlockedApps.map(\.bundleIdentifier))
         if quickSelectionIntentionID == intention.id {
             quickSelectionTabIDs = quickSelectionTabIDs?.filter { !presetIDs.contains($0.key) }
         }
@@ -1502,6 +1507,9 @@ final class IntentAppModel: ObservableObject {
             let heartbeatStore = BrowserGuardHeartbeatStore(
                 fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser.bundleIdentifier)
             )
+            if !intention.websiteFeaturePolicies.isEmpty && !heartbeatStore.supports(.websiteFeatures, maxAge: 5) {
+                errorMessage = "Update \(browser.name) Browser Guard to use website feature controls. This intention has not started."; return
+            }
             if !heartbeatStore.isFresh(maxAge: 5) {
                 errorMessage = "\(browser.name) browser locking is not connected. Load Intent Browser Guard in \(browser.name), then start this intention again."
                 return
@@ -1567,7 +1575,9 @@ final class IntentAppModel: ObservableObject {
 
         configuredRules?.addAsYouGo = intention.addAsYouGo
         configuredRules?.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
-        configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier)).union(intention.accessMode == .whitelist ? intention.wholeBrowserBundleIdentifiers : [])
+        configuredRules?.websiteFeaturePolicies = intention.websiteFeaturePolicies
+        let scopedBrowsers = Set(browserGuards.map(\.bundleIdentifier))
+        configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier)).subtracting(scopedBrowsers).union(intention.accessMode == .whitelist ? intention.wholeBrowserBundleIdentifiers : [])
         let rules = configuredRules
 
         do {
@@ -1585,7 +1595,7 @@ final class IntentAppModel: ObservableObject {
         // only activates each browser so two independent launch paths cannot race.
         var lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
         if quickSelectionIntentionID == intention.id {
-            let presetIDs = Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier))
+            let presetIDs = Set(alwaysBlockedApps.map(\.bundleIdentifier))
             lockSpec.selectedWindowIDsByApp = intention.addAsYouGo && intention.accessMode == .whitelist ? [:] : quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
         }
         lockSpec.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
@@ -1690,6 +1700,21 @@ final class IntentAppModel: ObservableObject {
 
             let failureMessage: String?
             do {
+                if let rules, !rules.websiteFeaturePolicies.isEmpty, let session = rules.startupSessionID {
+                    let began = Date()
+                    let deadline = began.addingTimeInterval(8)
+                    while !lock.isStopRequested {
+                        let ready = browserGuards.allSatisfy {
+                            WebsitePolicyAcknowledgement.isReady(browser: $0.bundleIdentifier, session: session, since: began.addingTimeInterval(-2))
+                        }
+                        if ready { break }
+                        if Date() >= deadline {
+                            throw NSError(domain: "Intent.BrowserPolicy", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                                "Browser Guard could not confirm the website controls. No focus lock was started. Reload Browser Guard and the affected website tabs, then try again."])
+                        }
+                        Thread.sleep(forTimeInterval: 0.1)
+                    }
+                }
                 try lock.run(onReady: { [weak self] in
                     Task { @MainActor [weak self] in
                         guard let self, self.activeSessionOccurrenceID == occurrence else { return }
@@ -1952,8 +1977,8 @@ final class IntentAppModel: ObservableObject {
         guard !intention.isLeisure else { return [] }
         return intention.allowedApps.filter {
             Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
-                && !intention.wholeBrowserBundleIdentifiers.contains($0.bundleIdentifier)
-                && !isAlwaysAllowed($0.bundleIdentifier)
+                && (!intention.wholeBrowserBundleIdentifiers.contains($0.bundleIdentifier) || !intention.websiteFeaturePolicies.isEmpty)
+                && !intention.presetAllowedBundleIdentifiers.contains($0.bundleIdentifier)
                 && (intention.accessMode == .whitelist
                     || !intention.websites(for: $0.bundleIdentifier).isEmpty
                     || intention.selectionBrowserBundleIdentifiers.contains($0.bundleIdentifier))

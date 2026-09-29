@@ -53,6 +53,7 @@ struct HostTab: Codable {
 }
 
 struct HostRequest: Codable {
+    var appliedWebsitePolicySessionID: String?
     var browserSessionID: String?
     var preview: BrowserTabPreview?
     var type: String?
@@ -68,6 +69,7 @@ struct HostRequest: Codable {
 
 struct HostRuleState: Codable, Equatable {
     var addAsYouGo: Bool = false
+    var websiteFeaturePolicies: [String: WebsiteFeaturePolicy] = [:]
     var hideDistractions: Bool = false
     var selectedBrowserSessionID: String? = nil
     var selectedTabIDs: [Int]? = nil
@@ -84,6 +86,7 @@ struct HostRuleState: Codable, Equatable {
 }
 
 struct HostResponse: Codable {
+    var websiteFeaturePolicies: [String: WebsiteFeaturePolicy]
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var bundledExtensionVersion: String = "0.2.22"
@@ -104,6 +107,7 @@ struct HostResponse: Codable {
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?) {
         addAsYouGo = state.addAsYouGo
+        websiteFeaturePolicies = state.websiteFeaturePolicies
         hideDistractions = state.hideDistractions
         selectedBrowserSessionID = state.selectedBrowserSessionID
         selectedTabIDs = state.selectedTabIDs
@@ -200,6 +204,7 @@ private final class HostRuntime {
     private let metricsURL: URL?
 
     private var browserBundleIdentifier: String?
+    private var profileSessionID: String?
     private var extensionVersion: String?
     private var extensionCapabilities: [String] = []
     private var guardEnabled = true
@@ -233,6 +238,7 @@ private final class HostRuntime {
         queue.sync {
             metrics.receivedMessages += 1
             let browser = request.browserBundleIdentifier ?? browserBundleIdentifier ?? "org.mozilla.firefox"
+            if let session = request.browserSessionID, !session.isEmpty { profileSessionID = session }
             if let version = request.extensionVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
                !version.isEmpty {
                 extensionVersion = version
@@ -251,6 +257,14 @@ private final class HostRuntime {
             }
 
             switch request.type ?? "getRules" {
+            case "websitePolicyReady":
+                if let session = request.appliedWebsitePolicySessionID,
+                   let browserSession = request.browserSessionID, !browserSession.isEmpty,
+                   let data = try? JSONEncoder().encode(WebsitePolicyAcknowledgement(startupSessionID: session, browserSessionID: browserSession)) {
+                    let base = WebsitePolicyAcknowledgement.fileURL(browser: browser, directory: paths.directory)
+                    try? data.write(to: base, options: .atomic)
+                    try? data.write(to: BrowserProfileSnapshots.partition(base, session: browserSession), options: .atomic)
+                }
             case "tabPreview":
                 if let preview = request.preview,
                    let data = try? JSONEncoder().encode(preview), data.count < 8_000_000 {
@@ -328,6 +342,10 @@ private final class HostRuntime {
         let store = BrowserGuardHeartbeatStore(
             fileURL: paths.heartbeat(for: browserBundleIdentifier)
         )
+        if let session = profileSessionID, let data = try? JSONEncoder().encode(now) {
+            let file = BrowserProfileSnapshots.partition(paths.snapshot(for: browserBundleIdentifier), session: session).appendingPathExtension("heartbeat")
+            try? data.write(to: file, options: .atomic)
+        }
         if (try? store.write(
             date: now,
             extensionVersion: extensionVersion,
@@ -364,6 +382,10 @@ private final class HostRuntime {
         )
         let store = BrowserTabSnapshotStore(fileURL: paths.snapshot(for: browserBundleIdentifier))
         if (try? store.write(snapshot)) != nil {
+            if let session = browserSessionID {
+                try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.partition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
+                maybeWriteHeartbeat(force: true)
+            }
             requestedSnapshotRefresh = false
             metrics.snapshotWrites += 1
             lastSnapshotSessionID = browserSessionID
@@ -444,12 +466,28 @@ private final class HostRuntime {
 
         let browserWebsites = rules.allowedWebsitesByBrowser[browserBundleIdentifier]
             ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
+        let expected = rules.selectedBrowserSessionIDsByBrowser?[browserBundleIdentifier]
+        var selectedIDs = rules.selectedTabIDsByBrowser?[browserBundleIdentifier]
+        var selectedSession = expected
+        if let selected = selectedIDs, let session = profileSessionID {
+            if expected?.hasPrefix("profiles:") == true {
+                let participating = String(expected!.dropFirst("profiles:".count)).components(separatedBy: "|").contains(session)
+                selectedIDs = participating ? (lastSnapshotAllTabs ?? lastSnapshotTabs ?? []).compactMap { tab in
+                    selected.contains(BrowserProfileSnapshots.compositeID(session: session, id: tab.id)) ? tab.id : nil
+                } : []
+                selectedSession = session
+            } else if expected != nil && expected != session {
+                selectedIDs = []; selectedSession = session
+            }
+        }
+        let unrestricted = rules.unrestrictedBrowserBundleIdentifiers.contains(browserBundleIdentifier)
         return HostRuleState(
-            addAsYouGo: rules.addAsYouGo,
+            addAsYouGo: rules.addAsYouGo || (unrestricted && rules.accessMode == .whitelist),
+            websiteFeaturePolicies: rules.websiteFeaturePolicies,
             hideDistractions: rules.hideDistractions,
-            selectedBrowserSessionID: rules.selectedBrowserSessionIDsByBrowser?[browserBundleIdentifier],
-            selectedTabIDs: rules.selectedTabIDsByBrowser?[browserBundleIdentifier],
-            active: rules.active && !rules.unrestrictedBrowserBundleIdentifiers.contains(browserBundleIdentifier),
+            selectedBrowserSessionID: unrestricted ? nil : selectedSession,
+            selectedTabIDs: unrestricted ? nil : selectedIDs,
+            active: rules.active && (!unrestricted || !rules.websiteFeaturePolicies.isEmpty),
             accessMode: rules.accessMode.rawValue,
             allowedWebsites: browserWebsites,
             startupWebsites: rules.startupWebsitesByBrowser[browserBundleIdentifier] ?? [],
@@ -464,6 +502,10 @@ private final class HostRuntime {
 
     private func takePendingCommand() -> BrowserTabCommand? {
         guard let browserBundleIdentifier else { return nil }
+        if let session = profileSessionID,
+           let command = BrowserTabCommandStore(fileURL: BrowserProfileSnapshots.partition(paths.command(for: browserBundleIdentifier), session: session)).take() {
+            return command
+        }
         return BrowserTabCommandStore(
             fileURL: paths.command(for: browserBundleIdentifier)
         ).take()

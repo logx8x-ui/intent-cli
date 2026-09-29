@@ -162,7 +162,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         tabs.delete(id);
         for (const listener of tabRemoved.listeners) await listener(id);
       },
-      sendMessage: async () => ({})
+      sendMessage: async () => options.rejectWebsiteGuard ? {} : ({websiteFeatures:true})
     },
     windows: {
       getAll: async () => {
@@ -187,6 +187,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const context = {
     chrome,
     IntentBrowserRules: helpers,
+    IntentWebsiteFeatures: require("../chrome-extension/website-features.js"),
     URL,
     importScripts: () => {},
     setInterval: (callback, delay) => {
@@ -295,7 +296,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 async function run() {
   for (const mode of ['whitelist', 'blacklist']) {
     const open = createHarness({active: true, guardEnabled: true, addAsYouGo: true, accessMode: mode,
-      allowedWebsites: [], selectedTabIDs: [81], blockNavigation: true, blockTabSwitching: true,
+      allowedWebsites: [], selectedTabIDs: [81], blockNavigation: true, blockTabSwitching: true, blockNewTabs: true,
       allowGoogleSearchTabs: true, startupSessionID: 'open-test'}, [
       {id: 81, windowId: 1, active: mode === 'whitelist', url: 'https://example.com/'},
       {id: 82, windowId: 1, active: mode === 'blacklist', url: 'https://other.example/'}
@@ -306,6 +307,9 @@ async function run() {
     await open.navigate(82, 'https://new.example/');
     assert.equal(open.tabs.get(82).url, 'https://new.example/', 'Add as you go permits ordinary website navigation');
     assert.equal(open.removedTabs.length, 0, 'Add as you go and blacklist never delete existing tabs');
+    await open.create({id: 83, windowId: 1, active: true, url: 'https://fresh.example/'});
+    await open.activate(83);
+    assert.equal(open.tabs.get(83)?.active, true, 'A new ordinary tab is usable with Add as you go');
     if (mode === 'blacklist') {
       await open.activate(81);
       assert.equal(open.tabs.get(81).active, false, 'An explicit blacklisted tab remains inaccessible');
@@ -1112,6 +1116,21 @@ async function run() {
   await current.receiveNative({active: false, guardEnabled: true, bundledExtensionVersion: require('../chrome-extension/manifest.json').version});
   assert.equal(current.extensionReloads.length, 0, "Matching extensions must not reload");
   console.log("Chrome background behavior spec passed");
+  const scopedSite = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[71], startupSessionID:"site-test",
+    websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [
+      {id:71,windowId:1,active:true,url:"https://www.youtube.com/watch?v=test"},
+      {id:72,windowId:1,active:false,url:"https://www.youtube.com/shorts/test"}
+    ]);
+  await scopedSite.settle();
+  assert.ok(scopedSite.nativeMessages.some(m=>m.type === "websitePolicyReady" && m.appliedWebsitePolicySessionID === "site-test"), "Acknowledge the installed network and content policy");
+  assert.ok(scopedSite.sessionRules.some(r=>r.id >= 24000 && r.action.type === "block"), "Selected tabs retain site-level network restrictions");
+  assert.ok(scopedSite.sessionRules.some(r=>r.id === 23000), "Site policy does not replace exact-tab restrictions");
+  const unavailableSite = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[71], startupSessionID:"failed-site-test",
+    websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [
+      {id:71,windowId:1,active:true,url:"https://www.youtube.com/watch?v=test"}
+    ], {rejectWebsiteGuard:true});
+  await unavailableSite.settle();
+  assert.equal(unavailableSite.nativeMessages.some(m=>m.type === "websitePolicyReady"), false, "Never confirm a page guard that failed to install");
 }
 
 run().catch((error) => {

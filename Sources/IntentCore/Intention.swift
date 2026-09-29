@@ -37,6 +37,7 @@ public struct Intention: Identifiable, Codable, Equatable {
     public var selectionRequiresTabReselection: Bool = false
     public var selectionOnly: Bool = false
     public var wholeBrowserBundleIdentifiers: Set<String> = []
+    public var websiteFeaturePolicies: [String: WebsiteFeaturePolicy] = [:]
     public var presetAllowedBundleIdentifiers: Set<String> = []
     public var presetBlockedBundleIdentifiers: Set<String> = []
     // Derived from this Mac's presets on load/start; not another visible restriction node.
@@ -106,6 +107,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         case accessMode
         case wholeBrowserBundleIdentifiers
         case selectionOnly
+        case websiteFeaturePolicies
         case selectionBrowserBundleIdentifiers
         case selectionRequiresTabReselection
     }
@@ -131,6 +133,7 @@ public struct Intention: Identifiable, Codable, Equatable {
         isLeisure = try container.decodeIfPresent(Bool.self, forKey: .isLeisure) ?? false
         wholeBrowserBundleIdentifiers = try container.decodeIfPresent(Set<String>.self, forKey: .wholeBrowserBundleIdentifiers) ?? []
         selectionOnly = try container.decodeIfPresent(Bool.self, forKey: .selectionOnly) ?? false
+        websiteFeaturePolicies = try container.decodeIfPresent([String: WebsiteFeaturePolicy].self, forKey: .websiteFeaturePolicies) ?? [:]
         selectionBrowserBundleIdentifiers = try container.decodeIfPresent([String].self, forKey: .selectionBrowserBundleIdentifiers) ?? []
         selectionRequiresTabReselection = try container.decodeIfPresent(Bool.self, forKey: .selectionRequiresTabReselection) ?? false
         accessMode = isLeisure

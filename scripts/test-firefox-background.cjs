@@ -57,6 +57,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
       }
     },
     tabs: {
+      sendMessage: async () => ({websiteFeatures:true}),
       onActivated: { addListener: (listener) => listeners.onActivated.push(listener) },
       onUpdated: { addListener: (listener) => listeners.onUpdated.push(listener) },
       onCreated: { addListener: (listener) => listeners.onCreated.push(listener) },
@@ -133,6 +134,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const context = {
     browser,
     IntentBrowserRules: helpers,
+    IntentWebsiteFeatures: require("../firefox-extension/website-features.js"),
     URL,
     setInterval: (callback, delay) => {
       intervals.push({ callback, delay });
@@ -262,7 +264,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
 async function run() {
   for (const mode of ['whitelist', 'blacklist']) {
     const open = createHarness({active: true, guardEnabled: true, addAsYouGo: true, accessMode: mode,
-      allowedWebsites: [], selectedTabIDs: [81], blockNavigation: true, blockTabSwitching: true,
+      allowedWebsites: [], selectedTabIDs: [81], blockNavigation: true, blockTabSwitching: true, blockNewTabs: true,
       allowGoogleSearchTabs: true, startupSessionID: 'open-test'}, [
       {id: 81, windowId: 1, active: mode === 'whitelist', url: 'https://example.com/'},
       {id: 82, windowId: 1, active: mode === 'blacklist', url: 'https://other.example/'}
@@ -273,12 +275,22 @@ async function run() {
     await open.update(82, {url: 'https://new.example/'});
     assert.equal(open.tabs.get(82).url, 'https://new.example/', 'Add as you go permits ordinary website navigation');
     assert.equal(open.removals.length, 0, 'Add as you go and blacklist never delete existing tabs');
+    await open.create({id: 83, windowId: 1, active: true, url: 'https://fresh.example/'});
+    await open.activate(83);
+    assert.equal(open.tabs.get(83)?.active, true, 'A new ordinary tab is usable with Add as you go');
     if (mode === 'blacklist') {
       await open.activate(81);
       assert.equal(open.tabs.get(81).active, false, 'An explicit blacklisted tab remains inaccessible');
     }
   }
 
+  const website = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[7],
+    websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [
+      {id:7,windowId:1,active:true,url:"https://www.youtube.com/watch?v=test"}
+    ]);
+  await website.ready();
+  assert.equal(website.listeners.onBeforeRequest[0]({tabId:7,url:"https://www.youtube.com/shorts/test"}).cancel, true, "A selected Firefox tab must not bypass its No Shorts policy");
+  assert.equal(website.listeners.onBeforeRequest[0]({tabId:7,url:"https://www.youtube.com/watch?v=test"}).cancel, undefined, "Normal videos remain usable");
   // Old blank/result tabs must not inherit the fresh-search allowance.
   {
     const searchRules = {active: true, hideDistractions: true, accessMode: 'whitelist', selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], startupSessionID: 'fresh-search-regression', blockTabSwitching: true, blockNavigation: true, blockNewTabs: true, allowGoogleSearchTabs: true};

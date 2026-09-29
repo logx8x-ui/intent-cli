@@ -75,6 +75,7 @@ public final class IntentionStore {
 
 public struct ActiveBrowserRules: Codable, Equatable {
     public var addAsYouGo = false
+    public var websiteFeaturePolicies: [String: WebsiteFeaturePolicy] = [:]
     public var hideDistractions = false
     public static let freshnessWindow: TimeInterval = 5
 
@@ -124,6 +125,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case websiteFeaturePolicies
         case active
         case accessMode
         case addAsYouGo
@@ -144,6 +146,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        websiteFeaturePolicies = try container.decodeIfPresent([String: WebsiteFeaturePolicy].self, forKey: .websiteFeaturePolicies) ?? [:]
         active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         accessMode = try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist
         addAsYouGo = try container.decodeIfPresent(Bool.self, forKey: .addAsYouGo) ?? false
@@ -180,6 +183,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         )
         result.addAsYouGo = addAsYouGo
         result.hideDistractions = hideDistractions
+        result.websiteFeaturePolicies = websiteFeaturePolicies
         result.unrestrictedBrowserBundleIdentifiers = unrestrictedBrowserBundleIdentifiers
         return result
     }
@@ -248,6 +252,7 @@ public struct BrowserGuardHeartbeat: Codable, Equatable {
 
 public enum BrowserGuardCapability: String, Codable, Equatable {
     case addAsYouGo = "add-as-you-go-v1"
+    case websiteFeatures = "website-features-v1"
     case singleStartupLaunch = "single-startup-launch-v1"
     case quickSelection = "quick-selection-tabs-v1"
     case blacklistSelection = "blacklist-selection-tabs-v1"

@@ -12,6 +12,7 @@
   "permissions": [
     "nativeMessaging",
     "storage",
+    "scripting",
     "tabs",
     "webNavigation",
     "declarativeNetRequest",
@@ -32,6 +33,11 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["*://*.instagram.com/*", "*://*.youtube.com/*"],
+      "js": ["website-features.js", "site-feature-guard.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": [
         "<all_urls>"

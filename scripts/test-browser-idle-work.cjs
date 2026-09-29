@@ -38,6 +38,7 @@ async function harness(browserName, connected) {
     Date: class extends Date { static now() { return now; } },
     clearTimeout: id => timers.delete(id),
     IntentBrowserRules: require(`../${browserName}-extension/rule-helpers.js`),
+    IntentWebsiteFeatures: require(`../${browserName}-extension/website-features.js`),
     importScripts() {},
     setTimeout(callback, delay = 0) {
       const id = nextID++;

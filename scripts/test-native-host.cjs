@@ -161,6 +161,15 @@ try {
   assert.equal(unrestricted.active, false, "Always-allowed browser stays unrestricted while another browser is controlled");
   assert.equal(restricted.active, true, "Browser exemption does not disable another browser's rules");
 
+  fs.writeFileSync(rulesPath, JSON.stringify({ ...activeRules, accessMode: "whitelist", addAsYouGo: false,
+    unrestrictedBrowserBundleIdentifiers: ["com.google.Chrome"],
+    websiteFeaturePolicies: { youtube: { version: 1, allowedFeatures: ["search"] } }, updatedAt: swiftReferenceDateNow() }));
+  const [wholeBrowser] = callHost([{ type: "getRules", browserBundleIdentifier: "com.google.Chrome" }]);
+  assert.equal(wholeBrowser.active, true, "Whole-browser permission retains explicit site controls");
+  assert.equal(wholeBrowser.addAsYouGo, true, "A whole-browser selection allows ordinary tab navigation");
+  assert.equal(wholeBrowser.selectedTabIDs, undefined, "Whole-browser scope cannot inherit a stale selected-tab identity");
+  assert.deepEqual(wholeBrowser.websiteFeaturePolicies.youtube.allowedFeatures, ["search"], "Site bans retain precedence");
+
   console.log("Native host spec passed");
 } finally {
   fs.rmSync(intentDir, { recursive: true, force: true });
