@@ -42,10 +42,10 @@ public struct SessionOverlayPolicy {
     public private(set) var visible = false
     public init() {}
 
-    public mutating func update(occurrenceID: UUID, hasTimer: Bool, hasChecklist: Bool) {
+    public mutating func update(occurrenceID: UUID, hasTimer: Bool, hasChecklist: Bool, hasStopwatch: Bool = false) {
         let isNewRun = self.occurrenceID != occurrenceID
         self.occurrenceID = occurrenceID
-        eligible = hasTimer || hasChecklist
+        eligible = hasTimer || hasChecklist || hasStopwatch
         if isNewRun { expanded = eligible; visible = eligible }
         else if !eligible { expanded = false; visible = false }
     }
@@ -68,4 +68,19 @@ public struct SessionOverlayPolicy {
     }
 
     public mutating func end() { self = Self() }
+}
+
+/// Append newly introduced controls without resetting a person's saved order.
+public enum SessionModificationOrder {
+    public static func migrated(stored: [String], available: [String]) -> [String] {
+        var seen = Set<String>()
+        return (stored + available).filter { available.contains($0) && seen.insert($0).inserted }
+    }
+}
+
+public enum SessionStopwatch {
+    public static func text(elapsed: TimeInterval) -> String {
+        let seconds = Int(max(0, elapsed).rounded(.down))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+    }
 }

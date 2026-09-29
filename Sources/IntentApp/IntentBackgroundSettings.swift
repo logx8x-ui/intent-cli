@@ -551,7 +551,7 @@ private struct AlwaysAllowedAppsSettingsSection: View {
     }
 }
 
-private struct OverlayShortcutRecorder: View {
+struct OverlayShortcutRecorder: View {
     @Binding var shortcut: OverlayShortcut
     let onUpdate: (OverlayShortcut) -> String?
 

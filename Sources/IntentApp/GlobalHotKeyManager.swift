@@ -266,6 +266,12 @@ final class GlobalHotKeyManager {
     var modificationHandler: ((Int) -> Void)?
     var markedModeHandler: (() -> Void)?
     private let markMonitor = QuickMarkKeyMonitor()
+    var spotlightApplicationHandler: ((URL) -> Void)? {
+        didSet { markMonitor.spotlight.onApplication = spotlightApplicationHandler }
+    }
+    var spotlightFailureHandler: ((String) -> Void)? {
+        didSet { markMonitor.spotlight.onFailure = spotlightFailureHandler }
+    }
     private var gestureRecoveryTimer: Timer?
     private var gestureActivationObserver: NSObjectProtocol?
     private var lastGestureDiagnosticState: String?

@@ -67,6 +67,7 @@ struct HostRequest: Codable {
 }
 
 struct HostRuleState: Codable, Equatable {
+    var addAsYouGo: Bool = false
     var hideDistractions: Bool = false
     var selectedBrowserSessionID: String? = nil
     var selectedTabIDs: [Int]? = nil
@@ -83,8 +84,9 @@ struct HostRuleState: Codable, Equatable {
 }
 
 struct HostResponse: Codable {
+    var addAsYouGo: Bool
     var hideDistractions: Bool
-    var bundledExtensionVersion: String = "0.2.20"
+    var bundledExtensionVersion: String = "0.2.22"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
@@ -101,6 +103,7 @@ struct HostResponse: Codable {
     var tabCommand: BrowserTabCommand?
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?) {
+        addAsYouGo = state.addAsYouGo
         hideDistractions = state.hideDistractions
         selectedBrowserSessionID = state.selectedBrowserSessionID
         selectedTabIDs = state.selectedTabIDs
@@ -442,6 +445,7 @@ private final class HostRuntime {
         let browserWebsites = rules.allowedWebsitesByBrowser[browserBundleIdentifier]
             ?? (browserBundleIdentifier == "org.mozilla.firefox" ? rules.allowedWebsites : [])
         return HostRuleState(
+            addAsYouGo: rules.addAsYouGo,
             hideDistractions: rules.hideDistractions,
             selectedBrowserSessionID: rules.selectedBrowserSessionIDsByBrowser?[browserBundleIdentifier],
             selectedTabIDs: rules.selectedTabIDsByBrowser?[browserBundleIdentifier],

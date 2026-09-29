@@ -55,6 +55,12 @@ final class IntentAppModel: ObservableObject {
     @Published var activeSessionName: String?
     @Published var activeSessionIsLeisure = false
     @Published var activeSessionEndsAt: Date?
+    @Published private(set) var stopwatchStarted: ContinuousClock.Instant?
+    var stopwatchText: String {
+        guard let stopwatchStarted else { return "00:00:00" }
+        let duration = stopwatchStarted.duration(to: ContinuousClock().now).components
+        return SessionStopwatch.text(elapsed: Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+    }
     @Published private(set) var activeSessionAbsoluteEndTime: Date?
     @Published private(set) var activeSessionOccurrenceID: UUID?
     @Published var zeroDriftEndsAt: Date?
@@ -1290,7 +1296,7 @@ final class IntentAppModel: ObservableObject {
     func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
     func toggleSessionControlsExpansion() { overlayPresenter?.toggleSessionControlsExpansion() }
 
-    var hasEligibleSessionControls: Bool { hasActiveSession && (activeSessionEndsAt != nil || !activeChecklist.isEmpty) }
+    var hasEligibleSessionControls: Bool { hasActiveSession && (activeSessionEndsAt != nil || stopwatchStarted != nil || !activeChecklist.isEmpty) }
     var isSessionControlsExpanded: Bool { overlayPresenter?.isSessionControlsExpanded == true }
     @discardableResult
     func collapseSessionControlsIfExpanded() -> Bool { overlayPresenter?.collapseSessionControlsIfExpanded() ?? false }
@@ -1507,6 +1513,10 @@ final class IntentAppModel: ObservableObject {
                 return
             }
 
+            if intention.addAsYouGo && !heartbeatStore.supports(.addAsYouGo, maxAge: 5) {
+                errorMessage = "Update \(browser.name) Browser Guard to use Add as you go."
+                return
+            }
             let stateStore = BrowserGuardStateStore(
                 fileURL: BrowserGuardStateStore.fileURL(for: browser.bundleIdentifier)
             )
@@ -1555,8 +1565,9 @@ final class IntentAppModel: ObservableObject {
             allowGoogleSearchTabs: intention.accessMode == .whitelist && intention.browserSearchesAllowed
         )
 
+        configuredRules?.addAsYouGo = intention.addAsYouGo
         configuredRules?.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
-        configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier))
+        configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier)).union(intention.accessMode == .whitelist ? intention.wholeBrowserBundleIdentifiers : [])
         let rules = configuredRules
 
         do {
@@ -1575,7 +1586,7 @@ final class IntentAppModel: ObservableObject {
         var lockSpec = rules == nil ? spec : spec.deferringBrowserWebsiteStartupToGuard()
         if quickSelectionIntentionID == intention.id {
             let presetIDs = Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier))
-            lockSpec.selectedWindowIDsByApp = quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
+            lockSpec.selectedWindowIDsByApp = intention.addAsYouGo && intention.accessMode == .whitelist ? [:] : quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
         }
         lockSpec.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
         // Finishing should leave the user where they are, not reactivate the
@@ -1595,6 +1606,7 @@ final class IntentAppModel: ObservableObject {
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
         if quickSelectionIntentionID == intention.id, !(quickSelectionTabIDs ?? [:]).isEmpty || !quickSelectionWindowIDs.isEmpty {
+            let requireSelectedResources = intention.accessMode == .whitelist && !intention.addAsYouGo
             let tabIDs = quickSelectionTabIDs ?? [:]
             let browserSessionIDs = quickSelectionBrowserSessionIDs
             let windowIDs = Set(quickSelectionWindowIDs.values.flatMap { $0 })
@@ -1602,7 +1614,7 @@ final class IntentAppModel: ObservableObject {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard !Task.isCancelled, let self, self.activeSessionID == intention.id else { return }
-                    if !windowIDs.isEmpty, !windowIDs.isSubset(of: Set(WorkspaceWindow.list(onScreen: false).map(\.id))) {
+                    if requireSelectedResources, !windowIDs.isEmpty, !windowIDs.isSubset(of: Set(WorkspaceWindow.list(onScreen: false).map(\.id))) {
                         self.activeLock?.stopForSafety()
                         self.errorMessage = "A marked window closed, so the intention ended safely."
                         return
@@ -1625,7 +1637,7 @@ final class IntentAppModel: ObservableObject {
                             self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
                             return
                         }
-                        if snapshot.updatedAt > Date().addingTimeInterval(-3),
+                        if requireSelectedResources, snapshot.updatedAt > Date().addingTimeInterval(-3),
                            !(snapshot.allTabs ?? snapshot.tabs).contains(where: { selected.contains($0.id) }) {
                             self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
                             self.activeLock?.stop()
@@ -1646,6 +1658,7 @@ final class IntentAppModel: ObservableObject {
             return []
         }
         completedChecklist = pendingResume?.completedTasks.filter { activeChecklist.indices.contains($0) } ?? []
+        stopwatchStarted = intention.showsStopwatch ? ContinuousClock().now : nil
         scheduleSessionLimit(for: intention, runtimeEndDate: runtimeEndDate)
         if let occurrence = activeSessionOccurrenceID, hasEligibleSessionControls {
             overlayPresenter?.showSessionControls(occurrenceID: occurrence)
@@ -1726,6 +1739,7 @@ final class IntentAppModel: ObservableObject {
                 self.sessionExpiryPolicy?.cancel()
                 self.sessionExpiryPolicy = nil
                 self.activeSessionEndsAt = nil
+                self.stopwatchStarted = nil
                 self.activeSessionAbsoluteEndTime = nil
                 self.activeSessionOccurrenceID = nil
                 self.overlayPresenter?.hideSessionTimer()
@@ -1938,6 +1952,7 @@ final class IntentAppModel: ObservableObject {
         guard !intention.isLeisure else { return [] }
         return intention.allowedApps.filter {
             Self.supportedBrowserBundleIdentifiers.contains($0.bundleIdentifier)
+                && !intention.wholeBrowserBundleIdentifiers.contains($0.bundleIdentifier)
                 && !isAlwaysAllowed($0.bundleIdentifier)
                 && (intention.accessMode == .whitelist
                     || !intention.websites(for: $0.bundleIdentifier).isEmpty

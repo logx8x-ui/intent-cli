@@ -20,6 +20,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
         LaunchAtLoginController.applySavedPreference()
         }
         NSApp.setActivationPolicy(.accessory)
+        SpotlightAppPreparation.shared.recover()
         IntentRuntime.shared.start()
         statusItemController = IntentStatusItemController(
             model: IntentRuntime.shared.model,
@@ -47,6 +48,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Never veto a Mac shutdown/restart to enforce a focus commitment.
+        SpotlightAppPreparation.shared.release()
         IntentRuntime.shared.model.emergencyStop(showMessage: false)
         return .terminateNow
     }
@@ -308,6 +310,12 @@ final class IntentRuntime {
         quickSelectionController.toggle()
     }
 
+    func prepareSavedIntention(_ intention: Intention) {
+        guard !model.hasActiveSession else { return }
+        if !quickSelectionController.isSelectionSurfaceVisible { quickSelectionController.toggle() }
+        quickSelectionController.prepare(intention, workspace: model.journal.workspaces[intention.id])
+    }
+
     func beginOnboardingSelectionScope() { quickSelectionController.beginOnboardingSelectionScope() }
     func endOnboardingSelectionScope() { quickSelectionController.endOnboardingSelectionScope() }
 
@@ -360,6 +368,14 @@ final class IntentRuntime {
                 }
             }
         }
+        hotKeyManager?.spotlightApplicationHandler = { [weak self] url in
+            MainActor.assumeIsolated { self?.quickSelectionController.addSpotlightApplication(url) }
+        }
+        hotKeyManager?.spotlightFailureHandler = { [weak self] message in
+            MainActor.assumeIsolated {
+                self?.model.errorMessage = message; self?.model.showOverlay()
+            }
+        }
         hotKeyManager?.markWindowHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(wholeWindow: true, fromShortcut: true) } }
         hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(fromShortcut: true) } }
         hotKeyManager?.runMarkedHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.runMarked() } }
@@ -407,7 +423,7 @@ final class IntentRuntime {
         if (!UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
             && !UserDefaults.standard.bool(forKey: IntentOnboardingCoordinator.deferredKey))
             || !UserDefaults.standard.bool(forKey: "intentAccountChoiceMade")
-            || PurposeModePreference.isEnabled {
+            {
             overlayController.showOverlay(animated: false)
         }
     }

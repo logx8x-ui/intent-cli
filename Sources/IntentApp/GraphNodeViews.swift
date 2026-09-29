@@ -321,6 +321,8 @@ struct RestrictionNodeView: View {
 
     private var restrictionIcon: String {
         switch node.kind {
+        case .addAsYouGo: "plus.app"
+        case .stopwatch: "stopwatch"
         case .allowBrowserSearches: "magnifyingglass"
         case .dontStartUp: "poweroff"
         case .coolDown: "hourglass"
@@ -331,6 +333,8 @@ struct RestrictionNodeView: View {
 
     private var restrictionTitle: String {
         switch node.kind {
+        case .addAsYouGo: "Add as\nyou go"
+        case .stopwatch: "Stopwatch"
         case .allowBrowserSearches: "Browser\nsearches"
         case .dontStartUp: "Don't\nstart up"
         case .coolDown: "Cooldown"

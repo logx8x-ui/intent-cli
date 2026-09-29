@@ -3,15 +3,16 @@ import IntentCore
 import SwiftUI
 
 enum QuickSelectionOptionsSection: String, CaseIterable {
-    case timer = "Timer", checklist = "Checklist", searches = "Searches", cooldown = "Cooldown"
+    case timer = "Timer", checklist = "Checklist", searches = "Searches", cooldown = "Cooldown", addAsYouGo = "Add as you go", stopwatch = "Stopwatch"
     static var ordered: [Self] {
         let stored = UserDefaults.standard.stringArray(forKey: "quickModificationOrder") ?? []
-        let decoded = stored.compactMap(Self.init(rawValue:))
-        return decoded.count == allCases.count && Set(decoded).count == allCases.count ? decoded : allCases
+        return SessionModificationOrder.migrated(stored: stored, available: allCases.map(\.rawValue)).compactMap(Self.init(rawValue:))
     }
     func enable(in selection: inout QuickSelection) {
         guard !enabled(in: selection) else { return }
         switch self {
+        case .addAsYouGo: selection.restrictionNodes.append(.init(kind: .addAsYouGo, position: .zero))
+        case .stopwatch: selection.restrictionNodes.append(.init(kind: .stopwatch, position: .zero))
         case .timer: selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: true))
         case .checklist: selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260)))
         case .searches: selection.restrictionNodes.append(.init(kind: .allowBrowserSearches, position: .init(x: 240, y: 390)))
@@ -20,6 +21,8 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
     }
     func disable(in selection: inout QuickSelection) {
         switch self {
+        case .addAsYouGo: selection.restrictionNodes.removeAll { $0.kind == .addAsYouGo }
+        case .stopwatch: selection.restrictionNodes.removeAll { $0.kind == .stopwatch }
         case .timer: selection.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
         case .checklist: selection.frictionNodes.removeAll { if case .taskChecklist = $0.friction { return true }; return false }
         case .searches: selection.restrictionNodes.removeAll { $0.kind == .allowBrowserSearches }
@@ -27,10 +30,12 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         }
     }
     var icon: String {
-        switch self { case .timer: return "timer"; case .checklist: return "checklist"; case .searches: return "magnifyingglass"; case .cooldown: return "hourglass" }
+        switch self { case .addAsYouGo: return "plus.app"; case .stopwatch: return "stopwatch"; case .timer: return "timer"; case .checklist: return "checklist"; case .searches: return "magnifyingglass"; case .cooldown: return "hourglass" }
     }
     var hint: String {
         switch self {
+        case .addAsYouGo: return "Open more apps, tabs and websites as you work. Explicit blocks still apply. Choose this before starting; it cannot be enabled mid-intention."
+        case .stopwatch: return "Count time upwards, including while your Mac sleeps. No deadline; Timer and Checklist still decide when a locked intention finishes."
         case .timer: return "Finish after a duration or at a time you choose."
         case .checklist: return "Check off your tasks; completing them all ends the intention."
         case .searches: return "Open fresh tabs for Google searches and results during this intention. Other websites stay blocked."
@@ -39,6 +44,8 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
     }
     func enabled(in selection: QuickSelection) -> Bool {
         switch self {
+        case .addAsYouGo: return selection.restrictionNodes.contains { $0.kind == .addAsYouGo }
+        case .stopwatch: return selection.restrictionNodes.contains { $0.kind == .stopwatch }
         case .timer: return selection.restrictionNodes.contains { $0.kind == .timer || $0.kind == .endTime }
         case .checklist: return selection.frictionNodes.contains { if case .taskChecklist = $0.friction { return true }; return false }
         case .searches: return selection.restrictionNodes.contains { $0.kind == .allowBrowserSearches }

@@ -216,7 +216,7 @@ public extension AIIntentionPlan {
                         kind: restriction.kind,
                         durationMinutes: min(max(restriction.durationMinutes, 1), 1_440)
                     )
-                case .endTime:
+                case .endTime, .addAsYouGo, .stopwatch:
                     return nil
                 }
             }

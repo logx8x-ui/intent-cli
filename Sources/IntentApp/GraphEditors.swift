@@ -904,6 +904,10 @@ struct RestrictionEditorMenu: View {
             .labelsHidden()
 
             switch node.kind {
+            case .addAsYouGo:
+                Text("Open more apps and websites during this intention. Explicit blocks still apply.").font(.caption)
+            case .stopwatch:
+                Text("Count elapsed time without a deadline.").font(.caption)
             case .allowBrowserSearches:
                 Text("Allows new tabs and Google result pages, while links to websites outside this intention stay blocked.")
                     .font(.caption)

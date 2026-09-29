@@ -74,6 +74,7 @@ public final class IntentionStore {
 }
 
 public struct ActiveBrowserRules: Codable, Equatable {
+    public var addAsYouGo = false
     public var hideDistractions = false
     public static let freshnessWindow: TimeInterval = 5
 
@@ -125,6 +126,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case active
         case accessMode
+        case addAsYouGo
         case hideDistractions
         case unrestrictedBrowserBundleIdentifiers
         case allowedWebsites
@@ -144,6 +146,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         active = try container.decodeIfPresent(Bool.self, forKey: .active) ?? false
         accessMode = try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist
+        addAsYouGo = try container.decodeIfPresent(Bool.self, forKey: .addAsYouGo) ?? false
         hideDistractions = try container.decodeIfPresent(Bool.self, forKey: .hideDistractions) ?? false
         unrestrictedBrowserBundleIdentifiers = try container.decodeIfPresent(Set<String>.self, forKey: .unrestrictedBrowserBundleIdentifiers) ?? []
         allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
@@ -175,6 +178,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
             allowGoogleSearchTabs: allowGoogleSearchTabs,
             updatedAt: date
         )
+        result.addAsYouGo = addAsYouGo
         result.hideDistractions = hideDistractions
         result.unrestrictedBrowserBundleIdentifiers = unrestrictedBrowserBundleIdentifiers
         return result
@@ -243,6 +247,7 @@ public struct BrowserGuardHeartbeat: Codable, Equatable {
 }
 
 public enum BrowserGuardCapability: String, Codable, Equatable {
+    case addAsYouGo = "add-as-you-go-v1"
     case singleStartupLaunch = "single-startup-launch-v1"
     case quickSelection = "quick-selection-tabs-v1"
     case blacklistSelection = "blacklist-selection-tabs-v1"

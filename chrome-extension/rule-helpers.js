@@ -48,6 +48,7 @@
   function isAllowedURL(url, rules) {
     if (!rules.active) return true;
     const isBlacklist = rules.accessMode === "blacklist";
+    if (rules.addAsYouGo && !isBlacklist) return true;
     if (isSearchStagingURL(url)) return isBlacklist || rules.allowGoogleSearchTabs;
     if (rules.allowGoogleSearchTabs && (isSearchStagingURL(url) || isGoogleSearchURL(url))) return true;
     if (!rules.allowedWebsites.length) return isBlacklist;

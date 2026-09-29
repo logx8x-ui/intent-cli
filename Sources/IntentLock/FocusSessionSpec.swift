@@ -88,9 +88,12 @@ public struct FocusSessionSpec {
         finishShortcut: FocusKeyboardShortcut = .defaultFinish
     ) -> FocusSessionSpec {
         let startupSteps = IntentionStartupPlanner.steps(for: intention)
-        let controlledBundleIdentifiers = intention.accessMode == .blacklist
-            ? intention.blockedAppBundleIdentifiers
-            : Set(intention.allowedApps.map(\.bundleIdentifier))
+        // An open-ended whitelist uses a deny list at the enforcement layer.
+        // Keep the draft's mode and startup choices intact; persistent bans win.
+        let openEnded = intention.addAsYouGo && intention.accessMode == .whitelist
+        let controlledBundleIdentifiers = openEnded ? intention.presetBlockedBundleIdentifiers
+            : (intention.accessMode == .blacklist ? intention.blockedAppBundleIdentifiers.union(intention.presetBlockedBundleIdentifiers)
+                : Set(intention.allowedApps.map(\.bundleIdentifier)))
         let fallback = intention.accessMode == .blacklist || (intention.isLeisure && startupSteps.isEmpty)
             ? ""
             : IntentionStartupPlanner.fallbackBundleIdentifier(for: intention)
@@ -104,17 +107,17 @@ public struct FocusSessionSpec {
 
         return FocusSessionSpec(
             displayName: intention.name,
-            accessMode: intention.accessMode,
+            accessMode: openEnded ? .blacklist : intention.accessMode,
             startupSteps: startupSteps,
             allowedBundleIdentifiers: controlledBundleIdentifiers,
             fallbackBundleIdentifier: fallback,
-            strictSingleApp: intention.accessMode == .whitelist && !intention.isLeisure && intention.allowedApps.count == 1,
+            strictSingleApp: !openEnded && intention.accessMode == .whitelist && !intention.isLeisure && intention.allowedApps.count == 1,
             blockAppSwitching: !intention.isLeisure,
             blockNewApps: !intention.isLeisure,
             keepFocused: !intention.isLeisure,
-            blockBrowserTabEscape: !intention.isLeisure && (
+            blockBrowserTabEscape: !openEnded && !intention.isLeisure && (
                 intention.accessMode == .whitelist
-                    ? intention.allowedApps.contains(where: \.isBrowser)
+                    ? intention.allowedApps.contains { $0.isBrowser && !intention.wholeBrowserBundleIdentifiers.contains($0.bundleIdentifier) }
                     : !intention.allowedWebsites.isEmpty || !intention.selectionBrowserBundleIdentifiers.isEmpty
             ),
             blockFirefoxChromeClicks: false,
@@ -132,7 +135,7 @@ public struct FocusSessionSpec {
                 by: \.0
             ).mapValues { $0.map(\.1) },
             presetBlockedBundleIdentifiers: intention.presetBlockedBundleIdentifiers,
-            presetAllowedBundleIdentifiers: intention.presetAllowedBundleIdentifiers
+            presetAllowedBundleIdentifiers: intention.presetAllowedBundleIdentifiers.union(intention.accessMode == .whitelist ? intention.wholeBrowserBundleIdentifiers : [])
         )
     }
 
@@ -179,11 +182,13 @@ public struct FocusSessionSpec {
     }
 
     public func permitsWindow(_ id: UInt32, bundleIdentifier: String) -> Bool {
+        if presetBlockedBundleIdentifiers.contains(bundleIdentifier) { return false }
         guard let ids = selectedWindowIDsByApp[bundleIdentifier] else { return permitsApplication(bundleIdentifier) }
         return accessMode == .whitelist ? ids.contains(id) : !ids.contains(id)
     }
 
     public func permitsApplication(_ bundleIdentifier: String) -> Bool {
+        if presetBlockedBundleIdentifiers.contains(bundleIdentifier) { return false }
         if !requiresEnforcement { return true }
         if selectedWindowIDsByApp[bundleIdentifier] != nil { return true }
         switch accessMode {

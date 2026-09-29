@@ -260,6 +260,25 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  for (const mode of ['whitelist', 'blacklist']) {
+    const open = createHarness({active: true, guardEnabled: true, addAsYouGo: true, accessMode: mode,
+      allowedWebsites: [], selectedTabIDs: [81], blockNavigation: true, blockTabSwitching: true,
+      allowGoogleSearchTabs: true, startupSessionID: 'open-test'}, [
+      {id: 81, windowId: 1, active: mode === 'whitelist', url: 'https://example.com/'},
+      {id: 82, windowId: 1, active: mode === 'blacklist', url: 'https://other.example/'}
+    ]);
+    await open.ready();
+    await open.activate(82);
+    assert.equal(open.tabs.get(82).active, true, 'Add as you go permits ordinary tab switching');
+    await open.update(82, {url: 'https://new.example/'});
+    assert.equal(open.tabs.get(82).url, 'https://new.example/', 'Add as you go permits ordinary website navigation');
+    assert.equal(open.removals.length, 0, 'Add as you go and blacklist never delete existing tabs');
+    if (mode === 'blacklist') {
+      await open.activate(81);
+      assert.equal(open.tabs.get(81).active, false, 'An explicit blacklisted tab remains inaccessible');
+    }
+  }
+
   // Old blank/result tabs must not inherit the fresh-search allowance.
   {
     const searchRules = {active: true, hideDistractions: true, accessMode: 'whitelist', selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], startupSessionID: 'fresh-search-regression', blockTabSwitching: true, blockNavigation: true, blockNewTabs: true, allowGoogleSearchTabs: true};

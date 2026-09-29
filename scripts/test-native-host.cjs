@@ -53,6 +53,7 @@ assert.ok(fs.existsSync(hostPath), `Build IntentNativeHost first: missing ${host
 try {
   const activeRules = {
     active: true,
+    addAsYouGo: true,
     accessMode: "blacklist",
     allowedWebsites: ["instagram.com/direct"],
     allowedWebsitesByBrowser: {
@@ -78,6 +79,7 @@ try {
   assert.equal(offResponse.guardEnabled, false, "Native host should persist guard off");
 
   const [rulesResponse] = callHost([{ type: "getRules" }]);
+  assert.equal(rulesResponse.addAsYouGo, true, "Native bridge forwards the session-frozen Add as you go policy");
   assert.equal(rulesResponse.active, true, "Native host should return active app rules");
   assert.equal(rulesResponse.selectedBrowserSessionID, "firefox-session", "Selected-tab policy is bound to the browser lifetime");
   assert.equal(rulesResponse.accessMode, "blacklist", "Native host should preserve browser access mode");

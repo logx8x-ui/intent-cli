@@ -16,12 +16,15 @@ public struct QuickSelectionBrowserWindow: Hashable, Codable {
 public struct QuickSelection: Codable {
     public var name: String = ""
     public var sourceIntentionID: String?
+    public var wholeBrowserApps: Set<String>?
+    public var startupAppIDs: Set<String>?
 
     /// Replay current saved settings while retaining conservatively resolved targets.
     public mutating func applySessionConfiguration(_ intention: Intention) {
         name = intention.name
         sourceIntentionID = intention.id
         accessMode = intention.accessMode
+        wholeBrowserApps = intention.wholeBrowserBundleIdentifiers
         restrictionNodes = intention.restrictionNodes.filter { $0.id != Self.startupSuppressionID }
         frictionNodes = intention.frictionNodes
     }
@@ -52,6 +55,7 @@ public struct QuickSelection: Codable {
 
     public mutating func clearTargets() {
         apps.removeAll(); tabs.removeAll(); windowIDsByApp.removeAll()
+        wholeBrowserApps = nil; startupAppIDs = nil
         browserWindowTabs.removeAll(); ranges.removeAll(); browserSessionIDs.removeAll()
     }
 
@@ -66,6 +70,8 @@ public struct QuickSelection: Codable {
     }
 
     public mutating func toggleApp(_ identifier: String, snapshots: [BrowserTabSnapshot]) {
+        wholeBrowserApps?.remove(identifier)
+        startupAppIDs?.remove(identifier)
         ranges = ranges.filter { $0.key.browser != identifier }
         browserWindowTabs = browserWindowTabs.filter { $0.key.browser != identifier }
         windowIDsByApp.removeValue(forKey: identifier)
@@ -83,6 +89,7 @@ public struct QuickSelection: Codable {
 
     public mutating func toggleTab(_ key: QuickSelectionTab, browserSessionID: String? = nil) {
         if let browserSessionID, !pinBrowserSession(key.browser, sessionID: browserSessionID) { return }
+        wholeBrowserApps?.remove(key.browser)
         ranges = ranges.filter { $0.key.browser != key.browser }
         browserWindowTabs = browserWindowTabs.filter { $0.key.browser != key.browser || !$0.value.contains(key.id) }
         if tabs.remove(key) == nil { tabs.insert(key); apps.insert(key.browser) }
@@ -127,6 +134,7 @@ public struct QuickSelection: Codable {
 
     private mutating func toggleTabGroup(_ keys: Set<QuickSelectionTab>, browser: String) {
         guard !keys.isEmpty else { return }
+        wholeBrowserApps?.remove(browser)
         ranges = ranges.filter { $0.key.browser != browser }
         browserWindowTabs = browserWindowTabs.filter { $0.key.browser != browser || $0.value.isDisjoint(with: keys.map(\.id)) }
         if keys.isSubset(of: tabs) { tabs.subtract(keys) }
@@ -141,6 +149,7 @@ public struct QuickSelection: Codable {
 
     public mutating func toggleBrowserWindow(browser: String, windowID: Int, snapshots: [BrowserTabSnapshot], outlineWholeWindow: Bool = false) {
         guard pinBrowserSession(browser, sessionID: snapshots.first { $0.browserBundleIdentifier == browser }?.browserSessionID) else { return }
+        wholeBrowserApps?.remove(browser)
         let keys = Set((snapshots.first { $0.browserBundleIdentifier == browser }.map { $0.allTabs ?? $0.tabs } ?? [])
             .filter { $0.windowID == windowID && Self.isSelectable($0) }
             .map { QuickSelectionTab(browser: browser, id: $0.id) })
@@ -175,7 +184,7 @@ public struct QuickSelection: Codable {
         var websites: [AllowedWebsite] = []
         var foundTabs: Set<QuickSelectionTab> = []
         var requiresTabReselection = false
-        for browser in apps.intersection(Self.browsers) {
+        for browser in apps.intersection(Self.browsers).subtracting(wholeBrowserApps ?? []) {
             if accessMode == .blacklist, !tabs.contains(where: { $0.browser == browser }) { continue }
             guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == browser }) else {
                 throw QuickSelectionError.browserUnavailable
@@ -229,9 +238,10 @@ public struct QuickSelection: Codable {
             // UUID-derived placement used by ordinary new canvas intentions.
             graphPosition: .zero,
             restrictionNodes: configuredRestrictions + [.init(id: Self.startupSuppressionID, kind: .dontStartUp, position: .init(x: 220, y: 170),
-                                    excludedResourceIDs: resources)],
+                                    excludedResourceIDs: resources.filter { !(startupAppIDs ?? []).contains(String($0.dropFirst(4))) })],
             frictionNodes: sessionFrictions
         )
+        intention.wholeBrowserBundleIdentifiers = apps.intersection(wholeBrowserApps ?? [])
         intention.accessMode = accessMode
         intention.selectionOnly = true
         intention.selectionBrowserBundleIdentifiers = Array(Set(tabs.map(\.browser))).sorted()

@@ -4,6 +4,7 @@ import IntentCore
 /// Tiny input callback: no AX queries, disk IO or window capture in the tap.
 final class QuickMarkKeyMonitor {
     var onAction: ((QuickMarkGesture.Action) -> Void)?
+    let spotlight = SpotlightSelectionMonitor()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private var timer: Timer?
@@ -23,6 +24,7 @@ final class QuickMarkKeyMonitor {
     }
     func start() -> Bool {
         if tap != nil { return true }
+        spotlight.start()
         let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.keyUp.rawValue)
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, pointer in
             guard let pointer else { return Unmanaged.passUnretained(event) }
@@ -32,6 +34,14 @@ final class QuickMarkKeyMonitor {
                 // Callback is bounded; recover once on the next main-loop turn.
                 DispatchQueue.main.async { [weak owner] in if let tap = owner?.tap { CGEvent.tapEnable(tap: tap, enable: true) } }
                 return Unmanaged.passUnretained(event)
+            }
+            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if let consume = owner.spotlight.handle(code: code, down: type == .keyDown,
+                modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
+                openingShortcut: code == 49 && event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]) == .maskCommand,
+                repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0) {
+                owner.cancelPending()
+                return consume ? nil : Unmanaged.passUnretained(event)
             }
             // Preserve Intent's text editors and marked IME composition. The
             // physical-key gesture is only active outside those text contexts.

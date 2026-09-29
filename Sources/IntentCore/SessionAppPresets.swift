@@ -10,6 +10,7 @@ public enum SessionAppPresets {
         let allowed = allowed.filter { !blockedIDs.contains($0.bundleIdentifier) }
         result.presetAllowedBundleIdentifiers = Set(allowed.map(\.bundleIdentifier))
         let presetIDs = blockedIDs.union(allowed.map(\.bundleIdentifier))
+        result.wholeBrowserBundleIdentifiers.subtract(presetIDs)
         result.selectionBrowserBundleIdentifiers.removeAll { presetIDs.contains($0) }
         result.allowedWebsites.removeAll { presetIDs.contains($0.browserBundleIdentifier ?? "") }
         if result.isLeisure {

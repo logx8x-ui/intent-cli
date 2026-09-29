@@ -30,6 +30,7 @@ do {
     try runQuickGestureRegressionSpecs()
     try runTabSelectionSpecs()
     try runSessionRuntimeSpecs()
+    try runSessionAdditionsSpecs()
     try runBrowserCommandSpecs()
     try runOnboardingSpecs()
     try runOnboardingSavePlanSpecs()

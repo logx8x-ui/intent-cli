@@ -53,6 +53,8 @@ public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
     case coolDown
     case timer
     case endTime
+    case addAsYouGo
+    case stopwatch
 
     public var displayName: String {
         switch self {
@@ -64,6 +66,8 @@ public enum RestrictionKind: String, Codable, CaseIterable, Equatable {
             return "Cooldown"
         case .timer:
             return "Timer"
+        case .addAsYouGo: return "Add as you go"
+        case .stopwatch: return "Stopwatch"
         case .endTime:
             return "End Time"
         }
@@ -167,6 +171,8 @@ public extension Intention {
     }
 
     func permitsApplication(_ bundleIdentifier: String) -> Bool {
+        if presetBlockedBundleIdentifiers.contains(bundleIdentifier) { return false }
+        if addAsYouGo && accessMode == .whitelist { return true }
         switch accessMode {
         case .whitelist:
             return allowedApps.contains { $0.bundleIdentifier == bundleIdentifier }
@@ -174,6 +180,9 @@ public extension Intention {
             return !blockedAppBundleIdentifiers.contains(bundleIdentifier)
         }
     }
+
+    var addAsYouGo: Bool { restrictionNodes.contains { $0.kind == .addAsYouGo } }
+    var showsStopwatch: Bool { restrictionNodes.contains { $0.kind == .stopwatch } }
 
     var browserSearchesAllowed: Bool {
         restrictionNodes.contains { $0.kind == .allowBrowserSearches }

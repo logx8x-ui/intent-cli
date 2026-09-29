@@ -21,9 +21,62 @@ final class QuickSelectionController: ObservableObject {
         var preview: NSImage?
     }
     @Published var apps: [AppItem] = []
+    @Published private(set) var openingApps = Set<String>()
+    private var spotlightApps: [String: AllowedApp] = [:]
+    private static func placeholderID(_ app: AppItem) -> UInt32 {
+        if app.pid > 0 { return UInt32.max - UInt32(app.pid) }
+        let hash = app.id.utf8.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
+        return 0xF0000000 | (hash & 0x0FFFFFFF)
+    }
+    func addSpotlightApplication(_ url: URL) {
+        guard !model.hasActiveSession, let bundle = Bundle(url: url), let id = bundle.bundleIdentifier,
+              id != Bundle.main.bundleIdentifier else { return }
+        guard askName() else { return }
+        if model.alwaysBlockedApps.contains(where: { $0.bundleIdentifier == id }) {
+            message = "This app is always blocked. Change its app default in Settings first."; return
+        }
+        let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent
+        let app = AllowedApp(name: name, bundleIdentifier: id)
+        spotlightApps[id] = app; selection.apps.insert(id); hasStagedSelection = true
+        selection.windowIDsByApp.removeValue(forKey: id)
+        if QuickSelection.browsers.contains(id) {
+            selection.wholeBrowserApps = (selection.wholeBrowserApps ?? []).union([id])
+            selection.tabs = selection.tabs.filter { $0.browser != id }
+        }
+        if selection.accessMode == .whitelist {
+            selection.startupAppIDs = (selection.startupAppIDs ?? []).union([id])
+            let background = UserDefaults.standard.object(forKey: "spotlightBackgroundOpening") as? Bool ?? true
+            if background && NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty {
+                if !UserDefaults.standard.bool(forKey: "spotlightBackgroundOpeningExplained") {
+                    let alert = NSAlert(); alert.messageText = "Apps added through Spotlight open in the background and appear when you start your intention. You can turn this off in Settings."
+                    alert.addButton(withTitle: "OK"); alert.runModal()
+                    UserDefaults.standard.set(true, forKey: "spotlightBackgroundOpeningExplained")
+                }
+                openingApps.insert(id)
+                SpotlightAppPreparation.shared.prepare(url) { [weak self] failure in
+                    guard let self else { return }
+                    self.openingApps.remove(id); self.refresh()
+                    if let failure { self.message = failure; self.model.errorMessage = failure; self.model.showOverlay() }
+                }
+            }
+        }
+        refresh()
+        if !windows.contains(where: { $0.appID == id }), let item = apps.first(where: { $0.id == id }) {
+            windows.append(.init(id: Self.placeholderID(item), appID: id, title: name,
+                sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
+        }
+        refreshStagedOutlines()
+        if panel?.isVisible != true { showStagedModifiers() }
+    }
     @Published var windows: [WindowItem] = []
     @Published var snapshots: [BrowserTabSnapshot] = []
-    @Published var selection = QuickSelection()
+    @Published var selection = QuickSelection() {
+        didSet {
+            let keep = selection.accessMode == .whitelist ? selection.apps : []
+            SpotlightAppPreparation.shared.release(except: keep)
+        }
+    }
     @Published var pendingName = ""
     @Published var showingSlots = false
     @Published var naming = false
@@ -234,6 +287,7 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func openModification(_ section: QuickSelectionOptionsSection) {
+        guard !model.hasActiveSession else { return }
         if panel?.isVisible == true { guard !naming else { return } }
         else if !askName() { return }
         if section == .timer || section == .checklist { IntentExitPasscode.offerOnce() }
@@ -242,7 +296,7 @@ final class QuickSelectionController: ObservableObject {
             stagedPreviousApp = frontmost
         }
         hoverModification(nil)
-        if section == .searches {
+        if section == .searches || section == .addAsYouGo || section == .stopwatch {
             if section.enabled(in: selection) { section.disable(in: &selection) }
             else { section.enable(in: &selection) }
             optionsSection = nil
@@ -277,7 +331,7 @@ final class QuickSelectionController: ObservableObject {
             return
         }
         guard stagedModifiersPanel == nil, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
-        let width = min(680, screen.visibleFrame.width - 56)
+        let width = min(1050, screen.visibleFrame.width - 56)
         let notice = SelectionPanel(contentRect: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 46), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         notice.isOpaque = false; notice.backgroundColor = .clear; notice.hidesOnDeactivate = false
         notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -418,7 +472,7 @@ final class QuickSelectionController: ObservableObject {
             guard let self else { return }
             defer { self.runMarkedTask = nil }
             await self.markTask?.value
-            guard !self.model.hasActiveSession, self.hasStagedSelection, !self.selection.apps.isEmpty else { return }
+            guard !self.model.hasActiveSession, self.openingApps.isEmpty, self.hasStagedSelection, !self.selection.apps.isEmpty else { return }
             self.refresh()
             let fresh = await self.freshSnapshots(for: Set(self.selection.tabs.map(\.browser)))
             guard !Task.isCancelled, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
@@ -482,6 +536,7 @@ final class QuickSelectionController: ObservableObject {
         markTask?.cancel(); markTask = nil
         overviewOpenTask?.cancel(); overviewOpenTask = nil
         runMarkedTask?.cancel()
+        SpotlightAppPreparation.shared.release(); openingApps = []; spotlightApps = [:]
         selection.clearTargets()
         selection.name = ""; selection.sourceIntentionID = nil; pendingName = ""; naming = false; pendingFirstWindow = nil; pendingFirstApp = nil; resumeRecord = nil
         hasStagedSelection = false
@@ -512,6 +567,7 @@ final class QuickSelectionController: ObservableObject {
         model.quickSelectionDidStart = { [weak self] in
             guard let self else { return }
             self.workspaceOutlines.stop(); self.hideStagedModifiers()
+            SpotlightAppPreparation.shared.didStart(); self.spotlightApps = [:]; self.openingApps = []
             self.hasStagedSelection = false
             self.selection = QuickSelection(); self.pendingName = ""
             self.naming = false; self.pendingFirstWindow = nil; self.pendingFirstApp = nil; self.resumeRecord = nil
@@ -640,7 +696,8 @@ final class QuickSelectionController: ObservableObject {
         // A whole-browser block has no tab selection; do not silently turn that
         // into an allow-all browser when returning to Allow mode.
         if selection.accessMode == .whitelist {
-            for browser in QuickSelection.browsers where !selection.tabs.contains(where: { $0.browser == browser }) { selection.apps.remove(browser) }
+            for browser in QuickSelection.browsers where !(selection.wholeBrowserApps ?? []).contains(browser) && !selection.tabs.contains(where: { $0.browser == browser }) { selection.apps.remove(browser) }
+            selection.startupAppIDs = (selection.startupAppIDs ?? []).union(Set(spotlightApps.keys).intersection(selection.apps))
         }
         message = nil
     }
@@ -654,6 +711,10 @@ final class QuickSelectionController: ObservableObject {
             return AppItem(app: .init(name: app.localizedName ?? id, bundleIdentifier: id),
                            icon: app.icon ?? NSImage(named: NSImage.applicationIconName)!, pid: app.processIdentifier)
         }.sorted { $0.app.name.localizedCaseInsensitiveCompare($1.app.name) == .orderedAscending }
+        for (id, app) in spotlightApps where selection.apps.contains(id) && !apps.contains(where: { $0.id == id }) {
+            let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { NSWorkspace.shared.icon(forFile: $0.path) }
+            apps.append(.init(app: app, icon: icon ?? NSImage(named: NSImage.applicationIconName)!, pid: 0))
+        }
         snapshots = QuickSelection.browsers.sorted().compactMap { browser in
             guard apps.contains(where: { $0.id == browser }),
                   BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5) else { return nil }
@@ -819,7 +880,7 @@ final class QuickSelectionController: ObservableObject {
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
     }
     func runSelection() {
-        guard !closing, !loading, !naming, !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !selection.apps.isEmpty else { return }
+        guard !closing, !loading, openingApps.isEmpty, !naming, !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !selection.apps.isEmpty else { return }
         refresh()
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
@@ -948,7 +1009,7 @@ final class QuickSelectionController: ObservableObject {
                         self.wallpaper = NSImage(cgImage: image, size: .zero)
                     }
                 }
-                let appByPID = Dictionary(uniqueKeysWithValues: self.apps.map { ($0.pid, $0.id) })
+                let appByPID = Dictionary(uniqueKeysWithValues: self.apps.filter { $0.pid > 0 }.map { ($0.pid, $0.id) })
                 let invisibleIDs = Set((CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { entry -> CGWindowID? in
                     guard let alpha = entry[kCGWindowAlpha as String] as? Double, alpha <= 0 else { return nil }
                     return entry[kCGWindowNumber as String] as? CGWindowID
@@ -965,7 +1026,20 @@ final class QuickSelectionController: ObservableObject {
                     if $0.frame.midX != $1.frame.midX { return $0.frame.midX < $1.frame.midX }
                     return $0.windowID < $1.windowID
                 }
-                var items: [WindowItem] = []
+                // Install the complete geometry once. Captures replace only pixels,
+                // never append/repack cards as individual windows finish loading.
+                var items: [WindowItem] = candidates.compactMap { window in
+                    guard let pid = window.owningApplication?.processID, let appID = appByPID[pid] else { return nil }
+                    let cached = self.previewCache[window.windowID]
+                    return WindowItem(id: window.windowID, appID: appID, title: window.title ?? "",
+                        sourceFrame: window.frame, preview: cached?.title == (window.title ?? "") ? cached?.preview : nil)
+                }
+                for app in self.apps where !items.contains(where: { $0.appID == app.id }) {
+                    items.append(.init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
+                        sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
+                }
+                self.windows = items
+                self.expanded = true
                 // Bound capture concurrency: avoid serial per-window latency without
                 // flooding WindowServer or changing the stable overview ordering.
                 for offset in stride(from: 0, to: candidates.count, by: 3) {
@@ -980,7 +1054,12 @@ final class QuickSelectionController: ObservableObject {
                         for await result in group { results.append(result) }
                         return results.sorted { $0.0 < $1.0 }.compactMap { $0.1 }
                     }
-                    items.append(contentsOf: batch)
+                    guard !Task.isCancelled, self.generation == token, !self.closing else { return }
+                    for captured in batch {
+                        guard let index = items.firstIndex(where: { $0.id == captured.id }) else { continue }
+                        if let image = captured.preview { items[index].preview = image }
+                    }
+                    self.windows = items
                 }
                 guard !Task.isCancelled, self.generation == token else { return }
                 let liveIDs = Set(content.windows.map(\.windowID))
@@ -993,7 +1072,7 @@ final class QuickSelectionController: ObservableObject {
                     }
                 }
                 for app in self.apps where !items.contains(where: { $0.appID == app.id }) {
-                    items.append(.init(id: UInt32.max - UInt32(app.pid), appID: app.id, title: app.app.name,
+                    items.append(.init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
                         sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
                 }
                 self.windows = items; self.loading = false; self.refresh()
@@ -1013,7 +1092,7 @@ final class QuickSelectionController: ObservableObject {
                 guard let self, self.generation == token else { return }
                 self.loading = false
                 self.windows = self.apps.map { app in
-                    .init(id: UInt32.max - UInt32(app.pid), appID: app.id, title: app.app.name,
+                    .init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
                           sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil)
                 }
                 self.expanded = true
@@ -1144,7 +1223,7 @@ private struct QuickSelectionView: View {
                     }
                 }.frame(width: geometry.size.width)
                 VStack(spacing: 8) {
-                    ModificationStrip(controller: controller).disabled(controller.naming || controller.showingSlots || controller.selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).frame(maxWidth: 680).padding(.horizontal, 28)
+                    ModificationStrip(controller: controller).disabled(controller.naming || controller.showingSlots || controller.selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).frame(maxWidth: 1050).padding(.horizontal, 28)
                     if let message = controller.message {
                         Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
                             .padding(8).frame(maxWidth: geometry.size.width - 56).frame(height: 52)
@@ -1172,9 +1251,9 @@ private struct QuickSelectionView: View {
                     }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
                 }.frame(width: geometry.size.width, height: footer, alignment: .bottom)
                     .position(x: geometry.size.width / 2, y: geometry.size.height - footer / 2)
-                if controller.loading {
-                    ProgressView("Gathering your apps…").padding(18).background(.regularMaterial, in: Capsule())
-                        .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                if controller.loading && visibleWindows.isEmpty {
+                    OverviewLoadingSkeleton().frame(width: area.width, height: area.height)
+                        .position(x: area.midX, y: area.midY).allowsHitTesting(false)
                 }
                 if let focused, !controller.naming, !controller.showingSlots {
                     tabGrid(focused).frame(width: tabWidth - 20, height: area.height)
@@ -1255,11 +1334,15 @@ private struct QuickSelectionView: View {
         return VStack(spacing: 6) {
             Button { controller.selectWindow(window) } label: {
                 ZStack {
-                    if let image = window.preview {
+                    if controller.openingApps.contains(window.appID) {
+                        ProgressView().controlSize(.small).accessibilityLabel("Opening in background")
+                    } else if let image = window.preview {
                         Image(nsImage: image).resizable().scaledToFit()
                     } else {
                         RoundedRectangle(cornerRadius: radius).fill(.ultraThinMaterial)
-                        if let app {
+                        if controller.loading {
+                            WindowLoadingSkeleton().padding(12)
+                        } else if let app {
                             Image(nsImage: app.icon).resizable().scaledToFit()
                                 .frame(width: min(84, frame.width * 0.45), height: min(84, frame.height * 0.65))
                         }
@@ -1422,7 +1505,7 @@ private struct ModificationStrip: View {
                 Button { controller.openModification(section) } label: {
                     HStack(spacing: 5) {
                         Image(systemName: section.icon)
-                        Text(section.rawValue)
+                        Text(section.rawValue).lineLimit(1).minimumScaleFactor(0.8)
                         Text("` + \(index + 1)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                         if enabled { Circle().fill(accent).frame(width: 5, height: 5) }
                     }.font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 8)

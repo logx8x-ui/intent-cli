@@ -138,7 +138,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
 
     func showSessionControls(occurrenceID: UUID) {
         let newOccurrence = sessionOverlayState.occurrenceID != occurrenceID
-        sessionOverlayState.update(occurrenceID: occurrenceID, hasTimer: model.activeSessionEndsAt != nil, hasChecklist: !model.activeChecklist.isEmpty)
+        sessionOverlayState.update(occurrenceID: occurrenceID, hasTimer: model.activeSessionEndsAt != nil, hasChecklist: !model.activeChecklist.isEmpty, hasStopwatch: model.stopwatchStarted != nil)
         guard sessionOverlayState.eligible else { hideSessionTimer(); return }
         let timerPanel = sessionTimerPanel ?? makeSessionTimerPanel()
         sessionTimerPanel = timerPanel
@@ -251,7 +251,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.animationBehavior = .none
         panel.contentViewController = NSHostingController(
-            rootView: IntentGraphView()
+            rootView: IntentHomeView()
                 .environmentObject(model)
                 .environmentObject(calendarSync)
                 .environmentObject(accountManager)
@@ -343,7 +343,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         if !sessionOverlayState.expanded { return NSSize(width: 300, height: 48) }
         let timerHeight: CGFloat = model.activeSessionEndsAt == nil ? 0 : (model.activeSessionAbsoluteEndTime == nil ? 54 : 74)
         let checklistHeight: CGFloat = model.activeChecklist.isEmpty ? 0 : 28 + min(230, CGFloat(model.activeChecklist.count) * 36)
-        return NSSize(width: 336, height: 86 + timerHeight + checklistHeight)
+        return NSSize(width: 336, height: 86 + timerHeight + checklistHeight + (model.stopwatchStarted == nil ? 0 : 54))
     }
 
     private func installSessionTimerContent() {
@@ -395,6 +395,11 @@ private struct SessionControlsView: View {
                     SessionTimerDragRegion()
                 }.frame(height: 22)
                 if !expanded {
+                    if model.stopwatchStarted != nil {
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            Text(model.stopwatchText).monospacedDigit().font(.system(size: 12)).accessibilityLabel("Elapsed time")
+                        }
+                    }
                     if let end = model.activeSessionEndsAt {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
                             Text(SessionTimerFormatter.countdownText(until: end, now: context.date)).monospacedDigit().font(.system(size: 12))
@@ -422,6 +427,14 @@ private struct SessionControlsView: View {
                             Text("Ends at \(end.formatted(date: .omitted, time: .shortened))").font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                     }
+                }
+            }
+            if expanded, model.stopwatchStarted != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(model.stopwatchText).font(.system(size: 29, weight: .medium, design: .rounded)).monospacedDigit()
+                        Text("elapsed").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }.accessibilityElement(children: .combine)
                 }
             }
             if expanded, !model.activeChecklist.isEmpty {

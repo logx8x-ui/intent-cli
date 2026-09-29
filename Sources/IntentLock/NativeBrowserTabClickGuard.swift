@@ -176,6 +176,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
               let rules = try? JSONDecoder().decode(ActiveBrowserRules.self, from: data), rules.active, rules.isFresh(),
               let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
               !rules.unrestrictedBrowserBundleIdentifiers.contains(browser),
+              !(rules.addAsYouGo && rules.accessMode == .whitelist),
               rules.matchesBrowserSession(snapshot),
               let allTabs = snapshot.allTabs else {
             blurContinuity = TabBlurContinuity(); publish([], pid: 0); return
@@ -216,6 +217,19 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
                 visual.append(frame)
                 visualComplete = true
                 blocksForegroundWindow = true
+                continue
+            }
+            // Hidden tabs have already left the usable window. Walking every AX
+            // descendant on every tick makes Firefox's own UI do unnecessary work.
+            if windowTabs.allSatisfy({ allowedIDs.contains($0.id) }) {
+                if isFocused, rules.accessMode == .whitelist, let focusedElement {
+                    let element = unsafeBitCast(focusedElement, to: AXUIElement.self)
+                    let labels = [kAXIdentifierAttribute, kAXDescriptionAttribute, kAXTitleAttribute, kAXHelpAttribute].compactMap { string(element, $0, deadline) }
+                    if BrowserAddressPolicy.isAddressControl(labels: labels) {
+                        let input = string(element, kAXValueAttribute, deadline) ?? ""
+                        blocksAddress = !rules.allowGoogleSearchTabs || BrowserAddressPolicy.isDirectDestination(input)
+                    }
+                }
                 continue
             }
             var pending: [(AXUIElement, CGRect?)] = [(window, nil)]

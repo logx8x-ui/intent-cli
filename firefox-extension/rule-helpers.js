@@ -57,6 +57,7 @@
     }
 
     const isBlacklist = rules.accessMode === "blacklist";
+    if (rules.addAsYouGo && !isBlacklist) return true;
 
     if (isSearchStagingURL(url)) {
       return isBlacklist || rules.allowGoogleSearchTabs;

@@ -8,7 +8,7 @@ const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
-const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1"];
+const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "add-as-you-go-v1"];
 const browserSessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
@@ -361,19 +361,21 @@ function effectiveRules(nativeRules) {
   if (!guardEnabled || !nativeRules?.active) {
     return inactiveRules();
   }
+  const openEnded = nativeRules.addAsYouGo === true && nativeRules.accessMode !== "blacklist";
   return {
     ...inactiveRules(),
+    addAsYouGo: openEnded,
     active: true,
     hideDistractions: Boolean(nativeRules.hideDistractions),
     accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
-    selectedTabIDs: Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
-    blockTabSwitching: Boolean(nativeRules.blockTabSwitching),
-    blockNavigation: Boolean(nativeRules.blockNavigation),
-    blockNewTabs: Boolean(nativeRules.blockNewTabs),
-    allowGoogleSearchTabs: Boolean(nativeRules.allowGoogleSearchTabs)
+    selectedTabIDs: !openEnded && Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
+    blockTabSwitching: !openEnded && Boolean(nativeRules.blockTabSwitching),
+    blockNavigation: !openEnded && Boolean(nativeRules.blockNavigation),
+    blockNewTabs: !openEnded && Boolean(nativeRules.blockNewTabs),
+    allowGoogleSearchTabs: !openEnded && Boolean(nativeRules.allowGoogleSearchTabs)
   };
 }
 
@@ -497,6 +499,7 @@ async function restoreSearchPage(tabId) {
 }
 
 function isRuntimeAllowedTab(tab) {
+  if (rules.active && rules.addAsYouGo && rules.accessMode !== "blacklist") return true;
   if (rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id) && tab?.url
       && !isSearchStagingURL(tab.url) && !IntentBrowserRules.isGoogleSearchURL(tab.url)) return false;
   if (rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab?.id)) return true;
@@ -811,7 +814,7 @@ browser.runtime.onMessage.addListener((message) => {
 browser.windows?.onFocusChanged?.addListener(async (windowId) => {
   if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
-  const tabs = await browser.tabs.query({});
+  const tabs = await browser.tabs.query({active: true, windowId});
   const active = tabs.find(tab => tab.windowId === windowId && tab.active);
   if (active && !isRuntimeAllowedTab(active)) await returnToAllowedTab();
 });
@@ -822,7 +825,8 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
     return;
   }
   const tab = await browser.tabs.get(tabId).catch(() => null);
-  await recordWebsiteVisit(tab);
+  // Recording history is housekeeping, never part of the tab-switch critical path.
+  void recordWebsiteVisit(tab);
   scheduleTabSnapshot();
   if (!rules.active) {
     return;
