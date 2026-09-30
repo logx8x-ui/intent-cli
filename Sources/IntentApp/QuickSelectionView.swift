@@ -1185,7 +1185,7 @@ private struct QuickSelectionView: View {
     var body: some View {
         GeometryReader { geometry in
             let presetIDs = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
-            let visibleWindows = controller.windows.filter { !Set(model.alwaysBlockedApps.map(\.bundleIdentifier)).contains($0.appID) }
+            let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
             let header = controller.topSafeInset + 48 + (!controller.naming && !controller.showingSlots ? 30 : 0) + (onboarding.isTeaching ? 60 : 0)
