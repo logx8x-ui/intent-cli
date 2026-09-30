@@ -369,7 +369,6 @@ final class GlobalHotKeyManager {
     }
 
     private func recordQuickGestureReadiness(accessibilityTrusted: Bool) {
-        guard IntentEnvironment.isQA else { return }
         let state = "\(accessibilityTrusted):\(isQuickGestureReady):\(selectionHotKeyRef != nil)"
         guard state != lastGestureDiagnosticState else { return }
         let status: [String: Any] = [

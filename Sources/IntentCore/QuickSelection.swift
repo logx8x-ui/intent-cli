@@ -22,7 +22,7 @@ public struct QuickSelection: Codable {
 
     /// Replay current saved settings while retaining conservatively resolved targets.
     public mutating func applySessionConfiguration(_ intention: Intention) {
-        name = intention.name
+        name = intention.nameIsAutomatic ? "" : intention.name
         sourceIntentionID = intention.id
         websiteFeaturePolicies = intention.websiteFeaturePolicies
         accessMode = intention.accessMode
@@ -55,6 +55,10 @@ public struct QuickSelection: Codable {
     public var frictionNodes: [FrictionNode] = []
     public static let startupSuppressionID = "quick-selection-current-session-startup"
     public init() {}
+    public var hasDraftConfiguration: Bool {
+        !apps.isEmpty || !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !restrictionNodes.isEmpty || !frictionNodes.isEmpty || accessMode == .blacklist
+    }
 
     public mutating func clearTargets() {
         apps.removeAll(); tabs.removeAll(); windowIDsByApp.removeAll()
@@ -232,9 +236,16 @@ public struct QuickSelection: Codable {
         for index in configuredRestrictions.indices where configuredRestrictions[index].kind == .dontStartUp {
             configuredRestrictions[index].excludedResourceIDs = resources
         }
+        let automaticName = SessionNaming.summary(apps: chosen, tabCounts: Dictionary(uniqueKeysWithValues: chosen.filter { Self.browsers.contains($0.bundleIdentifier) }.map { app in
+            let count = (wholeBrowserApps ?? []).contains(app.bundleIdentifier)
+                ? (snapshots.first { $0.browserBundleIdentifier == app.bundleIdentifier }.map { $0.allTabs ?? $0.tabs } ?? []).count
+                : tabs.filter { $0.browser == app.bundleIdentifier }.count
+            return (app.bundleIdentifier, count)
+        }))
+        let customName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         var intention = Intention(
             id: sourceIntentionID ?? UUID().uuidString,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (accessMode == .blacklist ? "Quick Block" : "Quick Focus") : name.trimmingCharacters(in: .whitespacesAndNewlines), icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
+            name: customName.isEmpty ? automaticName : customName, icon: "square.grid.2x2", colorHex: accessMode == .blacklist ? "#FF453A" : "#34C759", folder: "",
             allowedApps: chosen, allowedWebsites: websites,
             startupActions: [], restrictions: .init(),
             // Picker modifier coordinates are local to this draft, not to the
@@ -244,6 +255,8 @@ public struct QuickSelection: Codable {
                                     excludedResourceIDs: resources.filter { !(startupAppIDs ?? []).contains(String($0.dropFirst(4))) })],
             frictionNodes: sessionFrictions
         )
+        intention.nameIsAutomatic = customName.isEmpty
+        intention.automaticName = automaticName
         intention.wholeBrowserBundleIdentifiers = apps.intersection(wholeBrowserApps ?? [])
         intention.accessMode = accessMode
         intention.selectionOnly = true

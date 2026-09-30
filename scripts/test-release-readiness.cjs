@@ -110,16 +110,18 @@ assert.ok(
   "Quick Focus must not double-register its global bare-grave shortcut in the app menu"
 );
 assert.ok(
-  hotKeyManager.includes("registerRequiredShortcut()") &&
-    hotKeyManager.includes("register(.defaultShortcut, id: 1") &&
-    hotKeyManager.includes("OverlayShortcut.quickSelectionShortcut.keyCode") &&
-    hotKeyManager.includes("OverlayShortcut.quickSelectionShortcut.modifiers"),
-  "Command-G must open Intent and bare grave must open Quick Focus globally"
+  hotKeyManager.includes("RegisterEventHotKey(OverlayShortcut.quickSelectionShortcut.keyCode") &&
+    hotKeyManager.includes("OverlayShortcut.quickSelectionShortcut.modifiers") &&
+    hotKeyManager.includes("markMonitor.start()") &&
+    hotKeyManager.includes("unregister(ref: &selectionHotKeyRef)") &&
+    hotKeyManager.includes("guard !candidate.isRetiredLauncherShortcut") &&
+    !hotKeyManager.includes("register(.defaultShortcut, id: 1"),
+  "Backtick gestures must replace the single-press fallback and leave retired Command-G available to other apps"
 );
 assert.ok(
   hotKeyManager.includes("shortcut == .legacyDefaultShortcut") &&
     hotKeyManager.includes("save(.defaultShortcut)"),
-  "The former Shift-grave default must migrate to Command-G"
+  "Legacy stored launcher preferences remain readable without registering the retired shortcut"
 );
 
 const developmentInstaller = read("scripts/install-dev.sh");

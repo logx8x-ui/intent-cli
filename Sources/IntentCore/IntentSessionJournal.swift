@@ -62,6 +62,7 @@ public struct IntentSessionRecord: Codable, Identifiable {
     public var endedAt: Date?
     public var completedTasks: Set<Int>
     public var remainingSeconds: TimeInterval?
+    public var savedIntentionID: String?
     public init(id: UUID, intention: Intention, workspace: SessionWorkspace?, startedAt: Date = Date()) {
         self.id = id; self.intention = intention; self.workspace = workspace
         self.startedAt = startedAt; completedTasks = []

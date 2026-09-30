@@ -145,9 +145,6 @@ final class IntentAppModel: ObservableObject {
             errorMessage = "Finish the current intention and save or dismiss its result first."
             return false
         }
-        guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "Name what you came to do before choosing your workspace."; return false
-        }
         pendingPurposeSessionSave = nil
         do {
             var intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
@@ -240,31 +237,73 @@ final class IntentAppModel: ObservableObject {
         return sessionExpiryPolicy?.hasDeadline != true && activeSessionEndsAt == nil
     }
 
-    func persistJournal() {
-        guard journalWritable else { return }
-        do { try journal.save(to: journalURL) }
-        catch { errorMessage = "Could not save session history: \(error.localizedDescription)" }
+    @discardableResult
+    func persistJournal() -> Bool {
+        guard journalWritable else { return false }
+        do { try journal.save(to: journalURL); return true }
+        catch { errorMessage = "Could not save session history: \(error.localizedDescription)"; return false }
     }
     func dismissRecovery() { journal.recovery = nil; persistJournal() }
-    func saveRecord(_ record: IntentSessionRecord) {
+    func savedIntentionID(for record: IntentSessionRecord) -> String? {
+        let linked = journal.records.first(where: { $0.id == record.id })?.savedIntentionID ?? record.savedIntentionID ?? record.intention.id
+        return intentions.contains(where: { $0.id == linked }) ? linked : nil
+    }
+    @discardableResult
+    func saveRecord(_ input: IntentSessionRecord) -> String? {
+        let record = journal.records.first(where: { $0.id == input.id }) ?? input
+        guard !hasActiveSession else { return nil }
+        if let id = savedIntentionID(for: record) { return id }
+        let previousIntentions = intentions; let previousJournal = journal; let previousUndo = undoStack
         var intention = record.intention
-        intention.id = UUID().uuidString
-        if let id = addDraftIntention(intention, at: .zero) {
-            journal.workspaces[id] = record.workspace
-            journal.slotOrder.append(id); persistJournal()
+        // The run's stable ID links every bookmark to the same saved setup.
+        intention = AlwaysAllowedAppStore.applying(alwaysAllowedApps, to: intention)
+        recordUndoSnapshot()
+        let order = savedSlots.map(\.id)
+        intentions.append(intention)
+        guard save() else { intentions = previousIntentions; undoStack = previousUndo; return nil }
+        journal.workspaces[intention.id] = record.workspace
+        journal.slotOrder = SavedSlotOrder.normalized(order + [intention.id], available: intentions.map(\.id))
+        for index in journal.records.indices where journal.records[index].intention.id == record.intention.id {
+            journal.records[index].savedIntentionID = intention.id
+        }
+        if journal.recovery?.intention.id == record.intention.id { journal.recovery?.savedIntentionID = intention.id }
+        guard persistJournal() else {
+            let failure = errorMessage
+            intentions = previousIntentions; journal = previousJournal; undoStack = previousUndo
+            _ = save(); errorMessage = failure; return nil
+        }
+        return intention.id
+    }
+    func renameRecord(_ id: UUID, to name: String) {
+        guard !hasActiveSession, let index = journal.records.firstIndex(where: { $0.id == id }) else { return }
+        let previousIntentions = intentions; let previousJournal = journal; let previousUndo = undoStack
+        let record = journal.records[index]
+        let renamed = SessionNaming.rename(record.intention, to: name)
+        if let savedID = savedIntentionID(for: record), let savedIndex = intentions.firstIndex(where: { $0.id == savedID }) {
+            recordUndoSnapshot()
+            intentions[savedIndex] = SessionNaming.rename(intentions[savedIndex], to: name)
+            journal.workspaces[savedID]?.selection.name = renamed.nameIsAutomatic ? "" : renamed.name
+            guard save() else { intentions = previousIntentions; undoStack = previousUndo; return }
+        }
+        journal.records[index].intention = renamed
+        journal.records[index].workspace?.selection.name = renamed.nameIsAutomatic ? "" : renamed.name
+        if journal.recovery?.id == id { journal.recovery = journal.records[index] }
+        if !persistJournal() {
+            let failure = errorMessage
+            intentions = previousIntentions; journal = previousJournal; undoStack = previousUndo
+            _ = save(); errorMessage = failure
         }
     }
     var savedSlots: [Intention] {
-        intentions.sorted {
-            let a = journal.slotOrder.firstIndex(of: $0.id) ?? Int.max
-            let b = journal.slotOrder.firstIndex(of: $1.id) ?? Int.max
-            return a == b ? $0.name.localizedStandardCompare($1.name) == .orderedAscending : a < b
-        }
+        let available = intentions.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let ids = SavedSlotOrder.normalized(journal.slotOrder, available: available.map(\.id))
+        return ids.compactMap { id in intentions.first { $0.id == id } }
     }
     func moveSlot(_ source: String, to target: String) {
-        var ids = savedSlots.map(\.id)
-        guard let a = ids.firstIndex(of: source), let b = ids.firstIndex(of: target) else { return }
-        ids.swapAt(a, b); journal.slotOrder = ids; persistJournal()
+        guard !hasActiveSession else { return }
+        let old = journal.slotOrder
+        journal.slotOrder = SavedSlotOrder.swapping(source, with: target, order: old, available: savedSlots.map(\.id))
+        if !persistJournal() { journal.slotOrder = old }
     }
     private func releaseWorkPeriodAfterFailedStart() {
         if isZeroDriftActive, !hasActiveSession, pendingFriction == nil, pendingEndTimeRequest == nil, pendingZeroDriftStart == nil {
@@ -811,6 +850,9 @@ final class IntentAppModel: ObservableObject {
             selectedID = previousSelectedID
             undoStack = previousUndoStack
             return
+        }
+        for index in journal.records.indices where journal.records[index].intention.id == candidate.id {
+            journal.records[index].savedIntentionID = intention.id
         }
         if let workspace = journal.records.last(where: { $0.intention.id == candidate.id })?.workspace {
             journal.workspaces[intention.id] = workspace

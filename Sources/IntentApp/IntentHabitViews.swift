@@ -3,71 +3,108 @@ import SwiftUI
 import IntentCore
 import UniformTypeIdentifiers
 
-struct IntentNameBar: View {
+struct IntentOptionalNameBar: View {
     @Binding var name: String
-    let submit: () -> Void
     @FocusState private var focused: Bool
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("What did you come to do?").font(.system(size: 17, weight: .medium))
-            HStack(spacing: 12) {
-                TextField("Reply to emails, study chapter 2…", text: $name)
-                    .textFieldStyle(.plain).font(.system(size: 16)).focused($focused).onSubmit(submit)
-                Button(action: submit) { Image(systemName: "arrow.right").frame(width: 24, height: 24) }
-                    .buttonStyle(.plain).tint(.green).accessibilityLabel("Confirm intention name")
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            Rectangle().fill(.white.opacity(0.25)).frame(height: 1)
-        }.padding(.horizontal, 22).padding(.vertical, 16)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18)))
-            .preferredColorScheme(.dark).onAppear { focused = true }
+        HStack(spacing: 10) {
+            Image(systemName: "pencil.line").font(.system(size: 13)).foregroundStyle(.white.opacity(0.65))
+            TextField("Name your intention", text: $name)
+                .textFieldStyle(.plain).font(.system(size: 17, weight: .medium, design: .serif))
+                .focused($focused).onSubmit { focused = false }
+                .accessibilityLabel("Name your intention, optional")
+            if !name.isEmpty {
+                Button { name = ""; focused = false } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                    .buttonStyle(.plain).accessibilityLabel("Clear optional name")
+            } else { Text("optional").font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)) }
+        }.padding(.horizontal, 17).frame(height: 38)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(focused ? 0.5 : 0.22), lineWidth: 1))
     }
 }
-struct IntentNameFirstView: View {
-    @ObservedObject var controller: QuickSelectionController
-    var body: some View { IntentNameBar(name: $controller.pendingName, submit: controller.confirmName) }
+
+struct IntentionFramePreference: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue(), uniquingKeysWith: { _, new in new }) }
+}
+extension View {
+    func intentionFrame(_ id: String) -> some View {
+        background(GeometryReader { geometry in Color.clear.preference(key: IntentionFramePreference.self,
+            value: [id: geometry.frame(in: .named("IntentOverview"))]) })
+    }
 }
 
 struct IntentSavedSlotsView: View {
     @ObservedObject var controller: QuickSelectionController
     @ObservedObject var model: IntentAppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("Your intentions").font(.title2); Spacer(); Button("Workspace · Space") { controller.toggleSlots() } }
-            Text("Ready for next time. Drag to reorder.").foregroundStyle(.secondary)
-            ScrollView {
-                LazyVStack(spacing: 10) {
-                    if model.savedSlots.isEmpty { Text("Save a session from Today or Yesterday to keep it here.").padding(24) }
-                    ForEach(model.savedSlots) { intention in
-                        HStack(spacing: 10) {
-                            Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(intention.name).font(.headline)
-                                HStack(spacing: 4) {
-                                    ForEach(Array(intention.allowedApps.prefix(7)), id: \.bundleIdentifier) { app in
-                                        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
-                                            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 20, height: 20).help(app.name)
-                                        }
-                                    }
+        HStack(spacing: 10) {
+            if controller.savedSlotPages > 1 {
+                Button { controller.savedSlotPage = max(0, controller.savedSlotPage - 1) } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(.plain).disabled(controller.savedSlotPage == 0).accessibilityLabel("Previous saved intentions")
+            }
+            ForEach(Array(controller.visibleSavedSlots.enumerated()), id: \.element.id) { index, intention in
+                Button { controller.runSavedSlot(index) } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 5) {
+                            ForEach(Array(intention.allowedApps.filter { app in !model.isAlwaysAllowed(app.bundleIdentifier) && !model.alwaysBlockedApps.contains(where: { $0.bundleIdentifier == app.bundleIdentifier }) }.prefix(3)), id: \.bundleIdentifier) { app in
+                                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
+                                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 22, height: 22)
                                 }
                             }
-                            Spacer()
-                            Button("Review") { controller.prepare(intention, workspace: model.journal.workspaces[intention.id]) }
-                            Button("Run") { controller.prepare(intention, workspace: model.journal.workspaces[intention.id], run: true) }
-                                .buttonStyle(.borderedProminent).tint(.green).disabled(controller.loading || controller.closing)
-                        }.padding(14).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
-                            .onDrag { NSItemProvider(object: intention.id as NSString) }
-                            .onDrop(of: [.text], isTargeted: nil) { providers in
-                                guard let provider = providers.first else { return false }
-                                _ = provider.loadObject(ofClass: String.self) { value, _ in
-                                    guard let value else { return }; Task { @MainActor in model.moveSlot(value, to: intention.id) }
-                                }; return true
+                            Spacer(minLength: 0)
+                            Text("\(index + 1)").font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.7)).frame(width: 20, height: 20)
+                                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                        Text(intention.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                            .opacity(intention.nameIsAutomatic ? 0.6 : 1).frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(12).frame(width: 126, height: 88, alignment: .topLeading)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(controller.saveFlight?.savedID == intention.id ? 0.8 : 0.2)))
+                        .contentShape(RoundedRectangle(cornerRadius: 16))
+                }.buttonStyle(.plain).help("\(intention.name) · \(index + 1) to run · drag to reorder")
+                    .accessibilityLabel("Saved intention \(index + 1), \(intention.name)")
+                    .disabled(controller.loading || controller.closing || !controller.openingApps.isEmpty)
+                    .intentionFrame("slot:" + intention.id)
+                    .onDrag { NSItemProvider(object: intention.id as NSString) }
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        guard let provider = providers.first else { return false }
+                        _ = provider.loadObject(ofClass: String.self) { value, _ in
+                            Task { @MainActor in
+                                guard let value else { return }
+                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { model.moveSlot(value, to: intention.id) }
                             }
+                        }; return true
                     }
-                }
+                    .contextMenu {
+                        Button("Review workspace") { controller.prepare(intention, workspace: model.journal.workspaces[intention.id]) }
+                        Button("Remove saved intention") { model.deleteIntention(id: intention.id) }
+                    }
             }
-        }.padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+            if controller.savedSlotPages > 1 {
+                Button { controller.savedSlotPage = min(controller.savedSlotPages - 1, controller.savedSlotPage + 1) } label: { Image(systemName: "chevron.right") }
+                    .buttonStyle(.plain).disabled(controller.savedSlotPage >= controller.savedSlotPages - 1)
+                    .accessibilityLabel("Next saved intentions")
+                    .help("Page \(controller.savedSlotPage + 1) of \(controller.savedSlotPages). Numbers run the visible slots.")
+            }
+        }.onChange(of: model.savedSlots.count) { _ in controller.savedSlotPage = min(controller.savedSlotPage, controller.savedSlotPages - 1) }
+    }
+}
+
+struct SavedIntentionFlight: View {
+    let source: CGRect
+    let target: CGRect
+    @State private var progress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Image(systemName: "bookmark.fill").font(.system(size: 22)).foregroundStyle(.white)
+            .scaleEffect(1 - progress * 0.65).opacity(1 - progress)
+            .position(x: source.midX + (target.midX - source.midX) * progress,
+                      y: source.midY + (target.midY - source.midY) * progress - sin(progress * .pi) * 70)
+            .allowsHitTesting(false).accessibilityHidden(true)
+            .onAppear { withAnimation(reduceMotion ? .linear(duration: 0.15) : .easeInOut(duration: 0.65)) { progress = 1 } }
     }
 }
 
@@ -95,17 +132,59 @@ struct IntentSessionNotesView: View {
         }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
     private func notes(_ title: String, day: Date) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.system(.headline, design: .serif))
             let records = model.journal.records(on: day)
             if records.isEmpty { Text("Nothing yet").font(.caption).foregroundStyle(.secondary) }
-            ForEach(records) { record in
-                HStack {
-                    Button(record.intention.name) { controller.prepare(record.intention, workspace: record.workspace) }
-                        .buttonStyle(.plain).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                    Button { model.saveRecord(record) } label: { Image(systemName: "bookmark") }.buttonStyle(.plain).help("Save as an intention")
-                }.font(.callout)
+            ForEach(records) { record in IntentRecentRow(controller: controller, model: model, record: record) }
+        }
+    }
+}
+
+private struct IntentRecentRow: View {
+    @ObservedObject var controller: QuickSelectionController
+    @ObservedObject var model: IntentAppModel
+    let record: IntentSessionRecord
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var saved: Bool { model.savedIntentionID(for: record) != nil }
+    private func commit() {
+        guard editing else { return }
+        editing = false; focused = false
+        model.renameRecord(record.id, to: draft)
+    }
+    var body: some View {
+        HStack(alignment: .center, spacing: 7) {
+            if editing {
+                TextField("Name this intention", text: $draft).textFieldStyle(.plain).focused($focused)
+                    .onSubmit(commit).accessibilityLabel("Rename recent intention")
+                    .onChange(of: focused) { if !$0 { commit() } }
+                    .onDisappear { commit() }
+            } else {
+                Button {
+                    draft = record.intention.nameIsAutomatic ? "" : record.intention.name
+                    editing = true; focused = true
+                } label: {
+                    Text(record.intention.name).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        .opacity(record.intention.nameIsAutomatic ? 0.5 : 1)
+                }.buttonStyle(.plain).help("Click to name this intention")
             }
+            Button {
+                commit()
+                withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.6)) { controller.saveRecent(record) }
+            } label: {
+                Image(systemName: saved ? "bookmark.fill" : "bookmark")
+                    .foregroundStyle(saved ? .white : .white.opacity(0.7))
+                    .scaleEffect(controller.saveFlight?.recordID == record.id ? 1.2 : 1)
+                    .frame(width: 24, height: 26)
+            }.buttonStyle(.plain).help(saved ? "Saved" : "Save as an intention")
+                .accessibilityLabel(saved ? "Intention saved" : "Save intention")
+                .intentionFrame("record:" + record.id.uuidString)
+        }.font(.callout).contextMenu {
+            Button("Review workspace") { controller.prepare(record.intention, workspace: record.workspace) }
+            Button("Run again") { controller.prepare(record.intention, workspace: record.workspace, run: true) }
         }
     }
 }
@@ -185,7 +264,7 @@ final class IntentGentleReminder {
         next.contentView = NSHostingView(rootView: VStack(alignment: .leading, spacing: 10) {
             Text("What did you come to do?").font(.headline)
             HStack {
-                Button("Name an intention") { [weak self] in self?.hide(); start() }
+                Button("Start an intention") { [weak self] in self?.hide(); start() }
                 Spacer(); Button("Not now") { [weak self] in self?.hide() }
             }.font(.callout)
         }.padding(18).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18)))

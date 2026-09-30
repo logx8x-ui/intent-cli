@@ -24,6 +24,7 @@ for pass in 1 2 3; do
   } > "$qa_logs/regression-pass-$pass.log" 2>&1
   printf 'Automated regression pass %s/3 passed (not live UI acceptance).\n' "$pass"
 done
+bash scripts/test-qa-persistence.sh > "$qa_logs/app-persistence.log" 2>&1
 node scripts/test-native-host-performance.cjs > "$qa_logs/native-host-performance.log" 2>&1
 npm run extension:lint > "$qa_logs/extension-lint.log" 2>&1
 npm run extension:build > "$qa_logs/firefox-package.log" 2>&1

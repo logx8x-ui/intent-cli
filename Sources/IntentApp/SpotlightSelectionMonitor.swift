@@ -39,9 +39,9 @@ final class SpotlightSelectionMonitor {
     func handle(code: Int, down: Bool, modified: Bool, openingShortcut: Bool, repeatKey: Bool) -> Bool? {
         mutex.lock()
         if openingShortcut && down { spotlightOpeningUntil = Date(timeIntervalSinceNow: 1.5) }
-        guard isSpotlight && Date().timeIntervalSince(observedAt) < 0.5 else {
-            let opening = Date() < spotlightOpeningUntil
-            mutex.unlock(); return opening ? false : nil
+        let opening = Date() < spotlightOpeningUntil
+        guard (isSpotlight && Date().timeIntervalSince(observedAt) < 0.5) || opening else {
+            mutex.unlock(); return nil
         }
         if down { revision += 1 }
         if code == 53 { armed = false }
@@ -65,7 +65,14 @@ final class SpotlightSelectionMonitor {
     }
     private func windows(_ app: AXUIElement) -> [AXUIElement] {
         if let focused = element(value(app, kAXFocusedWindowAttribute)) { return [focused] }
-        return value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        let windows = value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        if !windows.isEmpty { return windows }
+        // Newer Spotlight exposes its search surface as an AXSystemDialog,
+        // an application child rather than an AXWindow.
+        return (value(app, kAXChildrenAttribute) as? [AXUIElement] ?? []).filter {
+            let role = value($0, kAXRoleAttribute) as? String ?? ""
+            return role != kAXMenuBarRole && role != kAXButtonRole
+        }
     }
     private func belongsToSpotlight(_ item: AXUIElement) -> Bool {
         var pid: pid_t = 0; AXUIElementGetPid(item, &pid)
@@ -100,6 +107,13 @@ final class SpotlightSelectionMonitor {
         }
         return nil
     }
+    private func diagnostic(_ event: String) {
+        let status: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "event": event,
+            "updatedAt": Date().timeIntervalSince1970]
+        if let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]) {
+            try? data.write(to: IntentEnvironment.dataDirectory.appendingPathComponent("spotlight-status.json"), options: .atomic)
+        }
+    }
     private func scan() {
         mutex.lock(); let submitting = enterPending; mutex.unlock()
         guard !submitting else { return }
@@ -110,7 +124,7 @@ final class SpotlightSelectionMonitor {
         isSpotlight = current != nil; observedAt = Date(); field = current
         armed = raw.flatMap(SpotlightSelectionPolicy.markedQuery) != nil
         mutex.unlock()
-        if changed { DispatchQueue.main.async { [weak self] in self?.onVisibility?(current != nil) } }
+        if changed { diagnostic(current == nil ? "closed" : "native-search-ready"); DispatchQueue.main.async { [weak self] in self?.onVisibility?(current != nil) } }
     }
     private func selectedURL(in roots: [AXUIElement], catalog: [SpotlightApplicationCandidate]) -> URL? {
         var pending = roots.map { ($0, false, false) }
@@ -135,7 +149,12 @@ final class SpotlightSelectionMonitor {
             }
             let selectedChildren = (value(item, kAXSelectedChildrenAttribute) as? [AXUIElement] ?? []) + (value(item, kAXSelectedRowsAttribute) as? [AXUIElement] ?? [])
             pending.insert(contentsOf: selectedChildren.map { ($0, true, application) }, at: 0)
-            pending += (value(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).map { ($0, selected, application) }
+            let children = (value(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).map { ($0, selected, application) }
+            // Read the selected result's label before walking all the unrelated
+            // document/web results. A large result list must not exhaust the AX
+            // time budget before reaching the application's own text child.
+            if selected { pending.insert(contentsOf: children, at: 0) }
+            else { pending += children }
         }
         if urls.count == 1 { return urls.first }
         guard urls.isEmpty else { return nil }
@@ -145,6 +164,7 @@ final class SpotlightSelectionMonitor {
     private func submit() {
         defer { mutex.lock(); enterPending = false; mutex.unlock() }
         mutex.lock(); let expectedRevision = revision; let inOverview = overview; let catalog = candidates; mutex.unlock()
+        diagnostic("return-intercepted")
         guard let search = focusedField(), let raw = value(search, kAXValueAttribute) as? String else { fail(); return }
         let marked = SpotlightSelectionPolicy.markedQuery(raw)
         guard inOverview || marked != nil, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { fail(); return }
@@ -174,10 +194,11 @@ final class SpotlightSelectionMonitor {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.mutex.lock(); let stillValid = self.revision == expectedRevision; self.mutex.unlock()
-            if stillValid { self.onApplication?(url) }
+            if stillValid { self.diagnostic("application-added"); self.onApplication?(url) }
         }
     }
     private func fail() {
+        diagnostic("selected-application-unavailable")
         DispatchQueue.main.async { [weak self] in
             self?.onFailure?("Choose an application result in Apple Spotlight, then press Return. Intent could not identify the selected application.")
         }

@@ -15,6 +15,8 @@ public enum IntentionAccessMode: String, Codable, CaseIterable, Hashable {
 public struct Intention: Identifiable, Codable, Equatable {
     public var id: String
     public var name: String
+    public var nameIsAutomatic: Bool = false
+    public var automaticName: String?
     public var icon: String
     public var colorHex: String
     public var folder: String
@@ -88,6 +90,8 @@ public struct Intention: Identifiable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id
         case name
+        case nameIsAutomatic
+        case automaticName
         case icon
         case colorHex
         case folder
@@ -116,6 +120,8 @@ public struct Intention: Identifiable, Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Untitled intention"
+        nameIsAutomatic = try container.decodeIfPresent(Bool.self, forKey: .nameIsAutomatic) ?? false
+        automaticName = try container.decodeIfPresent(String.self, forKey: .automaticName)
         icon = try container.decodeIfPresent(String.self, forKey: .icon) ?? "target"
         colorHex = try container.decodeIfPresent(String.self, forKey: .colorHex) ?? "#6B7280"
         folder = try container.decodeIfPresent(String.self, forKey: .folder) ?? ""

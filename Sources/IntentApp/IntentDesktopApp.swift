@@ -9,6 +9,10 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         IntentEnvironment.validateLaunch()
+        if CommandLine.arguments.contains("--qa-persistence-checks") {
+            guard IntentEnvironment.isQA else { exit(2) }
+            exit(IntentPersistenceChecks.run())
+        }
         if !IntentEnvironment.isQA {
         do { try IntentFreshInstallation.prepare() } catch {
             let alert = NSAlert(); alert.messageText = "Fresh setup needs attention"; alert.informativeText = error.localizedDescription; alert.runModal()

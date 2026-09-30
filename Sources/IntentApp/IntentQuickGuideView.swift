@@ -199,7 +199,7 @@ struct IntentQuickGuideView: View {
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             Text("Reply to friends, make something, watch a film… your words are enough.").font(.callout).foregroundStyle(.secondary)
             primary("Choose my setup") { guide.submitPurpose() }.disabled(purpose.isEmpty)
-            Text("This names your intention before you choose anything; you can edit it later.").font(.caption).foregroundStyle(.secondary)
+            Text("You can name your intention in the top bar, or leave it blank and start with your apps.").font(.caption).foregroundStyle(.secondary)
         }
     }
     private var overview: some View {
