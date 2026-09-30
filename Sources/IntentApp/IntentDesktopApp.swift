@@ -365,8 +365,22 @@ final class IntentRuntime {
                 self?.quickSelectionController.handleOverviewKey(code: code, down: down, modified: modified, repeatKey: repeated) ?? false
             }
         }
+        quickSelectionController.onOverviewClosed = { [weak self] in self?.hotKeyManager?.cancelSpotlightSelection() }
+        hotKeyManager?.spotlightContext = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return (false, []) }
+                return (self.quickSelectionController.isSelectionSurfaceVisible,
+                    self.model.installedApps.map { .init(name: $0.name, url: $0.url) })
+            }
+        }
+        hotKeyManager?.spotlightOpeningHandler = { [weak self] in
+            MainActor.assumeIsolated { self?.quickSelectionController.prepareForSpotlight() }
+        }
         hotKeyManager?.spotlightApplicationHandler = { [weak self] url in
             MainActor.assumeIsolated { self?.quickSelectionController.addSpotlightApplication(url) }
+        }
+        hotKeyManager?.spotlightVisibilityHandler = { [weak self] visible in
+            MainActor.assumeIsolated { self?.quickSelectionController.spotlightVisibilityChanged(visible) }
         }
         hotKeyManager?.spotlightFailureHandler = { [weak self] message in
             MainActor.assumeIsolated {

@@ -4,6 +4,8 @@ import IntentCore
 /// Tiny input callback: no AX queries, disk IO or window capture in the tap.
 final class QuickMarkKeyMonitor {
     var overviewKeyHandler: ((Int, Bool, Bool, Bool) -> Bool)?
+    var spotlightContext: (() -> (Bool, [SpotlightApplicationCandidate]))?
+    var onSpotlightOpening: (() -> Void)?
     var onAction: ((QuickMarkGesture.Action) -> Void)?
     let spotlight = SpotlightSelectionMonitor()
     private var tap: CFMachPort?
@@ -37,20 +39,32 @@ final class QuickMarkKeyMonitor {
                 return Unmanaged.passUnretained(event)
             }
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            if event.getIntegerValueField(.eventSourceUserData) == NativeSpotlightKeyboard.dismissalTag {
+                return Unmanaged.passUnretained(event)
+            }
+            let opening = code == 49 && event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]) == .maskCommand
+            if let context = owner.spotlightContext?() { owner.spotlight.setOverview(active: context.0, candidates: context.1) }
+            if opening && type == .keyDown { owner.cancelPending(); owner.onSpotlightOpening?() }
             let intentOwnsInput = NSApp.isActive
-            if (intentOwnsInput || code == 53), owner.overviewKeyHandler?(code, type == .keyDown,
+            // Escape is urgent even if Spotlight owns focus. Search text and
+            // Return must reach the Spotlight route before overview shortcuts.
+            if code == 53, owner.overviewKeyHandler?(code, type == .keyDown,
                 !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
                 event.getIntegerValueField(.keyboardEventAutorepeat) != 0) == true {
                 owner.cancelPending()
-                // Also let a system search dismiss itself if it owned Escape.
                 return intentOwnsInput ? nil : Unmanaged.passUnretained(event)
             }
             if let consume = owner.spotlight.handle(code: code, down: type == .keyDown,
                 modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
-                openingShortcut: code == 49 && event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]) == .maskCommand,
+                openingShortcut: opening,
                 repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0) {
                 owner.cancelPending()
                 return consume ? nil : Unmanaged.passUnretained(event)
+            }
+            if intentOwnsInput, owner.overviewKeyHandler?(code, type == .keyDown,
+                !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
+                event.getIntegerValueField(.keyboardEventAutorepeat) != 0) == true {
+                owner.cancelPending(); return nil
             }
             // Preserve Intent's text editors and marked IME composition. The
             // physical-key gesture is only active outside those text contexts.

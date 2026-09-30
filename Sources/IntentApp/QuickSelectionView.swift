@@ -23,61 +23,46 @@ final class QuickSelectionController: ObservableObject {
     @Published var apps: [AppItem] = []
     @Published private(set) var openingApps = Set<String>()
     private var spotlightApps: [String: AllowedApp] = [:]
-    @Published var appSearchOpen = false
-    @Published var appSearchQuery = ""
-    @Published var appSearchIndex = 0
+    var onOverviewClosed: (() -> Void)?
     private var overviewInput = OverviewSearchGesture()
-    private var spotlightActivationObserver: NSObjectProtocol?
-    var appSearchResults: [InstalledApp] {
-        let query = appSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let clean = SpotlightSelectionPolicy.markedQuery(query) ?? query
-        let presets = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
-        return model.installedApps.filter {
-            $0.bundleIdentifier != Bundle.main.bundleIdentifier && !presets.contains($0.bundleIdentifier) && $0.matchesSearch(clean)
-        }.sorted {
-            let a = $0.name.localizedCaseInsensitiveCompare(clean) == .orderedSame
-            let b = $1.name.localizedCaseInsensitiveCompare(clean) == .orderedSame
-            if a != b { return a }
-            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
+    func prepareForSpotlight() {
+        guard panel?.isVisible == true else { return }
+        overviewInput = OverviewSearchGesture()
+        optionsSection = nil; settingsOpen = false
+        // System hotkeys are handled before AppKit local event monitors. Lower
+        // the panel from the global tap, before Spotlight's window is presented.
+        panel?.level = .normal
     }
-    // The overview has its own app-only input, so adding an app does not depend
-    // on Spotlight exposing selected-result URLs through accessibility.
+    func openAppleSpotlight() {
+        prepareForSpotlight()
+        NativeSpotlightKeyboard.open()
+    }
     func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool) -> Bool {
         guard panel?.isVisible == true else { return false }
-        if code == 50, down, !modified, !repeatKey, appSearchOpen, !appSearchQuery.isEmpty {
-            cancelImmediately(); return true
-        }
         let result = overviewInput.key(code: code, down: down, modified: modified, repeated: repeatKey,
-            editing: panel?.firstResponder is NSTextView, hasSearchQuery: !appSearchQuery.isEmpty)
+            editing: panel?.firstResponder is NSTextView)
         switch result.action {
         case .close: cancelImmediately()
         case .clear: cancelImmediately(); clearMarks()
-        case .search:
-            appSearchQuery = ""; appSearchIndex = 0; appSearchOpen = true
-            optionsSection = nil; showingSlots = false
-        case .released: break
-        case .modification(let index):
-            appSearchOpen = false; openModification(index)
-        case .mode:
-            appSearchOpen = false; toggleAccessMode()
-        case .run: appSearchOpen = false; runSelection()
+        case .modification(let index): openModification(index)
+        case .mode: toggleAccessMode()
+        case .run: runSelection()
         case nil: break
         }
         return result.consume
     }
 
     func reportSpotlightFailure(_ text: String) {
+        // Leave Apple's results in front so the user can correct the selection.
         message = text
-        panel?.level = .popUpMenu
-        NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
     }
-    func chooseSearchApplication(_ app: InstalledApp) {
-        appSearchOpen = false
-        addSpotlightApplication(app.url)
+    func spotlightVisibilityChanged(_ visible: Bool) {
+        guard let panel, panel.isVisible else { return }
+        panel.level = visible ? .normal : .popUpMenu
+        if !visible { NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil) }
     }
     func cancelImmediately() {
-        overviewInput = OverviewSearchGesture(); appSearchOpen = false
+        overviewInput = OverviewSearchGesture()
         if NSApp.modalWindow != nil { NSApp.abortModal() }
         if let sheet = panel?.attachedSheet { panel?.endSheet(sheet); sheet.orderOut(nil) }
         overviewOpenTask?.cancel(); overviewOpenTask = nil
@@ -105,6 +90,12 @@ final class QuickSelectionController: ObservableObject {
     func addSpotlightApplication(_ url: URL) {
         guard !model.hasActiveSession, let bundle = Bundle(url: url), let id = bundle.bundleIdentifier,
               id != Bundle.main.bundleIdentifier else { return }
+        if model.alwaysAllowedApps.contains(where: { $0.bundleIdentifier == id }) {
+            message = "This app is already always allowed."; spotlightVisibilityChanged(false); return
+        }
+        if model.alwaysBlockedApps.contains(where: { $0.bundleIdentifier == id }) {
+            message = "This app is always blocked. Change its app default in Settings first."; spotlightVisibilityChanged(false); return
+        }
         if panel?.isVisible == true, selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             pendingFirstSpotlightURL = url; pendingName = ""; naming = true
             panel?.level = .popUpMenu
@@ -114,9 +105,6 @@ final class QuickSelectionController: ObservableObject {
         guard askName() else { return }
         panel?.level = .popUpMenu
         NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
-        if model.alwaysBlockedApps.contains(where: { $0.bundleIdentifier == id }) {
-            message = "This app is always blocked. Change its app default in Settings first."; return
-        }
         let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent
         let app = AllowedApp(name: name, bundleIdentifier: id)
@@ -748,12 +736,6 @@ final class QuickSelectionController: ObservableObject {
         content.autoresizingMask = [.width, .height]
         panel.contentView = content
         self.panel = panel
-        spotlightActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            MainActor.assumeIsolated {
-                guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-                self.panel?.level = app.bundleIdentifier == "com.apple.Spotlight" ? .normal : .popUpMenu
-            }
-        }
         model.overlayPresenter?.hideOverlay(animated: false)
         NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
         onboarding.selectionVisible = panel.isVisible
@@ -768,19 +750,6 @@ final class QuickSelectionController: ObservableObject {
             if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command {
                 // Spotlight's panel must be able to appear above the overview.
                 self.panel?.level = .normal
-                return event
-            }
-            if self.appSearchOpen {
-                if [125, 126].contains(event.keyCode) {
-                    let count = min(7, self.appSearchResults.count)
-                    self.appSearchIndex = max(0, min(count - 1, self.appSearchIndex + (event.keyCode == 125 ? 1 : -1)))
-                    return nil
-                }
-                if [36, 76].contains(event.keyCode) {
-                    let results = self.appSearchResults
-                    if !results.isEmpty { self.chooseSearchApplication(results[min(self.appSearchIndex, results.count - 1)]) }
-                    return nil
-                }
                 return event
             }
             if self.settingsOpen { return event }
@@ -1047,11 +1016,10 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        onOverviewClosed?()
         settingsOpen = false; naming = false; showingSlots = false
         pendingFirstSpotlightURL = nil
-        overviewInput = OverviewSearchGesture(); appSearchOpen = false; appSearchQuery = ""
-        if let observer = spotlightActivationObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
-        spotlightActivationObserver = nil
+        overviewInput = OverviewSearchGesture()
         expandedStack = nil
         hideStagedModifiers()
         hoverModification(nil)
@@ -1371,9 +1339,7 @@ private struct QuickSelectionView: View {
                     }.padding(.horizontal, 28).frame(height: 26)
                     HStack {
                         Button("Close · Esc") { controller.cancel() }.buttonStyle(.plain)
-                        Button("Add app · `") {
-                            controller.appSearchQuery = ""; controller.appSearchIndex = 0; controller.appSearchOpen = true
-                        }.buttonStyle(.plain)
+                        Button("Apple Spotlight · ⌘Space") { controller.openAppleSpotlight() }.buttonStyle(.plain)
                         Button(controller.showingSlots ? "Workspace · Space" : "Saved · Space") { controller.toggleSlots() }.buttonStyle(.plain)
                         Spacer()
                         Button(controller.selection.accessMode == .blacklist ? "Block selected · B" : "Allow selected · B") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
@@ -1390,12 +1356,6 @@ private struct QuickSelectionView: View {
                     }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
                 }.frame(width: geometry.size.width, height: footer, alignment: .bottom)
                     .position(x: geometry.size.width / 2, y: geometry.size.height - footer / 2)
-                if controller.appSearchOpen {
-                    OverviewAppSearch(controller: controller)
-                        .frame(width: min(540, geometry.size.width - 48))
-                        .position(x: geometry.size.width / 2, y: geometry.size.height * 0.32)
-                        .zIndex(20)
-                }
                 if controller.loading && visibleWindows.isEmpty {
                     OverviewLoadingSkeleton().frame(width: area.width, height: area.height)
                         .position(x: area.midX, y: area.midY).allowsHitTesting(false)

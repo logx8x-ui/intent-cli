@@ -2,10 +2,10 @@ import AppKit
 import ApplicationServices
 import IntentCore
 
-/// Polls only Spotlight's focused accessibility surface. No result is inferred
-/// from its title or the query; Return requires one selected application URL.
+/// Observes Apple's real Spotlight. Query text is never used to guess an app.
 final class SpotlightSelectionMonitor {
     var onApplication: ((URL) -> Void)?
+    var onVisibility: ((Bool) -> Void)?
     var onFailure: ((String) -> Void)?
     private let queue = DispatchQueue(label: "intent.spotlight-selection", qos: .userInitiated)
     private let mutex = NSLock()
@@ -14,13 +14,20 @@ final class SpotlightSelectionMonitor {
     private var armed = false
     private var observedAt = Date.distantPast
     private var field: AXUIElement?
-    private var cleanQuery = ""
-    private var invalid = false
     private var enterPending = false
     private var spotlightOpeningUntil = Date.distantPast
     private var revision = 0
-    private var lastKeyAt = Date.distantPast
+    private var overview = false
+    private var candidates: [SpotlightApplicationCandidate] = []
 
+    func setOverview(active: Bool, candidates: [SpotlightApplicationCandidate]) {
+        mutex.lock(); defer { mutex.unlock() }
+        if overview != active { revision += 1 }
+        overview = active; self.candidates = candidates
+    }
+    func cancelSelection() {
+        mutex.lock(); revision += 1; overview = false; armed = false; mutex.unlock()
+    }
     func start() {
         guard timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -28,30 +35,26 @@ final class SpotlightSelectionMonitor {
         timer.setEventHandler { [weak self] in self?.scan() }
         self.timer = timer; timer.resume()
     }
-
-    /// Called by the keyboard tap; cached state only, never AX or file work.
-    /// nil = normal Intent gesture path, false = pass through to Spotlight,
-    /// true = consume a marked submission until its exact result is resolved.
+    /// Cached state only: the input tap never blocks on an AX message.
     func handle(code: Int, down: Bool, modified: Bool, openingShortcut: Bool, repeatKey: Bool) -> Bool? {
         mutex.lock()
-        if openingShortcut && down { spotlightOpeningUntil = Date(timeIntervalSinceNow: 0.5) }
-        guard isSpotlight && Date().timeIntervalSince(observedAt) < 0.4 else {
+        if openingShortcut && down { spotlightOpeningUntil = Date(timeIntervalSinceNow: 1.5) }
+        guard isSpotlight && Date().timeIntervalSince(observedAt) < 0.5 else {
             let opening = Date() < spotlightOpeningUntil
             mutex.unlock(); return opening ? false : nil
         }
-        if down { revision += 1; lastKeyAt = Date() }
-        if code == 53 { armed = false; invalid = false }
+        if down { revision += 1 }
+        if code == 53 { armed = false }
         if code == 50 && down && !modified { armed = true }
-        let submit = [36, 76].contains(code) && !modified && armed
-        let shouldResolve = submit && down && !repeatKey && !enterPending
-        if shouldResolve { enterPending = true }
+        let submit = [36, 76].contains(code) && !modified && (armed || overview)
+        let resolve = submit && down && !repeatKey && !enterPending
+        if resolve { enterPending = true }
         mutex.unlock()
-        if shouldResolve { queue.async { [weak self] in self?.submit() } }
+        if resolve { queue.async { [weak self] in self?.submit() } }
         return submit
     }
-
     private func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
-        AXUIElementSetMessagingTimeout(element, 0.035)
+        AXUIElementSetMessagingTimeout(element, 0.06)
         var output: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &output) == .success else { return nil }
         return output
@@ -60,93 +63,123 @@ final class SpotlightSelectionMonitor {
         guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
     }
-    private func focusedField() -> AXUIElement? {
-        let system = AXUIElementCreateSystemWide()
-        guard let focused = element(value(system, kAXFocusedUIElementAttribute)) else { return nil }
-        var pid: pid_t = 0
-        AXUIElementGetPid(focused, &pid)
-        guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.Spotlight" else { return nil }
-        if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField"].contains(value(focused, kAXRoleAttribute) as? String ?? "") { return focused }
-        // Arrowing through results can move AX focus off the search field.
-        mutex.lock(); let previous = field; mutex.unlock()
-        if let previous {
-            var previousPID: pid_t = 0; AXUIElementGetPid(previous, &previousPID)
-            if previousPID == pid { return previous }
+    private func windows(_ app: AXUIElement) -> [AXUIElement] {
+        if let focused = element(value(app, kAXFocusedWindowAttribute)) { return [focused] }
+        return value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+    }
+    private func belongsToSpotlight(_ item: AXUIElement) -> Bool {
+        var pid: pid_t = 0; AXUIElementGetPid(item, &pid)
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.Spotlight"
+    }
+    private func searchField(in roots: [AXUIElement]) -> AXUIElement? {
+        var pending = roots; var visited = Set<CFHashCode>()
+        let deadline = Date(timeIntervalSinceNow: 0.15)
+        while !pending.isEmpty, visited.count < 120, Date() < deadline {
+            let item = pending.removeFirst()
+            guard visited.insert(CFHash(item)).inserted else { continue }
+            let role = value(item, kAXRoleAttribute) as? String ?? ""
+            if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField"].contains(role), value(item, kAXValueAttribute) is String { return item }
+            pending += value(item, kAXChildrenAttribute) as? [AXUIElement] ?? []
         }
         return nil
     }
-    private func scan(forSubmission: Bool = false) {
-        let current = focusedField()
-        mutex.lock()
-        isSpotlight = current != nil; observedAt = Date()
-        guard let current else {
-            armed = false; invalid = false; field = nil; cleanQuery = ""; mutex.unlock(); return
+    private func focusedField() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        if let focused = element(value(system, kAXFocusedUIElementAttribute)), belongsToSpotlight(focused) {
+            let role = value(focused, kAXRoleAttribute) as? String ?? ""
+            if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField"].contains(role) { return focused }
+            var pid: pid_t = 0; AXUIElementGetPid(focused, &pid)
+            return searchField(in: windows(AXUIElementCreateApplication(pid)))
         }
-        if let field, !CFEqual(field, current) { armed = false; cleanQuery = ""; invalid = false }
-        field = current
-        let submitting = enterPending
-        let typing = Date().timeIntervalSince(lastKeyAt) < 0.06
-        mutex.unlock()
-        if (typing || submitting) && !forSubmission { return }
-        guard let raw = value(current, kAXValueAttribute) as? String else { return }
-        // Keep the marker visible while editing. Only submission may strip it.
-        let marked = SpotlightSelectionPolicy.markedQuery(raw)
+        // Spotlight is a system panel: AX focus can remain on its previous app.
+        // Only inspect its visible windows; a running background process alone
+        // must never cause ordinary keyboard input to be intercepted.
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Spotlight") {
+            let roots = windows(AXUIElementCreateApplication(app.processIdentifier))
+            if let search = searchField(in: roots) { return search }
+        }
+        return nil
+    }
+    private func scan() {
+        mutex.lock(); let submitting = enterPending; mutex.unlock()
+        guard !submitting else { return }
+        let current = focusedField()
+        let raw = current.flatMap { value($0, kAXValueAttribute) as? String }
         mutex.lock()
-        armed = marked != nil
-        invalid = raw.contains("`") && marked == nil
-        cleanQuery = marked ?? raw
+        let changed = isSpotlight != (current != nil)
+        isSpotlight = current != nil; observedAt = Date(); field = current
+        armed = raw.flatMap(SpotlightSelectionPolicy.markedQuery) != nil
         mutex.unlock()
+        if changed { DispatchQueue.main.async { [weak self] in self?.onVisibility?(current != nil) } }
+    }
+    private func selectedURL(in roots: [AXUIElement], catalog: [SpotlightApplicationCandidate]) -> URL? {
+        var pending = roots.map { ($0, false, false) }
+        var visited = Set<CFHashCode>(); var urls = Set<URL>()
+        var names = Set<String>()
+        let deadline = Date(timeIntervalSinceNow: 0.3)
+        while !pending.isEmpty, visited.count < 240, Date() < deadline {
+            let (item, selectedAncestor, applicationAncestor) = pending.removeFirst()
+            guard visited.insert(CFHash(item)).inserted else { continue }
+            let role = value(item, kAXRoleAttribute) as? String ?? ""
+            if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField", kAXButtonRole, kAXMenuBarRole].contains(role) { continue }
+            let selected = selectedAncestor || value(item, kAXSelectedAttribute) as? Bool == true
+            let labels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute].compactMap { value(item, $0) as? String }
+            let metadata = [kAXDescriptionAttribute, kAXIdentifierAttribute].compactMap { value(item, $0) as? String }
+            let application = applicationAncestor || metadata.contains(where: SpotlightSelectionPolicy.isApplicationResult)
+                || labels.contains { ["application", "applications", "app", "apps"].contains($0.lowercased()) }
+            if selected {
+                for attr in [kAXURLAttribute, kAXDocumentAttribute, "AXFilename", kAXValueAttribute] {
+                    if let raw = value(item, attr), let url = SpotlightSelectionPolicy.applicationURL(String(describing: raw)) { urls.insert(url) }
+                }
+                if application { names.formUnion(labels) }
+            }
+            let selectedChildren = (value(item, kAXSelectedChildrenAttribute) as? [AXUIElement] ?? []) + (value(item, kAXSelectedRowsAttribute) as? [AXUIElement] ?? [])
+            pending.insert(contentsOf: selectedChildren.map { ($0, true, application) }, at: 0)
+            pending += (value(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).map { ($0, selected, application) }
+        }
+        if urls.count == 1 { return urls.first }
+        guard urls.isEmpty else { return nil }
+        let matches = Set(names.compactMap { SpotlightSelectionPolicy.selectedApplication(named: $0, isApplication: true, candidates: catalog) })
+        return matches.count == 1 ? matches.first : nil
     }
     private func submit() {
         defer { mutex.lock(); enterPending = false; mutex.unlock() }
-        scan(forSubmission: true)
-        mutex.lock()
-        let expected = cleanQuery; let valid = armed && !invalid && !expected.isEmpty
-        let submittedRevision = revision
-        mutex.unlock()
-        guard valid, let field = focusedField(),
-              let raw = value(field, kAXValueAttribute) as? String,
-              SpotlightSelectionPolicy.markedQuery(raw) == expected,
-              AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, expected as CFString) == .success else { fail(); return }
-        // Resolve the exact selected result after Spotlight processes the clean query.
-        Thread.sleep(forTimeInterval: 0.15)
-        var pid: pid_t = 0; AXUIElementGetPid(field, &pid)
-        let app = AXUIElementCreateApplication(pid)
-        guard let window = element(value(app, kAXFocusedWindowAttribute)) else { fail(); return }
-        let deadline = Date(timeIntervalSinceNow: 0.2)
-        var pending: [(AXUIElement, Bool)] = [(window, false)]
-        var urls = Set<URL>(); var visited = Set<CFHashCode>()
-        while !pending.isEmpty && visited.count < 240 && Date() < deadline {
-            let (item, selectedAncestor) = pending.removeFirst()
-            guard visited.insert(CFHash(item)).inserted else { continue }
-            let role = value(item, kAXRoleAttribute) as? String ?? ""
-            if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField"].contains(role) { continue }
-            let selected = selectedAncestor || (value(item, kAXSelectedAttribute) as? Bool == true)
-            if selected {
-                for attribute in [kAXURLAttribute, "AXDocument", kAXValueAttribute] {
-                    if let raw = value(item, attribute), let url = SpotlightSelectionPolicy.applicationURL(String(describing: raw)) { urls.insert(url) }
-                }
-            }
-            let selectedChildren = (value(item, kAXSelectedChildrenAttribute) as? [AXUIElement] ?? [])
-                + (value(item, kAXSelectedRowsAttribute) as? [AXUIElement] ?? [])
-            pending.insert(contentsOf: selectedChildren.map { ($0, true) }, at: 0)
-            pending.append(contentsOf: (value(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).map { ($0, selected) })
+        mutex.lock(); let expectedRevision = revision; let inOverview = overview; let catalog = candidates; mutex.unlock()
+        guard let search = focusedField(), let raw = value(search, kAXValueAttribute) as? String else { fail(); return }
+        let marked = SpotlightSelectionPolicy.markedQuery(raw)
+        guard inOverview || marked != nil, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { fail(); return }
+        let expected = marked ?? raw
+        if marked != nil {
+            guard AXUIElementSetAttributeValue(search, kAXValueAttribute as CFString, expected as CFString) == .success else { fail(); return }
         }
-        mutex.lock(); let unchanged = revision == submittedRevision; mutex.unlock()
-        guard unchanged, value(field, kAXValueAttribute) as? String == expected,
-              urls.count == 1, let url = urls.first,
-              Bundle(url: url)?.bundleIdentifier != nil else { fail(); return }
-        // Cancel Spotlight rather than pressing its result: native Return would
-        // launch/activate it before Intent has applied name-first and mode rules.
-        guard AXUIElementPerformAction(window, kAXCancelAction as CFString) == .success
-                || AXUIElementPerformAction(field, kAXCancelAction as CFString) == .success
-                || AXUIElementPerformAction(app, kAXCancelAction as CFString) == .success else { fail(); return }
-        mutex.lock(); armed = false; mutex.unlock()
-        DispatchQueue.main.async { [weak self] in self?.onApplication?(url) }
+        var pid: pid_t = 0; AXUIElementGetPid(search, &pid)
+        let app = AXUIElementCreateApplication(pid)
+        let deadline = Date(timeIntervalSinceNow: marked == nil ? 0.6 : 1.2)
+        var resolved: URL?
+        repeat {
+            mutex.lock(); let valid = revision == expectedRevision && (!inOverview || overview); mutex.unlock()
+            guard valid else { return }
+            guard value(search, kAXValueAttribute) as? String == expected else { return }
+            resolved = selectedURL(in: windows(app), catalog: catalog)
+            if resolved != nil { break }
+            Thread.sleep(forTimeInterval: 0.06)
+        } while Date() < deadline
+        guard let url = resolved, Bundle(url: url)?.bundleIdentifier != nil else { fail(); return }
+        mutex.lock(); let valid = revision == expectedRevision; mutex.unlock()
+        guard valid else { return }
+        // Send Escape only to the native panel, never press its result or launch
+        // the chosen app in front of the user's unfinished selection.
+        NativeSpotlightKeyboard.dismiss(pid: pid)
+        mutex.lock(); armed = false; isSpotlight = false; field = nil; mutex.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.mutex.lock(); let stillValid = self.revision == expectedRevision; self.mutex.unlock()
+            if stillValid { self.onApplication?(url) }
+        }
     }
     private func fail() {
         DispatchQueue.main.async { [weak self] in
-            self?.onFailure?("Spotlight did not expose a unique application result that Intent could add safely. Choose the app in Intent’s overview instead.")
+            self?.onFailure?("Choose an application result in Apple Spotlight, then press Return. Intent could not identify the selected application.")
         }
     }
     deinit { timer?.cancel() }

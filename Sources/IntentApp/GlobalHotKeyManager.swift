@@ -271,8 +271,17 @@ final class GlobalHotKeyManager {
     var overviewKeyHandler: ((Int, Bool, Bool, Bool) -> Bool)? {
         didSet { markMonitor.overviewKeyHandler = overviewKeyHandler }
     }
+    var spotlightContext: (() -> (Bool, [SpotlightApplicationCandidate]))? {
+        didSet { markMonitor.spotlightContext = spotlightContext }
+    }
+    var spotlightOpeningHandler: (() -> Void)? {
+        didSet { markMonitor.onSpotlightOpening = spotlightOpeningHandler }
+    }
     var spotlightApplicationHandler: ((URL) -> Void)? {
         didSet { markMonitor.spotlight.onApplication = spotlightApplicationHandler }
+    }
+    var spotlightVisibilityHandler: ((Bool) -> Void)? {
+        didSet { markMonitor.spotlight.onVisibility = spotlightVisibilityHandler }
     }
     var spotlightFailureHandler: ((String) -> Void)? {
         didSet { markMonitor.spotlight.onFailure = spotlightFailureHandler }
@@ -281,6 +290,7 @@ final class GlobalHotKeyManager {
     private var gestureActivationObserver: NSObjectProtocol?
     private var lastGestureDiagnosticState: String?
     private(set) var isQuickGestureReady = false
+    func cancelSpotlightSelection() { markMonitor.spotlight.cancelSelection() }
     func cancelPendingQuickGesture() { markMonitor.cancelPending() }
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
