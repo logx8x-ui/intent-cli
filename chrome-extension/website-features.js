@@ -48,7 +48,7 @@
     if (!valid(site, policy)) return "";
     const has = f => policy.allowedFeatures.includes(f), hidden = [];
     if (site === "youtube") {
-      if (!has("shorts")) hidden.push('ytd-reel-shelf-renderer', 'ytd-rich-shelf-renderer[is-shorts]', 'ytm-shorts-lockup-view-model', 'a[href^="/shorts/"]', 'ytd-guide-entry-renderer:has(a[href^="/shorts"])');
+      if (!has("shorts")) hidden.push('[data-intent-feature-hidden="shorts"]', 'ytd-reel-shelf-renderer', 'ytd-rich-shelf-renderer[is-shorts]', 'ytm-shorts-lockup-view-model', 'a[href^="/shorts/"]', 'ytd-guide-entry-renderer:has(a[href^="/shorts"])');
       if (!has("recommendations")) hidden.push('#related', '.ytp-endscreen-content', '.ytp-ce-element', 'ytd-watch-next-secondary-results-renderer');
       if (!has("comments")) hidden.push('ytd-comments', '#comments', 'ytm-comment-section-renderer');
       if (!has("autoplay")) hidden.push('.ytp-autonav-toggle-button-container', 'ytd-compact-autoplay-renderer');

@@ -85,12 +85,13 @@ a brand-new account always starts with zero intentions. See [Intent Accounts](do
 - **Stopwatch** counts elapsed time, including sleep, and does not lock finishing. Timer and Checklist keep their completion rules.
 - To add an installed app, put one backtick before or after its search in Apple Spotlight and press Return on the app result. Intent requires the exact selected app URL from macOS accessibility; unsupported results leave the selection unchanged and show an explanation.
 - Spotlight allow selections open in the background by default. Change this in Settings. Block selections never launch the blocked app.
-- Use Settings for app defaults, visibility, shortcuts, account and login preferences. Saved intentions remain on the home screen.
+- Use Settings for app defaults, visibility, shortcuts, account and login preferences. Saved intentions are available with Space in the workspace chooser.
+- Command–G has no action in Intent. Opening the app or using the menu-bar icon goes straight to the workspace chooser (or the controls for a running session).
 - Finish using your configured shortcut. A running timer or unfinished checklist keeps its existing finish requirements. Safety Stop remains available with Control–Option–Command–Escape.
 
 ### Legacy compatibility
 
-The canvas, AI builder and experimental navigation are no longer exposed in the normal app interface. Their code and stored data remain for compatibility. The following describes those older implementations, not current home-screen controls.
+The landing screen, canvas, AI builder and experimental navigation are no longer exposed in the normal app interface. Legacy stored data remains compatible. The following describes older implementations, not current workspace controls.
 
 ### Build with AI
 

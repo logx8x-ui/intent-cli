@@ -152,7 +152,7 @@ final class IntentStatusItemController: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let openItem = NSMenuItem(title: "Open Intent", action: #selector(openIntent), keyEquivalent: "g")
+        let openItem = NSMenuItem(title: "Open workspace", action: #selector(openIntent), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
 
@@ -331,12 +331,7 @@ final class IntentRuntime {
         hasStarted = true
         _ = quickSelectionController
 
-        hotKeyManager = GlobalHotKeyManager {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return }
-                IntentRuntime.shared.model.toggleOverlay()
-            }
-        }
+        hotKeyManager = GlobalHotKeyManager()
         gestureSessionObserver = model.$activeSessionName.dropFirst().sink { [weak self] name in
             self?.hotKeyManager?.cancelPendingQuickGesture()
             if name == nil {
@@ -351,9 +346,6 @@ final class IntentRuntime {
                     }
                 }
             }
-        }
-        if hotKeyManager?.isRegistered != true {
-            model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
         }
         hotKeyManager?.selectionHandler = { [weak self] in
             // Carbon and the gesture monitor deliver on the main run loop. Route
@@ -429,30 +421,12 @@ final class IntentRuntime {
     }
 
     func updateOverlayShortcut(_ candidate: OverlayShortcut) -> String? {
-        if candidate == FinishShortcutStore.load() {
-            return "Use a different shortcut from the one that finishes an intention."
-        }
-        if let message = OverlayShortcutConflictChecker.validationMessage(for: candidate) {
-            return message
-        }
-        guard let hotKeyManager else {
-            return "Intent's shortcut service is not ready yet."
-        }
-
-        let status = hotKeyManager.update(to: candidate)
-        guard status == noErr else {
-            model.shortcutWarning = "Shortcut unavailable. Open Intent here and choose another shortcut."
-            return "\(candidate.displayName) is already being used by macOS or another app."
-        }
-
-        model.shortcutWarning = nil
-        OverlayShortcutStore.save(candidate)
-        return nil
+        "The old launcher shortcut has been removed. Use ` to open your workspace."
     }
 
     func updateFinishShortcut(_ candidate: OverlayShortcut) -> String? {
-        if candidate == OverlayShortcutStore.load() {
-            return "Use a different shortcut from the one that opens Intent."
+        if candidate.isRetiredLauncherShortcut {
+            return "Cmd+G is no longer used by Intent. Choose another finish shortcut."
         }
         if let message = OverlayShortcutConflictChecker.validationMessage(for: candidate) {
             return message
@@ -467,13 +441,9 @@ final class IntentRuntime {
 
     func resetShortcuts() -> String? {
         guard let hotKeyManager else { return "Intent's shortcut service is not ready yet." }
-        let previousOverlay = OverlayShortcutStore.load()
-        guard hotKeyManager.update(to: .defaultShortcut) == noErr else { return "The default open shortcut is unavailable." }
         guard hotKeyManager.updateFinishShortcut(.defaultFinishShortcut) == noErr else {
-            _ = hotKeyManager.update(to: previousOverlay)
             return "The default finish shortcut is unavailable. Your shortcuts were preserved."
         }
-        OverlayShortcutStore.save(.defaultShortcut)
         FinishShortcutStore.save(.defaultFinishShortcut)
         model.refreshFinishShortcut()
         model.shortcutWarning = nil
@@ -485,10 +455,8 @@ final class IntentRuntime {
     }
 
     private func reloadPortablePreferences() {
-        let shortcut = OverlayShortcutStore.load()
         guard let hotKeyManager else { return }
-        let status = hotKeyManager.update(to: shortcut)
-        _ = hotKeyManager.updateFinishShortcut(FinishShortcutStore.load())
+        let status = hotKeyManager.updateFinishShortcut(FinishShortcutStore.load())
         model.refreshFinishShortcut()
         model.shortcutWarning = status == noErr
             ? nil

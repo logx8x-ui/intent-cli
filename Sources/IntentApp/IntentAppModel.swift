@@ -1398,13 +1398,14 @@ final class IntentAppModel: ObservableObject {
         startZeroDriftIdleLockIfNeeded()
     }
 
+    func dismissSettingsPresentation() { settingsPresentationRequest = nil }
+
     func requestSettingsPresentation() {
         // Settings is the existing canvas popover, not SwiftUI's empty lifecycle
         // scene. Defer an open guide without losing its progress or ending a run.
         onboarding.exit()
+        settingsPresentationRequest = UUID()
         showOverlay(animated: false)
-        // Let the canvas finish its queued activation before opening the popover.
-        DispatchQueue.main.async { self.settingsPresentationRequest = UUID() }
     }
 
     func showOverlay(animated: Bool = true) {
@@ -1785,7 +1786,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeSessionIsLeisure = false
                 if failureMessage == nil,
                    wasPurposeSession,
-                   self.saveSessionOnFinish,
+                   (self.saveSessionOnFinish || (self.quickSelectionIntentionID == intention.id && !self.intentions.contains(where: { $0.id == intention.id }))),
                    let purposeUsage,
                    let statedPurpose {
                     self.pendingPurposeSessionSave = (self.quickSelectionIntentionID == intention.id || self.firstIntentionID == intention.id)
@@ -1809,7 +1810,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeChecklist = []
                 self.completedChecklist = []
                 if let interruptedWorkspace { self.restoreInterruptedWorkspace?(intention, interruptedWorkspace) }
-                if self.saveSessionOnFinish || failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
+                if self.pendingPurposeSessionSave != nil || self.saveSessionOnFinish || failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
                 self.saveSessionOnFinish = false
                 if let replacement, !lock.didStopForSafety, failureMessage == nil {
                     self.requestStart(replacement)

@@ -13,6 +13,13 @@
   function render() {
     scheduled = false;
     const p = policy();
+    // Search chips have no Shorts URL, so identify their dedicated tab label.
+    // Mark only these controls; removing the policy restores the page.
+    for (const chip of document.querySelectorAll('[role="tab"],yt-chip-cloud-chip-renderer,yt-chip-cloud-chip-view-model,[data-intent-feature-hidden]')) {
+      const hide = site === "youtube" && p && !p.allowedFeatures?.includes("shorts") && chip.textContent.trim().toLowerCase() === "shorts";
+      if (hide) chip.setAttribute("data-intent-feature-hidden", "shorts");
+      else chip.removeAttribute("data-intent-feature-hidden");
+    }
     if (!p) {
       style?.remove(); style = null; notice?.remove(); notice = null;
       document.documentElement?.removeAttribute("data-intent-site-blocked");

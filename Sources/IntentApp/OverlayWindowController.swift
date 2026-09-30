@@ -60,6 +60,19 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
 
     func showOverlay(animated: Bool) {
         guard !isAnimating, !model.onboarding.permissionHandoffActive else { return }
+        let needsOnboarding = !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
+            && !UserDefaults.standard.bool(forKey: IntentOnboardingCoordinator.deferredKey)
+        let needsUtility = model.settingsPresentationRequest != nil || model.pendingFriction != nil
+            || model.pendingEndTimeRequest != nil || model.pendingPurposeSessionSave != nil
+            || model.errorMessage != nil || needsOnboarding || model.onboarding.isPresented
+            || accountManager.phase == .loading || accountManager.phase == .choosing || accountManager.isPresentingAccount
+            || (model.hasActiveSession && !model.hasEligibleSessionControls)
+        guard needsUtility else {
+            panel?.orderOut(nil)
+            if model.hasActiveSession { model.toggleSessionControls() }
+            else { _ = model.presentWorkspace?() }
+            return
+        }
         let panel = panel ?? makePanel()
         self.panel = panel
 
@@ -70,7 +83,8 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
 
         // The panel includes a transparent perimeter so edit mode can cast its
         // blue aura outside the visible overlay while preserving a 30pt gap.
-        targetFrame = screen.visibleFrame.insetBy(dx: 12, dy: 12)
+        let size = NSSize(width: min(560, screen.visibleFrame.width), height: min(740, screen.visibleFrame.height))
+        targetFrame = NSRect(x: screen.visibleFrame.midX - size.width / 2, y: screen.visibleFrame.midY - size.height / 2, width: size.width, height: size.height)
         let startFrame = targetFrame.insetBy(dx: 9, dy: 7)
         panel.setFrame(animated ? startFrame : targetFrame, display: true)
         panel.alphaValue = animated ? 0 : 1
@@ -251,7 +265,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.animationBehavior = .none
         panel.contentViewController = NSHostingController(
-            rootView: IntentHomeView()
+            rootView: IntentUtilityView()
                 .environmentObject(model)
                 .environmentObject(calendarSync)
                 .environmentObject(accountManager)
@@ -312,7 +326,12 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     }
 
     func toggleSessionControls() {
-        guard model.hasEligibleSessionControls, let occurrence = model.activeSessionOccurrenceID else { return }
+        guard model.hasActiveSession, let occurrence = model.activeSessionOccurrenceID else { return }
+        if !model.hasEligibleSessionControls {
+            if panel?.isVisible == true { hideOverlay(animated: true) }
+            else { showOverlay(animated: true) }
+            return
+        }
         if sessionOverlayState.occurrenceID != occurrence { showSessionControls(occurrenceID: occurrence); return }
         sessionOverlayState.toggleVisibility()
         if sessionOverlayState.visible { showSessionControls(occurrenceID: occurrence) }

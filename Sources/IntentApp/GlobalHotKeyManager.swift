@@ -15,6 +15,10 @@ struct OverlayShortcut: Codable, Equatable {
         keyLabel: "G"
     )
 
+    var isRetiredLauncherShortcut: Bool {
+        keyCode == UInt32(kVK_ANSI_G) && modifiers == UInt32(cmdKey)
+    }
+
     static let quickSelectionShortcut = OverlayShortcut(
         keyCode: UInt32(kVK_ANSI_Grave),
         modifiers: 0,
@@ -158,7 +162,7 @@ enum FinishShortcutStore {
               let shortcut = try? JSONDecoder().decode(OverlayShortcut.self, from: data) else {
             return .defaultFinishShortcut
         }
-        if shortcut.keyCode == UInt32(kVK_ANSI_M) && shortcut.modifiers == UInt32(cmdKey | shiftKey) {
+        if shortcut.isRetiredLauncherShortcut || (shortcut.keyCode == UInt32(kVK_ANSI_M) && shortcut.modifiers == UInt32(cmdKey | shiftKey)) {
             save(.defaultFinishShortcut)
             return .defaultFinishShortcut
         }
@@ -249,8 +253,6 @@ enum OverlayShortcutConflictChecker {
 }
 
 final class GlobalHotKeyManager {
-    private var requiredHotKeyRef: EventHotKeyRef?
-    private var customHotKeyRef: EventHotKeyRef?
     private var selectionHotKeyRef: EventHotKeyRef?
     private var finishHotKeyRef: EventHotKeyRef?
     private var saveHotKeyRef: EventHotKeyRef?
@@ -279,24 +281,13 @@ final class GlobalHotKeyManager {
     func cancelPendingQuickGesture() { markMonitor.cancelPending() }
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
-    private var nextHotKeyID: UInt32 = 2
-    private let handler: () -> Void
-    private(set) var shortcut: OverlayShortcut
     private(set) var registrationStatus: OSStatus = OSStatus(eventNotHandledErr)
 
-    var isRegistered: Bool {
-        requiredHotKeyRef != nil && registrationStatus == noErr
-    }
-
-    init(shortcut: OverlayShortcut = OverlayShortcutStore.load(), handler: @escaping () -> Void) {
-        self.shortcut = shortcut
-        self.handler = handler
+    init() {
         registrationStatus = installHandler()
         guard registrationStatus == noErr else { return }
 
-        registrationStatus = registerRequiredShortcut()
-        // A conflicting dashboard shortcut must not disable the independent
-        // selection, finish, save, or safety-stop routes below.
+        // The retired landing-screen shortcut must not reserve Cmd+G.
         let selectionID = EventHotKeyID(signature: fourCharCode("IntO"), id: UInt32.max)
         selectionRegistrationStatus = RegisterEventHotKey(OverlayShortcut.quickSelectionShortcut.keyCode,
                                                         OverlayShortcut.quickSelectionShortcut.modifiers, selectionID,
@@ -335,13 +326,6 @@ final class GlobalHotKeyManager {
             modifiers: UInt32(cmdKey | controlKey | optionKey), keyLabel: "Escape"),
             id: UInt32.max - 2, ref: &safetyHotKeyRef)
 
-        if shortcut != .defaultShortcut {
-            let status = registerCustomShortcut(shortcut)
-            if status != noErr {
-                self.shortcut = .defaultShortcut
-                OverlayShortcutStore.save(.defaultShortcut)
-            }
-        }
     }
 
     deinit {
@@ -349,8 +333,6 @@ final class GlobalHotKeyManager {
         if let gestureActivationObserver {
             NotificationCenter.default.removeObserver(gestureActivationObserver)
         }
-        unregister(ref: &requiredHotKeyRef)
-        unregister(ref: &customHotKeyRef)
         unregister(ref: &selectionHotKeyRef)
         unregister(ref: &finishHotKeyRef)
         unregister(ref: &safetyHotKeyRef)
@@ -389,34 +371,6 @@ final class GlobalHotKeyManager {
         lastGestureDiagnosticState = state
     }
 
-    func update(to candidate: OverlayShortcut) -> OSStatus {
-        guard isRegistered else { return registrationStatus }
-        guard candidate != shortcut else { return noErr }
-
-        let previous = shortcut
-        unregister(ref: &customHotKeyRef)
-
-        if candidate == .defaultShortcut {
-            shortcut = .defaultShortcut
-            return noErr
-        }
-
-        let status = registerCustomShortcut(candidate)
-        if status == noErr {
-            shortcut = candidate
-            return noErr
-        }
-
-        if previous != .defaultShortcut {
-            let restoreStatus = registerCustomShortcut(previous)
-            if restoreStatus != noErr {
-                shortcut = .defaultShortcut
-                OverlayShortcutStore.save(.defaultShortcut)
-            }
-        }
-        return status
-    }
-
     private func installHandler() -> OSStatus {
         var eventSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -438,7 +392,7 @@ final class GlobalHotKeyManager {
             else if identifier.id == UInt32.max - 3 { manager.saveHandler?() }
             else if identifier.id == UInt32.max - 1 { manager.finishHandler?() }
             else if identifier.id == UInt32.max - 2 { manager.safetyHandler?() }
-            else { manager.handler() }
+            else { return OSStatus(eventNotHandledErr) }
             return noErr
         }
 
@@ -452,11 +406,8 @@ final class GlobalHotKeyManager {
         )
     }
 
-    private func registerRequiredShortcut() -> OSStatus {
-        register(.defaultShortcut, id: 1, ref: &requiredHotKeyRef)
-    }
-
     func updateFinishShortcut(_ candidate: OverlayShortcut) -> OSStatus {
+        guard !candidate.isRetiredLauncherShortcut else { return OSStatus(eventNotHandledErr) }
         unregister(ref: &finishHotKeyRef)
         let status = register(candidate, id: UInt32.max - 1, ref: &finishHotKeyRef)
         if status != noErr {
@@ -465,16 +416,12 @@ final class GlobalHotKeyManager {
         return status
     }
 
-    private func registerCustomShortcut(_ shortcut: OverlayShortcut) -> OSStatus {
-        defer { nextHotKeyID &+= 1 }
-        return register(shortcut, id: nextHotKeyID, ref: &customHotKeyRef)
-    }
-
     private func register(
         _ shortcut: OverlayShortcut,
         id: UInt32,
         ref: inout EventHotKeyRef?
     ) -> OSStatus {
+        guard !shortcut.isRetiredLauncherShortcut else { return OSStatus(eventNotHandledErr) }
         let hotKeyID = EventHotKeyID(signature: fourCharCode("IntO"), id: id)
         var newHotKeyRef: EventHotKeyRef?
         let status = RegisterEventHotKey(
