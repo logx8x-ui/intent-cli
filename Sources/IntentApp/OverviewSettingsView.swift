@@ -49,7 +49,7 @@ struct OverviewSettingsView: View {
             Text("Browser Guard puts distractions in a temporary minimized window and brings them back when you finish. Select both sides of a split-view pair together.")
                 .font(.caption2).foregroundStyle(.secondary)
             Toggle("Open Spotlight selections in the background", isOn: $spotlightBackgroundOpening).font(.callout)
-            Text("Use one ` before or after an app search in Apple Spotlight, then Return. Only selected app results are added.")
+            Text("In the overview, press `, type an app name, then Return to add it. Escape closes the overview. Apple Spotlight also accepts one ` before or after an app search.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("App defaults").font(.headline)

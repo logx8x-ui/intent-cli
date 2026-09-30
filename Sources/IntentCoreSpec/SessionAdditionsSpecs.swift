@@ -3,6 +3,22 @@ import IntentCore
 import IntentLock
 
 func runSessionAdditionsSpecs() throws {
+    for _ in 0..<100 {
+        var overview = OverviewSearchGesture()
+        try expect(overview.key(code: 50, down: true, modified: false, repeated: false, editing: false).action == .search, "Backtick enters app search inside the overview")
+        try expect(overview.key(code: 18, down: true, modified: false, repeated: false, editing: true).action == .modification(0), "Search focus cannot steal held-prefix modifier 1")
+        try expect(overview.key(code: 22, down: true, modified: false, repeated: false, editing: true).action == .modification(5), "Held prefix accepts successive modifier numbers")
+        try expect(overview.key(code: 22, down: true, modified: false, repeated: true, editing: true).action == nil, "Key repeat cannot toggle modifiers twice")
+        try expect(overview.key(code: 36, down: true, modified: false, repeated: false, editing: true).action == .run, "Held-prefix Return still starts a selected workspace with no search query")
+        try expect(!overview.key(code: 36, down: true, modified: false, repeated: false, editing: true, hasSearchQuery: true).consume, "Submitting an app query cannot accidentally run the workspace")
+        try expect(overview.key(code: 50, down: false, modified: false, repeated: false, editing: true).action == .released, "Prefix release survives search focus changes")
+        try expect(!overview.key(code: 0, down: true, modified: false, repeated: false, editing: true).consume, "App-name letters remain ordinary text input")
+        try expect(overview.key(code: 53, down: true, modified: false, repeated: false, editing: true).action == .close, "Escape exits immediately even while editing")
+        try expect(!overview.key(code: 50, down: true, modified: false, repeated: false, editing: true).consume, "Existing intention text editors retain ordinary backticks")
+        var chordExit = OverviewSearchGesture()
+        _ = chordExit.key(code: 50, down: true, modified: false, repeated: false, editing: false)
+        try expect(chordExit.key(code: 53, down: true, modified: false, repeated: false, editing: true).action == .clear, "Backtick plus Escape clears marks and exits even after search takes focus")
+    }
     try expect(SpotlightSelectionPolicy.markedQuery("`Notes") == "Notes", "Spotlight accepts a leading marker")
     try expect(SpotlightSelectionPolicy.markedQuery("Notes `") == "Notes", "Spotlight accepts a trailing marker")
     try expect(SpotlightSelectionPolicy.markedQuery("Notes") == nil && SpotlightSelectionPolicy.markedQuery("No`tes") == nil && SpotlightSelectionPolicy.markedQuery("`Notes`") == nil, "Ordinary, embedded and multiple markers are never guessed")

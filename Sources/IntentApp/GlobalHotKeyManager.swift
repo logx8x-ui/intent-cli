@@ -268,6 +268,9 @@ final class GlobalHotKeyManager {
     var modificationHandler: ((Int) -> Void)?
     var markedModeHandler: (() -> Void)?
     private let markMonitor = QuickMarkKeyMonitor()
+    var overviewKeyHandler: ((Int, Bool, Bool, Bool) -> Bool)? {
+        didSet { markMonitor.overviewKeyHandler = overviewKeyHandler }
+    }
     var spotlightApplicationHandler: ((URL) -> Void)? {
         didSet { markMonitor.spotlight.onApplication = spotlightApplicationHandler }
     }

@@ -84,35 +84,32 @@ final class SpotlightSelectionMonitor {
         }
         if let field, !CFEqual(field, current) { armed = false; cleanQuery = ""; invalid = false }
         field = current
-        let scanRevision = revision
+        let submitting = enterPending
         let typing = Date().timeIntervalSince(lastKeyAt) < 0.06
         mutex.unlock()
-        if typing && !forSubmission { return }
+        if (typing || submitting) && !forSubmission { return }
         guard let raw = value(current, kAXValueAttribute) as? String else { return }
-        if let stripped = SpotlightSelectionPolicy.markedQuery(raw) {
-            // Do not replace a query captured before a newer keystroke.
-            mutex.lock(); let unchanged = revision == scanRevision; mutex.unlock()
-            guard unchanged, value(current, kAXValueAttribute) as? String == raw else { return }
-            let changed = AXUIElementSetAttributeValue(current, kAXValueAttribute as CFString, stripped as CFString) == .success
-            mutex.lock(); armed = true; invalid = !changed; cleanQuery = stripped; mutex.unlock()
-        } else {
-            mutex.lock()
-            if raw.isEmpty && !cleanQuery.isEmpty { armed = false }
-            if raw.contains("`") { invalid = true }
-            cleanQuery = raw
-            mutex.unlock()
-        }
+        // Keep the marker visible while editing. Only submission may strip it.
+        let marked = SpotlightSelectionPolicy.markedQuery(raw)
+        mutex.lock()
+        armed = marked != nil
+        invalid = raw.contains("`") && marked == nil
+        cleanQuery = marked ?? raw
+        mutex.unlock()
     }
     private func submit() {
         defer { mutex.lock(); enterPending = false; mutex.unlock() }
         scan(forSubmission: true)
-        // Give Spotlight time to replace results after removing a suffix marker.
-        Thread.sleep(forTimeInterval: 0.15)
         mutex.lock()
         let expected = cleanQuery; let valid = armed && !invalid && !expected.isEmpty
         let submittedRevision = revision
         mutex.unlock()
-        guard valid, let field = focusedField() else { fail(); return }
+        guard valid, let field = focusedField(),
+              let raw = value(field, kAXValueAttribute) as? String,
+              SpotlightSelectionPolicy.markedQuery(raw) == expected,
+              AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, expected as CFString) == .success else { fail(); return }
+        // Resolve the exact selected result after Spotlight processes the clean query.
+        Thread.sleep(forTimeInterval: 0.15)
         var pid: pid_t = 0; AXUIElementGetPid(field, &pid)
         let app = AXUIElementCreateApplication(pid)
         guard let window = element(value(app, kAXFocusedWindowAttribute)) else { fail(); return }

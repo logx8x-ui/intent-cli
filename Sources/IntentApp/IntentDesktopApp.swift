@@ -360,18 +360,31 @@ final class IntentRuntime {
                 }
             }
         }
+        hotKeyManager?.overviewKeyHandler = { [weak self] code, down, modified, repeated in
+            MainActor.assumeIsolated {
+                self?.quickSelectionController.handleOverviewKey(code: code, down: down, modified: modified, repeatKey: repeated) ?? false
+            }
+        }
         hotKeyManager?.spotlightApplicationHandler = { [weak self] url in
             MainActor.assumeIsolated { self?.quickSelectionController.addSpotlightApplication(url) }
         }
         hotKeyManager?.spotlightFailureHandler = { [weak self] message in
             MainActor.assumeIsolated {
-                self?.model.errorMessage = message; self?.model.showOverlay()
+                guard let self else { return }
+                if self.quickSelectionController.isSelectionSurfaceVisible { self.quickSelectionController.reportSpotlightFailure(message) }
+                else { self.model.errorMessage = message; self.model.showOverlay() }
             }
         }
         hotKeyManager?.markWindowHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(wholeWindow: true, fromShortcut: true) } }
         hotKeyManager?.markHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.markForeground(fromShortcut: true) } }
         hotKeyManager?.runMarkedHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.runMarked() } }
-        hotKeyManager?.clearMarksHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.clearMarks() } }
+        hotKeyManager?.clearMarksHandler = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.quickSelectionController.isSelectionSurfaceVisible { self.quickSelectionController.cancelImmediately() }
+                self.quickSelectionController.clearMarks()
+            }
+        }
         hotKeyManager?.modificationHandler = { [weak self] index in Task { @MainActor in self?.quickSelectionController.openModification(index) } }
         hotKeyManager?.markedModeHandler = { [weak self] in Task { @MainActor in self?.quickSelectionController.toggleMarkedMode() } }
         hotKeyManager?.finishHandler = { [weak self] in

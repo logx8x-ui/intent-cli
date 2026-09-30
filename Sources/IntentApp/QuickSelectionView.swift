@@ -23,6 +23,80 @@ final class QuickSelectionController: ObservableObject {
     @Published var apps: [AppItem] = []
     @Published private(set) var openingApps = Set<String>()
     private var spotlightApps: [String: AllowedApp] = [:]
+    @Published var appSearchOpen = false
+    @Published var appSearchQuery = ""
+    @Published var appSearchIndex = 0
+    private var overviewInput = OverviewSearchGesture()
+    private var spotlightActivationObserver: NSObjectProtocol?
+    var appSearchResults: [InstalledApp] {
+        let query = appSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clean = SpotlightSelectionPolicy.markedQuery(query) ?? query
+        let presets = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
+        return model.installedApps.filter {
+            $0.bundleIdentifier != Bundle.main.bundleIdentifier && !presets.contains($0.bundleIdentifier) && $0.matchesSearch(clean)
+        }.sorted {
+            let a = $0.name.localizedCaseInsensitiveCompare(clean) == .orderedSame
+            let b = $1.name.localizedCaseInsensitiveCompare(clean) == .orderedSame
+            if a != b { return a }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+    // The overview has its own app-only input, so adding an app does not depend
+    // on Spotlight exposing selected-result URLs through accessibility.
+    func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool) -> Bool {
+        guard panel?.isVisible == true else { return false }
+        if code == 50, down, !modified, !repeatKey, appSearchOpen, !appSearchQuery.isEmpty {
+            cancelImmediately(); return true
+        }
+        let result = overviewInput.key(code: code, down: down, modified: modified, repeated: repeatKey,
+            editing: panel?.firstResponder is NSTextView, hasSearchQuery: !appSearchQuery.isEmpty)
+        switch result.action {
+        case .close: cancelImmediately()
+        case .clear: cancelImmediately(); clearMarks()
+        case .search:
+            appSearchQuery = ""; appSearchIndex = 0; appSearchOpen = true
+            optionsSection = nil; showingSlots = false
+        case .released: break
+        case .modification(let index):
+            appSearchOpen = false; openModification(index)
+        case .mode:
+            appSearchOpen = false; toggleAccessMode()
+        case .run: appSearchOpen = false; runSelection()
+        case nil: break
+        }
+        return result.consume
+    }
+
+    func reportSpotlightFailure(_ text: String) {
+        message = text
+        panel?.level = .popUpMenu
+        NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
+    }
+    func chooseSearchApplication(_ app: InstalledApp) {
+        appSearchOpen = false
+        addSpotlightApplication(app.url)
+    }
+    func cancelImmediately() {
+        overviewInput = OverviewSearchGesture(); appSearchOpen = false
+        if NSApp.modalWindow != nil { NSApp.abortModal() }
+        if let sheet = panel?.attachedSheet { panel?.endSheet(sheet); sheet.orderOut(nil) }
+        overviewOpenTask?.cancel(); overviewOpenTask = nil
+        markTask?.cancel(); markTask = nil; markGeneration = UUID()
+        hasStagedSelection = !selection.name.isEmpty
+        let previous = previousApp
+        close()
+        if hasStagedSelection { refreshStagedOutlines() }
+        if previous?.bundleIdentifier != Bundle.main.bundleIdentifier { previous?.activate(options: []) }
+    }
+    private func preserveAddedAppIcons(in items: [WindowItem]) -> [WindowItem] {
+        var result = items
+        for app in apps where spotlightApps[app.id] != nil && selection.apps.contains(app.id)
+            && !result.contains(where: { $0.appID == app.id }) {
+            result.append(.init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
+                sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
+        }
+        return result
+    }
     private static func placeholderID(_ app: AppItem) -> UInt32 {
         if app.pid > 0 { return UInt32.max - UInt32(app.pid) }
         let hash = app.id.utf8.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
@@ -31,7 +105,15 @@ final class QuickSelectionController: ObservableObject {
     func addSpotlightApplication(_ url: URL) {
         guard !model.hasActiveSession, let bundle = Bundle(url: url), let id = bundle.bundleIdentifier,
               id != Bundle.main.bundleIdentifier else { return }
+        if panel?.isVisible == true, selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingFirstSpotlightURL = url; pendingName = ""; naming = true
+            panel?.level = .popUpMenu
+            NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
+            return
+        }
         guard askName() else { return }
+        panel?.level = .popUpMenu
+        NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
         if model.alwaysBlockedApps.contains(where: { $0.bundleIdentifier == id }) {
             message = "This app is always blocked. Change its app default in Settings first."; return
         }
@@ -50,14 +132,18 @@ final class QuickSelectionController: ObservableObject {
             if background && NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty {
                 if !UserDefaults.standard.bool(forKey: "spotlightBackgroundOpeningExplained") {
                     let alert = NSAlert(); alert.messageText = "Apps added through Spotlight open in the background and appear when you start your intention. You can turn this off in Settings."
-                    alert.addButton(withTitle: "OK"); alert.runModal()
+                    alert.addButton(withTitle: "OK")
+                    if let panel { alert.beginSheetModal(for: panel) } else { alert.runModal() }
                     UserDefaults.standard.set(true, forKey: "spotlightBackgroundOpeningExplained")
                 }
                 openingApps.insert(id)
                 SpotlightAppPreparation.shared.prepare(url) { [weak self] failure in
                     guard let self else { return }
                     self.openingApps.remove(id); self.refresh()
-                    if let failure { self.message = failure; self.model.errorMessage = failure; self.model.showOverlay() }
+                    if let failure {
+                        self.message = failure
+                        if self.panel?.isVisible != true { self.model.errorMessage = failure; self.model.showOverlay() }
+                    }
                 }
             }
         }
@@ -81,6 +167,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var showingSlots = false
     @Published var naming = false
     private var pendingFirstWindow: WindowItem?
+    private var pendingFirstSpotlightURL: URL?
     private var pendingFirstApp: AppItem?
     private var namePromptOpen = false
     private var resumeRecord: IntentSessionRecord?
@@ -93,6 +180,7 @@ final class QuickSelectionController: ObservableObject {
         selection.name = value; naming = false; hasStagedSelection = true
         if let window = pendingFirstWindow { pendingFirstWindow = nil; selectWindow(window) }
         if let app = pendingFirstApp { pendingFirstApp = nil; selectApp(app) }
+        if let url = pendingFirstSpotlightURL { pendingFirstSpotlightURL = nil; addSpotlightApplication(url) }
     }
     func rename() {
         guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -660,18 +748,42 @@ final class QuickSelectionController: ObservableObject {
         content.autoresizingMask = [.width, .height]
         panel.contentView = content
         self.panel = panel
+        spotlightActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+                self.panel?.level = app.bundleIdentifier == "com.apple.Spotlight" ? .normal : .popUpMenu
+            }
+        }
         model.overlayPresenter?.hideOverlay(animated: false)
         NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
         onboarding.selectionVisible = panel.isVisible
         if panel.isVisible { onboarding.record(.overviewOpened) }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self, self.panel?.isVisible == true else { return event }
-            if self.settingsOpen { return event }
-            if event.keyCode == 53 {
-                if self.expandedStack != nil { self.expandedStack = nil; return nil }
-                if self.optionsSection != nil { self.optionsSection = nil } else { self.cancel() }
-                return nil
+            if self.handleOverviewKey(code: Int(event.keyCode), down: event.type == .keyDown,
+                modified: !event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+                repeatKey: event.isARepeat) { return nil }
+            guard event.type == .keyDown else { return event }
+            if event.keyCode == 53 { self.cancelImmediately(); return nil }
+            if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command {
+                // Spotlight's panel must be able to appear above the overview.
+                self.panel?.level = .normal
+                return event
             }
+            if self.appSearchOpen {
+                if [125, 126].contains(event.keyCode) {
+                    let count = min(7, self.appSearchResults.count)
+                    self.appSearchIndex = max(0, min(count - 1, self.appSearchIndex + (event.keyCode == 125 ? 1 : -1)))
+                    return nil
+                }
+                if [36, 76].contains(event.keyCode) {
+                    let results = self.appSearchResults
+                    if !results.isEmpty { self.chooseSearchApplication(results[min(self.appSearchIndex, results.count - 1)]) }
+                    return nil
+                }
+                return event
+            }
+            if self.settingsOpen { return event }
             // Phrase/checklist editing must not switch Allow/Block when typing '/'.
             if self.panel?.firstResponder is NSTextView { return event }
             if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
@@ -683,7 +795,7 @@ final class QuickSelectionController: ObservableObject {
                 return nil
             }
             if event.keyCode == 36 || event.keyCode == 76 { self.runSelection(); return nil }
-            if event.charactersIgnoringModifiers == "/", event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            if (event.keyCode == 11 || event.charactersIgnoringModifiers == "/"), event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
                 if !event.isARepeat { self.toggleAccessMode() }
                 return nil
             }
@@ -906,7 +1018,7 @@ final class QuickSelectionController: ObservableObject {
         catch { message = error.localizedDescription; return }
         dismissAnimated(start: true)
     }
-    func cancel() { if !closing { dismissAnimated(start: false) } }
+    func cancel() { cancelImmediately() }
     private func dismissAnimated(start: Bool) {
         closing = true
         let token = generation
@@ -935,6 +1047,11 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        settingsOpen = false; naming = false; showingSlots = false
+        pendingFirstSpotlightURL = nil
+        overviewInput = OverviewSearchGesture(); appSearchOpen = false; appSearchQuery = ""
+        if let observer = spotlightActivationObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        spotlightActivationObserver = nil
         expandedStack = nil
         hideStagedModifiers()
         hoverModification(nil)
@@ -1059,7 +1176,7 @@ final class QuickSelectionController: ObservableObject {
                     items.append(.init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
                         sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
                 }
-                self.windows = items
+                self.windows = self.preserveAddedAppIcons(in: items)
                 self.expanded = true
                 // Bound capture concurrency: avoid serial per-window latency without
                 // flooding WindowServer or changing the stable overview ordering.
@@ -1080,7 +1197,7 @@ final class QuickSelectionController: ObservableObject {
                         guard let index = items.firstIndex(where: { $0.id == captured.id }) else { continue }
                         if let image = captured.preview { items[index].preview = image }
                     }
-                    self.windows = items
+                    self.windows = self.preserveAddedAppIcons(in: items)
                 }
                 guard !Task.isCancelled, self.generation == token else { return }
                 let liveIDs = Set(content.windows.map(\.windowID))
@@ -1096,7 +1213,7 @@ final class QuickSelectionController: ObservableObject {
                     items.append(.init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
                         sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
                 }
-                self.windows = items; self.loading = false; self.refresh()
+                self.windows = self.preserveAddedAppIcons(in: items); self.loading = false; self.refresh()
                 if items.contains(where: { $0.preview == nil && liveIDs.contains($0.id) }), self.previewRetry < 2 {
                     self.previewRetry += 1
                     Task { [weak self] in
@@ -1253,10 +1370,13 @@ private struct QuickSelectionView: View {
                         Spacer(minLength: 16)
                     }.padding(.horizontal, 28).frame(height: 26)
                     HStack {
-                        Button("Close · ` / Esc") { controller.cancel() }.buttonStyle(.plain)
+                        Button("Close · Esc") { controller.cancel() }.buttonStyle(.plain)
+                        Button("Add app · `") {
+                            controller.appSearchQuery = ""; controller.appSearchIndex = 0; controller.appSearchOpen = true
+                        }.buttonStyle(.plain)
                         Button(controller.showingSlots ? "Workspace · Space" : "Saved · Space") { controller.toggleSlots() }.buttonStyle(.plain)
                         Spacer()
-                        Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
+                        Button(controller.selection.accessMode == .blacklist ? "Block selected · B" : "Allow selected · B") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
                         Spacer()
                         Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
                             .disabled(controller.naming || controller.showingSlots || controller.selection.apps.isEmpty || controller.loading || controller.closing)
@@ -1270,6 +1390,12 @@ private struct QuickSelectionView: View {
                     }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
                 }.frame(width: geometry.size.width, height: footer, alignment: .bottom)
                     .position(x: geometry.size.width / 2, y: geometry.size.height - footer / 2)
+                if controller.appSearchOpen {
+                    OverviewAppSearch(controller: controller)
+                        .frame(width: min(540, geometry.size.width - 48))
+                        .position(x: geometry.size.width / 2, y: geometry.size.height * 0.32)
+                        .zIndex(20)
+                }
                 if controller.loading && visibleWindows.isEmpty {
                     OverviewLoadingSkeleton().frame(width: area.width, height: area.height)
                         .position(x: area.midX, y: area.midY).allowsHitTesting(false)
@@ -1338,7 +1464,7 @@ private struct QuickSelectionView: View {
                     }
                     if let focused, ids.contains(focused.appID) { controller.focusedBrowserWindow = nil }
                 }
-        }.ignoresSafeArea()
+        }.ignoresSafeArea().onExitCommand { controller.cancelImmediately() }
     }
     private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect, showsCaption: Bool) -> some View {
         let app = controller.apps.first { $0.id == window.appID }

@@ -3,6 +3,7 @@ import IntentCore
 
 /// Tiny input callback: no AX queries, disk IO or window capture in the tap.
 final class QuickMarkKeyMonitor {
+    var overviewKeyHandler: ((Int, Bool, Bool, Bool) -> Bool)?
     var onAction: ((QuickMarkGesture.Action) -> Void)?
     let spotlight = SpotlightSelectionMonitor()
     private var tap: CFMachPort?
@@ -36,6 +37,14 @@ final class QuickMarkKeyMonitor {
                 return Unmanaged.passUnretained(event)
             }
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            let intentOwnsInput = NSApp.isActive
+            if (intentOwnsInput || code == 53), owner.overviewKeyHandler?(code, type == .keyDown,
+                !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
+                event.getIntegerValueField(.keyboardEventAutorepeat) != 0) == true {
+                owner.cancelPending()
+                // Also let a system search dismiss itself if it owned Escape.
+                return intentOwnsInput ? nil : Unmanaged.passUnretained(event)
+            }
             if let consume = owner.spotlight.handle(code: code, down: type == .keyDown,
                 modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
                 openingShortcut: code == 49 && event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]) == .maskCommand,
