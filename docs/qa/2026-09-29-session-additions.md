@@ -59,3 +59,18 @@ Firefox's permanent default-profile extension is 0.2.20; the other task used a t
 4. Exercise actual Spotlight app results and keyboard input; report any macOS AX limitation rather than weakening identification.
 5. Exercise stopwatch/timer/checklist completion and foreground preservation. Reproduce and attribute the blue mark before changing its owner.
 6. Publish signed Firefox/browser-store updates separately when the required credentials and store workflow are available.
+
+
+## Unlocked follow-up — 2026-09-30
+
+Verified through the native macOS UI with the installed development build:
+
+- First app click opens the naming bar. Confirming the name selects that original app.
+- Add as you go and Stopwatch enable together. Clicking Stopwatch again disables it; enabling it again succeeds.
+- Running the temporary `Intent QA stopwatch` intention displays an increasing elapsed counter. Collapse leaves a persistent small bar; expanding restores the still-running counter (00:00:21 observed).
+- File > Finish Intention removes the running controls. Native browser-rules readback confirms `active: false`. The synthesized Shift+grave path did not finish the run; physical shortcut acceptance and exact foreground preservation remain open.
+- Chrome Default/Logavix visibly loads 0.2.22 from the existing main checkout. Its manifest and background script hashes match this branch. UI reload succeeds and a fresh heartbeat includes `add-as-you-go-v1`. This supersedes the earlier 0.2.21 observation; its unpacked path is still the main checkout, not the stable staged folder.
+- Firefox temporarily loads 0.2.22 from `~/.intent/browser-guard/Firefox`; fresh heartbeat includes `add-as-you-go-v1`. Temporary loading is not a permanent signed update.
+- Spotlight automation times out; requested a physical Command+Space opening while independent review continues. Selected-result exposure, background launch and marker workflows remain unverified.
+
+Codex was not restarted or reconfigured. Its Crashpad sidecars confirm browser-process crash captures at 06:41, 09:26 and 09:45 local time. Recent desktop logs contained no matching fatal/crash marker. These records establish crashes, not a root cause or a repair; no guarantee against recurrence is made.
