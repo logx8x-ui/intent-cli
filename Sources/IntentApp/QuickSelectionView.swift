@@ -672,7 +672,7 @@ final class QuickSelectionController: ObservableObject {
                 if self.optionsSection != nil { self.optionsSection = nil } else { self.cancel() }
                 return nil
             }
-            // Phrase/checklist editing must not switch Allow/Block when typing '/'.
+            // Phrase/checklist editing must not switch Allow/Block when typing 'b'.
             if self.panel?.firstResponder is NSTextView { return event }
             if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
                 if !event.isARepeat { self.toggleSlots() }; return nil
@@ -683,7 +683,7 @@ final class QuickSelectionController: ObservableObject {
                 return nil
             }
             if event.keyCode == 36 || event.keyCode == 76 { self.runSelection(); return nil }
-            if event.charactersIgnoringModifiers == "/", event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            if event.keyCode == 11, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
                 if !event.isARepeat { self.toggleAccessMode() }
                 return nil
             }
@@ -1185,7 +1185,7 @@ private struct QuickSelectionView: View {
     var body: some View {
         GeometryReader { geometry in
             let presetIDs = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
-            let visibleWindows = controller.windows.filter { !Set(model.alwaysBlockedApps.map(\.bundleIdentifier)).contains($0.appID) }
+            let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
             let header = controller.topSafeInset + 48 + (!controller.naming && !controller.showingSlots ? 30 : 0) + (onboarding.isTeaching ? 60 : 0)
@@ -1256,7 +1256,7 @@ private struct QuickSelectionView: View {
                         Button("Close · ` / Esc") { controller.cancel() }.buttonStyle(.plain)
                         Button(controller.showingSlots ? "Workspace · Space" : "Saved · Space") { controller.toggleSlots() }.buttonStyle(.plain)
                         Spacer()
-                        Button(controller.selection.accessMode == .blacklist ? "Block selected · /" : "Allow selected · /") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
+                        Button(controller.selection.accessMode == .blacklist ? "Block selected · B" : "Allow selected · B") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
                         Spacer()
                         Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
                             .disabled(controller.naming || controller.showingSlots || controller.selection.apps.isEmpty || controller.loading || controller.closing)
@@ -1394,7 +1394,7 @@ private struct QuickSelectionView: View {
                 }
             }.font(.system(size: 12, weight: .medium)).padding(.horizontal, 5)
                 .frame(maxWidth: captionWidth, minHeight: 20, maxHeight: 20)
-                .background(.black.opacity(hovered || selected ? 0.5 : 0.25), in: Capsule())
+                .foregroundStyle(.white)
             }
         }.frame(width: captionWidth, height: frame.height + captionHeight, alignment: .top)
             .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }

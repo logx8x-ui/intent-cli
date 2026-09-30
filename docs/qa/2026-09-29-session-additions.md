@@ -85,3 +85,13 @@ Codex was not restarted or reconfigured. Its Crashpad sidecars confirm browser-p
 - Both browsers still reported fresh 0.2.22 heartbeats with `add-as-you-go-v1` after the test.
 - Apple Spotlight process is running. Computer-use selection by bundle ID and exact `/System/Library/CoreServices/Spotlight.app` path both timed out even after Logan physically opened it. Requested a physical leading-backtick Calculator submission; name-first receipt/background launch remain pending until that result is observed.
 - No existing user tabs were closed. Only safe example-domain test tabs were added.
+
+
+## Spotlight marker and overview corrections — 2026-09-30
+
+- Keep Spotlight's boundary backtick visible during editing; strip only on explicit marked Return before resolving the selected application URL. Polling no longer writes the search field while the user types.
+- Exclude all always-allowed and always-blocked apps from overview window cards and stacks. Preset badges remain in the bottom-left.
+- Plain B toggles overview allow/block mode, with no modifiers; text editing retains ordinary B input. Footer labels updated.
+- Remove caption and stack-summary capsule backgrounds; use white labels.
+- IntentCoreSpec and release IntentApp build passed. Development installer completed. Installed overview live check confirmed Finder absent from main cards, preset badges intact, B switched Allow → Block → Allow, and screenshot confirmed plain bright labels without capsule backgrounds.
+- Spotlight full physical submission remains unverified because its native automation interface times out; the user-reported marker deletion was traced to and removed from polling.

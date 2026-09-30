@@ -63,7 +63,7 @@ struct AppStackOverview<Card: View>: View {
             if ids.count > 1 {
                 Button { expanded = group.app } label: {
                     Text("\(names[group.app] ?? group.app) · \(ids.filter { selected.contains($0) }.count) of \(ids.count) selected")
-                        .font(.caption).padding(6).background(.ultraThinMaterial, in: Capsule())
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white).padding(6)
                 }.buttonStyle(.plain)
                     .onHover { if $0 && expanded == nil { expanded = group.app } }
                     .position(x: group.frame.midX, y: group.frame.maxY - 8)
