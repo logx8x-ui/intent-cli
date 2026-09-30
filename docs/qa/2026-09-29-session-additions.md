@@ -74,3 +74,14 @@ Verified through the native macOS UI with the installed development build:
 - Spotlight automation times out; requested a physical Command+Space opening while independent review continues. Selected-result exposure, background launch and marker workflows remain unverified.
 
 Codex was not restarted or reconfigured. Its Crashpad sidecars confirm browser-process crash captures at 06:41, 09:26 and 09:45 local time. Recent desktop logs contained no matching fatal/crash marker. These records establish crashes, not a root cause or a repair; no guarantee against recurrence is made.
+
+
+## Browser additions live follow-up — 2026-09-30
+
+- Ran `Intent QA additions` with Spotify selected, Add as you go and Stopwatch enabled.
+- Chrome Default/Logavix: a newly created tab loaded example.com; address-bar navigation to example.org remained allowed while the intention ran.
+- Firefox default profile with temporary 0.2.22 guard: a newly created tab loaded example.com; address-bar navigation to example.org remained allowed. A second fresh tab loaded example.net. Direct sidebar clicks switched to example.net and example.org without observed bounce-back. This is state-transition acceptance, not a measured perceptual latency or reload-count guarantee.
+- File > Finish Intention cleared restrictions (`browser-rules.json active: false`) and removed the Stopwatch control.
+- Both browsers still reported fresh 0.2.22 heartbeats with `add-as-you-go-v1` after the test.
+- Apple Spotlight process is running. Computer-use selection by bundle ID and exact `/System/Library/CoreServices/Spotlight.app` path both timed out even after Logan physically opened it. Requested a physical leading-backtick Calculator submission; name-first receipt/background launch remain pending until that result is observed.
+- No existing user tabs were closed. Only safe example-domain test tabs were added.
