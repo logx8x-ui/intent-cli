@@ -38,6 +38,8 @@ struct IntentSavedSlotsView: View {
     @ObservedObject var controller: QuickSelectionController
     @ObservedObject var model: IntentAppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dragged: String?
+    @State private var dragOffset: CGFloat = 0
     var body: some View {
         HStack(spacing: 10) {
             if controller.savedSlotPages > 1 {
@@ -54,30 +56,40 @@ struct IntentSavedSlotsView: View {
                                 }
                             }
                             Spacer(minLength: 0)
-                            Text("\(index + 1)").font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.7)).frame(width: 20, height: 20)
-                                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                            Color.clear.frame(width: 16, height: 20)
                         }
                         Text(intention.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                            .opacity(intention.nameIsAutomatic ? 0.6 : 1).frame(maxWidth: .infinity, alignment: .leading)
+                            .opacity(intention.nameIsAutomatic ? 0.6 : 1).padding(.trailing, 15).frame(maxWidth: .infinity, alignment: .leading)
                     }.padding(12).frame(width: 126, height: 88, alignment: .topLeading)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
                         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(controller.saveFlight?.savedID == intention.id ? 0.8 : 0.2)))
                         .contentShape(RoundedRectangle(cornerRadius: 16))
                 }.buttonStyle(.plain).help("\(intention.name) · \(index + 1) to run · drag to reorder")
                     .accessibilityLabel("Saved intention \(index + 1), \(intention.name)")
-                    .disabled(controller.loading || controller.closing || !controller.openingApps.isEmpty)
-                    .intentionFrame("slot:" + intention.id)
-                    .onDrag { NSItemProvider(object: intention.id as NSString) }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        guard let provider = providers.first else { return false }
-                        _ = provider.loadObject(ofClass: String.self) { value, _ in
-                            Task { @MainActor in
-                                guard let value else { return }
-                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { model.moveSlot(value, to: intention.id) }
-                            }
-                        }; return true
+                    .disabled(controller.closing)
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { model.deleteIntention(id: intention.id) }
+                        } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).frame(width: 24, height: 24)
+                        }.buttonStyle(.plain).padding(4).accessibilityLabel("Delete saved intention " + intention.name)
                     }
+                    .overlay(alignment: .bottomTrailing) {
+                        Text("\(index + 1)").font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.65)).padding(10).allowsHitTesting(false)
+                    }
+                    .intentionFrame("slot:" + intention.id)
+                    .offset(x: dragged == intention.id ? dragOffset : 0).zIndex(dragged == intention.id ? 1 : 0)
+                    .highPriorityGesture(DragGesture(minimumDistance: 10)
+                        .onChanged { value in dragged = intention.id; dragOffset = value.translation.width }
+                        .onEnded { value in
+                            let slots = controller.visibleSavedSlots
+                            let destination = min(slots.count - 1, max(0, index + Int((value.translation.width / 136).rounded())))
+                            if slots.indices.contains(destination) {
+                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { model.moveSlot(intention.id, to: slots[destination].id) }
+                            }
+                            dragged = nil; dragOffset = 0
+                        })
                     .contextMenu {
                         Button("Review workspace") { controller.prepare(intention, workspace: model.journal.workspaces[intention.id]) }
                         Button("Remove saved intention") { model.deleteIntention(id: intention.id) }

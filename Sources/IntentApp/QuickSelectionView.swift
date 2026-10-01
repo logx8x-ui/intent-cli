@@ -99,6 +99,7 @@ final class QuickSelectionController: ObservableObject {
         }
         panel?.level = .popUpMenu
         NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
+        panel?.makeFirstResponder(nil)
         let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent
         let app = AllowedApp(name: name, bundleIdentifier: id)
@@ -110,22 +111,9 @@ final class QuickSelectionController: ObservableObject {
         }
         if selection.accessMode == .whitelist {
             selection.startupAppIDs = (selection.startupAppIDs ?? []).union([id])
-            let background = UserDefaults.standard.object(forKey: "spotlightBackgroundOpening") as? Bool ?? true
-            if background && NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty {
-                if !UserDefaults.standard.bool(forKey: "spotlightBackgroundOpeningExplained") {
-                    let alert = NSAlert(); alert.messageText = "Apps added through Spotlight open in the background and appear when you start your intention. You can turn this off in Settings."
-                    alert.addButton(withTitle: "OK")
-                    if let panel { alert.beginSheetModal(for: panel) } else { alert.runModal() }
-                    UserDefaults.standard.set(true, forKey: "spotlightBackgroundOpeningExplained")
-                }
-                openingApps.insert(id)
+            if NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty {
                 SpotlightAppPreparation.shared.prepare(url) { [weak self] failure in
-                    guard let self else { return }
-                    self.openingApps.remove(id); self.refresh()
-                    if let failure {
-                        self.message = failure
-                        if self.panel?.isVisible != true { self.model.errorMessage = failure; self.model.showOverlay() }
-                    }
+                    if let failure { self?.message = failure }
                 }
             }
         }
@@ -141,6 +129,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var snapshots: [BrowserTabSnapshot] = []
     @Published var selection = QuickSelection() {
         didSet {
+            savedRunTask?.cancel(); savedRunTask = nil
             let keep = selection.accessMode == .whitelist ? selection.apps : []
             SpotlightAppPreparation.shared.release(except: keep)
         }
@@ -160,12 +149,39 @@ final class QuickSelectionController: ObservableObject {
         return Array(slots.dropFirst(page * savedSlotCapacity).prefix(savedSlotCapacity))
     }
     var savedSlotPages: Int { max(1, (model.savedSlots.count + savedSlotCapacity - 1) / savedSlotCapacity) }
+    private var savedRunTask: Task<Void, Never>?
     func runSavedSlot(_ index: Int) {
-        guard isSelectionSurfaceVisible, !closing, !loading, openingApps.isEmpty,
+        guard isSelectionSurfaceVisible, !closing,
               visibleSavedSlots.indices.contains(index) else { return }
         let intention = visibleSavedSlots[index]
-        prepare(intention, workspace: model.journal.workspaces[intention.id], run: true)
+        savedRunTask?.cancel()
+        savedRunTask = Task { [weak self] in
+            // Keep the requested ID, not the position: reordering during loading
+            // must never start a different intention.
+            while let self, self.loading || !self.openingApps.isEmpty {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                if Task.isCancelled || !self.isSelectionSurfaceVisible { return }
+            }
+            guard !Task.isCancelled, let self, self.isSelectionSurfaceVisible,
+                  let current = self.model.intentions.first(where: { $0.id == intention.id }) else { return }
+            self.savedRunTask = nil
+            self.prepare(current, workspace: self.model.journal.workspaces[current.id], run: true)
+        }
     }
+    func removeAddedApplication(_ id: String) {
+        savedRunTask?.cancel()
+        spotlightApps.removeValue(forKey: id)
+        selection.apps.remove(id)
+        selection.windowIDsByApp.removeValue(forKey: id)
+        selection.tabs = selection.tabs.filter { $0.browser != id }
+        selection.wholeBrowserApps?.remove(id)
+        selection.startupAppIDs?.remove(id)
+        openingApps.remove(id)
+        SpotlightAppPreparation.shared.release(except: selection.apps)
+        windows.removeAll { $0.appID == id }
+        refresh(); refreshStagedOutlines()
+    }
+    func isAddedApplication(_ id: String) -> Bool { spotlightApps[id] != nil }
     func saveRecent(_ record: IntentSessionRecord) {
         let wasSaved = model.savedIntentionID(for: record) != nil
         guard let id = model.saveRecord(record) else { message = model.errorMessage; return }
@@ -188,6 +204,7 @@ final class QuickSelectionController: ObservableObject {
     }
     func prepare(_ intention: Intention, workspace: SessionWorkspace?, resume: IntentSessionRecord? = nil, run: Bool = false) {
         guard !model.hasActiveSession else { return }
+        panel?.makeFirstResponder(nil)
         refresh()
         var draft = QuickSelection(); draft.name = intention.name; draft.accessMode = intention.accessMode
         draft.restrictionNodes = intention.restrictionNodes.filter { $0.id != QuickSelection.startupSuppressionID }
@@ -212,6 +229,19 @@ final class QuickSelectionController: ObservableObject {
                 else { missing += 1 }
             }
         }
+        // A closed native app has no existing windows to accidentally widen into.
+        // Reopen its default workspace at Start, as requested. Browser tab scopes
+        // still require exact identity; never replace missing tabs with allow-all.
+        if let workspace {
+            for app in intention.allowedApps where installed.contains(app.bundleIdentifier)
+                && !QuickSelection.browsers.contains(app.bundleIdentifier)
+                && workspace.selection.apps.contains(app.bundleIdentifier)
+                && NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty {
+                draft.apps.insert(app.bundleIdentifier)
+                draft.windowIDsByApp.removeValue(forKey: app.bundleIdentifier)
+                missing = max(0, missing - workspace.windows.filter { $0.app == app.bundleIdentifier }.count)
+            }
+        }
         // Workspace snapshots own resource identity, not the saved setup’s latest settings.
         draft.applySessionConfiguration(intention)
         draft.apps.subtract(presets)
@@ -219,6 +249,14 @@ final class QuickSelectionController: ObservableObject {
         draft.windowIDsByApp = draft.windowIDsByApp.filter { !presets.contains($0.key) }
         for app in intention.allowedApps where draft.apps.contains(app.bundleIdentifier) && !apps.contains(where: { $0.id == app.bundleIdentifier }) {
             spotlightApps[app.bundleIdentifier] = app
+            if draft.accessMode == .whitelist {
+                draft.startupAppIDs = (draft.startupAppIDs ?? []).union([app.bundleIdentifier])
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
+                    SpotlightAppPreparation.shared.prepare(url) { [weak self] failure in
+                        if let failure { self?.message = failure }
+                    }
+                }
+            }
         }
         if let seconds = resume?.remainingSeconds {
             draft.restrictionNodes.removeAll { $0.kind == .timer || $0.kind == .endTime }
@@ -230,7 +268,7 @@ final class QuickSelectionController: ObservableObject {
         windows = preserveAddedAppIcons(in: windows)
         hasStagedSelection = true; resumeRecord = resume
         message = missing == 0
-            ? (draft.apps.isEmpty ? "These apps are already covered by your defaults. Choose an additional app or tab." : "Ready when you are. Review your workspace, then Return.")
+            ? (draft.apps.isEmpty ? (draft.accessMode == .blacklist ? "This saved intention has no blocked apps or tabs. Choose what to block, then run and save it again." : "These apps are already covered by your defaults. Choose an additional app or tab.") : "Ready when you are. Review your workspace, then Return.")
             : "\(missing) items need choosing again. Review your apps and tabs before running."
         if run && missing == 0 { runSelection() }
     }
@@ -747,6 +785,7 @@ final class QuickSelectionController: ObservableObject {
     }
     func toggleAccessMode() {
         guard !closing else { return }
+        panel?.makeFirstResponder(nil)
         selection.accessMode = selection.accessMode == .whitelist ? .blacklist : .whitelist
         // A whole-browser block has no tab selection; do not silently turn that
         // into an allow-all browser when returning to Allow mode.
@@ -877,6 +916,7 @@ final class QuickSelectionController: ObservableObject {
     }
     func selectWindow(_ window: WindowItem) {
         guard !closing else { return }
+        panel?.makeFirstResponder(nil)
         if let app = apps.first(where: { $0.id == window.appID }), window.id == Self.placeholderID(app),
            spotlightApps[window.appID] != nil && selection.apps.contains(window.appID) {
             selection.toggleApp(window.appID, snapshots: snapshots); return
@@ -930,6 +970,7 @@ final class QuickSelectionController: ObservableObject {
         selection.toggleBrowserWindow(browser: window.appID, windowID: id, snapshots: snapshots)
     }
     func selectApp(_ app: AppItem) {
+        panel?.makeFirstResponder(nil)
         if app.app.isBrowser && selection.accessMode == .whitelist {
             message = "Select website tabs above a Chrome or Firefox window."; return
         }
@@ -977,6 +1018,7 @@ final class QuickSelectionController: ObservableObject {
     }
     private func close() {
         onOverviewClosed?()
+        savedRunTask?.cancel(); savedRunTask = nil
         settingsOpen = false; saveFlight = nil
         overviewInput = OverviewSearchGesture()
         expandedStack = nil
@@ -1400,6 +1442,16 @@ private struct QuickSelectionView: View {
                     .contentShape(RoundedRectangle(cornerRadius: radius))
             }.buttonStyle(.plain)
                 .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
+                .overlay(alignment: .topTrailing) {
+                    if controller.isAddedApplication(window.appID) {
+                        Button { controller.removeAddedApplication(window.appID) } label: {
+                            Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                                .frame(width: 24, height: 24).background(.regularMaterial, in: Circle())
+                        }.buttonStyle(.plain).padding(5)
+                            .accessibilityLabel("Remove added app \(app?.app.name ?? label)")
+                            .help("Remove this addition and cancel its opening")
+                    }
+                }
             if showsCaption { HStack(spacing: 5) {
                 Button { controller.selectWindow(window) } label: {
                     HStack(spacing: 5) {
@@ -1420,7 +1472,7 @@ private struct QuickSelectionView: View {
                 }
             }.font(.system(size: 12, weight: .medium)).padding(.horizontal, 5)
                 .frame(maxWidth: captionWidth, minHeight: 20, maxHeight: 20)
-                .background(.black.opacity(hovered || selected ? 0.5 : 0.25), in: Capsule())
+                .foregroundStyle(.white)
             }
         }.frame(width: captionWidth, height: frame.height + captionHeight, alignment: .top)
             .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }

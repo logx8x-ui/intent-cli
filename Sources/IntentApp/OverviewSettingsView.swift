@@ -31,7 +31,6 @@ struct AppPresetStatusStrip: View {
 struct OverviewSettingsView: View {
     @ObservedObject var model: IntentAppModel
     @State private var query = ""
-    @AppStorage("spotlightBackgroundOpening") private var spotlightBackgroundOpening = true
     @AppStorage("distractionAppearance") private var distractionAppearance = "hide"
     @AppStorage("overviewShowClock") private var showClock = true
     @AppStorage("overviewShowTitles") private var showTitles = true
@@ -48,7 +47,8 @@ struct OverviewSettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
             Text("Browser Guard puts distractions in a temporary minimized window and brings them back when you finish. Select both sides of a split-view pair together.")
                 .font(.caption2).foregroundStyle(.secondary)
-            Toggle("Open Spotlight selections in the background", isOn: $spotlightBackgroundOpening).font(.callout)
+            Text("Spotlight additions stay off-screen until Start.").font(.callout)
+            Text("Closed apps are prepared as icons without opening a window. Remove an icon with × to cancel its opening. Apps you already have open are left alone.").font(.caption).foregroundStyle(.secondary)
             Text("In the overview, open Apple Spotlight with ⌘Space, choose an app, then press Return to add it. No backtick is needed. Outside the overview, put one ` before or after a Spotlight app search to add it to your draft. Escape closes the overview.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()

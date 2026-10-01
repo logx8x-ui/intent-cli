@@ -1,5 +1,6 @@
 import AppKit
 import IntentCore
+import IntentLock
 import SwiftUI
 
 /// Opt-in checks against the actual app model, inside a disposable QA workspace.
@@ -65,8 +66,73 @@ enum IntentPersistenceChecks {
             try check(model.intentions[0].name == beforeName && model.journal.records[0].intention.name == "calculator", "Rename failure preserves both history and slot name")
             try FileManager.default.removeItem(at: journalURL)
             try journalData.write(to: journalURL, options: .atomic)
+            model.deleteIntention(id: secondID!)
+            try check(model.savedSlots.map(\.id) == [id!], "Deleting a slot removes the gap and renumbers survivors")
+            try check(model.savedIntentionID(for: second) == nil, "Deleting a saved setup clears its filled history bookmark")
+            try check(model.journal.records.contains(where: { $0.id == second.id }), "Slot deletion preserves recent run history")
+            model.undoLastChange()
+            try check(model.savedSlots.map(\.id) == [secondID!, id!], "Undo restores the saved setup in its original position")
+            let beforeDelete = model.intentions
+            let intentionsURL = IntentionStore.defaultFileURL()
+            let intentionsData = try Data(contentsOf: intentionsURL)
+            try FileManager.default.removeItem(at: intentionsURL)
+            try FileManager.default.createDirectory(at: intentionsURL, withIntermediateDirectories: true)
+            model.deleteIntention(id: secondID!)
+            try check(model.intentions == beforeDelete, "Failed deletion rolls back the visible slots")
+            try FileManager.default.removeItem(at: intentionsURL)
+            try intentionsData.write(to: intentionsURL, options: .atomic)
+            let preparation = SpotlightAppPreparation.shared
+            guard let calculatorURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) else {
+                throw NSError(domain: "IntentPersistenceChecks", code: 2)
+            }
+            let beforePIDs = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).map(\.processIdentifier)
+            let beforeFront = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            var preparationFailure: String?
+            preparation.prepare(calculatorURL) { preparationFailure = $0 }
+            try check(preparationFailure == nil && preparation.staged.contains(app.bundleIdentifier), "A closed app can be staged without a background-launch warning")
+            try check(NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).map(\.processIdentifier) == beforePIDs,
+                "Staging never starts a process before the user runs the intention")
+            try check(NSWorkspace.shared.frontmostApplication?.processIdentifier == beforeFront, "Staging cannot steal foreground focus")
+            preparation.release()
+            try check(preparation.staged.isEmpty, "Removing an addition cancels its pending launch")
+            preparation.prepare(calculatorURL) { preparationFailure = $0 }
+            preparation.didStart()
+            try check(preparation.staged.isEmpty, "Session start relinquishes staged additions")
+            preparation.prepare(URL(fileURLWithPath: "/not-an-application")) { preparationFailure = $0 }
+            try check(preparationFailure != nil && preparation.staged.isEmpty, "Unavailable applications are rejected rather than guessed")
+            selection = QuickSelection(); selection.apps = [app.bundleIdentifier]; selection.startupAppIDs = [app.bundleIdentifier]
+            let ready = try selection.makeIntention(apps: [app], snapshots: [])
+            try check(IntentionStartupPlanner.steps(for: ready).contains(.openBundle(app.bundleIdentifier)), "Staged apps open when the intention starts")
+            selection.accessMode = .blacklist
+            let blocker = try selection.makeIntention(apps: [app], snapshots: [])
+            try check(IntentionStartupPlanner.steps(for: blocker).isEmpty, "Saved blocker targets are never launched")
             // Render only our own mock views; this is not a live desktop acceptance check.
             let controller = QuickSelectionController(model: model)
+            model.installedApps = [.init(name: app.name, bundleIdentifier: app.bundleIdentifier, url: calculatorURL,
+                icon: NSWorkspace.shared.icon(forFile: calculatorURL.path))]
+            controller.prepare(ready, workspace: workspace)
+            try check(controller.selection.apps.contains(app.bundleIdentifier), "Saved closed apps remain selected on replay")
+            try check((controller.selection.startupAppIDs ?? []).contains(app.bundleIdentifier), "Replay stages the closed app for Start")
+            if beforePIDs.isEmpty {
+                try check(controller.isAddedApplication(app.bundleIdentifier) && controller.windows.contains(where: { $0.appID == app.bundleIdentifier }),
+                    "Saved closed app appears as a removable icon in the overview")
+                var scoped = selection; scoped.accessMode = .whitelist
+                scoped.windowIDsByApp = [app.bundleIdentifier: [12345]]
+                let scopedWorkspace = SessionWorkspace(selection: scoped, windows: [.init(app: app.bundleIdentifier, title: "Previous calculator")], tabs: [])
+                controller.prepare(ready, workspace: scopedWorkspace)
+                try check(controller.selection.apps.contains(app.bundleIdentifier) && controller.selection.windowIDsByApp[app.bundleIdentifier] == nil,
+                    "An entirely closed native app can reopen its default window without permitting unrelated existing windows")
+                controller.removeAddedApplication(app.bundleIdentifier)
+                try check(!controller.selection.apps.contains(app.bundleIdentifier) && !controller.isAddedApplication(app.bundleIdentifier)
+                    && !controller.windows.contains(where: { $0.appID == app.bundleIdentifier }), "App X clears its target, placeholder and staged launch")
+                try check(NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty, "Removing a staged app never opens it")
+                controller.prepare(blocker, workspace: nil)
+                try check(controller.selection.accessMode == .blacklist && controller.selection.apps.contains(app.bundleIdentifier),
+                    "Populated saved blacklist slots restore their target and mode")
+                try check(IntentionStartupPlanner.steps(for: try controller.selection.makeIntention(apps: [app], snapshots: [])).isEmpty,
+                    "A replayed blacklist never opens the blocked app")
+            }
+            preparation.release()
             let preview = VStack(spacing: 20) {
                 IntentOptionalNameBar(name: .constant("")).frame(width: 520)
                 IntentSavedSlotsView(controller: controller, model: model)

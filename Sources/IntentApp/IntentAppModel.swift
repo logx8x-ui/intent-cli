@@ -1030,16 +1030,20 @@ final class IntentAppModel: ObservableObject {
     func deleteIntention(id: String) {
         guard !hasActiveSession else { return }
         guard intentions.contains(where: { $0.id == id }) else { return }
+        let previousIntentions = intentions, previousSchedules = schedules
+        let previousID = selectedID, previousUndo = undoStack
         recordUndoSnapshot()
         intentions.removeAll { $0.id == id }
+        if selectedID == id { selectedID = intentions.first?.id }
+        guard save() else {
+            intentions = previousIntentions; schedules = previousSchedules
+            selectedID = previousID; undoStack = previousUndo
+            return
+        }
         schedules.removeAll { $0.intentionID == id }
         try? cooldownStore.clear(intentionID: id)
         cooldownExpirations.removeValue(forKey: id)
         saveSchedules()
-        if selectedID == id {
-            selectedID = intentions.first?.id
-        }
-        save()
     }
 
     func updateIntention(_ intention: Intention) {
