@@ -1344,6 +1344,13 @@ final class IntentAppModel: ObservableObject {
         remainingFrictions = []
     }
 
+    /// All successful completion paths are silent, including timer and checklist completion.
+    func dismissSessionPresentation() {
+        overlayPresenter?.hideOverlay(animated: false)
+        overlayPresenter?.hideSessionTimer()
+        overlayPresenter?.hideSessionExpiry()
+    }
+
     func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
     func toggleSessionControlsExpansion() { overlayPresenter?.toggleSessionControlsExpansion() }
 
@@ -1818,7 +1825,7 @@ final class IntentAppModel: ObservableObject {
                 self.stopwatchStarted = nil
                 self.activeSessionAbsoluteEndTime = nil
                 self.activeSessionOccurrenceID = nil
-                self.overlayPresenter?.hideSessionTimer()
+                self.dismissSessionPresentation()
                 if lock.didStopForSafety {
                     self.emergencyStop()
                 } else if failureMessage == nil {
@@ -1860,7 +1867,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeChecklist = []
                 self.completedChecklist = []
                 if let interruptedWorkspace { self.restoreInterruptedWorkspace?(intention, interruptedWorkspace) }
-                if failureMessage != nil || lock.didStopForSafety || self.errorMessage != nil { self.overlayPresenter?.showOverlay(animated: true) }
+                if failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
                 self.saveSessionOnFinish = false
                 if let replacement, !lock.didStopForSafety, failureMessage == nil {
                     self.requestStart(replacement)
@@ -1984,7 +1991,6 @@ final class IntentAppModel: ObservableObject {
                 let elapsed = Double(components.seconds) + Double(components.attoseconds) / 1e18
                 let wallNow = Date()
                 if self.sessionExpiryPolicy?.expire(elapsed: elapsed, now: wallNow) != nil {
-                    self.overlayPresenter?.showSessionExpiry(occurrenceID: occurrence, name: intention.name)
                     lock.stopForExpiry()
                     return
                 }

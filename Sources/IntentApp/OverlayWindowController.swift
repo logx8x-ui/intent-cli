@@ -19,6 +19,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     private var lockObserver: NSObjectProtocol?
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
+    private var presentationGeneration = 0
     private var permissionHandoffObserver: AnyCancellable?
 
     var isOverlayVisible: Bool {
@@ -63,16 +64,17 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         let needsOnboarding = !UserDefaults.standard.bool(forKey: "intentDidCompleteOnboarding")
             && !UserDefaults.standard.bool(forKey: IntentOnboardingCoordinator.deferredKey)
         let needsUtility = model.settingsPresentationRequest != nil || model.pendingFriction != nil
-            || model.pendingEndTimeRequest != nil || model.pendingPurposeSessionSave != nil
+            || model.pendingEndTimeRequest != nil
             || model.errorMessage != nil || needsOnboarding || model.onboarding.isPresented
             || accountManager.phase == .loading || accountManager.phase == .choosing || accountManager.isPresentingAccount
-            || (model.hasActiveSession && !model.hasEligibleSessionControls)
         guard needsUtility else {
             panel?.orderOut(nil)
             if model.hasActiveSession { model.toggleSessionControls() }
             else { _ = model.presentWorkspace?() }
             return
         }
+        presentationGeneration += 1
+        let generation = presentationGeneration
         let panel = panel ?? makePanel()
         self.panel = panel
 
@@ -98,17 +100,20 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
             panel.animator().alphaValue = 1
             panel.animator().setFrame(targetFrame, display: true)
         } completionHandler: { [weak self] in
-            self?.isAnimating = false
-            if let panel = self?.panel, panel.isVisible {
-                self?.focusOverlay(panel)
-            }
+            guard let self, self.presentationGeneration == generation else { return }
+            self.isAnimating = false
+            if let panel = self.panel, panel.isVisible { self.focusOverlay(panel) }
         }
     }
 
     func hideOverlay(animated: Bool) {
-        guard let panel, panel.isVisible, !isAnimating else { return }
-        guard animated else {
+        guard let panel else { return }
+        presentationGeneration += 1
+        let generation = presentationGeneration
+        // Completion and Escape must win over an in-flight opening animation.
+        guard animated, panel.isVisible, !isAnimating else {
             panel.orderOut(nil)
+            isAnimating = false
             return
         }
 
@@ -120,12 +125,11 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
             panel.animator().alphaValue = 0
             panel.animator().setFrame(endFrame, display: true)
         } completionHandler: { [weak self, weak panel] in
+            guard let self, self.presentationGeneration == generation else { return }
             panel?.orderOut(nil)
             panel?.alphaValue = 1
-            if let targetFrame = self?.targetFrame {
-                panel?.setFrame(targetFrame, display: false)
-            }
-            self?.isAnimating = false
+            panel?.setFrame(self.targetFrame, display: false)
+            self.isAnimating = false
         }
     }
 
@@ -328,8 +332,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     func toggleSessionControls() {
         guard model.hasActiveSession, let occurrence = model.activeSessionOccurrenceID else { return }
         if !model.hasEligibleSessionControls {
-            if panel?.isVisible == true { hideOverlay(animated: true) }
-            else { showOverlay(animated: true) }
+            hideOverlay(animated: false)
             return
         }
         if sessionOverlayState.occurrenceID != occurrence { showSessionControls(occurrenceID: occurrence); return }

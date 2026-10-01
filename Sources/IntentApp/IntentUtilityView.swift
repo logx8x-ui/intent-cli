@@ -11,13 +11,6 @@ struct IntentUtilityView: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 18).fill(.regularMaterial)
-            if model.hasActiveSession && !model.hasEligibleSessionControls && model.settingsPresentationRequest == nil {
-                VStack(spacing: 20) {
-                    Text(model.activeSessionName ?? "Intention running").font(.title3)
-                    Button("Finish intention") { model.endActiveSession() }.buttonStyle(.borderedProminent).tint(.green)
-                    Button("Hide controls") { model.hideOverlay() }.buttonStyle(.plain)
-                }.padding(24)
-            }
             if model.settingsPresentationRequest != nil {
                 VStack {
                     HStack {

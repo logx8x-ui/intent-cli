@@ -16,6 +16,12 @@ enum IntentPersistenceChecks {
         }
         do {
             let model = IntentAppModel()
+            let presentation = SessionDismissalProbe()
+            model.overlayPresenter = presentation
+            model.dismissSessionPresentation()
+            try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry"],
+                "Session completion dismisses every presentation without activation or a completion screen")
+            model.overlayPresenter = nil
             let app = AllowedApp(name: "Calculator", bundleIdentifier: "com.apple.calculator")
             var selection = QuickSelection(); selection.apps = [app.bundleIdentifier]
             let unnamed = try selection.makeIntention(apps: [app], snapshots: [])
@@ -154,4 +160,21 @@ enum IntentPersistenceChecks {
             return 1
         }
     }
+}
+
+@MainActor
+private final class SessionDismissalProbe: IntentOverlayPresenting {
+    var events: [String] = []
+    var isOverlayVisible: Bool { true }
+    var isSessionControlsExpanded: Bool { true }
+    func showOverlay(animated: Bool) { events.append("show") }
+    func hideOverlay(animated: Bool) { events.append(animated ? "hide-animated" : "hide-immediately") }
+    func toggleOverlay() { events.append("toggle") }
+    func showSessionControls(occurrenceID: UUID) { events.append("show-controls") }
+    func collapseSessionControlsIfExpanded() -> Bool { false }
+    func toggleSessionControls() { events.append("toggle-controls") }
+    func toggleSessionControlsExpansion() {}
+    func hideSessionTimer() { events.append("hide-controls") }
+    func showSessionExpiry(occurrenceID: UUID, name: String) { events.append("show-expiry") }
+    func hideSessionExpiry() { events.append("hide-expiry") }
 }
