@@ -105,6 +105,21 @@ do {
         BrowserTabItem(id: 12, windowID: 1, index: 1, title: "Same title", url: "https://example.com", active: false),
         BrowserTabItem(id: 13, windowID: 1, index: 2, title: "Third", url: "https://example.org", active: false)
     ]
+    try expect(!NativeTabClickPolicy.usesNativeTabHitRegions(hideDistractions: true), "Hidden-tab sessions leave sidebar and tab-strip clicks to the browser's exact-ID policy, so row reflow cannot mask an allowed tab")
+    try expect(NativeTabClickPolicy.usesNativeTabHitRegions(hideDistractions: false), "Explicit blur mode retains native forbidden-tab hit regions")
+    try expect(NativeTabClickPolicy.matchesWindow(cachedID: 101, targetID: 101), "A verified blocked window keeps its input protection")
+    try expect(!NativeTabClickPolicy.matchesWindow(cachedID: 101, targetID: 102), "Switching browser windows cannot reuse the old window's mask, even in the same process")
+    try expect(!NativeTabClickPolicy.matchesWindow(cachedID: 0, targetID: 0), "Unknown window identity cannot swallow a tab click")
+    try expect(!NativeTabClickPolicy.matchesWindow(cachedID: 101, targetID: 0), "A popup or unidentifiable input target cannot inherit a browser mask")
+    try expect(NativeTabClickPolicy.confirmsActiveTitle("Same title - Mozilla Firefox", tabs: clickTabs), "Verified foreground content can receive whole-window protection")
+    try expect(!NativeTabClickPolicy.confirmsActiveTitle("New Tab - Mozilla Firefox", tabs: clickTabs), "A fresh tab must not inherit a whole-window mask from the prior snapshot")
+    try expect(!NativeTabClickPolicy.confirmsActiveTitle("Third", tabs: clickTabs), "A newly activated tab must wait for its matching active snapshot before whole-window masking")
+    for code: Int64 in [17, 45] {
+        try expect(FocusBrowserShortcutPolicy.createsSearchSurface(keyCode: code, command: true, control: false, option: false, shift: false, allowGoogleSearchTabs: true), "Tab searches permits a fresh tab/window from a currently blocked browser window")
+        try expect(!FocusBrowserShortcutPolicy.shouldBlock(keyCode: code, command: true, control: false, option: false, shift: false, allowGoogleSearchTabs: true), "A fresh search surface is not swallowed by the later browser shortcut guard")
+        try expect(!FocusBrowserShortcutPolicy.createsSearchSurface(keyCode: code, command: true, control: false, option: false, shift: true, allowGoogleSearchTabs: true), "Private-window and restore-closed-tab shortcuts do not inherit the fresh-search exception")
+        try expect(!FocusBrowserShortcutPolicy.createsSearchSurface(keyCode: code, command: true, control: false, option: false, shift: false, allowGoogleSearchTabs: false), "Restrictive intentions cannot create search surfaces without Tab searches")
+    }
     try expect(!NativeTabClickPolicy.blocksWholeWindow(tabs: [], allowedIDs: []), "An empty or unavailable tab inventory cannot infer a blocked window")
     try expect(!NativeTabClickPolicy.blocksWholeWindow(tabs: clickTabs, allowedIDs: [12]), "One permitted tab keeps the window available for tab switching")
     try expect(NativeTabClickPolicy.blocksWholeWindow(tabs: clickTabs, allowedIDs: []), "A window containing only forbidden tabs also blocks its existing page content")

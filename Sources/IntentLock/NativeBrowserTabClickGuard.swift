@@ -3,6 +3,23 @@ import ApplicationServices
 import IntentCore
 
 public enum NativeTabClickPolicy {
+    /// Hidden tabs are owned by the extension's exact-ID visibility policy.
+    /// Screen coordinates cannot follow a scrolling/reflowing browser sidebar
+    /// reliably enough to intercept its remaining (permitted) tabs.
+    public static func usesNativeTabHitRegions(hideDistractions: Bool) -> Bool {
+        !hideDistractions
+    }
+
+    public static func matchesWindow(cachedID: UInt32, targetID: UInt32) -> Bool {
+        cachedID != 0 && cachedID == targetID
+    }
+
+    /// A new or newly activated tab can precede the extension's next snapshot.
+    /// Geometry alone must not turn that stale inventory into a full input mask.
+    public static func confirmsActiveTitle(_ title: String, tabs: [BrowserTabItem]) -> Bool {
+        tabs.contains { $0.active && BrowserWindowMatching.sameWindowTitle(title, $0.title) }
+    }
+
     /// If this exact window has no permitted tab to return to, its current page
     /// still needs protection (including browser pages without content scripts).
     public static func blocksWholeWindow(tabs: [BrowserTabItem], allowedIDs: Set<Int>) -> Bool {
@@ -69,6 +86,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var stopped = true
     private var pid: pid_t = 0
+    private var nativeWindowID: UInt32 = 0
     private var rectangles: [CGRect] = []
     private var visualRectangles: [CGRect] = []
     private var foregroundWindowBlocked = false
@@ -110,10 +128,12 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         mutex.lock(); stopped = true; rectangles = []; visualRectangles = []; foregroundWindowBlocked = false; mutex.unlock()
     }
 
-    func shouldBlock(_ point: CGPoint, frontmostPID: pid_t?) -> Bool {
+    func shouldBlock(_ point: CGPoint, frontmostPID: pid_t?, targetWindowID: UInt32) -> Bool {
         guard !IntentInteractivePanelRegions.shared.contains(point) else { return false }
         mutex.lock(); defer { mutex.unlock() }
-        let blocked = !stopped && (foregroundWindowBlocked || Date() >= ignoreUntil) && frontmostPID == pid && Date().timeIntervalSince(updatedAt) < 0.45
+        let blocked = !stopped && (foregroundWindowBlocked || Date() >= ignoreUntil) && frontmostPID == pid
+            && NativeTabClickPolicy.matchesWindow(cachedID: nativeWindowID, targetID: targetWindowID)
+            && Date().timeIntervalSince(updatedAt) < 0.45
             && rectangles.contains { $0.contains(point) }
         if blocked { blockedClicks += 1 }
         return blocked
@@ -121,14 +141,22 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
 
     /// Keyboard handling reads only the same short-lived, focused-window cache.
     func blocksForegroundWindow(_ frontmostPID: pid_t?) -> Bool {
-        mutex.lock(); defer { mutex.unlock() }
-        return !stopped && foregroundWindowBlocked && frontmostPID == pid
+        mutex.lock()
+        let blocked = !stopped && foregroundWindowBlocked && frontmostPID == pid
             && Date().timeIntervalSince(updatedAt) < 0.45
+        let expectedWindow = nativeWindowID
+        mutex.unlock()
+        return blocked && NativeTabClickPolicy.matchesWindow(cachedID: expectedWindow,
+            targetID: Self.foregroundWindowID(for: frontmostPID))
     }
 
     func blocksAddressSubmission(_ frontmostPID: pid_t?) -> Bool {
-        mutex.lock(); defer { mutex.unlock() }
-        return !stopped && addressSubmissionBlocked && frontmostPID == pid && Date().timeIntervalSince(updatedAt) < 0.45
+        mutex.lock()
+        let blocked = !stopped && addressSubmissionBlocked && frontmostPID == pid && Date().timeIntervalSince(updatedAt) < 0.45
+        let expectedWindow = nativeWindowID
+        mutex.unlock()
+        return blocked && NativeTabClickPolicy.matchesWindow(cachedID: expectedWindow,
+            targetID: Self.foregroundWindowID(for: frontmostPID))
     }
 
     /// A separate visual consumer; never performs AX work on the main thread.
@@ -141,10 +169,11 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         return visualRectangles
     }
 
-    private func publish(_ rectangles: [CGRect], pid: pid_t, visualRectangles: [CGRect] = [], blocksForegroundWindow: Bool = false, blocksAddressSubmission: Bool = false) {
+    private func publish(_ rectangles: [CGRect], pid: pid_t, nativeWindowID: UInt32 = 0, visualRectangles: [CGRect] = [], blocksForegroundWindow: Bool = false, blocksAddressSubmission: Bool = false) {
         mutex.lock()
         guard !stopped else { mutex.unlock(); return }
         self.rectangles = rectangles; self.visualRectangles = visualRectangles; self.pid = pid; updatedAt = Date()
+        self.nativeWindowID = nativeWindowID
         foregroundWindowBlocked = blocksForegroundWindow
         addressSubmissionBlocked = blocksAddressSubmission
         let clicks = blockedClicks
@@ -183,6 +212,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             blurContinuity = TabBlurContinuity(); publish([], pid: 0); return
         }
         scanState = "scanning"
+        let nativeWindowID = Self.foregroundWindowID(for: app.processIdentifier)
         let deadline = Date(timeIntervalSinceNow: 0.10)
         let application = AXUIElementCreateApplication(app.processIdentifier)
         let focused = value(application, kAXFocusedWindowAttribute, deadline)
@@ -216,6 +246,7 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             let selected = rules.selectedTabIDsByBrowser?[browser]
             let allowedIDs = rules.accessMode == .blacklist && selected != nil ? Set(allTabs.map(\.id)).subtracting(selected!) : Set(selected ?? snapshot.tabs.map(\.id)).union(rules.allowGoogleSearchTabs && rules.startupSessionID != nil ? Set(allTabs.filter { $0.searchSessionID == rules.startupSessionID }.map(\.id)) : [])
             if isFocused, NativeTabClickPolicy.blocksWholeWindow(tabs: windowTabs, allowedIDs: allowedIDs),
+               NativeTabClickPolicy.confirmsActiveTitle(title, tabs: windowTabs),
                let frame = bounds(window, deadline), frame.width > 5, frame.height > 5 {
                 blocked.append(frame)
                 visual.append(frame)
@@ -225,7 +256,8 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
             }
             // Hidden tabs have already left the usable window. Walking every AX
             // descendant on every tick makes Firefox's own UI do unnecessary work.
-            if windowTabs.allSatisfy({ allowedIDs.contains($0.id) }) {
+            if !NativeTabClickPolicy.usesNativeTabHitRegions(hideDistractions: rules.hideDistractions)
+                || windowTabs.allSatisfy({ allowedIDs.contains($0.id) }) {
                 if isFocused, rules.accessMode == .whitelist, let focusedElement {
                     let element = unsafeBitCast(focusedElement, to: AXUIElement.self)
                     let labels = [kAXIdentifierAttribute, kAXDescriptionAttribute, kAXTitleAttribute, kAXHelpAttribute].compactMap { string(element, $0, deadline) }
@@ -324,7 +356,18 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         }
         // Each completed rectangle is independently validated. Preserve those
         // checks if another branch runs out of time; never infer missing rows.
-        publish(blocked, pid: app.processIdentifier, visualRectangles: visual, blocksForegroundWindow: blocksForegroundWindow, blocksAddressSubmission: blocksAddress)
+        publish(blocked, pid: app.processIdentifier, nativeWindowID: nativeWindowID, visualRectangles: visual, blocksForegroundWindow: blocksForegroundWindow, blocksAddressSubmission: blocksAddress)
+    }
+
+    /// WindowServer is independent of browser accessibility and tab snapshots.
+    /// A cached mask for one Firefox window cannot block another window in the
+    /// same process while its next asynchronous scan is still in flight.
+    private static func foregroundWindowID(for pid: pid_t?) -> UInt32 {
+        guard let pid,
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return 0 }
+        return windows.first(where: {
+            $0[kCGWindowOwnerPID as String] as? pid_t == pid && $0[kCGWindowLayer as String] as? Int == 0
+        })?[kCGWindowNumber as String] as? UInt32 ?? 0
     }
 
     private func nativeTabs(in children: [AXUIElement], deadline: Date) -> [AXUIElement] {

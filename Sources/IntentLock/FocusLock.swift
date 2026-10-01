@@ -438,7 +438,8 @@ public final class FocusLock {
             let wholeWindowBlocked = nativeTabClickGuard.blocksForegroundWindow(foregroundPID)
             // Do not intercept normal tab/sidebar scrolling or scroll over a
             // different window. shouldBlock also exempts registered controls.
-            let pointerBlocked = wholeWindowBlocked && nativeTabClickGuard.shouldBlock(event.location, frontmostPID: foregroundPID)
+            let pointerBlocked = wholeWindowBlocked && nativeTabClickGuard.shouldBlock(event.location, frontmostPID: foregroundPID,
+                targetWindowID: UInt32(clamping: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent)))
             if NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: wholeWindowBlocked,
                 pointerBlocked: pointerBlocked, missionControl: pointerBlocked && isMissionControlActive()) {
                 return nil
@@ -476,7 +477,8 @@ public final class FocusLock {
                 return Unmanaged.passUnretained(event)
             }
 
-            if nativeTabClickGuard.shouldBlock(event.location, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) {
+            if nativeTabClickGuard.shouldBlock(event.location, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                targetWindowID: UInt32(clamping: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent))) {
                 // A forbidden native tab is a no-op: do not activate it and bounce afterward.
                 suppressedTabButtons.insert(event.getIntegerValueField(.mouseEventButtonNumber))
                 return nil
@@ -589,6 +591,8 @@ public final class FocusLock {
         if keyCode != KeyCode.grave,
            !(keyCode == KeyCode.tab && (command || control)),
            !(control && FocusSystemShortcutPolicy.isSpaceNavigationKey(keyCode)),
+           !FocusBrowserShortcutPolicy.createsSearchSurface(keyCode: keyCode, command: command, control: control,
+                option: option, shift: shift, allowGoogleSearchTabs: spec.allowGoogleSearchTabs),
            !IntentInteractivePanelRegions.shared.hasKeyboardFocus,
            nativeTabClickGuard.blocksForegroundWindow(NSWorkspace.shared.frontmostApplication?.processIdentifier) {
             return nil

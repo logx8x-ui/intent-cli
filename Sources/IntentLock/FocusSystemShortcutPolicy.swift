@@ -19,6 +19,15 @@ public enum FocusSystemShortcutPolicy {
 }
 
 public enum FocusBrowserShortcutPolicy {
+    /// Creating a fresh search surface remains available even when the current
+    /// browser window contains only blocked tabs. Private/reopen shortcuts do
+    /// not inherit this exception.
+    public static func createsSearchSurface(keyCode: Int64, command: Bool, control: Bool,
+        option: Bool, shift: Bool, allowGoogleSearchTabs: Bool) -> Bool {
+        allowGoogleSearchTabs && command && !control && !option && !shift
+            && [KeyCode.t, KeyCode.n].contains(keyCode)
+    }
+
     public static func shouldBlock(
         keyCode: Int64,
         command: Bool,
@@ -32,6 +41,11 @@ public enum FocusBrowserShortcutPolicy {
         }
 
         if control && keyCode == KeyCode.tab {
+            return false
+        }
+
+        if createsSearchSurface(keyCode: keyCode, command: command, control: control,
+            option: option, shift: shift, allowGoogleSearchTabs: allowGoogleSearchTabs) {
             return false
         }
 

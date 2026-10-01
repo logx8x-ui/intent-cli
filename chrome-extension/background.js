@@ -506,24 +506,57 @@ function effectiveRules(nativeRules) {
 }
 
 let initialVisibilitySession = null;
-async function applyNativeRules(nativeRules) {
+let ruleApplication = Promise.resolve();
+let requestedRulesFingerprint = null;
+let ruleApplicationRevision = 0;
+function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
-  if (!nextRules.active) await tabVisibility?.sync(nextRules, () => true);
-  await restoreSearchLedger(nextRules);
-  const nextFingerprint = fingerprintRules(nextRules);
+  const requestedFingerprint = fingerprintRules(nextRules);
+  if (requestedFingerprint === requestedRulesFingerprint) {
+    return ruleApplication.then(() => settleRuleRequests());
+  }
+  requestedRulesFingerprint = requestedFingerprint;
+  const revision = ++ruleApplicationRevision;
+  // Stop enforcement before restoring tabs: restoration emits ordinary tab
+  // events, which must not activate anything using the old session's policy.
+  if (!nextRules.active) rules = nextRules;
+  const apply = async () => {
+    if (revision !== ruleApplicationRevision) return;
+    await applyEffectiveRules(nextRules, revision);
+  };
+  ruleApplication = ruleApplication.then(apply, apply).catch(error => {
+    if (revision === ruleApplicationRevision) {
+      requestedRulesFingerprint = null;
+      rulesFingerprint = "";
+    }
+    throw error;
+  });
+  return ruleApplication;
+}
+async function applyEffectiveRules(nextRules, revision) {
   rules = nextRules;
+  if (!nextRules.active) await tabVisibility?.sync(nextRules, () => true);
+  if (revision !== ruleApplicationRevision) return;
+  await restoreSearchLedger(nextRules);
+  if (revision !== ruleApplicationRevision) return;
+  const nextFingerprint = fingerprintRules(nextRules);
   settleRuleRequests();
   if (nextFingerprint === rulesFingerprint) return;
   rulesFingerprint = nextFingerprint;
   await updateNetworkRules();
+  if (revision !== ruleApplicationRevision) return;
   if (rules.active && Object.keys(rules.websiteFeaturePolicies || {}).length) {
     try { await installWebsiteGuards(); } catch (error) { rulesFingerprint = ""; throw error; }
   }
   broadcastRules();
+  if (revision !== ruleApplicationRevision) return;
   if (rules.active) {
     await removeAlreadyBlockedTabs();
+    if (revision !== ruleApplicationRevision) return;
     await synchronizeStartupTabs();
+    if (revision !== ruleApplicationRevision) return;
     await primeAllowedTab();
+    if (revision !== ruleApplicationRevision) return;
     for (const tab of await chrome.tabs.query({})) if (!committedURLByTab.has(tab.id) && tab.url) committedURLByTab.set(tab.id, tab.url);
     if (Array.isArray(rules.selectedTabIDs)) await returnToAllowedTab();
   }
@@ -537,6 +570,7 @@ async function applyNativeRules(nativeRules) {
     }
     completedStartupFingerprint = null;
   }
+  if (revision !== ruleApplicationRevision) return;
   // Start with only the chosen workspace; later opens are allowed. The
   // visibility ledger keeps the initial distractions parked until completion.
   if (rules.active && rules.addAsYouGo && initialVisibilitySession !== rules.startupSessionID
@@ -548,6 +582,7 @@ async function applyNativeRules(nativeRules) {
   } else {
     await tabVisibility?.sync(rules, isRuntimeAllowedTab);
   }
+  if (revision !== ruleApplicationRevision) return;
   if (!rules.active) initialVisibilitySession = null;
   scheduleTabSnapshot(true);
 }
@@ -1111,7 +1146,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (isRuntimeAllowedTab(tab)) {
     freshBlankTabIds.delete(tabId);
     lastAllowedURLByTab.set(tabId, tab.url);
-    lastAllowedTabId = tabId;
   } else if (rules.blockNavigation) {
     await recoverBlockedNavigation(tabId);
   }
@@ -1138,13 +1172,13 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       return;
     }
     freshBlankTabIds.add(tab.id);
-    lastAllowedTabId = tab.id;
+    if (tab.active) lastAllowedTabId = tab.id;
     return;
   }
 
   if (isRuntimeAllowedTab(tab)) {
     lastAllowedURLByTab.set(tab.id, tab.url);
-    lastAllowedTabId = tab.id;
+    if (tab.active) lastAllowedTabId = tab.id;
     return;
   }
 
@@ -1229,7 +1263,10 @@ chrome.webNavigation?.onCommitted?.addListener(async (details) => {
   const previous = committedURLByTab.get(details.tabId);
   const direct = ["typed", "generated", "keyword", "keyword_generated", "auto_bookmark"].includes(details.transitionType)
     || (details.transitionQualifiers || []).includes("from_address_bar");
-  if (rules.active && Array.isArray(rules.selectedTabIDs) && direct
+  // Exact selections only restrict direct navigation in a fixed whitelist.
+  // Blacklists and Add as you go allow navigation in every permitted tab.
+  if (rules.active && rules.accessMode === "whitelist" && !rules.addAsYouGo
+      && Array.isArray(rules.selectedTabIDs) && direct
       && !(rules.allowGoogleSearchTabs && IntentBrowserRules.isGoogleSearchURL(details.url))) {
     if (previous && previous !== details.url) await chrome.tabs.update(details.tabId, {url: previous}).catch(() => {});
     else await returnToAllowedTab();

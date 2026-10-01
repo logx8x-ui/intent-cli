@@ -186,6 +186,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 
   const context = {
     chrome,
+    IntentTabVisibility: options.onVisibilitySync ? class {
+      sync(rules) { return options.onVisibilitySync(rules); }
+      syncInitial(rules) { return options.onVisibilitySync(rules); }
+    } : undefined,
     IntentBrowserRules: helpers,
     IntentWebsiteFeatures: require("../chrome-extension/website-features.js"),
     URL,
@@ -214,6 +218,13 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
+    async applyRules(next) {
+      if (Array.isArray(next.selectedTabIDs) && next.selectedBrowserSessionID === undefined) {
+        next = {...next, selectedBrowserSessionID: vm.runInNewContext("browserSessionID", context)};
+      }
+      nativeRules = next;
+      await context.applyNativeRules(next);
+    },
     effectiveRules: context.effectiveRules,
     allowedTabIDs: () => [...tabs.values()].filter(context.isRuntimeAllowedTab).map(tab => tab.id),
     browserSessionID: () => vm.runInNewContext("browserSessionID", context),
@@ -315,6 +326,86 @@ async function run() {
       await open.activate(81);
       assert.equal(open.tabs.get(81).active, false, 'An explicit blacklisted tab remains inaccessible');
     }
+  }
+
+  // Real address-bar navigation also emits onCommitted; onUpdated alone does
+  // not exercise the exact-tab direct-navigation guard.
+  for (const mode of ['whitelist', 'blacklist']) {
+    for (const addAsYouGo of (mode === 'whitelist' ? [true] : [false, true])) {
+      const navigation = createHarness({active: true, accessMode: mode, addAsYouGo,
+        selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [],
+        startupSessionID: `direct-navigation-${mode}-${addAsYouGo}`,
+        blockNavigation: true, blockTabSwitching: true, allowGoogleSearchTabs: true}, [
+        {id: 1, windowId: 1, active: mode === 'whitelist', url: 'https://example.com/'},
+        {id: 2, windowId: 1, active: mode === 'blacklist', url: 'https://example.org/'}
+      ]);
+      await navigation.settle();
+      const existingID = mode === 'whitelist' ? 1 : 2;
+      await navigation.create({id: 3, windowId: 1, active: true, url: 'about:blank'});
+      for (const id of [existingID, 3]) {
+        await navigation.commit(id, 'https://new.example/', 'typed');
+        assert.equal(navigation.tabs.get(id).url, 'https://new.example/', `${mode}: permitted tabs accept typed websites`);
+        await navigation.commit(id, 'https://www.google.com/search?q=study', 'generated');
+        assert.equal(navigation.tabs.get(id).url, 'https://www.google.com/search?q=study', `${mode}: permitted tabs accept address-bar searches`);
+        await navigation.commit(id, 'https://result.example/', 'link');
+        assert.equal(navigation.tabs.get(id).url, 'https://result.example/', `${mode}: ordinary search results can open`);
+      }
+      if (mode === 'blacklist') {
+        await navigation.activate(1);
+        assert.equal(navigation.tabs.get(1).active, false, 'Direct navigation permission must not unblock explicitly blacklisted tabs');
+      }
+    }
+  }
+
+  // Background loading and background-created search tabs must never change
+  // which user-selected tab receives a blocked activation's recovery.
+  {
+    const recovery = createHarness({active: true, accessMode: 'whitelist', selectedTabIDs: [1,2],
+      allowedWebsites: [], startupWebsites: [], startupSessionID: 'background-recovery',
+      blockNavigation: true, blockTabSwitching: true, allowGoogleSearchTabs: true}, [
+      {id: 1, windowId: 1, active: true, url: 'https://example.com/'},
+      {id: 2, windowId: 1, active: false, url: 'https://example.org/'},
+      {id: 3, windowId: 1, active: false, url: 'https://blocked.example/'}
+    ]);
+    await recovery.settle();
+    await recovery.activate(1);
+    await recovery.complete(2);
+    await recovery.activate(3);
+    assert.equal(recovery.tabs.get(1).active, true, 'A background page load must not replace the last user-selected allowed tab');
+    await recovery.create({id: 4, windowId: 1, active: false, url: 'about:blank'});
+    await recovery.activate(3);
+    assert.equal(recovery.tabs.get(1).active, true, 'A background search tab must not replace the last user-selected allowed tab');
+  }
+
+  // Visibility restoration emits browser events. Once stop arrives those
+  // events must not be processed using the previous intention's restrictions.
+  {
+    let restore = async () => {};
+    const finishing = createHarness({active: true, accessMode: 'whitelist', selectedTabIDs: [1],
+      allowedWebsites: [], startupWebsites: [], startupSessionID: 'finishing-visibility',
+      blockNavigation: true, blockTabSwitching: true}, [
+      {id: 1, windowId: 1, active: true, url: 'https://example.com/'},
+      {id: 2, windowId: 1, active: false, url: 'https://example.org/'}
+    ], {onVisibilitySync: rules => !rules.active ? restore() : Promise.resolve()});
+    await finishing.settle();
+    finishing.updates.length = 0;
+    restore = async () => { await finishing.activate(2); };
+    await finishing.applyRules({active: false});
+    assert.equal(finishing.tabs.get(2).active, true, 'Restoration events after stop must not reactivate the old selected tab');
+    assert.equal(finishing.updates.filter(update => update.patch.active).length, 0, 'Session finish must not issue an activation during restoration');
+    await finishing.applyRules({active: true, accessMode: 'whitelist', selectedTabIDs: [1],
+      allowedWebsites: [], startupWebsites: [], startupSessionID: 'previous-session', blockTabSwitching: true});
+    let enterRestore, releaseRestore;
+    const restoreEntered = new Promise(resolve => { enterRestore = resolve; });
+    const restoreGate = new Promise(resolve => { releaseRestore = resolve; });
+    restore = async () => { enterRestore(); await restoreGate; };
+    const stopping = finishing.applyRules({active: false});
+    await restoreEntered;
+    const starting = finishing.applyRules({active: true, accessMode: 'whitelist', selectedTabIDs: [2],
+      allowedWebsites: [], startupWebsites: [], startupSessionID: 'replacement-session', blockTabSwitching: true});
+    releaseRestore();
+    await Promise.all([stopping, starting]);
+    assert.deepEqual(finishing.allowedTabIDs(), [2], 'A delayed old restore cannot clear or reinstate policy over the newer intention');
   }
 
   // Old blank/result tabs must not inherit the fresh-search allowance.

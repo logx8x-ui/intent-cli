@@ -18,6 +18,41 @@ func runAppStackPolicySpecs() throws {
         try expect(groups.dropFirst(index + 1).allSatisfy { !$0.frame.intersects(group.frame) }, "Different app stacks cannot overlap")
     }
     print("App-stack pack: \(Int(Date().timeIntervalSince(began) * 1000)) ms for two 18-window layouts")
+    let placed = groups.flatMap(\.windows)
+    try expect(Set(placed.map(\.id)) == Set(items.map(\.id)), "Every app window is visible directly without opening a group sheet")
+    for window in placed {
+        try expect(area.contains(window.frame) && area.contains(window.captionFrame), "Previews and their complete captions fit inside the overview")
+        try expect(!window.captionFrame.intersects(panel), "Window titles never overlap the recent-intentions panel")
+        try expect(placed.allSatisfy { !window.captionFrame.intersects($0.frame) }, "No title is drawn over any window preview")
+        try expect(placed.filter { $0.id != window.id }.allSatisfy { !window.captionFrame.intersects($0.captionFrame) }, "Window titles never overlap each other")
+    }
+    let roomy = CGRect(x: 0, y: 0, width: 2600, height: 1400)
+    let sameSource = CGRect(x: 100, y: 100, width: 1000, height: 700)
+    let equalWindows = (1...3).map { AppStackLayout.Item(id: UInt32($0), app: "Firefox", source: sameSource) }
+        + [AppStackLayout.Item(id: 4, app: "Notes", source: sameSource)]
+    let spreadGroups = AppStackLayout.groups(equalWindows, in: roomy)
+    let firefoxGroup = spreadGroups.first { $0.app == "Firefox" }!
+    let notesGroup = spreadGroups.first { $0.app == "Notes" }!
+    try expect(firefoxGroup.windows.allSatisfy { $0.frame.size == notesGroup.windows[0].frame.size }, "A multi-window app keeps exactly the same preview scale as a single-window app")
+    try expect(firefoxGroup.frame.width * firefoxGroup.frame.height > notesGroup.frame.width * notesGroup.frame.height * 2, "Three windows reserve substantially more overview space than one")
+    try expect(Set(firefoxGroup.windows.map { $0.frame.minY }).count == 3, "Three windows use a staggered spread instead of a hidden pile or a rigid row")
+    for window in firefoxGroup.windows {
+        let covered = firefoxGroup.windows.filter { $0.id != window.id }.reduce(CGFloat.zero) { total, other in
+            let intersection = window.frame.intersection(other.frame)
+            return total + (intersection.isNull ? 0 : intersection.width * intersection.height)
+        }
+        try expect(covered < window.frame.width * window.frame.height * 0.30, "Each preview remains predominantly exposed even before hover brings it forward")
+    }
+    var updatedTabs = equalWindows
+    updatedTabs[2].tabCount = 40
+    let afterTabUpdate = AppStackLayout.groups(updatedTabs, in: roomy)
+    try expect(afterTabUpdate.flatMap(\.windows) == spreadGroups.flatMap(\.windows), "Tab counts and default front order cannot move window positions")
+    let many = (1...9).map { AppStackLayout.Item(id: UInt32($0), app: "Notes", source: sameSource) }
+    let allNine = AppStackLayout.groups(many, in: roomy).flatMap(\.windows)
+    try expect(allNine.count == 9, "Windows beyond the old four-window pile limit are not omitted")
+    for window in allNine {
+        try expect(allNine.allSatisfy { !window.captionFrame.intersects($0.frame) }, "A second spread row cannot cover a preceding row's title")
+    }
     var selection = QuickSelection()
     selection.toggleWindow(20, app: "com.apple.Notes")
     selection.toggleWindow(21, app: "com.apple.Notes")

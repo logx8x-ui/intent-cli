@@ -1292,11 +1292,11 @@ private struct QuickSelectionView: View {
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
                 AppStackOverview(items: visibleWindows.map { .init(id: $0.id, app: $0.appID, source: $0.sourceFrame, tabCount: controller.tabs(for: $0).count) },
-                                 area: area, obstacle: focused == nil && controller.expandedStack == nil ? settledNotesFrame : nil,
+                                 area: area, obstacle: focused == nil ? settledNotesFrame : nil,
                                  selected: Set(visibleWindows.filter { controller.isSelected($0) }.map(\.id)),
                                  names: Dictionary(uniqueKeysWithValues: controller.apps.map { ($0.id, $0.app.name) }),
-                                 fronts: $controller.frontWindowByApp, expanded: $controller.expandedStack) { id, frame, showsCaption in
-                    Group { if let window = visibleWindows.first(where: { $0.id == id }) { windowCard(window, frame: frame, showsCaption: showsCaption) } }
+                                 fronts: $controller.frontWindowByApp, expanded: $controller.expandedStack, hovered: hoveredWindow) { id, frame, captionFrame, showsCaption in
+                    Group { if let window = visibleWindows.first(where: { $0.id == id }) { windowCard(window, frame: frame, captionFrame: captionFrame, showsCaption: showsCaption) } }
                 }
                 VStack {
                     HStack {
@@ -1353,7 +1353,7 @@ private struct QuickSelectionView: View {
                     tabGrid(focused).frame(width: tabWidth - 20, height: area.height)
                         .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
                 }
-                if focused == nil && controller.expandedStack == nil {
+                if focused == nil {
                     VStack(spacing: 0) {
                         HStack {
                             Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
@@ -1408,17 +1408,17 @@ private struct QuickSelectionView: View {
                 }
         }.ignoresSafeArea().onExitCommand { controller.cancelImmediately() }
     }
-    private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect, showsCaption: Bool) -> some View {
+    private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect, captionFrame: CGRect, showsCaption: Bool) -> some View {
         let app = controller.apps.first { $0.id == window.appID }
         let selected = controller.isSelected(window)
         let browser = QuickSelection.browsers.contains(window.appID)
         let title = window.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = title.isEmpty || title == "()" ? (app?.app.name ?? window.appID) : title
         let hovered = hoveredWindow == window.id
-        let captionWidth = max(FieldOfViewLayout.minimumCaptionWidth, frame.width)
-        let captionHeight = FieldOfViewLayout.captionHeight
+        let captionWidth = captionFrame.width
+        let cardBounds = showsCaption ? frame.union(captionFrame) : frame
         let radius = min(10, min(frame.width, frame.height) / 8)
-        return VStack(spacing: 6) {
+        return ZStack(alignment: .topLeading) {
             Button { controller.selectWindow(window) } label: {
                 ZStack {
                     if controller.openingApps.contains(window.appID) {
@@ -1452,11 +1452,14 @@ private struct QuickSelectionView: View {
                             .help("Remove this addition and cancel its opening")
                     }
                 }
+                .position(x: frame.midX - cardBounds.minX, y: frame.midY - cardBounds.minY)
             if showsCaption { HStack(spacing: 5) {
                 Button { controller.selectWindow(window) } label: {
                     HStack(spacing: 5) {
                         if let app { Image(nsImage: app.icon).resizable().frame(width: 16, height: 16) }
-                        Text(showTitles ? label : (app?.app.name ?? label)).lineLimit(1).truncationMode(.middle)
+                        Text(showTitles ? label : (app?.app.name ?? label))
+                            .lineLimit(1).truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }.frame(maxWidth: .infinity, minHeight: 20).contentShape(Rectangle())
                 }.buttonStyle(.plain)
                     .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
@@ -1471,17 +1474,18 @@ private struct QuickSelectionView: View {
                     }.buttonStyle(.plain).accessibilityLabel("Show tabs for \(label)").help("Choose browser tabs")
                 }
             }.font(.system(size: 12, weight: .medium)).padding(.horizontal, 5)
-                .frame(maxWidth: captionWidth, minHeight: 20, maxHeight: 20)
+                .frame(width: captionWidth, height: captionFrame.height)
                 .foregroundStyle(.white)
+                .position(x: captionFrame.midX - cardBounds.minX, y: captionFrame.midY - cardBounds.minY)
             }
-        }.frame(width: captionWidth, height: frame.height + captionHeight, alignment: .top)
+        }.frame(width: cardBounds.width, height: cardBounds.height, alignment: .topLeading)
             .onHover { hoveredWindow = $0 ? window.id : (hoveredWindow == window.id ? nil : hoveredWindow) }
             .help("\(app?.app.name ?? window.appID) — \(label)")
             .opacity(controller.expanded ? 1 : 0).allowsHitTesting(controller.expanded && !controller.closing)
             // Keep hover/help hit regions on the card's bounds. Position expands
             // its layout wrapper to the canvas; attaching interaction after it
             // lets later cards intercept clicks intended for earlier previews.
-            .position(x: frame.midX, y: frame.midY + captionHeight / 2)
+            .position(x: cardBounds.midX, y: cardBounds.midY)
     }
     private func tabGrid(_ window: QuickSelectionController.WindowItem) -> some View {
         GeometryReader { geometry in
