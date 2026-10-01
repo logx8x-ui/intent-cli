@@ -17,8 +17,9 @@ public enum NativeTabClickPolicy {
 
     public static func blocksSidebarTitle(_ title: String, tabs: [BrowserTabItem], allowedIDs: Set<Int>) -> Bool {
         let matches = tabs.filter { $0.title == title }
-        // Ambiguous duplicate labels must never grant access to a forbidden tab.
-        return !matches.isEmpty && matches.contains { !allowedIDs.contains($0.id) }
+        // A title is not a tab identity. Do not swallow an allowed duplicate
+        // (including a fresh search tab); the extension enforces exact IDs.
+        return !matches.isEmpty && matches.allSatisfy { !allowedIDs.contains($0.id) }
     }
     /// Collapsed groups/pinned strips may expose only part of the tab list.
     /// In that case use explicit labels, never an index into the full browser list.
@@ -205,6 +206,9 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
         for window in windows {
             guard Date() < deadline else { break }
             let isFocused = focused.map { CFEqual($0, window) } ?? false
+            // Background and minimized windows overlap the foreground window
+            // in screen coordinates. Their hit regions must never mask it.
+            guard isFocused else { continue }
             let title = string(window, kAXTitleAttribute, deadline) ?? ""
             guard let windowID = BrowserWindowMatching.match(title: title, tabs: allTabs, nativeWindowCount: windows.count, frame: bounds(window, deadline), isFocused: isFocused) else { continue }
             windowMatches += 1
