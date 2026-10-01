@@ -51,9 +51,6 @@ struct IntentUtilityView: View {
             .sheet(item: $model.pendingEndTimeRequest, onDismiss: dismissIfIdle) { pending in
                 EndTimeSheet(pending: pending).environmentObject(model).interactiveDismissDisabled()
             }
-            .sheet(item: $model.pendingPurposeSessionSave, onDismiss: dismissIfIdle) { candidate in
-                PurposeSessionSaveSheet(candidate: candidate).environmentObject(model).interactiveDismissDisabled()
-            }
             .alert("Intent", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil; dismissIfIdle() } })) {
                 Button("OK") { model.errorMessage = nil; dismissIfIdle() }
             } message: { Text(model.errorMessage ?? "") }

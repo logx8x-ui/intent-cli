@@ -2,6 +2,26 @@ import Foundation
 import IntentCore
 
 func runQuickGestureRegressionSpecs() throws {
+    for capsFirst in [true, false] {
+        var run = QuickMarkGesture()
+        let first = run.key(code: 50, down: true, modified: false, repeatKey: false, now: 0, capsLockHeld: capsFirst)
+        let result = capsFirst ? first : run.key(code: 57, down: true, modified: false, repeatKey: false, now: 0.02)
+        try expect(result.action == .run, "Caps Lock and backtick start in either order")
+        try expect(run.key(code: 57, down: true, modified: false, repeatKey: true, now: 0.03).action == nil, "Run chord cannot repeat")
+        _ = run.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.05)
+        try expect(run.expire(now: 1) == nil, "Run never opens the picker on release")
+    }
+    var configured = QuickMarkGesture()
+    _ = configured.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
+    _ = configured.key(code: 18, down: true, modified: false, repeatKey: false, now: 0.1)
+    _ = configured.key(code: 18, down: false, modified: false, repeatKey: false, now: 0.2)
+    try expect(configured.key(code: 57, down: true, modified: false, repeatKey: false, now: 0.3).action == .run, "Caps Lock can start after modifier changes without releasing backtick")
+    var retired = QuickMarkGesture()
+    _ = retired.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
+    try expect(retired.key(code: 36, down: true, modified: false, repeatKey: false, now: 0.02).action == nil, "Retired backtick Return cannot start a session")
+    var capitals = QuickMarkGesture()
+    try expect(capitals.key(code: 50, down: true, modified: false, repeatKey: false, now: 0, capsLockHeld: false).action == nil, "Latched capitals are not a physically held Caps Lock key")
+    try expect(SessionModificationOrder.migrated(stored: ["Searches", "Timer"], available: ["Timer", "Tab searches"]) == ["Tab searches", "Timer"], "Renaming preserves the user's shortcut ordering")
     // Repeated clean/reused input sequences with a deterministic event clock.
     for iteration in 0..<100 {
         let base = Double(iteration) * 3

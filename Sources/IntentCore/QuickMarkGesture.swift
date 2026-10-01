@@ -8,6 +8,7 @@ public struct QuickMarkGesture {
     private var held = false
     public var isHoldingPrefix: Bool { held }
     private var usedChord = false
+    private var runIssued = false
     private var pendingSingle: TimeInterval?
     private var swallowed: Set<Int> = []
     public init() {}
@@ -17,8 +18,13 @@ public struct QuickMarkGesture {
         pendingSingle = nil
         return .single
     }
-    public mutating func key(code: Int, down: Bool, modified: Bool, repeatKey: Bool, now: TimeInterval) -> Result {
+    public mutating func key(code: Int, down: Bool, modified: Bool, repeatKey: Bool, now: TimeInterval, capsLockHeld: Bool = false) -> Result {
         if !down, swallowed.remove(code) != nil { return .init(consume: true, action: nil) }
+        if code == 57, down, held, !modified {
+            guard !runIssued, !repeatKey else { return .init(consume: true, action: nil) }
+            usedChord = true; runIssued = true; pendingSingle = nil
+            return .init(consume: true, action: .run)
+        }
         if code == 50 {
             if !down {
                 guard held else { return .init(consume: false, action: nil) }
@@ -28,7 +34,11 @@ public struct QuickMarkGesture {
             }
             guard !modified else { pendingSingle = nil; if held { usedChord = true }; return .init(consume: false, action: nil) }
             if repeatKey || held { return .init(consume: true, action: nil) }
-            held = true; usedChord = false
+            held = true; usedChord = false; runIssued = false
+            if capsLockHeld {
+                usedChord = true; runIssued = true; pendingSingle = nil
+                return .init(consume: true, action: .run)
+            }
             if let deadline = pendingSingle {
                 pendingSingle = nil
                 if now <= deadline {
@@ -42,7 +52,7 @@ public struct QuickMarkGesture {
             pendingSingle = nil
             return .init(consume: true, action: nil)
         }
-        if down, held, !modified, [36, 76, 11, 53, 48, 18, 19, 20, 21, 23, 22].contains(code) {
+        if down, held, !modified, [11, 53, 48, 18, 19, 20, 21, 23, 22].contains(code) {
             swallowed.insert(code)
             // Each physical chord press is independent while the prefix stays down.
             // usedChord only suppresses the delayed single on prefix release.

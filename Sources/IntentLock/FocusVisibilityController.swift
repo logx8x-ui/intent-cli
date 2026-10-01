@@ -20,6 +20,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var entries: [Entry] = []
     private var stopped = false
+    private var initialVisibilityApplied = false
     public init(spec: FocusSessionSpec) { self.spec = spec }
 
     public func start() {
@@ -81,11 +82,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
 
     private func refresh() {
         guard !stopped else { return }
+        let initialApps = initialVisibilityApplied ? nil : spec.initialAllowedApps
+        defer { initialVisibilityApplied = true }
         let windows = WorkspaceWindow.list(onScreen: false)
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
                   let bundle = app.bundleIdentifier, let launched = app.launchDate else { continue }
-            if !spec.permitsApplication(bundle) {
+            if !spec.permitsApplication(bundle) || initialApps.map({ !$0.contains(bundle) }) == true {
                 guard !app.isHidden else { continue }
                 let entry = Entry(pid: app.processIdentifier, launched: launched, bundle: bundle, window: nil)
                 if !entries.contains(where: { $0.pid == entry.pid && $0.window == nil }) {
@@ -94,7 +97,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 }
                 _ = app.hide()
             } else {
-                for window in windows where window.pid == app.processIdentifier && !spec.permitsWindow(window.id, bundleIdentifier: bundle) {
+                for window in windows where window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
                     guard let element = Self.element(window), Self.value(element, kAXMinimizedAttribute) as? Bool == false else { continue }
                     if !entries.contains(where: { $0.pid == window.pid && $0.window == window.id }) {
                         entries.append(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id))

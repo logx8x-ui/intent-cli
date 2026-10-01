@@ -821,8 +821,20 @@ async function run() {
 }
 
 run()
-  .then(() => {
-    console.log("Firefox background behavior spec passed");
+  .then(async () => {
+    {
+    const rapid = createHarness({active:true,accessMode:'whitelist',selectedTabIDs:[501,502],allowedWebsites:[],startupWebsites:[],startupSessionID:'rapid-clicks',blockNavigation:true,blockTabSwitching:true}, [
+      {id:501,windowId:1,index:0,active:true,url:'https://example.com/'},
+      {id:502,windowId:1,index:1,active:false,url:'https://example.org/'},
+      {id:503,windowId:1,index:2,active:false,url:'https://blocked.example/'}
+    ]);
+    await rapid.ready();
+    rapid.updates.length = 0;
+    await Promise.all([rapid.activate(503), rapid.activate(502)]);
+    assert.equal(rapid.tabs.get(502).active,true,'A delayed blocked-tab recovery cannot undo a newer allowed click');
+    assert.equal(rapid.updates.filter(x=>x.patch.active).length,0,'Switching to the allowed tab needs no synthetic activation');
+  }
+  console.log("Firefox background behavior spec passed");
   })
   .catch((error) => {
     console.error(error);

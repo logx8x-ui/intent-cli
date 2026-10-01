@@ -74,7 +74,8 @@ public struct SessionOverlayPolicy {
 public enum SessionModificationOrder {
     public static func migrated(stored: [String], available: [String]) -> [String] {
         var seen = Set<String>()
-        return (stored + available).filter { available.contains($0) && seen.insert($0).inserted }
+        let renamed = stored.map { $0 == "Searches" && available.contains("Tab searches") ? "Tab searches" : $0 }
+        return (renamed + available).filter { available.contains($0) && seen.insert($0).inserted }
     }
 }
 

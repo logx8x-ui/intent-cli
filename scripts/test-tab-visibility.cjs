@@ -55,6 +55,18 @@ function fixture() {
 (async()=>{
   const active={active:true,hideDistractions:true,startupSessionID:'one',selectedTabIDs:[1]};
   {
+    const f=fixture(), v=new Visibility(f.api,true);
+    const open={...active,addAsYouGo:true};
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.notEqual(f.tabs.find(t=>t.id===2).windowId,1,'Add as you go initially parks unselected existing tabs');
+    f.tabs.push({id:88,windowId:1,index:1,url:'https://new.example',active:true});
+    await new Visibility(f.api,true).syncInitial(open,t=>t.id===1,()=>true);
+    assert.equal(f.tabs.find(t=>t.id===88).windowId,1,'A suspended worker cannot re-hide a new permitted tab');
+    await v.sync({active:false},()=>true);
+    assert.equal(f.tabs.find(t=>t.id===2).windowId,1,'Initial distractions return when Add as you go finishes');
+    assert.equal(f.removed.includes(2),false,'User tabs are never deleted');
+  }
+  {
     const f=fixture(); delete f.api.storage.session;
     const v=new Visibility(f.api,true);
     await v.sync(active,t=>t.id===1);

@@ -28,7 +28,7 @@ final class QuickMarkKeyMonitor {
     func start() -> Bool {
         if tap != nil { return true }
         spotlight.start()
-        let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.keyUp.rawValue)
+        let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.keyUp.rawValue) | (CGEventMask(1) << CGEventType.flagsChanged.rawValue)
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, pointer in
             guard let pointer else { return Unmanaged.passUnretained(event) }
             let owner = Unmanaged<QuickMarkKeyMonitor>.fromOpaque(pointer).takeUnretainedValue()
@@ -41,6 +41,23 @@ final class QuickMarkKeyMonitor {
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
             if event.getIntegerValueField(.eventSourceUserData) == NativeSpotlightKeyboard.dismissalTag {
                 return Unmanaged.passUnretained(event)
+            }
+            // AlphaShift is a latched state. Read the physical Caps Lock key,
+            // otherwise leaving capitals enabled would turn every backtick into Run.
+            let capsHeld = CGEventSource.keyState(.hidSystemState, key: 57)
+            if type == .flagsChanged {
+                guard code == 57, capsHeld, !owner.editingText else { return Unmanaged.passUnretained(event) }
+                let result = owner.gesture.key(code: code, down: true,
+                    modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
+                    repeatKey: false, now: ProcessInfo.processInfo.systemUptime)
+                if let action = result.action {
+                    let generation = owner.generation
+                    DispatchQueue.main.async { [weak owner] in
+                        guard let owner, owner.generation == generation else { return }
+                        owner.onAction?(action)
+                    }
+                }
+                return result.consume ? nil : Unmanaged.passUnretained(event)
             }
             let opening = code == 49 && event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]) == .maskCommand
             if let context = owner.spotlightContext?() { owner.spotlight.setOverview(active: context.0, candidates: context.1) }
@@ -71,7 +88,7 @@ final class QuickMarkKeyMonitor {
             if owner.editingText && !owner.gesture.isHoldingPrefix { owner.cancelPending(); return Unmanaged.passUnretained(event) }
             let result = owner.gesture.key(code: Int(event.getIntegerValueField(.keyboardEventKeycode)), down: type == .keyDown,
                 modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
-                repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0, now: ProcessInfo.processInfo.systemUptime)
+                repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0, now: ProcessInfo.processInfo.systemUptime, capsLockHeld: capsHeld)
             if let action = result.action {
                 let generation = owner.generation
                 DispatchQueue.main.async { [weak owner] in

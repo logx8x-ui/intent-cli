@@ -80,12 +80,13 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private var lastSnapshotRequest = Date.distantPast // worker queue only
     private var tabContinuity: [UInt32: TabBlurContinuity] = [:] // worker queue only
     private var panels: [NSPanel] = [] // main queue only
+    private var scanCache: [UInt32: (key: String, at: Date, regions: [CGRect])] = [:] // worker queue
     public init() {}
     public func update(_ selection: QuickSelection) {
         mutex.lock(); self.selection = selection; revision += 1; mutex.unlock()
         if timer == nil {
             let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.schedule(deadline: .now(), repeating: 0.18)
+            timer.schedule(deadline: .now(), repeating: 0.35)
             timer.setEventHandler { [weak self] in self?.refresh() }
             self.timer = timer; timer.resume()
         }
@@ -108,6 +109,9 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         let windows = WorkspaceWindow.list(onScreen: false)
         var markedRegions: [UInt32: [CGRect]] = [:]
         let front = WorkspaceWindow.focused()
+        let overviewVisible = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains {
+            $0[kCGWindowOwnerName as String] as? String == "Dock" && $0[kCGWindowLayer as String] as? Int == 20
+        }
         for window in windows {
             if selection.windowIDsByApp[window.bundle]?.contains(window.id) == true {
                 markedRegions[window.id] = [window.frame]
@@ -125,14 +129,26 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                 markedRegions[window.id] = [window.frame]
                 continue
             }
-            // Read background window chrome too so marks survive entering Mission Control.
+            // Selection/geometry changes refresh immediately; an unchanged tab strip
+            // needs no full accessibility traversal on every animation tick.
+            let key = "\(window.pid):\(window.frame):\(tabs.map { "\($0.id):\($0.index):\($0.title):\($0.active)" }):\(selectedIDs.sorted())"
+            if let cached = scanCache[window.id], cached.key == key, Date().timeIntervalSince(cached.at) < 1 {
+                markedRegions[window.id] = cached.regions
+                continue
+            }
+            if front?.id != window.id && !overviewVisible {
+                markedRegions[window.id] = scanCache[window.id].flatMap { $0.key == key ? $0.regions : nil } ?? []
+                continue
+            }
             let scan = WorkspaceTabOutline.scan(window: window, tabs: tabs, selected: selectedIDs)
             let context = "\(window.pid):\(window.frame):\(tabs):\(selectedIDs.sorted())"
             var continuity = tabContinuity[window.id] ?? TabBlurContinuity()
             let regions = continuity.update(scan.regions, context: context, complete: scan.complete, now: Date())
             tabContinuity[window.id] = continuity
             markedRegions[window.id] = regions
+            if scan.complete { scanCache[window.id] = (key, Date(), regions) }
         }
+        scanCache = scanCache.filter { markedRegions[$0.key] != nil }
         tabContinuity = tabContinuity.filter { markedRegions[$0.key] != nil }
         let selected = windows.filter { markedRegions[$0.id]?.isEmpty == false }
         let mission = Self.missionRegions(selected: selected, all: windows, markedRegions: markedRegions)

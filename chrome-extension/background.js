@@ -497,7 +497,7 @@ function effectiveRules(nativeRules) {
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
-    selectedTabIDs: !openEnded && Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
+    selectedTabIDs: Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
     blockTabSwitching: !openEnded && Boolean(nativeRules.blockTabSwitching),
     blockNavigation: !openEnded && Boolean(nativeRules.blockNavigation),
     blockNewTabs: !openEnded && Boolean(nativeRules.blockNewTabs),
@@ -505,6 +505,7 @@ function effectiveRules(nativeRules) {
   };
 }
 
+let initialVisibilitySession = null;
 async function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
   if (!nextRules.active) await tabVisibility?.sync(nextRules, () => true);
@@ -536,7 +537,18 @@ async function applyNativeRules(nativeRules) {
     }
     completedStartupFingerprint = null;
   }
-  await tabVisibility?.sync(rules, isRuntimeAllowedTab);
+  // Start with only the chosen workspace; later opens are allowed. The
+  // visibility ledger keeps the initial distractions parked until completion.
+  if (rules.active && rules.addAsYouGo && initialVisibilitySession !== rules.startupSessionID
+      && (Array.isArray(rules.selectedTabIDs) || rules.startupWebsites.length > 0)) {
+    initialVisibilitySession = rules.startupSessionID;
+    await tabVisibility?.syncInitial(rules, tab => Array.isArray(rules.selectedTabIDs)
+      ? rules.selectedTabIDs.includes(tab.id)
+      : isAllowedURL(tab.url, {...rules, addAsYouGo: false}), isRuntimeAllowedTab);
+  } else {
+    await tabVisibility?.sync(rules, isRuntimeAllowedTab);
+  }
+  if (!rules.active) initialVisibilitySession = null;
   scheduleTabSnapshot(true);
 }
 
@@ -601,7 +613,7 @@ async function updateNetworkRules() {
   // Tab-scoped DNR conditions are session rules, not dynamic rules. This also
   // blocks new, unselected tabs before their first document loads.
   if (typeof chrome.declarativeNetRequest.updateSessionRules === "function") {
-    const selected = rules.active && Array.isArray(rules.selectedTabIDs) ? rules.selectedTabIDs : null;
+    const selected = rules.active && !rules.addAsYouGo && Array.isArray(rules.selectedTabIDs) ? rules.selectedTabIDs : null;
     const sessionRules = selected === null || (rules.accessMode === "blacklist" && selected.length === 0) ? [] : [{
       id: 23000, priority: 1000, action: { type: "block" },
       condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"],
@@ -914,9 +926,16 @@ async function returnToAllowedTab() {
   if (enforcing) { enforcementPending = true; return; }
   enforcing = true;
   try {
+    const generation = rules.startupSessionID;
+    const activation = activationRevision;
+    const current = (await chrome.tabs.query({active: true, lastFocusedWindow: true})).find(tab => tab.active && isRuntimeAllowedTab(tab));
+    if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
+    if (current) { lastAllowedTabId = current.id; return; }
+
     if (lastAllowedTabId !== null) {
       const lastAllowed = await getAllowedTab(lastAllowedTabId);
       if (lastAllowed) {
+        if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
         await chrome.tabs.update(lastAllowed.id, { active: true });
         if (Array.isArray(rules.selectedTabIDs) && lastAllowed.windowId != null) {
           await chrome.windows?.update(lastAllowed.windowId, { focused: true }).catch(() => {});
@@ -927,6 +946,7 @@ async function returnToAllowedTab() {
     }
 
     const tabs = await chrome.tabs.query({});
+    if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
     const allowed = tabs.find((tab) => isRuntimeAllowedTab(tab));
     if (allowed) {
       lastAllowedTabId = allowed.id;
@@ -1007,13 +1027,17 @@ chrome.windows?.onFocusChanged?.addListener(async (windowId) => {
   if (active && !isRuntimeAllowedTab(active)) await returnToAllowedTab();
 });
 
+let activationRevision = 0;
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  const activation = ++activationRevision;
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && isRuntimeAllowedTab({id: tabId})) lastAllowedTabId = tabId;
   if (previewBusy && !rules.active) return; // Preview activations are not user browsing history.
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
     await returnToAllowedTab();
     return;
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (activation !== activationRevision) return;
   recordWebsiteVisit(tab);
   scheduleTabSnapshot();
   if (!rules.active) return;

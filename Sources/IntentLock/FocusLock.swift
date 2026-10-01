@@ -965,6 +965,10 @@ public final class FocusLock {
         ownerBundleIdentifier: String?,
         representedBundleIdentifier: String?
     ) {
+        if let owner = windowOwnerBundleIdentifier(at: point),
+           !["com.apple.dock", "com.apple.WindowManager"].contains(owner) {
+            return (owner, nil)
+        }
         let systemWide = AXUIElementCreateSystemWide()
         // Bound synchronous accessibility work in the input callback. A hung app
         // must not hold every mouse click while the default AX timeout elapses.
@@ -1087,7 +1091,7 @@ public final class FocusLock {
 
         for window in windows {
             guard let layer = window[kCGWindowLayer as String] as? Int,
-                  layer == 0,
+                  layer >= 0,
                   let boundsDictionary = window[kCGWindowBounds as String] as? [String: Any],
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
                   bounds.contains(point),

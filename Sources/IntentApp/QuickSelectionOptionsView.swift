@@ -3,7 +3,7 @@ import IntentCore
 import SwiftUI
 
 enum QuickSelectionOptionsSection: String, CaseIterable {
-    case timer = "Timer", checklist = "Checklist", searches = "Searches", cooldown = "Cooldown", addAsYouGo = "Add as you go", stopwatch = "Stopwatch"
+    case timer = "Timer", checklist = "Checklist", searches = "Tab searches", cooldown = "Cooldown", addAsYouGo = "Add as you go", stopwatch = "Stopwatch"
     static var ordered: [Self] {
         let stored = UserDefaults.standard.stringArray(forKey: "quickModificationOrder") ?? []
         return SessionModificationOrder.migrated(stored: stored, available: allCases.map(\.rawValue)).compactMap(Self.init(rawValue:))
@@ -34,7 +34,7 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
     }
     var hint: String {
         switch self {
-        case .addAsYouGo: return "Open more apps, tabs and websites as you work. Explicit blocks still apply. Choose this before starting; it cannot be enabled mid-intention."
+        case .addAsYouGo: return "Start with only your selections, then open more apps, tabs and websites as you work. Explicit blocks still apply."
         case .stopwatch: return "Count time upwards, including while your Mac sleeps. No deadline; Timer and Checklist still decide when a locked intention finishes."
         case .timer: return "Finish after a duration or at a time you choose."
         case .checklist: return "Check off your tasks; completing them all ends the intention."
@@ -62,14 +62,14 @@ struct QuickSelectionOptionsView: View {
     private var timerIndex: Int? { selection.restrictionNodes.firstIndex { $0.kind == .timer || $0.kind == .endTime } }
     private var checklistIndex: Int? { selection.frictionNodes.firstIndex { if case .taskChecklist = $0.friction { return true }; return false } }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text(section.rawValue).font(.title2); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
-            Text(section.hint).font(.callout).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack { Text(section.rawValue).font(.system(size: 15, weight: .semibold)); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
+            Text(section.hint).font(.system(size: 12)).foregroundStyle(.secondary)
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
                     if section == .timer {
                     if let index = timerIndex {
-                        Text("Choose one: Duration OR Set end time. Finish early with your exit passcode, or wait for completion.").font(.caption).foregroundStyle(.secondary)
+                        Text("Finish when time is up; use your exit passcode to finish early.").font(.caption).foregroundStyle(.secondary)
                         HStack(spacing: 8) {
                             timerModeButton("Duration", clock: false, index: index)
                             timerModeButton("Set end time", clock: true, index: index)
@@ -116,7 +116,9 @@ struct QuickSelectionOptionsView: View {
             Button("Remove \(section.rawValue.lowercased())") {
                 section.disable(in: &selection); close()
             }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
-        }.padding(18).tint(.green)
+        }.padding(14).tint(.green)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.16)))
     }
     private func timerModeButton(_ title: String, clock: Bool, index: Int) -> some View {
         let selected = (selection.restrictionNodes[index].kind == .endTime) == clock

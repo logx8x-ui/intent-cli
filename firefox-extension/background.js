@@ -373,7 +373,7 @@ function effectiveRules(nativeRules) {
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
     startupSessionID: typeof nativeRules.startupSessionID === "string" ? nativeRules.startupSessionID : null,
-    selectedTabIDs: !openEnded && Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
+    selectedTabIDs: Array.isArray(nativeRules.selectedTabIDs) ? nativeRules.selectedTabIDs.filter(Number.isInteger) : null,
     blockTabSwitching: !openEnded && Boolean(nativeRules.blockTabSwitching),
     blockNavigation: !openEnded && Boolean(nativeRules.blockNavigation),
     blockNewTabs: !openEnded && Boolean(nativeRules.blockNewTabs),
@@ -427,6 +427,7 @@ function sendHeartbeat() {
   postCommandPort({ type: "heartbeat" });
 }
 
+let initialVisibilitySession = null;
 async function applyNativeRules(nativeRules) {
   const previousFingerprint = rulesFingerprint;
   const nextRules = effectiveRules(nativeRules);
@@ -461,7 +462,18 @@ async function applyNativeRules(nativeRules) {
     startupNavigationURLByTab.clear();
     completedStartupFingerprint = null;
   }
-  await tabVisibility?.sync(rules, isRuntimeAllowedTab);
+  // Start with only the chosen workspace; later opens are allowed. The
+  // visibility ledger keeps the initial distractions parked until completion.
+  if (rules.active && rules.addAsYouGo && initialVisibilitySession !== rules.startupSessionID
+      && (Array.isArray(rules.selectedTabIDs) || rules.startupWebsites.length > 0)) {
+    initialVisibilitySession = rules.startupSessionID;
+    await tabVisibility?.syncInitial(rules, tab => Array.isArray(rules.selectedTabIDs)
+      ? rules.selectedTabIDs.includes(tab.id)
+      : isAllowedURL(tab.url, {...rules, addAsYouGo: false}), isRuntimeAllowedTab);
+  } else {
+    await tabVisibility?.sync(rules, isRuntimeAllowedTab);
+  }
+  if (!rules.active) initialVisibilitySession = null;
   scheduleTabSnapshot(true);
 }
 
@@ -715,9 +727,16 @@ async function returnToAllowedTab() {
 
   enforcing = true;
   try {
+    const generation = rules.startupSessionID;
+    const activation = activationRevision;
+    const current = (await browser.tabs.query({active: true, lastFocusedWindow: true})).find(tab => tab.active && isRuntimeAllowedTab(tab));
+    if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
+    if (current) { lastAllowedTabId = current.id; return; }
+
     if (lastAllowedTabId !== null) {
       const lastAllowed = await getAllowedTab(lastAllowedTabId);
       if (lastAllowed) {
+        if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
         await browser.tabs.update(lastAllowed.id, { active: true });
         if (Array.isArray(rules.selectedTabIDs) && lastAllowed.windowId != null) {
           await browser.windows?.update(lastAllowed.windowId, { focused: true }).catch(() => {});
@@ -728,6 +747,7 @@ async function returnToAllowedTab() {
     }
 
     const tabs = await browser.tabs.query({});
+    if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
     const allowed = tabs.find((tab) => isRuntimeAllowedTab(tab));
     if (allowed) {
       lastAllowedTabId = allowed.id;
@@ -845,12 +865,16 @@ browser.windows?.onFocusChanged?.addListener(async (windowId) => {
   if (active && !isRuntimeAllowedTab(active)) await returnToAllowedTab();
 });
 
+let activationRevision = 0;
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
+  const activation = ++activationRevision;
+  if (rules.active && Array.isArray(rules.selectedTabIDs) && isRuntimeAllowedTab({id: tabId})) lastAllowedTabId = tabId;
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
     await returnToAllowedTab();
     return;
   }
   const tab = await browser.tabs.get(tabId).catch(() => null);
+  if (activation !== activationRevision) return;
   // Recording history is housekeeping, never part of the tab-switch critical path.
   void recordWebsiteVisit(tab);
   scheduleTabSnapshot();

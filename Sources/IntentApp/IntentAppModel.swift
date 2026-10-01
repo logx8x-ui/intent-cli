@@ -1645,6 +1645,10 @@ final class IntentAppModel: ObservableObject {
             let presetIDs = Set(alwaysBlockedApps.map(\.bundleIdentifier))
             lockSpec.selectedWindowIDsByApp = intention.addAsYouGo && intention.accessMode == .whitelist ? [:] : quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
         }
+        if intention.addAsYouGo && intention.accessMode == .whitelist {
+            lockSpec.initialAllowedApps = Set(intention.allowedApps.map(\.bundleIdentifier)).union(alwaysAllowedApps.map(\.bundleIdentifier))
+            lockSpec.initialSelectedWindows = quickSelectionIntentionID == intention.id ? quickSelectionWindowIDs : [:]
+        }
         lockSpec.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
         // Finishing should leave the user where they are, not reactivate the
         // application that happened to be frontmost before the session.
@@ -1832,7 +1836,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeSessionIsLeisure = false
                 if failureMessage == nil,
                    wasPurposeSession,
-                   (self.saveSessionOnFinish || (self.quickSelectionIntentionID == intention.id && !self.intentions.contains(where: { $0.id == intention.id }))),
+                   self.saveSessionOnFinish,
                    let purposeUsage,
                    let statedPurpose {
                     self.pendingPurposeSessionSave = (self.quickSelectionIntentionID == intention.id || self.firstIntentionID == intention.id)
@@ -1856,7 +1860,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeChecklist = []
                 self.completedChecklist = []
                 if let interruptedWorkspace { self.restoreInterruptedWorkspace?(intention, interruptedWorkspace) }
-                if self.pendingPurposeSessionSave != nil || self.saveSessionOnFinish || failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
+                if failureMessage != nil || lock.didStopForSafety || self.errorMessage != nil { self.overlayPresenter?.showOverlay(animated: true) }
                 self.saveSessionOnFinish = false
                 if let replacement, !lock.didStopForSafety, failureMessage == nil {
                     self.requestStart(replacement)

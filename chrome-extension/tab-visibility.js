@@ -10,6 +10,19 @@
       this.tail = this.tail.then(operation, operation).catch(() => {});
       return this.tail;
     }
+    syncInitial(rules, initiallyAllowed, subsequentlyAllowed) {
+      const operation = async () => {
+        await this.load();
+        if (this.state.initialSession === rules.startupSessionID) {
+          return this.reconcile(rules, subsequentlyAllowed);
+        }
+        await this.reconcile(rules, initiallyAllowed);
+        this.state.initialSession = rules.startupSessionID;
+        await this.save();
+      };
+      this.tail = this.tail.then(operation, operation).catch(() => {});
+      return this.tail;
+    }
     async load() {
       if (this.state) return;
       // Session storage survives a suspended Chrome service worker, but cannot
@@ -33,7 +46,7 @@
       await this.load();
       if (!rules.active || !rules.hideDistractions) {
         if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length && !this.state.groups.length && !this.state.orders.length) return;
-        await this.restore(); this.recoveredOnce = true; return;
+        await this.restore(); this.state.initialSession = null; await this.save(); this.recoveredOnce = true; return;
       }
       this.recoveredOnce = false;
       if (!this.api.storage.session && !(this.firefox && this.api.sessions)) return;

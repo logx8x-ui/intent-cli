@@ -1645,8 +1645,8 @@ private struct ModificationStrip: View {
                                 Divider()
                             }
                             QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.closeModification() }
-                                .frame(height: section == .checklist ? 310 : (section == .cooldown ? 160 : 240))
-                        }.frame(width: 360)
+                                .frame(height: section == .checklist ? 260 : (section == .cooldown ? 156 : 224))
+                        }.frame(width: 300)
                     }
             }
         }

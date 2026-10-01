@@ -250,10 +250,10 @@ struct IntentQuickGuideView: View {
                 title("Click a window, then double-tap `.")
                 Text("In Chrome or Firefox, this marks the current tab—or the tabs you selected together. In other apps, it marks the window.")
                 detail("Look for the outline", "Green means allow; red means block. Double-tap again to remove the same selection.")
-                Text(verbatim: "Hold ` and press Return to run. Hold ` and press B to switch Allow / Block.").font(.callout.weight(.medium))
+                Text(verbatim: "Press Caps Lock + ` together to run. Hold ` and press B to switch Allow / Block.").font(.callout.weight(.medium))
                 Text(verbatim: "Need a whole browser window? Hold ` and press Tab. To clear marks, hold ` and press Esc.")
                     .font(.caption).foregroundStyle(.secondary)
-                if guide.state.evidence.contains(.quickMarkChanged) { success("Selection detected—now hold ` and press Return.") }
+                if guide.state.evidence.contains(.quickMarkChanged) { success("Selection detected—now press Caps Lock + ` together.") }
                 Text("Starting applies real restrictions; closing this guide will leave your run going.").font(.caption).foregroundStyle(.secondary)
                 browserSetup
                 Button("Skip this skill for now") { guide.skip() }.buttonStyle(.plain).font(.caption)

@@ -50,7 +50,7 @@ do {
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0.17).action == .mark, "Double backtick marks without opening picker")
         _ = gesture.key(code: 50, down: false, modified: false, repeatKey: false, now: 0.2)
         try expect(gesture.expire(now: 1) == nil, "Double press cancels single action")
-        for code in [36, 76, 11, 53, 48] {
+        for code in [11, 53, 48] {
             gesture.reset()
             _ = gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0)
             let result = gesture.key(code: code, down: true, modified: false, repeatKey: false, now: 0.1)

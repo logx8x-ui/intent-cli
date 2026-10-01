@@ -302,6 +302,7 @@ async function run() {
       {id: 82, windowId: 1, active: mode === 'blacklist', url: 'https://other.example/'}
     ]);
     await open.settle();
+    if (mode === "whitelist") assert.equal(open.sessionRules.some(rule => rule.id === 23000), false, "Add as you go must not install a network block on future tabs");
     await open.activate(82);
     assert.equal(open.tabs.get(82).active, true, 'Add as you go permits ordinary tab switching');
     await open.navigate(82, 'https://new.example/');
@@ -1115,6 +1116,18 @@ async function run() {
   await current.settle();
   await current.receiveNative({active: false, guardEnabled: true, bundledExtensionVersion: require('../chrome-extension/manifest.json').version});
   assert.equal(current.extensionReloads.length, 0, "Matching extensions must not reload");
+  {
+    const rapid = createHarness({active:true,accessMode:'whitelist',selectedTabIDs:[501,502],allowedWebsites:[],startupWebsites:[],startupSessionID:'rapid-clicks',blockNavigation:true,blockTabSwitching:true}, [
+      {id:501,windowId:1,index:0,active:true,url:'https://example.com/'},
+      {id:502,windowId:1,index:1,active:false,url:'https://example.org/'},
+      {id:503,windowId:1,index:2,active:false,url:'https://blocked.example/'}
+    ]);
+    await rapid.settle();
+    rapid.updates.length = 0;
+    await Promise.all([rapid.activate(503), rapid.activate(502)]);
+    assert.equal(rapid.tabs.get(502).active,true,'A delayed blocked-tab recovery cannot undo a newer allowed click');
+    assert.equal(rapid.updates.filter(x=>x.patch.active).length,0,'Switching to the allowed tab needs no synthetic activation');
+  }
   console.log("Chrome background behavior spec passed");
   const scopedSite = createHarness({active:true, accessMode:"whitelist", selectedTabIDs:[71], startupSessionID:"site-test",
     websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}}, [

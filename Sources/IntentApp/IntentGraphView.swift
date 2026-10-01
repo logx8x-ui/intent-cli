@@ -317,11 +317,6 @@ struct IntentGraphView: View {
                 .environmentObject(model)
                 .interactiveDismissDisabled()
         }
-        .sheet(item: $model.pendingPurposeSessionSave) { candidate in
-            PurposeSessionSaveSheet(candidate: candidate)
-                .environmentObject(model)
-                .interactiveDismissDisabled()
-        }
         .sheet(isPresented: $showZeroDriftWarning) {
             ZeroDriftWarningSheet(
                 onCancel: {
