@@ -9,6 +9,7 @@ final class RestorationFocusGuard {
     private let application: NSRunningApplication
     private let window: AXUIElement?
     private let visibleWindowID: UInt32
+    private let targetResolution: String
     private var policy: RestorationFocusPolicy
     private var timer: Timer?
     private var globalInput: Any?
@@ -24,7 +25,9 @@ final class RestorationFocusGuard {
         policy = RestorationFocusPolicy(originalPID: application.processIdentifier, restoringPIDs: restoringPIDs)
         let element = AXUIElementCreateApplication(application.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.05)
-        window = Self.accessibilityWindow(matching: visibleWindow, application: element)
+        let target = Self.accessibilityWindow(matching: visibleWindow, application: element)
+        window = target.window
+        targetResolution = target.method
     }
     static func begin(restoringPIDs: Set<pid_t>) {
         precondition(Thread.isMainThread)
@@ -46,7 +49,7 @@ final class RestorationFocusGuard {
         // menu completion, rather than relying on remembered AX focus alone.
         guarder.observe("begin", details: ["controllerPID": controllerPID, "targetPID": targetPID,
             "fromControls": fromControls, "matchedWindow": guarder.window != nil,
-            "visibleWindowID": visible.id])
+            "visibleWindowID": visible.id, "resolution": guarder.targetResolution])
         if guarder.window == nil { guarder.observe("unresolvedVisibleWindow"); return }
         current = guarder
         let input: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
@@ -67,13 +70,15 @@ final class RestorationFocusGuard {
         RunLoop.main.add(timer, forMode: .common)
     }
     static func preserveCurrent() { current?.preserve() }
-    private static func accessibilityWindow(matching visible: WorkspaceWindow, application: AXUIElement) -> AXUIElement? {
+    private static func accessibilityWindow(matching visible: WorkspaceWindow, application: AXUIElement) -> (window: AXUIElement?, method: String) {
         let deadline = Date().addingTimeInterval(0.12)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement], windows.count <= 32 else { return nil }
-        let matches = windows.filter { candidate in
+        func stillFront() -> Bool {
+            WorkspaceWindow.list().first(where: { $0.pid == visible.pid })?.id == visible.id
+        }
+        func matchesVisible(_ candidate: AXUIElement) -> Bool {
             guard Date() < deadline else { return false }
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(candidate, &pid) == .success, pid == visible.pid else { return false }
             AXUIElementSetMessagingTimeout(candidate, 0.02)
             var position: CFTypeRef?, size: CFTypeRef?, title: CFTypeRef?
             guard AXUIElementCopyAttributeValue(candidate, kAXPositionAttribute as CFString, &position) == .success,
@@ -89,7 +94,36 @@ final class RestorationFocusGuard {
             return AXUIElementCopyAttributeValue(candidate, kAXTitleAttribute as CFString, &title) == .success
                 && title as? String == visible.title
         }
-        return Date() < deadline && matches.count == 1 ? matches[0] : nil
+        // Two browser windows can share both title and geometry. A hit on the
+        // actual exposed window gives its AX identity without guessing between
+        // duplicate windows or using a private WindowServer-ID API.
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.02)
+        for offset in [CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.2, y: 0.2), CGPoint(x: 0.8, y: 0.3)] {
+            guard Date() < deadline else { return (nil, "deadline") }
+            var hit: AXUIElement?
+            let x = visible.frame.minX + visible.frame.width * offset.x
+            let y = visible.frame.minY + visible.frame.height * offset.y
+            guard AXUIElementCopyElementAtPosition(system, Float(x), Float(y), &hit) == .success, let hit else { continue }
+            AXUIElementSetMessagingTimeout(hit, 0.02)
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(hit, kAXWindowAttribute as CFString, &value) == .success,
+               let value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+                let window = unsafeBitCast(value, to: AXUIElement.self)
+                if matchesVisible(window), Date() < deadline, stillFront() { return (window, "visibleHit") }
+            }
+            var role: CFTypeRef?
+            if AXUIElementCopyAttributeValue(hit, kAXRoleAttribute as CFString, &role) == .success,
+               role as? String == kAXWindowRole, matchesVisible(hit), Date() < deadline, stillFront() {
+                return (hit, "visibleHit")
+            }
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement], windows.count <= 32 else { return (nil, "unavailable") }
+        let matches = windows.filter(matchesVisible)
+        return Date() < deadline && matches.count == 1 && stillFront()
+            ? (matches[0], "uniqueMatch") : (nil, "unresolvedMatches-\(matches.count)")
     }
     private func observe(_ event: String, details: [String: Any] = [:]) {
         // Counts and transient IDs only: no window titles, URLs or user content.
