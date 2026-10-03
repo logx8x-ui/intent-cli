@@ -18,6 +18,12 @@ func runSessionAdditionsSpecs() throws {
         _ = exit.key(code: 50, down: true, modified: false, repeated: false, editing: false)
         try expect(exit.key(code: 53, down: true, modified: false, repeated: false, editing: true).action == .clear, "Backtick-Escape clears and exits immediately")
     }
+    var releasedPrefix = OverviewSearchGesture()
+    _ = releasedPrefix.key(code: 50, down: true, modified: false, repeated: false, editing: false)
+    let modifiedRelease = releasedPrefix.key(code: 50, down: false, modified: true, repeated: false, editing: false)
+    try expect(modifiedRelease.consume && modifiedRelease.action == nil, "Modified prefix release ends the hold without closing overview")
+    try expect(releasedPrefix.key(code: 18, down: true, modified: false, repeated: false, editing: false).action == .savedSlot(0), "Released prefix cannot turn a saved-slot number into a modification")
+    try expect(releasedPrefix.key(code: 53, down: true, modified: false, repeated: false, editing: false).action == .close, "Escape after modified release closes without clearing the draft")
     try expect(SpotlightSelectionPolicy.markedQuery("`Notes") == "Notes", "Spotlight accepts a leading marker")
     try expect(SpotlightSelectionPolicy.markedQuery("Notes `") == "Notes", "Spotlight accepts a trailing marker")
     try expect(SpotlightSelectionPolicy.markedQuery("Notes") == nil && SpotlightSelectionPolicy.markedQuery("No`tes") == nil && SpotlightSelectionPolicy.markedQuery("`Notes`") == nil, "Ordinary, embedded and multiple markers are never guessed")

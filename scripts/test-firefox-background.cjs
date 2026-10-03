@@ -77,6 +77,8 @@ function createHarness(activeRules, initialTabs, options = {}) {
           setActiveTab(tabId);
         }
         updates.push({ tabId, patch });
+        if (options.emitActivationOnUpdate && patch.active) { for (const listener of listeners.onActivated) void listener({tabId}); }
+        await options.afterTabUpdate?.(patch);
         return { ...tab };
       },
       reload: async (tabId) => {
@@ -273,6 +275,36 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  for (const outcome of ["finish", "new-click", "own-activation"]) {
+    let releaseActivation, activationStarted;
+    let pauseActivation = false;
+    const started = new Promise(resolve => { activationStarted = resolve; });
+    const delayed = new Promise(resolve => { releaseActivation = resolve; });
+    const race = createHarness({active: true, accessMode: 'whitelist', selectedTabIDs: [1, 2],
+      allowedWebsites: [], startupWebsites: [], startupSessionID: 'activation-finish-race',
+      blockTabSwitching: true, blockNavigation: true}, [
+        {id: 1, windowId: 1, active: true, url: 'https://example.com/'},
+        {id: 2, windowId: 2, active: false, url: 'https://example.org/'},
+        {id: 3, windowId: 3, active: false, url: 'https://blocked.example/'}
+      ], {emitActivationOnUpdate: true, afterTabUpdate: async patch => {
+        if (pauseActivation && patch.active) { pauseActivation = false; activationStarted(); await delayed; }
+      }});
+    await race.ready();
+    race.focusedWindows.length = 0;
+    pauseActivation = true;
+    const returning = race.activate(3);
+    let deadline;
+    await Promise.race([started, new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error("Recovery did not reach activation")), 2000);
+    })]).finally(() => clearTimeout(deadline));
+    if (outcome === "finish") await race.applyRules({active: false});
+    else if (outcome === "new-click") await race.activate(2);
+    releaseActivation();
+    await returning;
+    assert.equal(race.focusedWindows.length, outcome === "own-activation" ? 1 : 0,
+      "Recovery must accept its own activation but never raise a window after finish or a newer click");
+  }
+
   for (const mode of ['whitelist', 'blacklist']) {
     const open = createHarness({active: true, guardEnabled: true, addAsYouGo: true, accessMode: mode,
       allowedWebsites: [], selectedTabIDs: [81], blockNavigation: true, blockTabSwitching: true, blockNewTabs: true,

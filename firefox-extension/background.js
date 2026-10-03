@@ -770,6 +770,9 @@ async function returnToAllowedTab() {
       if (lastAllowed) {
         if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
         await browser.tabs.update(lastAllowed.id, { active: true });
+        // Accept our own activation event, but not a newer click on another tab.
+        if (!rules.active || rules.startupSessionID !== generation ||
+            (activation !== activationRevision && lastActivatedTabId !== lastAllowed.id)) return;
         if (Array.isArray(rules.selectedTabIDs) && lastAllowed.windowId != null) {
           await browser.windows?.update(lastAllowed.windowId, { focused: true }).catch(() => {});
         }
@@ -784,6 +787,9 @@ async function returnToAllowedTab() {
     if (allowed) {
       lastAllowedTabId = allowed.id;
       await browser.tabs.update(allowed.id, { active: true });
+      // Accept our own activation event, but not a newer click on another tab.
+      if (!rules.active || rules.startupSessionID !== generation ||
+          (activation !== activationRevision && lastActivatedTabId !== allowed.id)) return;
       if (Array.isArray(rules.selectedTabIDs) && allowed.windowId != null) {
         await browser.windows?.update(allowed.windowId, { focused: true }).catch(() => {});
       }
@@ -898,7 +904,9 @@ browser.windows?.onFocusChanged?.addListener(async (windowId) => {
 });
 
 let activationRevision = 0;
+let lastActivatedTabId = null;
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
+  lastActivatedTabId = tabId;
   const activation = ++activationRevision;
   if (rules.active && Array.isArray(rules.selectedTabIDs) && isRuntimeAllowedTab({id: tabId})) lastAllowedTabId = tabId;
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
