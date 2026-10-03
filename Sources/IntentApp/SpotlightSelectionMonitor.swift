@@ -54,6 +54,12 @@ final class SpotlightSelectionMonitor {
         return submit
     }
     private func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+        // A system-wide focus query can synchronously serialize our own SwiftUI
+        // field editor on this worker queue. Never inspect system-wide or
+        // in-process elements here: Spotlight is always an external process.
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { return nil }
         AXUIElementSetMessagingTimeout(element, 0.06)
         var output: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &output) == .success else { return nil }
@@ -91,18 +97,27 @@ final class SpotlightSelectionMonitor {
         return nil
     }
     private func focusedField() -> AXUIElement? {
-        let system = AXUIElementCreateSystemWide()
-        if let focused = element(value(system, kAXFocusedUIElementAttribute)), belongsToSpotlight(focused) {
-            let role = value(focused, kAXRoleAttribute) as? String ?? ""
-            if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField"].contains(role) { return focused }
-            var pid: pid_t = 0; AXUIElementGetPid(focused, &pid)
-            return searchField(in: windows(AXUIElementCreateApplication(pid)))
-        }
         // Spotlight is a system panel: AX focus can remain on its previous app.
-        // Only inspect its visible windows; a running background process alone
-        // must never cause ordinary keyboard input to be intercepted.
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Spotlight") {
-            let roots = windows(AXUIElementCreateApplication(app.processIdentifier))
+        // Require an on-screen surface, including nonzero-layer system panels.
+        // A retained AX focused field after dismissal must not intercept Return.
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Spotlight")
+        guard !apps.isEmpty else { return nil }
+        let visibleWindows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let visiblePIDs = Set(visibleWindows.compactMap { info -> pid_t? in
+            guard let pid = info[kCGWindowOwnerPID as String] as? Int32,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds),
+                  frame.width > 40, frame.height > 40,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0 else { return nil }
+            return pid
+        })
+        for app in apps where visiblePIDs.contains(app.processIdentifier) {
+            let application = AXUIElementCreateApplication(app.processIdentifier)
+            if let focused = element(value(application, kAXFocusedUIElementAttribute)), belongsToSpotlight(focused) {
+                let role = value(focused, kAXRoleAttribute) as? String ?? ""
+                if [kAXTextFieldRole, kAXComboBoxRole, "AXSearchField"].contains(role) { return focused }
+            }
+            let roots = windows(application)
             if let search = searchField(in: roots) { return search }
         }
         return nil
