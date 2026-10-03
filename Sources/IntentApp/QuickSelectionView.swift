@@ -304,6 +304,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var expandedStack: String?
     @Published private(set) var resolvingBrowserWindow = false
     private var windowResolutionTask: Task<Void, Never>?
+    private var windowResolutionID = UUID()
     private var confirmedBrowserWindows: [CGWindowID: (session: String, browser: String, id: Int)] = [:]
     @Published var hoveredTab: BrowserTabItem?
     @Published var tabPreview: NSImage?
@@ -824,14 +825,19 @@ final class QuickSelectionController: ObservableObject {
     // native and extension focus before retaining the session-local pairing.
     private func resolveBrowserWindow(_ window: WindowItem) {
         windowResolutionTask?.cancel()
+        let resolutionID = UUID()
+        windowResolutionID = resolutionID
         let token = generation
         windowResolutionTask = Task { [weak self] in
             guard let self else { return }
             self.resolvingBrowserWindow = true
             defer {
-                if self.generation == token {
+                if self.generation == token, self.windowResolutionID == resolutionID {
                     self.resolvingBrowserWindow = false
-                    if !self.closing, self.panel?.isVisible == true {
+                    let foreground = NSWorkspace.shared.frontmostApplication
+                    let stillInPicker = foreground?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+                        || foreground?.bundleIdentifier == window.appID
+                    if !self.closing, self.panel?.isVisible == true, stillInPicker {
                         NSApp.activate(ignoringOtherApps: true)
                         self.panel?.makeKeyAndOrderFront(nil)
                     }
@@ -841,7 +847,18 @@ final class QuickSelectionController: ObservableObject {
                   self.generation == token, self.browserWindowID(for: window) == nil,
                   let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == window.appID }),
                   let session = snapshot.browserSessionID else { return }
-            let candidates = (snapshot.allTabs ?? snapshot.tabs).filter(\.active)
+            let activeTabs = (snapshot.allTabs ?? snapshot.tabs).filter(\.active)
+            let titled = activeTabs.filter { BrowserWindowMatching.sameWindowTitle(window.title, $0.title) }
+            let candidates = titled.isEmpty ? activeTabs : titled
+            // Firefox's windows.update(focused:) can reorder its windows without
+            // activating its macOS application. The confirmation below requires
+            // actual native/browser focus, so explicitly activate the existing
+            // process behind our floating overview before asking it to focus.
+            // Never launch a browser merely to resolve a preview.
+            guard let nativeWindow = WorkspaceWindow.list().first(where: { $0.id == window.id && $0.bundle == window.appID }),
+                  let browser = NSRunningApplication(processIdentifier: nativeWindow.pid),
+                  !browser.isTerminated else { return }
+            browser.activate(options: [])
             for tab in candidates {
                 guard !Task.isCancelled, self.generation == token, !self.closing,
                       self.focusedBrowserWindow == window.id else { return }

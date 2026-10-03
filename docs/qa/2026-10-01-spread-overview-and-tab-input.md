@@ -71,3 +71,9 @@ The beta-installer test was invoked without its required prepared-kit argument a
 - Installed UUID `E3920F73-F160-318D-908E-4E81E8B0D1B7` matches release source; deep/strict signature verification and IntentCoreSpec passed.
 - Live checklist completion with multiple Example Domain windows now resolved `visibleHit`, survived transient Firefox AX timeouts, and completed its five-second transaction. The exact QA URL `example.com/?intent-qa=duplicate-front` remained foreground afterwards. No save/completion screen appeared and browser rules became inactive.
 - These are native UI automation checks; physical keyboard timing/trackpad fluidity are not inferred from them.
+
+### October 3: duplicate-title browser picker
+
+- Reproduced the empty "Waiting for tabs" picker with three Firefox windows sharing Example Domain titles and geometry. Firefox window focus commands alone did not activate the macOS app, so native/extension focus confirmation never agreed.
+- The resolver now activates only the existing PID owning the requested native window behind the floating overview. It probes matching-title candidates first and retains both native and extension identity checks. Resolver-specific IDs prevent cancelled lookups from restoring focus over replacements; returning to Intent respects a move to an unrelated app.
+- Installed release UUID `11411AAD-55ED-3E44-ADC7-BB5F907F3E8A`, deep/strict signature verified. All three duplicate-window tab pickers loaded independently: five tabs for the original QA window, one tab for each later QA window. No expansion sheet was added.
