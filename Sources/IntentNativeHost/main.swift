@@ -296,14 +296,16 @@ private final class HostRuntime {
                 break
             }
 
-            _ = refreshRulesIfNeeded()
+            let rulesChanged = refreshRulesIfNeeded()
             let tabCommand = takePendingCommand()
             let expectsResponse = request.type == nil
                 || request.type == "getRules"
                 || request.type == "setGuardEnabled"
 
-            if expectsResponse || tabCommand != nil {
-                sendCurrentState(tabCommand: tabCommand, force: true)
+            // A heartbeat or snapshot can observe a rules change before the
+            // directory watcher. Publish it here; the watcher now sees its cached signature.
+            if expectsResponse || rulesChanged || tabCommand != nil {
+                sendCurrentState(tabCommand: tabCommand, force: expectsResponse)
             }
         }
     }

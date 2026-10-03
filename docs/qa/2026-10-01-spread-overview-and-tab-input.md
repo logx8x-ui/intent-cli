@@ -55,3 +55,10 @@ The beta-installer test was invoked without its required prepared-kit argument a
 - `IntentCoreSpec` passed after the change, including target-selection/cancellation checks. Release builds and development installation passed; source/installed executable UUIDs match and strict/deep signature validation passed.
 - Native CUA clicks do not exercise the physical event-tap path (`mouseDownEvents` stayed zero), and an app-targeted backtick injection did not toggle the controls. These are automation limitations, not passing physical-input acceptance. Actual trackpad fluidity, hardware backtick/Caps Lock, fullscreen Spaces and screen-edge dragging remain distinct acceptance items.
 - Remaining live checks continue below; no public GitHub release or update feed has been changed.
+
+### Rule delivery and additions follow-up
+
+- Reproduced a native-helper race in an isolated process: an incoming heartbeat could consume a changed rules-file signature before the directory watcher, leaving the browser without the stop update. The old binary failed the new regression. The helper now publishes effective changes discovered by heartbeat/snapshot handling, with unchanged updates still deduplicated.
+- Firefox/Chrome start and stop races, exactly-once delivery, timestamp-only renewals, unchanged silence, baseline native-host tests and 50,000-heartbeat performance checks passed (8.1 MiB peak RSS). Installed matching helper bytes and verified both browser connections restarted on the new helper.
+- Live Firefox Add as you go started with only the selected search tab. Existing unselected tabs stayed put aside; a new tab, typed navigation to a different domain, a new window and opening Calculator were permitted. Checklist collapse/expand preserved the task and ticking it cleared active rules and the hidden-resource ledger.
+- This exposed another focus case: two Example Domain windows had identical titles/frames. The unique-match guard safely refused to guess, but restoration then promoted a different Firefox window. Window identity resolution is being refined before that completion case can pass.
