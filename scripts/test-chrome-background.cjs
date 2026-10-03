@@ -307,7 +307,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 }
 
 async function run() {
-  for (const outcome of ["finish", "new-click", "own-activation"]) {
+  for (const outcome of ["finish", "new-click", "leave-browser", "own-activation"]) {
     let releaseActivation, activationStarted;
     let pauseActivation = false;
     const started = new Promise(resolve => { activationStarted = resolve; });
@@ -332,6 +332,7 @@ async function run() {
     })]).finally(() => clearTimeout(deadline));
     if (outcome === "finish") await race.applyRules({active: false});
     else if (outcome === "new-click") await race.activate(2);
+    else if (outcome === "leave-browser") await race.focusWindow(-1);
     releaseActivation();
     await returning;
     assert.equal(race.focusedWindows.length, outcome === "own-activation" ? 1 : 0,

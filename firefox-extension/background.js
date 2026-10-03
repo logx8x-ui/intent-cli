@@ -761,17 +761,18 @@ async function returnToAllowedTab() {
   try {
     const generation = rules.startupSessionID;
     const activation = activationRevision;
+    const focus = windowFocusRevision;
     const current = (await browser.tabs.query({active: true, lastFocusedWindow: true})).find(tab => tab.active && isRuntimeAllowedTab(tab));
-    if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
+    if (!rules.active || rules.startupSessionID !== generation || focus !== windowFocusRevision || activation !== activationRevision) return;
     if (current) { lastAllowedTabId = current.id; return; }
 
     if (lastAllowedTabId !== null) {
       const lastAllowed = await getAllowedTab(lastAllowedTabId);
       if (lastAllowed) {
-        if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
+        if (!rules.active || rules.startupSessionID !== generation || focus !== windowFocusRevision || activation !== activationRevision) return;
         await browser.tabs.update(lastAllowed.id, { active: true });
         // Accept our own activation event, but not a newer click on another tab.
-        if (!rules.active || rules.startupSessionID !== generation ||
+        if (!rules.active || rules.startupSessionID !== generation || focus !== windowFocusRevision ||
             (activation !== activationRevision && lastActivatedTabId !== lastAllowed.id)) return;
         if (Array.isArray(rules.selectedTabIDs) && lastAllowed.windowId != null) {
           await browser.windows?.update(lastAllowed.windowId, { focused: true }).catch(() => {});
@@ -782,13 +783,13 @@ async function returnToAllowedTab() {
     }
 
     const tabs = await browser.tabs.query({});
-    if (!rules.active || rules.startupSessionID !== generation || activation !== activationRevision) return;
+    if (!rules.active || rules.startupSessionID !== generation || focus !== windowFocusRevision || activation !== activationRevision) return;
     const allowed = tabs.find((tab) => isRuntimeAllowedTab(tab));
     if (allowed) {
       lastAllowedTabId = allowed.id;
       await browser.tabs.update(allowed.id, { active: true });
       // Accept our own activation event, but not a newer click on another tab.
-      if (!rules.active || rules.startupSessionID !== generation ||
+      if (!rules.active || rules.startupSessionID !== generation || focus !== windowFocusRevision ||
           (activation !== activationRevision && lastActivatedTabId !== allowed.id)) return;
       if (Array.isArray(rules.selectedTabIDs) && allowed.windowId != null) {
         await browser.windows?.update(allowed.windowId, { focused: true }).catch(() => {});
@@ -895,7 +896,10 @@ browser.runtime.onMessage.addListener((message) => {
 });
 
 // Focusing an existing window need not emit tabs.onActivated.
+let windowFocusRevision = 0;
 browser.windows?.onFocusChanged?.addListener(async (windowId) => {
+  // Losing browser focus need not activate another tab. Invalidate pending recovery.
+  ++windowFocusRevision;
   if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
   const tabs = await browser.tabs.query({active: true, windowId});
