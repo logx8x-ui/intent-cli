@@ -77,3 +77,11 @@ The beta-installer test was invoked without its required prepared-kit argument a
 - Reproduced the empty "Waiting for tabs" picker with three Firefox windows sharing Example Domain titles and geometry. Firefox window focus commands alone did not activate the macOS app, so native/extension focus confirmation never agreed.
 - The resolver now activates only the existing PID owning the requested native window behind the floating overview. It probes matching-title candidates first and retains both native and extension identity checks. Resolver-specific IDs prevent cancelled lookups from restoring focus over replacements; returning to Intent respects a move to an unrelated app.
 - Installed release UUID `11411AAD-55ED-3E44-ADC7-BB5F907F3E8A`, deep/strict signature verified. All three duplicate-window tab pickers loaded independently: five tabs for the original QA window, one tab for each later QA window. No expansion sheet was added.
+
+### October 3: Chrome session checks
+
+- Matching Chrome profile/Browser Guard 0.2.25: two selected tabs plus Tab searches/Stopwatch. Eight native tab-strip switches reached the correct selected pages, then six switches alternated with a fresh Google search. The pre-existing Google search was parked. Attempted navigation from the fresh search to example.net was rejected; the search tab remained available at its original Google URL.
+- Add as you go off/on were exercised separately. With it on and Tab searches off, only the selected search tab remained initially; a new example.net tab, navigation to example.org and a new example.com window worked.
+- Chrome's AX window title includes the browser/profile suffix, unlike WindowServer's page title. The finish guard now uses the already-tested browser-title normalization while retaining PID/frame and hit-test/uniqueness checks.
+- On installed/source UUID `DC43C081-303D-3255-8772-817F18931AF2`, menu completion resolved `visibleHit`, restored resources, completed the guard and kept the exact new Chrome QA URL in front. Active rules were false afterwards. No finish/save screen appeared.
+- Opening Settings while active showed session policy controls disabled, so the tested session cannot enable Add as you go midway through its run. The Settings window was opened deliberately for automation's menu access; no settings were changed.

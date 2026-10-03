@@ -91,8 +91,12 @@ final class RestorationFocusGuard {
                   abs(point.x - visible.frame.minX) < 3, abs(point.y - visible.frame.minY) < 3,
                   abs(dimensions.width - visible.frame.width) < 3, abs(dimensions.height - visible.frame.height) < 3 else { return false }
             guard !visible.title.isEmpty else { return true }
-            return AXUIElementCopyAttributeValue(candidate, kAXTitleAttribute as CFString, &title) == .success
-                && title as? String == visible.title
+            guard AXUIElementCopyAttributeValue(candidate, kAXTitleAttribute as CFString, &title) == .success,
+                  let title = title as? String else { return false }
+            // Chrome's AX title includes its browser/profile suffix while the
+            // WindowServer title contains only the page. Identity still requires
+            // the same PID and exact frame, plus hit-testing or a unique match.
+            return title == visible.title || BrowserWindowMatching.sameWindowTitle(title, visible.title)
         }
         // Two browser windows can share both title and geometry. A hit on the
         // actual exposed window gives its AX identity without guessing between
