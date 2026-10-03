@@ -34,3 +34,12 @@ After unlock:
 5. Exercise Timer/Checklist/Stopwatch collapse, hide/restore, drag and modifier shortcuts; optional naming, saved-slot order/delete/replay; finish by shortcut, timer and checklist while another app stays foreground.
 
 The beta-installer test was invoked without its required prepared-kit argument and therefore did not run; it is not included in the passing checks. No public app release/update feed was changed. Unrelated working files and saved user data were preserved.
+
+## October 3 continuation
+
+- Confirmed the installed development app at `~/Applications/Intent.app` still has UUID `BF77B9C7-1F75-3BDB-A078-1401D6E0E88B`, matching this change. The active Firefox profile's permanent package and heartbeat remain 0.2.24; Chrome's heartbeat is 0.2.25.
+- Re-ran `npm test`: Swift specs, both browser rules/background suites, tab visibility and restoration, native-host behavior/performance/snapshot/profile checks, AI service tests, release readiness, and Firefox lint all passed. Lint reported zero errors, warnings, or notices.
+- `swift build -c release --product IntentApp` passed. `scripts/test-qa-persistence.sh` passed 39 isolated-model assertions; this does not establish live UI acceptance.
+- Closed the earlier installer coverage gap: prepared an isolated kit using the current installer and signed installed app, then ran `scripts/test-beta-installer.py` with that kit. Fresh install, update/data preservation, reinstall, and system-install migration checks passed without changing the user's installation or data.
+- Mozilla's authenticated Firefox portal was reached for uploading 0.2.25. The native file chooser accepted the package path but did not accept automation confirmation; native targeting, direct input, and reconnect attempts did not complete the upload. Chrome's alternate portal required a separate sign-in. A minimal user action request is pending to confirm the already-entered package in Firefox.
+- No new application code or public release changed in this continuation. All live acceptance items above remain pending until the signed Firefox update is installed and the actual flows are exercised. Do not describe the app as bug-free or tester-ready from these automated results.
