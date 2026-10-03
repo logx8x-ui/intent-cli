@@ -849,13 +849,21 @@ final class QuickSelectionController: ObservableObject {
                   let session = snapshot.browserSessionID else { return }
             let activeTabs = (snapshot.allTabs ?? snapshot.tabs).filter(\.active)
             let titled = activeTabs.filter { BrowserWindowMatching.sameWindowTitle(window.title, $0.title) }
-            let candidates = titled.isEmpty ? activeTabs : titled
+            let titledWindows = Set(titled.map(\.windowID))
+            // Preview titles can age while a page loads. Prioritize likely
+            // matches without excluding a target whose current title changed.
+            let candidates = titled + activeTabs.filter { !titledWindows.contains($0.windowID) }
             // Firefox's windows.update(focused:) can reorder its windows without
             // activating its macOS application. The confirmation below requires
             // actual native/browser focus, so explicitly activate the existing
             // process behind our floating overview before asking it to focus.
             // Never launch a browser merely to resolve a preview.
-            guard let nativeWindow = WorkspaceWindow.list().first(where: { $0.id == window.id && $0.bundle == window.appID }),
+            let foreground = NSWorkspace.shared.frontmostApplication
+            guard !Task.isCancelled, self.windowResolutionID == resolutionID,
+                  !self.closing, self.panel?.isVisible == true, self.focusedBrowserWindow == window.id,
+                  foreground?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+                    || foreground?.bundleIdentifier == window.appID else { return }
+            guard let nativeWindow = WorkspaceWindow.list(onScreen: false).first(where: { $0.id == window.id && $0.bundle == window.appID }),
                   let browser = NSRunningApplication(processIdentifier: nativeWindow.pid),
                   !browser.isTerminated else { return }
             browser.activate(options: [])

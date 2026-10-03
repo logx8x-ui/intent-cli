@@ -25,6 +25,10 @@ public struct WorkspaceWindow {
     public static func focused() -> WorkspaceWindow? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let candidates = list().filter { $0.pid == app.processIdentifier }
+        // Outline/blur workers call this too. Never make a synchronous AX
+        // request into our own SwiftUI while its field editor is changing.
+        // WindowServer ordering is sufficient for our own foreground window.
+        if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { return candidates.first }
         let element = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.03)
         var value: CFTypeRef?
