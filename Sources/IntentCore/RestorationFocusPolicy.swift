@@ -2,6 +2,15 @@ import Foundation
 
 /// Recovery may undo only its own focus changes, never a user's next action.
 public struct RestorationFocusPolicy {
+    /// Finishing from Intent's controls must preserve the work underneath them,
+    /// rather than a transient panel that is about to close.
+    public static func targetPID(frontmostPID: Int32?, controllerPID: Int32, visiblePID: Int32?) -> Int32? {
+        guard let frontmostPID else { return nil }
+        if frontmostPID != controllerPID { return frontmostPID }
+        guard let visiblePID, visiblePID != controllerPID else { return nil }
+        return visiblePID
+    }
+
     private let originalPID: Int32
     private let restoringPIDs: Set<Int32>
     private var cancelled = false
