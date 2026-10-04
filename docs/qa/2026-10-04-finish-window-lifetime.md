@@ -340,3 +340,90 @@ pre-finish target, short post-finish coverage, gaps over 0.2 seconds in the firs
 five post-finish seconds, later gaps over 0.75 seconds, and recorded/sampled
 displacement. Pure fixtures do not prove actual AX ordering or invisible visual
 restoration. The matching installed candidate retest is still pending here.
+
+Candidate source was committed as `e383c88` and installed under an explicit
+install-only desktop lease. `scripts/install-dev.sh` completed using the macOS
+Python PATH. Log: `/tmp/intent-owned-restoration-install-20261004.log`.
+`/Users/loganmondi/Applications/Intent.app` relaunched as PID 62505 with bundle
+`dev.loganmondi.intent` and `LSUIElement=true`. Installed app and host UUIDs match
+the tested UUIDs above exactly; deep strict signature verification passed.
+Rules were inactive and the native journal empty before and after installation.
+Chrome still advertised Browser Guard 0.2.29 and native visibility readiness.
+Firefox's permanent 0.2.28/signing-pending warning remained unchanged. The
+install lease was returned to Head Chat for the dense exact-case retest; root
+performed no UI driving or fixture seeding.
+
+### Installed immediate-preservation candidate: still fails strict acceptance
+
+Head Chat repeated the exact Chrome case in occurrence
+`7C68758F-67B6-440C-BB1E-BA5CAC8E678E` on installed `e383c88`: working CG 9047,
+normal owned CG 13527 and parking CG 13633. Evidence:
+
+- `/tmp/intent-chrome-029-immediate-finish.jsonl`
+- `/tmp/intent-chrome-029-immediate-diagnostics.json`
+
+The trace includes 225 post-finish samples and 32.24 seconds after Finish.
+Foreground PID stayed 36078, but the old window became first at +0.5194 seconds
+and working CG 9047 returned at +1.1143 seconds: roughly 0.6 seconds of
+displacement remains. The old window's bounds grew from 92 x 158 at +0.437 to
+1710 x 1073 at +0.777, identifying the Dock deminiaturization animation as the
+visible operation. Immediate AX preservation was overtaken by that asynchronous
+animation. The guard reported its target already front before every immediate
+dispatch and no later corrective raise; those diagnostics alone would have
+missed the displacement.
+
+The trace also has a 0.228-second gap in the first five seconds, exceeding the
+verifier's 0.2-second requirement. The verifier rejects the recording; widening
+that tolerance would not remove the independently recorded window switch.
+This is an improvement over the earlier one-second displacement, **not a fixed
+no-pop finish**. No further timing patch is accepted on this evidence.
+
+Parked user tabs returned. Parking ownership was still present after several
+minutes, then retired to `[]` on a subsequent passive read without journal
+mutation. Record eventual cleanup, not immediate cleanup. Supported non-minimize
+hiding/restoration alternatives and the actual duplicate-claim failure notice
+remain under investigation; leaving ordinary windows minimized after Finish
+would change restoration semantics and must not be introduced silently.
+
+### Duplicate claim failure: stop verified, notice deferred
+
+Head Chat repeated the duplicate-title/geometry case on installed `e383c88` in
+occurrence `7FDF305B-10E1-4121-A423-DA49E26964EC`, with the passive observer
+started before Run. Rules became inactive. The foreground changed from Intent
+to Chrome at 9.725 seconds in the 40-second trace and remained Chrome without
+any subsequent CUA call. Evidence:
+`/tmp/intent-chrome-029-duplicate-stop.jsonl`.
+
+The specific failure sheet was observed only after a later Intent accessibility
+query reopened/activated the app. Thus the safety stop is effective, but the
+existing alert on the hidden utility host is not a verified immediate visible
+notice. Do not describe this as an unattended-notice pass or infer that the
+alert itself stole focus. A nonactivating failure notice needs separate review;
+successful completion must still show no utility screen.
+
+### Supported API boundary and pending product choice
+
+Mozilla's public window update implementation handles `focused: true` but still
+lists `focused: false` as unimplemented, and its public window schema has no
+per-window hidden/order-out operation. Its native Cocoa implementation describes
+deminiaturization as asynchronous; the did-deminiaturize callback finalizes that
+transition and sends activation events. Similarly, the public AX notification
+reports that the window is already no longer minimized, not a pre-visibility
+barrier. These APIs cannot be treated as prevention of the recorded animation.
+
+Primary references:
+
+- [Firefox window update implementation](https://searchfox.org/firefox-main/source/browser/components/extensions/parent/ext-windows.js#510)
+- [Firefox native Cocoa window implementation](https://github.com/mozilla-firefox/firefox/blob/main/widget/cocoa/nsCocoaWindow.mm)
+- [Firefox public windows schema](https://github.com/mozilla-firefox/firefox/blob/main/browser/components/extensions/schemas/windows.json)
+
+Source review also found that native recovery starts before the normal app rules
+clear, but an already-in-flight renewal can clear rules while that recovery is
+running. Browser tab restoration and native window restoration do not share a
+tabs-ready acknowledgement. This overlap is a contributor hypothesis, not proof
+of the measured animation, and merely reordering it cannot establish no-pop.
+
+Logan was asked whether a quiet finish should leave ordinary windows minimized
+until he chooses them. No answer had arrived at this checkpoint. No deferred
+restoration semantics, global macOS preferences, private window APIs or further
+timing workaround were introduced while that product choice remained pending.
