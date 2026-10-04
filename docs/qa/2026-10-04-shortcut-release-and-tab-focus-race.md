@@ -20,7 +20,7 @@
 
 ## Remaining acceptance / package handoff
 
-- Final Firefox archive: `dist/firefox/intent_browser_guard-0.2.28.zip`. Default Firefox still runs permanent signed 0.2.25. Submit/sign/install 0.2.28 through the authenticated Mozilla portal and verify after restart once the Mac is unlocked.
+- Final Firefox archive: `dist/firefox/intent_browser_guard-0.2.28.zip`. Mozilla approved version 6539802 / file 5083944 on October 4. Signed package is downloaded; default Firefox still runs permanent signed 0.2.25. Install the approved 0.2.28 package and verify the actual profile after restart once the Mac is unlocked.
 - Intermediate 0.2.26 was uploaded for unlisted signing as AMO version 6538562, before the own-activation regression correction. Do NOT install/distribute that intermediate package. It was not added to any public release or update feed.
 - Resume actual Firefox/Chrome active-session tab lifecycle checks and completion-focus checks on final matching packages.
 - Physical double-backtick, Caps Lock chord order, held-number input and physical mouse event interception remain unverified. Synthetic UI actions and pure state-machine tests are not physical acceptance.
@@ -41,5 +41,16 @@
 | Browser lifecycle/rule/visibility regressions | Extension suite passed |
 | Native bridge delivery, profile isolation, performance | Native-host suite passed |
 | Physical double-backtick/Caps Lock and click timing | Unverified; unlocked hardware check required |
-| Final Firefox package in actual default profile | Pending signing/install; still 0.2.25 |
-| Final active-session live matrix | Incomplete; Mac locked before Run |
+| Final Firefox package in actual default profile | 0.2.28 approved and downloaded; installation pending, still 0.2.25 |
+| Final active-session live matrix | Chrome selected-tab clicks and fresh search passed; blocked-navigation run interrupted; Firefox and remaining matrix pending |
+
+
+## Resumed live pass and coordination, October 4
+
+- Coordinated explicitly with **Intent - Fix a Bug**. That chat owns Caps Lock input, fixed notch session controls, completion animation and delayed native focus-action cancellation. This pass owns browser signing and browser QA. Only one chat controls the desktop/install at a time; no unrelated edits were staged or installed.
+- Mozilla accepted final Firefox 0.2.28 with zero validation errors/warnings and approved AMO version **6539802**, file **5083944**. Downloaded signed XPI: `dist/firefox/485649d659c2420c9778-0.2.28.xpi`, SHA-256 `5531ee3d05019a6c69deea4bb2c3a07bce4d6cca6d87c5af4f4566f2afe232ae`. Signature metadata is present. All submitted payload files match; the manifest differs only in JSON formatting. No public update-feed or release changes.
+- Actual default Firefox profile remains `ykomjweq.default-release`, signed permanent **0.2.25**. The Mac locked again when opening the downloaded XPI for installation. Approval/download is **not** installed-profile acceptance.
+- On installed Mac build `2f17c4f` and Chrome Browser Guard **0.2.28**, a real UI-created intention selected exactly two QA tabs, with **Tab searches + Stopwatch**, Add as you go off. Passive rules confirmed both exact IDs and policy. Pre-existing unselected tabs, including an old Google search, were parked. Five native tab-click switches and creation/use of a fresh Google search passed.
+- During typed website rejection from that fresh search, the intention became inactive after about 75 seconds, and old tabs returned. The check is **inconclusive**, not a pass. App PID remained unchanged, and the other chat confirmed no UI, install, process-test or real-state activity. The journal has no timer, checklist or recovery checkpoint. The configured finish shortcut is Shift+backtick, unrelated to Cmd+L/Return.
+- Source audit found that loss of all selected tab IDs can finish this quick-selection session normally. Current empty snapshots after finish are expected idle behavior and cannot establish the trigger. The QA tabs were created using the browser automation wrapper; repeat with native-created tabs and passive transition capture before attributing this interruption to Intent.
+- Remaining: signed Firefox installation, matching-profile tab lifecycle/add-as-you-go/focus checks, repeat Chrome typed-navigation check, and coordinated acceptance after the other chat's combined native build. Physical key/mouse timing remains a separate unverified acceptance item.
