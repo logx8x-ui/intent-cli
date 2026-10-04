@@ -7,6 +7,7 @@ public enum FocusLockError: Error, CustomStringConvertible {
     case accessibilityPermissionRequired
     case eventTapUnavailable
     case unableToOpen(String)
+    case browserWindowEnforcementFailed(BrowserWindowEnforcementPolicy.Failure)
 
     public var description: String {
         switch self {
@@ -16,6 +17,8 @@ public enum FocusLockError: Error, CustomStringConvertible {
             return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for Intent, then start the intention again."
         case .unableToOpen(let name):
             return "Intent could not open \(name)."
+        case .browserWindowEnforcementFailed(let failure):
+            return failure.message
         }
     }
 }
@@ -111,6 +114,7 @@ public final class FocusLock {
     private let spec: FocusSessionSpec
     private var shouldStop = false
     private var safetyStop = false
+    private var safetyFailure: FocusLockError?
     private var currentFinishShortcut: FocusKeyboardShortcut
     public var didStopForSafety: Bool {
         stopStateLock.lock()
@@ -149,6 +153,10 @@ public final class FocusLock {
             allowedBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             accessMode: spec.accessMode
         )
+        visibilityController.onEnforcementFailure = { [weak self] failure in
+            self?.stopForSafety(failure: .browserWindowEnforcementFailed(failure))
+        }
+        visibilityController.enforcementIsCurrent = { [weak self] in self?.isStopRequested == false }
     }
 
     public func stop() {
@@ -182,8 +190,13 @@ public final class FocusLock {
         return currentFinishShortcut
     }
 
-    public func stopForSafety() {
+    public func stopForSafety(failure: FocusLockError? = nil) {
         stopStateLock.lock()
+        // A delayed failure must not turn manual/expiry completion into an
+        // error, nor affect a replacement occurrence. Never hold this mutex
+        // while synchronously entering the main-thread visibility controller.
+        if failure != nil && shouldStop { stopStateLock.unlock(); return }
+        if let failure { safetyFailure = failure; suppressReturnActivation = true }
         safetyStop = true
         shouldStop = true
         stopStateLock.unlock()
@@ -205,7 +218,15 @@ public final class FocusLock {
 
     public var isStopRequested: Bool { isStopped }
 
+    private func throwSafetyFailureIfNeeded() throws {
+        stopStateLock.lock()
+        let failure = safetyFailure
+        stopStateLock.unlock()
+        if let failure { throw failure }
+    }
+
     public func run(onReady: (@Sendable () -> Void)? = nil) throws {
+        try throwSafetyFailureIfNeeded()
         guard !isStopped else { return }
         if Thread.isMainThread { RestorationFocusGuard.cancel() }
         else { DispatchQueue.main.sync { RestorationFocusGuard.cancel() } }
@@ -253,6 +274,7 @@ public final class FocusLock {
         stopStateLock.lock()
         let shouldRestore = spec.restorePreviousApplicationOnStop && !suppressReturnActivation
         stopStateLock.unlock()
+        try throwSafetyFailureIfNeeded()
         if shouldRestore {
             returnApplication?.activate(options: [.activateIgnoringOtherApps])
         }

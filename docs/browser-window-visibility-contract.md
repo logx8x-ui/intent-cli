@@ -66,6 +66,34 @@ and registered holding-window history must survive later desired-plan updates.
 6. Observed input, unrelated activation and a Space change end the separate
    short exact-window focus guard. Do not chase the user between Spaces.
 
+### Enforcement outcomes are separate from plan receipts
+
+An accepted normal-window claim is not proof of successful hiding. Native
+reconciliation tracks actual AX minimized readback. A continuously unresolved
+claim gets a three-second monotonic observation grace, then a specific safety
+failure releases the intention without success celebration. Ambiguous identity,
+unreadable AX state, failed ownership persistence and unconfirmed minimization
+must not silently look like a successfully enforced intention.
+
+The deadline is keyed by occurrence, profile, browser window and process
+lifetime, not mutable title, geometry or revision. Already-owned windows use
+their bound CG/AX identity even when presentation metadata changes. Verified
+hidden state, omission and positive closure clear a pending failure. Current
+rules, the exact current claim and live process proof are checked again before
+delivery; an old callback cannot replace manual completion or stop a new session.
+Parking acknowledgements and recovery remain separate. This is not an all-profile
+startup-readiness gate: absent plans or unavailable process proof do not establish
+that every browser window is restricted.
+
+Native deminiaturization is not inherently nonactivating. Chrome live testing
+showed an old window temporarily coming forward even with native ownership.
+The bounded guard can queue exact-window preservation directly after an owned
+restore, before slow AX state reads, but that is a candidate ordering improvement,
+not a platform guarantee. Fresh CG/foreground checks and public input counters
+fence each effect; input counters cover cancellation callbacks still waiting on
+the main queue. A later corrective raise or a sampled displacement is a failed
+no-pop test, even if the original window eventually returns.
+
 ## Holding windows and the identity barrier
 
 Before moving a user's tabs into a new holding window, publish its registration

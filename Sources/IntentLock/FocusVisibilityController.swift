@@ -32,6 +32,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private static var diagnosticEvents: [[String: Any]] = []
     private let spec: FocusSessionSpec
     private let visibilityCache: BrowserWindowVisibilityRecordCache?
+    private var enforcementPolicy: BrowserWindowEnforcementPolicy?
+    /// Main-thread callback. Parking capture receipts are intentionally separate.
+    public var onEnforcementFailure: ((BrowserWindowEnforcementPolicy.Failure) -> Void)?
+    /// The lock's thread-safe stop gate also fences a main-thread AX pass while
+    /// another thread is waiting for synchronous visibility cleanup.
+    public var enforcementIsCurrent: (() -> Bool)?
+    private var mayEnforce: Bool { !stopped && (enforcementIsCurrent?() ?? true) }
     // AppKit visibility requests must run on the application main thread.
     // A background unhide can fail even after hide succeeded.
     private let queue = DispatchQueue.main
@@ -45,11 +52,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
         visibilityCache = spec.nativeWindowVisibilitySessionID.map {
             BrowserWindowVisibilityRecordCache(intentionSessionID: $0)
         }
+        enforcementPolicy = spec.nativeWindowVisibilitySessionID.map {
+            BrowserWindowEnforcementPolicy(intentionSessionID: $0)
+        }
     }
 
     public func start() {
         onMain {
-            guard !stopped else { return }
+            guard mayEnforce else { return }
             started = true
             Self.diagnosticEvents = []
             Self.recoveryGeneration &+= 1
@@ -71,6 +81,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     public func stop() {
         onMain {
             guard !stopped else { return }
+            enforcementPolicy?.stop()
             // Capture registrations even when finish beats the next refresh.
             if started, let visibilityCache {
                 entries = Self.captureParking(records: visibilityCache.records(forceRefresh: true), entries: Self.loadEntries())
@@ -124,12 +135,22 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
 
     private func refresh() {
-        guard !stopped else { return }
+        guard mayEnforce else { return }
         let initialApps = initialVisibilityApplied ? nil : spec.initialAllowedApps
         defer { initialVisibilityApplied = true }
         let windows = WorkspaceWindow.list(onScreen: false)
-        Self.accessibilityWindows = Self.accessibilityWindows.filter { identity, _ in
-            windows.contains { $0.id == identity.window && $0.pid == identity.pid }
+        // The presentation list can omit a still-live minimized window. Retain
+        // its exact AX binding unless the unfiltered lifetime probe proves loss.
+        let missingCached = Self.accessibilityWindows.keys.filter { identity in
+            !windows.contains { $0.id == identity.window && $0.pid == identity.pid }
+        }
+        if !missingCached.isEmpty {
+            let inventory = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+            Self.accessibilityWindows = Self.accessibilityWindows.filter { identity, _ in
+                guard missingCached.contains(identity), let inventory else { return true }
+                return inventory.contains { $0[kCGWindowNumber as String] as? UInt32 == identity.window
+                    && $0[kCGWindowOwnerPID as String] as? pid_t == identity.pid }
+            }
         }
         let records: [BrowserWindowVisibilityRecord]
         if let session = spec.nativeWindowVisibilitySessionID,
@@ -146,7 +167,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
             entries = Self.restore(parkingOnly: true, currentRecords: records)
         }
         reconcileBrowserWindows(records: records, windows: windows)
+        guard mayEnforce else { return }
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard mayEnforce else { return }
             guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
                   let bundle = app.bundleIdentifier, let launched = app.launchDate else { continue }
             if !spec.permitsApplication(bundle) || initialApps.map({ !$0.contains(bundle) }) == true {
@@ -156,14 +179,17 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     entries.append(entry)
                     guard Self.save(entries) else { entries.removeLast(); continue }
                 }
+                guard mayEnforce else { return }
                 _ = app.hide()
             } else {
                 for window in windows where window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
+                    guard mayEnforce else { return }
                     guard let element = Self.element(window, launched: launched), Self.boolean(element, kAXMinimizedAttribute).value == false else { continue }
                     if !entries.contains(where: { $0.pid == window.pid && $0.window == window.id }) {
                         entries.append(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id))
                         guard Self.save(entries) else { entries.removeLast(); continue }
                     }
+                    guard mayEnforce else { return }
                     _ = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
                 }
             }
@@ -173,30 +199,112 @@ public final class FocusVisibilityController: @unchecked Sendable {
         // Registration ACK has a short deadline. Bind holding windows before
         // potentially slow AX calls into unrelated blocked browser windows.
         let resolved = Self.matches(records: records, windows: windows).sorted { $0.isParking && !$1.isParking }
-        for match in resolved {
-            guard !stopped, let app = NSRunningApplication(processIdentifier: match.candidate.pid),
-                  app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.launchDate,
-                  let window = windows.first(where: { $0.id == match.candidate.id && $0.pid == match.candidate.pid }) else { continue }
-            if match.isParking {
-                entries = Self.captureParkingMatch(match, launched: launched, entries: entries)
-                continue
+        for match in resolved where match.isParking {
+            guard mayEnforce, let app = NSRunningApplication(processIdentifier: match.candidate.pid),
+                  app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.launchDate else { continue }
+            entries = Self.captureParkingMatch(match, launched: launched, entries: entries)
+        }
+        var observations: [BrowserWindowEnforcementPolicy.Observation] = []
+        for record in records {
+            let liveIdentity = Self.liveProcessIdentity(record)
+            for claim in record.plan.windows {
+                guard mayEnforce else { return }
+                var outcome: BrowserWindowEnforcementPolicy.Outcome = .unresolved(.windowIdentityUnavailable)
+                if let liveIdentity, liveIdentity == record.browserProcessIdentity {
+                    // A bound identity survives navigation and geometry changes.
+                    // Never replace it with a new title-based candidate.
+                    let owned = entries.first {
+                        $0.parking == false && $0.bundle == record.browserBundleIdentifier
+                            && $0.browserSessionID == record.browserSessionID
+                            && $0.intentionSessionID == record.plan.intentionSessionID
+                            && $0.browserWindowID == claim.windowID && $0.pid == liveIdentity.pid
+                            && $0.launched.timeIntervalSinceReferenceDate == liveIdentity.launched
+                    }
+                    let matched = resolved.first {
+                        !$0.isParking && $0.record.browserBundleIdentifier == record.browserBundleIdentifier
+                            && $0.record.browserSessionID == record.browserSessionID
+                            && $0.window.windowID == claim.windowID
+                    }
+                    let id = owned?.window ?? matched?.candidate.id
+                    if let id = owned?.window, WorkspaceWindow.exists(id: id, pid: liveIdentity.pid) == false {
+                        outcome = .noLongerExists
+                    } else if let id {
+                        let window = windows.first(where: { $0.id == id && $0.pid == liveIdentity.pid })
+                        outcome = minimizeNormalWindow(window, id: id, pid: liveIdentity.pid, record: record, claim: claim,
+                            launched: Date(timeIntervalSinceReferenceDate: liveIdentity.launched), owned: owned != nil)
+                    }
+                }
+                observations.append(.init(record: record, windowID: claim.windowID,
+                    liveProcessIdentity: liveIdentity, outcome: outcome))
             }
-            guard let element = Self.element(window, launched: launched),
-                  Self.boolean(element, kAXMinimizedAttribute).value == false else { continue }
-            // Never adopt a pre-minimized user window. Existing ownership can
-            // be re-enforced only while the exact current plan still lists it.
-            if !entries.contains(where: { $0.pid == window.pid && $0.launched == launched && $0.window == window.id }) {
-                guard Self.isFreshClaim(match.record, pid: window.pid, launched: launched) else { continue }
-                entries.append(Entry(pid: window.pid, launched: launched, bundle: window.bundle, window: window.id,
-                    browserSessionID: match.record.browserSessionID, intentionSessionID: match.record.plan.intentionSessionID,
-                    browserWindowID: match.window.windowID, parking: false))
-                guard Self.save(entries) else { entries.removeLast(); continue }
-            }
-            let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
-            Self.observe("browserMinimize", pid: window.pid, window: window.id, status: status)
+        }
+        // AX calls can take time. Recheck the active occurrence immediately
+        // before a failure callback; a stop/new session cannot be resurrected.
+        let rules = Self.currentRules()
+        let currentSession = rules.flatMap { $0.active && $0.hideDistractions && $0.nativeWindowVisibility && $0.isFresh() ? $0.startupSessionID : nil }
+        var nextPolicy = enforcementPolicy
+        let failure = nextPolicy?.update(observations,
+            activeIntentionSessionID: currentSession, now: ProcessInfo.processInfo.systemUptime)
+        if let failure {
+            // A later plan may have omitted this window while AX was answering.
+            // Keep the old clock, but retry a changed plan instead of delivering
+            // stale failure. Do not commit the policy's one-shot failed state.
+            guard mayEnforce, currentSession == spec.nativeWindowVisibilitySessionID,
+                  let record = records.first(where: { $0.browserBundleIdentifier == failure.browserBundleIdentifier
+                      && $0.browserSessionID == failure.browserSessionID }),
+                  let latest = BrowserWindowVisibilityStore().record(browserBundleIdentifier: failure.browserBundleIdentifier,
+                      browserSessionID: failure.browserSessionID, intentionSessionID: failure.intentionSessionID),
+                  latest.browserProcessIdentity == record.browserProcessIdentity,
+                  latest.plan.windows.first(where: { $0.windowID == failure.windowID })
+                    == record.plan.windows.first(where: { $0.windowID == failure.windowID }),
+                  Self.liveProcessIdentity(record) == record.browserProcessIdentity,
+                  let current = Self.currentRules(), current.active, current.isFresh(),
+                  current.hideDistractions, current.nativeWindowVisibility,
+                  current.startupSessionID == currentSession else { return }
+            enforcementPolicy = nextPolicy
+            onEnforcementFailure?(failure)
+        } else {
+            enforcementPolicy = nextPolicy
         }
         // Plan omission is not a reveal: Add As You Go leaves initial
         // distractions hidden until completion.
+    }
+
+    private func minimizeNormalWindow(_ window: WorkspaceWindow?, id: UInt32, pid: pid_t,
+                                      record: BrowserWindowVisibilityRecord,
+                                      claim: BrowserWindowVisibilityWindow, launched: Date,
+                                      owned: Bool) -> BrowserWindowEnforcementPolicy.Outcome {
+        let boundElement = owned ? Self.accessibilityWindows[.init(pid: pid, launched: launched, window: id)] : nil
+        guard let element = boundElement ?? window.flatMap({ Self.element($0, launched: launched) }) else {
+            return .unresolved(.accessibilityUnavailable)
+        }
+        let before = Self.boolean(element, kAXMinimizedAttribute)
+        if before.value == true { return .verifiedMinimized } // Never adopt user-minimized windows.
+        guard before.value == false else { return .unresolved(.accessibilityUnavailable) }
+        if !owned {
+            guard window != nil, Self.isFreshClaim(record, pid: pid, launched: launched),
+                  !entries.contains(where: { $0.pid == pid && $0.launched == launched && $0.window == id }) else {
+                return .unresolved(.windowIdentityUnavailable)
+            }
+            entries.append(Entry(pid: pid, launched: launched, bundle: record.browserBundleIdentifier, window: id,
+                browserSessionID: record.browserSessionID, intentionSessionID: record.plan.intentionSessionID,
+                browserWindowID: claim.windowID, parking: false))
+            guard Self.save(entries) else { entries.removeLast(); return .unresolved(.ownershipNotSaved) }
+        }
+        guard mayEnforce else { return .unresolved(.minimizeNotConfirmed) }
+        let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        Self.observe("browserMinimize", pid: pid, window: id, status: status)
+        // Dispatch success is not an effect receipt. A timed-out setter can also
+        // succeed; only the following exact AX state establishes enforcement.
+        return Self.boolean(element, kAXMinimizedAttribute).value == true
+            ? .verifiedMinimized : .unresolved(.minimizeNotConfirmed)
+    }
+
+    private static func liveProcessIdentity(_ record: BrowserWindowVisibilityRecord) -> BrowserProcessIdentity? {
+        guard let proof = record.browserProcessIdentity, proof.isValid, kill(proof.pid, 0) == 0,
+              let app = NSRunningApplication(processIdentifier: proof.pid), !app.isTerminated,
+              app.bundleIdentifier == record.browserBundleIdentifier, let launched = app.launchDate else { return nil }
+        return .init(pid: proof.pid, launched: launched.timeIntervalSinceReferenceDate)
     }
 
     private static func currentRules() -> ActiveBrowserRules? {
@@ -337,11 +445,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 }
                 let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                 observe("restore", pid: entry.pid, window: id, status: status)
+                RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 // Successful dispatch is not completion. A request that timed
                 // out may also have completed by the time this read succeeds.
                 if boolean(element, kAXMinimizedAttribute).value != false { pending.append(entry) }
             } else if app.isHidden {
                 _ = app.unhide()
+                RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 if app.isHidden { pending.append(entry) }
             }
             RestorationFocusGuard.preserveCurrent()

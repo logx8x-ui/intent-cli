@@ -215,7 +215,128 @@ corrections then passed their final green gate:
   or notices). Its rebuilt unsigned 0.2.29 archive SHA-256 is
   `2d6da9abe3b0e2d1a8c6c8957ff6b00b37e4ea4bd2774a8098d29f4d1e3374c6`.
 
-At this checkpoint no bridge version has replaced the daily candidate or passed
-matching-profile live acceptance. Daily rules are inactive and the native
-hidden-workspace journal is empty. Signing, matching installation and the
-multi-window foreground/Space retest remain separate steps.
+### Matching development installation
+
+Scoped native source was committed as `dfe0e73`, after browser commit `ff8bab1`.
+With Head Chat's UI paused, the development installer completed using macOS
+Python PATH; log: `/tmp/intent-native-visibility-install-20261004.log`.
+
+- Daily app: `/Users/loganmondi/Applications/Intent.app`, PID 20331 immediately
+  after installation, bundle `dev.loganmondi.intent`, `LSUIElement=true`.
+- Installed app/host UUIDs match the tested UUIDs above exactly; strict deep
+  signature verification passed.
+- Embedded Firefox/Chrome native-visibility helper bytes match final source.
+- Browser rules were inactive and the hidden-workspace journal was empty before
+  and after installation. No fixture was seeded and no daily data reset.
+- The installer correctly reported that default Firefox still had permanent
+  Browser Guard 0.2.28 while 0.2.29 signing was pending. Its separate disposable
+  QA-profile missing-extension warning is not proof of a default-profile failure.
+
+The final Firefox/Chrome extension suites, release-readiness and Mozilla lint
+were independently rerun after both commits and passed. Idle fixtures scheduled
+zero snapshot timers for 1,000 inactive browser events. These are synthetic
+efficiency checks, not battery-life or live foreground acceptance.
+
+UI control was explicitly returned to Head Chat for the signed extension install
+and exact-profile multi-window foreground/Space retest. That live acceptance is
+still pending at this checkpoint; no remote push has occurred.
+
+### Chrome installed checks and an evidence correction
+
+Chrome connected as Browser Guard 0.2.29 with negotiated native-window
+visibility on the installed build above. Head Chat exercised selected tabs,
+Tab searches and a stopwatch: repeated tab clicks and a fresh search remained
+usable, and a typed external URL was rejected. The first session had no blocked
+whole-browser-window plan and therefore did not test native browser-window
+restoration.
+
+The second session (`0DFEE286-C25A-401F-B056-489C26FA7EA1`) created a real holding
+window. Native ownership captured Chrome PID 36078 / CG window 13547 for browser
+window 1733680409 before tabs moved. Head Chat observed the parked tab returned
+to working window 9047 after Finish. The native journal later settled to `[]`;
+cleanup was eventual, not instantaneous.
+
+Trace `/tmp/intent-chrome-029-parking-finish.jsonl` has 40 samples across 20.53
+seconds, all with Chrome PID 36078 and working CG 9047 first in a separate
+`optionOnScreenOnly` query. However, it spans Unix timestamps
+1791112581.785707–1791112602.3173571 and Finish began at 1791112600.129889. Thus
+only **2.19 seconds are post-finish**, not 20 seconds. App-owned diagnostics
+independently completed the five-second guard with no Space change, foreground
+change or corrective raise. A longer post-finish recording remains required.
+
+Do not interpret an `optionAll` inventory filtered by `kCGWindowIsOnscreen` as
+front-to-back order: this machine returned a different order from a separate
+`optionOnScreenOnly` query. The latter agreed with the native working-window
+target. The earlier ordering discrepancy does not establish a guard-target bug.
+
+This live run also exposed a genuine enforcement gap: two same-profile windows
+with the same title and geometry cannot be safely mapped from browser IDs to
+native CG and AX identities. The matcher correctly refused to minimize an
+ambiguous window, but the intention did not report that its blocked-window
+claim remained unresolved. Exact mapping must not be guessed, and this trial
+is not a full restriction pass. A bounded explicit failure path is being added
+separately; unique-title whole-window acceptance is still in progress.
+
+### Unique-title Chrome window: strict no-pop failure
+
+The subsequent unique-title case captured normal blocked CG 13527 / browser
+window 1733680407 and parking CG 13585 / browser window 1733680412 with the
+verified Chrome process lifetime. This exercised actual whole-window ownership,
+not only parked tabs. The 120-sample trace spans 62.03 seconds, including 50.12
+seconds after Finish (`startedAt` 1791113007.956737):
+
+- `/tmp/intent-chrome-029-full-finish.jsonl`
+- `/tmp/intent-chrome-029-full-diagnostics.json`
+
+Chrome PID 36078 remained foreground, but restored CG 13527 displaced working
+CG 9047 at approximately +0.436 seconds. Working CG 9047 returned by +1.500
+seconds. Native diagnostics recorded eleven deferred AX probes before a
+corrective raise at +1.107 seconds. Thus native AX deminiaturization itself can
+raise a Chrome window: this is **not a no-pop pass**. The new read-only trace
+verifier rejects this recording; a completed five-second guard does not erase
+an earlier visible failure.
+
+A follow-up candidate queues preservation of the already-bound, still-onscreen
+working AX window immediately after each owned native restore, before waiting
+for minimized/focused-state reads. It does not alter global macOS preferences,
+use private window IDs, restore a minimized work target, or chase a Space.
+Diagnostics distinguish this causal dispatch from a later corrective raise.
+This remains an experimental timing improvement until the matching installed
+build passes denser sampling and live observation; no claim of invisible
+restoration follows from its source tests.
+
+### Follow-up candidate regression gate
+
+The candidate also adds explicit failure for continuously unresolved accepted
+normal-window claims, exact bound-window verification across title/frame changes,
+and generation/process/claim fences before delivering that failure. It does not
+guess duplicate window identity or change parking acknowledgements. Failure
+suppresses the success animation and preserves its specific error message.
+Installed error presentation still needs checking: the existing hidden SwiftUI
+alert host has no explicit activation, but source review alone does not establish
+whether the notice is visible without bringing Intent forward.
+
+Focus preservation now checks public WindowServer input counters before each
+effect as well as NSEvent monitors. This covers input whose main-queue callback
+is delayed by AX IPC. It rechecks native visibility and foreground between AX
+effects, records whether the target was already in front, and uses both bounded
+uptime and wall-time fences so sleep/wake cannot replay an old transaction.
+
+- `intent-session-checks-6JEdzKbJ` passed component checks but was correctly
+  rejected by the source-stability check after the final input-counter edit.
+- `intent-session-checks-lMljRzsJ` passed the complete gate. A subsequent two-line
+  sleep/wake fence required another complete run before installation.
+- Final same-source `npm run test:session-ui` passed at
+  `/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-session-checks-CxIDqGTU`.
+  Tested app UUID: `EA77703F-F19A-3A2F-8724-0A9C9D0D9B28`.
+- Full `npm run test:native-host` passed (10.1 MiB peak stress RSS). Tested host
+  UUID: `2116F34D-AA5B-3F10-A858-47F2023A569A`. The later fence changes only the
+  native focus guard, not the host or core protocol.
+- Firefox/Chrome extension suites, release-readiness fixtures and Mozilla lint
+  passed again with unchanged browser source; lint has zero errors/warnings.
+
+The trace verifier itself is now included in the session gate. It rejects a wrong
+pre-finish target, short post-finish coverage, gaps over 0.2 seconds in the first
+five post-finish seconds, later gaps over 0.75 seconds, and recorded/sampled
+displacement. Pure fixtures do not prove actual AX ordering or invisible visual
+restoration. The matching installed candidate retest is still pending here.

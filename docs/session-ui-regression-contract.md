@@ -94,6 +94,19 @@ not only on the first frame. Start with disposable test data and safe targets;
 never close the user's tabs, reset preferences or erase saved intentions to pass.
 End with restrictions inactive and no test session left running.
 
+For browser finish traces, capture a separate `optionOnScreenOnly` native-window
+query rather than treating an all-window inventory as z-order. Save the matching
+`restoration-focus-diagnostics.json` before another session overwrites it. Check
+at least 20 seconds **after its `startedAt`**, not merely 20 seconds total:
+
+```sh
+node scripts/verify-finish-trace.cjs TRACE.jsonl DIAGNOSTIC.json
+```
+
+The verifier rejects short tails, gaps, reordered/stale samples, foreground
+changes, Space changes and corrective raises. A sampled pass is not proof of
+sub-sample animation, physical key delivery or an untested display/profile.
+
 ## Handoff
 
 Report source tests, release build, isolated rendering, installation, live

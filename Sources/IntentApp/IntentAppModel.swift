@@ -1811,6 +1811,12 @@ final class IntentAppModel: ObservableObject {
                     }
                 })
                 failureMessage = nil
+            } catch let error as FocusLockError {
+                if case .browserWindowEnforcementFailed = error {
+                    failureMessage = error.description
+                } else {
+                    failureMessage = "Could not start session: \(error)"
+                }
             } catch {
                 failureMessage = "Could not start session: \(error)"
             }
@@ -1844,13 +1850,13 @@ final class IntentAppModel: ObservableObject {
                 self.stopwatchStarted = nil
                 self.activeSessionAbsoluteEndTime = nil
                 self.activeSessionOccurrenceID = nil
-                if lock.didStopForSafety {
-                    self.emergencyStop()
-                } else if failureMessage == nil {
-                    if !self.endedEarly { self.beginCooldown(for: intention) }
-                } else {
+                if let failureMessage {
                     self.emergencyStop(showMessage: false)
                     self.errorMessage = failureMessage
+                } else if lock.didStopForSafety {
+                    self.emergencyStop()
+                } else {
+                    if !self.endedEarly { self.beginCooldown(for: intention) }
                 }
                 self.activeLock = nil
                 self.quickSelectionMonitor?.cancel()
@@ -1859,7 +1865,7 @@ final class IntentAppModel: ObservableObject {
                 self.activeSessionIntention = nil
                 self.activeSessionName = nil
                 self.activeSessionIsLeisure = false
-                if failureMessage == nil,
+                if failureMessage == nil, !lock.didStopForSafety,
                    wasPurposeSession,
                    self.saveSessionOnFinish,
                    let purposeUsage,
@@ -1886,7 +1892,7 @@ final class IntentAppModel: ObservableObject {
                 self.completedChecklist = []
                 // Keep interrupted drafts in the journal for explicit recovery;
                 // opening their workspace here would replace the current screen.
-                if failureMessage == nil, let occurrence {
+                if failureMessage == nil, !lock.didStopForSafety, let occurrence {
                     self.completeSessionPresentation(occurrenceID: occurrence, mode: intention.accessMode)
                 } else { self.dismissSessionPresentation() }
                 self.saveSessionOnFinish = false

@@ -10,6 +10,11 @@ final class RestorationFocusGuard {
     private let window: AXUIElement?
     private let visibleWindowID: UInt32
     private let targetResolution: String
+    // NSEvent monitors are delivered on the main queue. AX IPC can briefly
+    // block that queue, so also consult public WindowServer input counters
+    // before effects rather than waiting for a queued cancellation callback.
+    private static let cancellingInput: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+    private let initialInputCounts: [UInt32]
     private var policy: RestorationFocusPolicy
     private var timer: Timer?
     private var globalInput: Any?
@@ -17,6 +22,7 @@ final class RestorationFocusGuard {
     private var activation: NSObjectProtocol?
     private var spaceChange: NSObjectProtocol?
     private let beganAt = Date()
+    private let beganUptime = ProcessInfo.processInfo.systemUptime
     private var observations: [[String: Any]] = []
     private var lastForegroundPID: pid_t?
     private var lastTargetOnScreen: Bool?
@@ -24,6 +30,7 @@ final class RestorationFocusGuard {
 
     private init(application: NSRunningApplication, restoringPIDs: Set<pid_t>, visibleWindow: WorkspaceWindow) {
         self.application = application
+        initialInputCounts = Self.inputCounts()
         visibleWindowID = visibleWindow.id
         policy = RestorationFocusPolicy(originalPID: application.processIdentifier, restoringPIDs: restoringPIDs)
         let element = AXUIElementCreateApplication(application.processIdentifier)
@@ -77,16 +84,75 @@ final class RestorationFocusGuard {
         }
         // Window deminiaturization and Browser Guard tab restoration finish
         // asynchronously after the native session loop has already stopped.
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = guarder.beganUptime + 5
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak guarder] _ in
             guard let guarder, current === guarder else { return }
-            if Date() >= deadline { cancel(reason: "complete"); return }
+            // Uptime may pause during sleep. The wall-time fence additionally
+            // prevents an old transaction from replaying after waking.
+            if ProcessInfo.processInfo.systemUptime >= deadline || Date().timeIntervalSince(guarder.beganAt) >= 5 {
+                cancel(reason: "complete"); return
+            }
             guarder.preserve()
         }
         guarder.timer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
     static func preserveCurrent() { current?.preserve() }
+    static func preserveAfterOwnedVisibilityChange() {
+        precondition(Thread.isMainThread)
+        current?.preserveOwnedVisibilityChange()
+    }
+
+    private static func inputCounts() -> [UInt32] {
+        cancellingInput.map { CGEventSource.counterForEventType(.combinedSessionState, eventType: $0) }
+    }
+    private func inputCancelled() -> Bool {
+        guard Self.current === self else { return true }
+        if RestorationFocusPolicy.inputChanged(initial: initialInputCounts, current: Self.inputCounts()) {
+            Self.cancel(reason: "inputCountChanged")
+            return true
+        }
+        return false
+    }
+
+    private func preserveOwnedVisibilityChange() {
+        guard let window else { return }
+        func nativePermission() -> (permitted: Bool, wasFront: Bool) {
+            guard !inputCancelled(), ProcessInfo.processInfo.systemUptime - beganUptime <= 5,
+                  Date().timeIntervalSince(beganAt) <= 5,
+                  !application.isTerminated, !application.isHidden else { return (false, false) }
+            let exists = WorkspaceWindow.exists(id: visibleWindowID, pid: application.processIdentifier)
+            let windows = WorkspaceWindow.list()
+            let visible = windows.contains { $0.id == visibleWindowID && $0.pid == application.processIdentifier }
+            let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let permitted = policy.shouldPreserveOwnedVisibilityChange(targetExists: exists, targetOnScreen: visible,
+                frontmostPID: foreground)
+            let wasFront = foreground == application.processIdentifier
+                && windows.first(where: { $0.pid == application.processIdentifier })?.id == visibleWindowID
+            return (permitted && !inputCancelled(), wasFront)
+        }
+        let before = nativePermission()
+        guard before.permitted else { return }
+        // AXMinimized=false may enqueue an asynchronous deminiaturization that
+        // raises its window. Queue the already-bound work window behind that
+        // operation immediately. Waiting for AXMinimized/AXFocusedWindow reads
+        // first left Chrome displaced for a second while those reads timed out.
+        // Never guess a window, deminiaturize it or launch an app. Fresh native
+        // checks narrow (but cannot eliminate) cross-process timing races.
+        let mainStatus = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let beforeRaise = nativePermission()
+        guard beforeRaise.permitted else {
+            observe("ownedRestorePreservationCancelled", details: ["mainStatus": mainStatus.rawValue,
+                "targetWasFront": before.wasFront])
+            return
+        }
+        // cannotComplete means dispatch may still be pending, not that a second
+        // independent AX action must be suppressed. The bounded timer remains
+        // a fallback, and input/new-session/Space cancellation still owns it.
+        let raiseStatus = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        observe("ownedRestorePreservation", details: ["mainStatus": mainStatus.rawValue, "raiseStatus": raiseStatus.rawValue,
+            "targetWasFront": before.wasFront, "targetWasFrontBeforeRaise": beforeRaise.wasFront])
+    }
     private static func accessibilityWindow(matching visible: WorkspaceWindow, application: AXUIElement) -> (window: AXUIElement?, method: String) {
         let deadline = Date().addingTimeInterval(0.12)
         func stillFront() -> Bool {
@@ -169,7 +235,7 @@ final class RestorationFocusGuard {
         if let observer = guarder.spaceChange { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
     private func preserve() {
-        guard Self.current === self else { return }
+        guard !inputCancelled() else { return }
         guard !application.isTerminated, !application.isHidden else { Self.cancel(reason: "targetUnavailable"); return }
         switch WorkspaceWindow.exists(id: visibleWindowID, pid: application.processIdentifier) {
         case false?: Self.cancel(reason: "windowClosed"); return
@@ -214,11 +280,13 @@ final class RestorationFocusGuard {
             let focusStatus = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focused)
             guard focusStatus == .success else { observe("focusProbeDeferred"); return }
             if !application.isActive || focused.map({ !CFEqual($0, window) }) != false {
+                guard !inputCancelled() else { return }
                 observe("preserveWindow")
                 if AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue) == .cannotComplete { return }
+                guard !inputCancelled() else { return }
                 guard AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success else { return }
             }
         }
-        if !application.isActive { application.activate(options: []) }
+        if !application.isActive, !inputCancelled() { application.activate(options: []) }
     }
 }

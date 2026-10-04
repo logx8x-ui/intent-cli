@@ -4,6 +4,12 @@ import IntentCore
 import IntentLock
 
 func runRestorationFocusSpecs() throws {
+    try expect(!RestorationFocusPolicy.inputChanged(initial: [1, 2, 3, 4, 5], current: [1, 2, 3, 4, 5]),
+        "Unchanged input counters do not cancel restoration")
+    try expect(RestorationFocusPolicy.inputChanged(initial: [1, 2, 3, 4, 5], current: [2, 2, 3, 4, 5])
+        && RestorationFocusPolicy.inputChanged(initial: [UInt32.max], current: [0])
+        && RestorationFocusPolicy.inputChanged(initial: [1, 2], current: [1]),
+        "Fresh input, counter wrap and an inconsistent snapshot cancel before queued main-thread callbacks")
     // The real CG provider seam catches query-flag regressions as well as
     // identity matching: optionAll has value zero, so contains(optionAll) alone
     // would not detect an accidental optionOnScreenOnly query.
@@ -113,4 +119,24 @@ func runRestorationFocusSpecs() throws {
     var policy = RestorationFocusPolicy(originalPID: 1, restoringPIDs: [2])
     try expect(!policy.shouldPreserve(frontmostPID: 9), "Do not fight unrelated app activation")
     try expect(!policy.shouldPreserve(frontmostPID: 2), "Do not return to a stale app after the user moved on")
+    var immediate = RestorationFocusPolicy(originalPID: 1, restoringPIDs: [2])
+    try expect(!immediate.shouldPreserveOwnedVisibilityChange(targetExists: nil, targetOnScreen: true, frontmostPID: 1),
+        "An unavailable inventory never authorizes an immediate AX effect")
+    try expect(!immediate.shouldPreserveOwnedVisibilityChange(targetExists: false, targetOnScreen: true, frontmostPID: 1),
+        "An already closed working window cannot be raised")
+    try expect(!immediate.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: false, frontmostPID: 1),
+        "Owned restoration cannot chase an offscreen or minimized target")
+    try expect(immediate.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: true, frontmostPID: 1),
+        "An exact onscreen working window can be queued directly after an owned restore")
+    immediate.userInteracted()
+    try expect(!immediate.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: true, frontmostPID: 2),
+        "User input cancels immediate owned-restore preservation as well as timer recovery")
+    var unrelated = RestorationFocusPolicy(originalPID: 1, restoringPIDs: [2])
+    try expect(!unrelated.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: true, frontmostPID: 9)
+        && !unrelated.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: true, frontmostPID: 1),
+        "An unrelated activation irrevocably cancels immediate restoration for this occurrence")
+    var unavailable = RestorationFocusPolicy(originalPID: 1, restoringPIDs: [2])
+    try expect(!unavailable.shouldPreserveOwnedVisibilityChange(targetExists: nil, targetOnScreen: false, frontmostPID: 9)
+        && !unavailable.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: true, frontmostPID: 1),
+        "Unrelated activation still cancels when the native inventory is temporarily unavailable")
 }
