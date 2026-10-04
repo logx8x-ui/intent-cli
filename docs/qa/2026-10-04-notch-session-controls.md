@@ -68,10 +68,11 @@ Evidence directory:
 Isolated rendered content:
 `/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-qa-Vo8ItaCI`.
 Packaged QA executable UUID: `6B436395-ECEB-3C3E-99F5-13935DC60BB4`.
-Daily installed executable was separately checked and is still the older UUID
+At the initial implementation checkpoint, the daily executable still had UUID
 `1BFD7BE8-0613-3EC7-BA9C-7A9863A95FD3` at
 `/Users/loganmondi/Applications/Intent.app/Contents/MacOS/IntentApp`.
-No daily app install/relaunch or browser profile mutation was performed here.
+No daily app install/relaunch or browser profile mutation had been performed at
+that checkpoint; the subsequent installation and live checks are recorded below.
 
 Use `npm run test:session-ui` and retain its provenance/log directory. It creates
 isolated QA storage and renders the production SwiftUI content inside AppKit.
@@ -82,3 +83,46 @@ The Mac then locked before this task's installation or physical acceptance.
 Neither source tests nor offscreen preview renders establish installed notch
 alignment, actual Caps Lock event delivery, Space behaviour or final foreground
 stability. Those remain explicit live checks, not inferred passes.
+
+## Installed follow-up — 2026-10-04, 17:50–18:02 KST
+
+- Installed committed source `a463b9aad8853822b630fe48630c4dfc143e0a28`
+  into `/Users/loganmondi/Applications/Intent.app`, bundle
+  `dev.loganmondi.intent`, on macOS 26.2 (25C56). Installed Mach-O UUID is now
+  `6B436395-ECEB-3C3E-99F5-13935DC60BB4`, matching the isolated tested package;
+  `codesign --verify --deep --strict` passed. Saved data was preserved.
+- The first development install hit a broken Homebrew Python 3.14 `pyexpat`
+  linkage (`_XML_SetAllocTrackerActivationThreshold`). Retrying the existing
+  installer with `PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin` selected
+  macOS Python and completed successfully. Log:
+  `/tmp/intent-notch-install-oct4-system-python.log`.
+- Inspected screenshots of the installed blacklist timer and checklist. The
+  red mode dot/label, right-side countdown or progress, named lower tongue and
+  anchored checklist tray rendered correctly. These were window captures, not
+  proof of physical notch alignment or full-screen/secondary-display geometry.
+- A disposable one-minute blacklist timer (`QA quiet timer expiry`) completed
+  around 17:58:30. Passive `lsappinfo` foreground sampling retained Finder from
+  17:58:17 through 17:58:40; rules were already inactive at 17:58:33. No browser
+  or completion window took focus during expiry or delayed cleanup.
+- A separate single-task blacklist checklist (`QA notch checklist`) completed
+  at about 18:01:27. Finder stayed foreground from 18:01:22 through 18:01:41;
+  browser rules returned inactive. The two disposable Finder windows used for
+  these checks were closed, and no test session remained active.
+
+### Automation boundary found during the live test
+
+Do not query an inactive Intent app through native CUA and call that a passive
+focus observation. In this environment, `intentLive.getAXState()` at 17:58:41
+reopened the hidden app and raised its workspace, after the clean expiry above.
+This is consistent with the app reopen handler, not evidence of a completion
+focus regression. While active, that same reopen route can toggle controls.
+Use passive foreground diagnostics after completion; avoid app-targeted input
+or inspection which may reopen Intent during the observation window.
+
+The initial app-targeted synthetic Caps Lock/backtick probe was inconclusive and
+is **not** a physical-key acceptance pass. The native decoder and scheduler
+fixtures passed, but physical Caps Lock on/off, held-Caps Run, double-backtick,
+manual finish, absolute end-time, green-mode live presentation, full-screen/
+external display behavior and the actual visual edge animation still need their
+corresponding acceptance checks. Browser-profile acceptance remains owned by the
+coordinated Head Chat; do not infer it from this native-only pass.
