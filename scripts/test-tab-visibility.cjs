@@ -3,7 +3,7 @@ const Visibility = require('../chrome-extension/tab-visibility.js');
 const fs = require('node:fs');
 const nativeIdentity={browserSessionID:'browser-one',processIdentity:{pid:123,launched:100}};
 assert.equal(fs.readFileSync('chrome-extension/tab-visibility.js','utf8'), fs.readFileSync('firefox-extension/tab-visibility.js','utf8'));
-function fixture() {
+function fixture({chromeCrossWindowMoves = false} = {}) {
   let serial = 50;
   const data = {};
   const localData = {};
@@ -38,11 +38,43 @@ function fixture() {
         groupData.set(id,{id,windowId});for(const tab of tabs)if(value.tabIds.includes(tab.id))tab.groupId=id;return id},
       query:async q=>structuredClone(tabs.filter(t=>q.windowId==null||q.windowId===t.windowId).sort((a,b)=>a.windowId-b.windowId||a.index-b.index)),
       get:async id=>{const t=tabs.find(t=>t.id===id);if(!t)throw Error();return structuredClone(t)},
-      update:async(id,value)=>{const t=tabs.find(t=>t.id===id);if(value.active)tabs.filter(x=>x.windowId===t.windowId).forEach(x=>x.active=false);Object.assign(t,value)},
+      update:async(id,value)=>{
+        const t=tabs.find(t=>t.id===id);if(!t)throw Error('missing tab');
+        if(value.active)tabs.filter(x=>x.windowId===t.windowId).forEach(x=>x.active=false);
+        const pinChanged=typeof value.pinned==='boolean'&&Boolean(t.pinned)!==value.pinned;
+        Object.assign(t,value);
+        if(pinChanged){
+          const rest=tabs.filter(x=>x.windowId===t.windowId&&x!==t).sort((a,b)=>a.index-b.index);
+          // Pin/unpin relocates the tab to the boundary, never activates it.
+          rest.splice(rest.filter(x=>x.pinned).length,0,t);rest.forEach((x,i)=>x.index=i);
+          if(t.pinned)t.groupId=-1;
+        }
+      },
       hide:async id=>{tabs.find(t=>t.id===id).hidden=true},
       show:async id=>{tabs.find(t=>t.id===id).hidden=false},
       move:async(ids,value)=>{
+        if(value.windowId==null)value={...value,windowId:tabs.find(t=>t.id===(Array.isArray(ids)?ids[0]:ids)).windowId};
         assert(windows.some(w=>w.id===value.windowId));
+        if(chromeCrossWindowMoves){
+          const results=[];let nextIndex=value.index;
+          for(const id of Array.isArray(ids)?ids:[ids]){
+            const tab=tabs.find(t=>t.id===id);if(!tab)throw Error('missing tab');
+            const oldWindow=tab.windowId;
+            const remaining=tabs.filter(t=>t.windowId===value.windowId&&t!==tab).sort((a,b)=>a.index-b.index);
+            if(oldWindow!==value.windowId){
+              // Chromium 154 inserts with ADD_NONE: cross-window moves lose pin
+              // and group, and preserve an existing destination's active tab.
+              tab.pinned=false;tab.groupId=-1;tab.active=remaining.length===0;
+            }
+            const pins=remaining.filter(t=>t.pinned).length;
+            const requested=nextIndex<0?remaining.length:nextIndex;
+            const index=tab.pinned?Math.max(0,Math.min(requested,pins)):Math.max(pins,Math.min(requested,remaining.length));
+            tab.windowId=value.windowId;remaining.splice(index,0,tab);remaining.forEach((t,i)=>t.index=i);
+            if(oldWindow!==value.windowId)tabs.filter(t=>t.windowId===oldWindow).sort((a,b)=>a.index-b.index).forEach((t,i)=>t.index=i);
+            nextIndex=index+1;results.push(tab);
+          }
+          return Array.isArray(ids)?results:results[0];
+        }
         const moving=(Array.isArray(ids)?ids:[ids]).map(id=>tabs.find(t=>t.id===id));
         const remaining=tabs.filter(t=>t.windowId===value.windowId&&!moving.includes(t)).sort((a,b)=>a.index-b.index);
         const index=value.index<0?remaining.length:Math.min(value.index,remaining.length);
@@ -57,7 +89,292 @@ function fixture() {
   return {api,tabs,windows,removed,groupData,localData,
     clearSession:()=>{for(const key of Object.keys(data))delete data[key]}};
 }
+
+async function testPinPreservation() {
+  const failures=[];
+  async function check(name,run){
+    try{await run();console.log('PASS pin preservation: '+name)}
+    catch(error){failures.push({name,message:error.message});console.error('FAIL pin preservation: '+name+' — '+error.message)}
+  }
+  function setup(firefox=false){
+    // Chrome is the source-backed unpinning model. Running it with Firefox
+    // markers also injects loss/failure to verify that marker-only retries work.
+    const f=fixture({chromeCrossWindowMoves:true});
+    const tab=f.tabs.find(t=>t.id===4);tab.pinned=true;tab.index=0;
+    f.tabs.find(t=>t.id===1).index=1;f.tabs.find(t=>t.id===2).index=2;f.tabs.find(t=>t.id===3).index=3;
+    const reveals=[];f.activeUpdates=[];const update=f.api.tabs.update;
+    f.api.tabs.update=async(id,value)=>{if('active' in value)f.activeUpdates.push({id,...value});return update(id,value)};
+    const nativeOwner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true,
+      revealWindows:async(session,windows)=>{reveals.push(...windows.map(w=>w.windowID));return true}};
+    const rules={active:true,hideDistractions:true,startupSessionID:'pin-session',nativeWindowVisibility:true,selectedTabIDs:[1,2,3,5]};
+    return {f,tab,nativeOwner,rules,reveals,make:()=>new Visibility(f.api,firefox,nativeOwner)};
+  }
+  function preserved(f){
+    assert.deepEqual(f.activeUpdates,[],'Pin repair never requests tab activation');
+    assert.deepEqual(f.tabs.filter(t=>t.windowId===1&&t.active).map(t=>t.id),[1],'Working tab remains selected');
+    assert.deepEqual(f.removed.filter(id=>id<=5),[],'User tabs are never deleted');
+  }
+  for(const firefox of [false,true]){
+    const label=firefox?'Firefox marker path':'Chrome';
+    await check(label+' pinned tab survives parking and return',async()=>{
+      const {f,tab,rules,make}=setup(firefox),v=make();
+      await v.sync(rules,t=>t.id!==4);
+      assert.notEqual(tab.windowId,1);assert.equal(tab.pinned,true,'Parked tab retains original pin');
+      await v.sync({active:false},()=>true);
+      assert.equal(tab.windowId,1);assert.equal(tab.pinned,true);assert.equal(tab.index,0);
+      assert.equal(v.state.moved.length,0);preserved(f);
+    });
+    await check(label+' retries failed pin update on an already parked tab',async()=>{
+      const {f,tab,rules,make}=setup(firefox),v=make(),update=f.api.tabs.update;
+      let denied=false;
+      f.api.tabs.update=async(id,value)=>{
+        if(id===4&&value.pinned===true&&!denied){denied=true;throw Error('busy')}
+        return update(id,value);
+      };
+      await v.sync(rules,t=>t.id!==4);
+      assert.equal(tab.pinned,false);assert.equal(v.state.moved.find(t=>t.id===4).pinned,true);
+      const parking=tab.windowId;
+      await v.sync(rules,t=>t.id!==4);
+      assert.equal(tab.windowId,parking);assert.equal(tab.pinned,true,'Retry repairs a tab excluded from new candidates');
+      await v.sync({active:false},()=>true);assert.equal(tab.pinned,true);preserved(f);
+    });
+    for(const failure of ['reject','silent'])await check(label+' retries '+failure+' pin update after returning to source',async()=>{
+      const {f,tab,rules,make,reveals}=setup(firefox);let v=make();
+      if(firefox)delete f.api.storage.session;
+      await v.sync(rules,t=>t.id!==4);
+      const update=f.api.tabs.update;let denied=false;
+      f.api.tabs.update=async(id,value)=>{
+        if(id===4&&value.pinned===true&&tab.windowId===1&&!denied){
+          denied=true;if(failure==='reject')throw Error('busy');return;
+        }
+        return update(id,value);
+      };
+      await v.sync({active:false},()=>true);
+      assert.equal(tab.windowId,1);assert.equal(tab.pinned,false);
+      assert(v.state.moved.some(t=>t.id===4),'Failed pin repair keeps original ownership');
+      v=make();await v.sync({active:false},()=>true);
+      assert.equal(tab.windowId,1);assert.equal(tab.pinned,true);assert.equal(tab.index,0);
+      assert.equal(v.state.moved.length,0);assert(!reveals.includes(1),'Source window is never mistaken for a holder');
+      preserved(f);
+    });
+    await check(label+' pin order survives a selected pin and a newly pinned tab',async()=>{
+      const {f,rules,make}=setup(firefox);
+      f.tabs.find(t=>t.id===1).pinned=true;
+      f.tabs.find(t=>t.id===2).pinned=true;
+      const v=make();await v.sync(rules,t=>t.id===1||t.id===3||t.id===5);
+      const existing=f.tabs.filter(t=>t.windowId===1).sort((a,b)=>a.index-b.index);
+      existing.filter(t=>!t.pinned).forEach(t=>t.index++);
+      f.tabs.push({id:80,windowId:1,index:1,pinned:true,active:false,url:'https://fresh.example'});
+      await v.sync({active:false},()=>true);
+      assert.deepEqual((await f.api.tabs.query({windowId:1})).map(t=>[t.id,Boolean(t.pinned)]),[[4,true],[1,true],[2,true],[80,true],[3,false]]);
+      preserved(f);
+    });
+  }
+  await check('Firefox marker-only restore retains original pin position',async()=>{
+    const {f,tab,rules,make}=setup(true);delete f.api.storage.session;
+    f.tabs.find(t=>t.id===1).pinned=true;
+    await make().sync(rules,t=>t.id!==4);
+    const v=make();await v.sync({active:false},()=>true);
+    assert.deepEqual((await f.api.tabs.query({windowId:1})).map(t=>t.id),[4,1,2,3]);
+    assert.equal(tab.pinned,true);assert.equal(v.state.moved.length,0);preserved(f);
+  });
+  await check('Native orphan reveal retains pin ownership until repair succeeds',async()=>{
+    const {f,tab,rules,make}=setup(),v=make();
+    const update=f.api.tabs.update;let deny=true;
+    f.api.tabs.update=async(id,value)=>{if(id===4&&value.pinned===true&&deny)throw Error('busy');return update(id,value)};
+    await v.sync(rules,t=>t.id!==4);const parking=tab.windowId;
+    f.windows.splice(f.windows.findIndex(w=>w.id===1),1);
+    await v.sync({active:false},()=>true);
+    assert.equal(tab.windowId,parking);assert(v.state.moved.some(t=>t.id===4),'Reveal acknowledgement does not discard a failed pin repair');
+    deny=false;await v.sync({active:false},()=>true);
+    assert.equal(tab.pinned,true);assert.equal(v.state.moved.length,0);assert(!f.removed.includes(4));
+  });
+  assert.deepEqual(failures,[],'Pinned-tab regression failures');
+}
+
+
+async function testPinReviewRegressions() {
+  const failures=[];
+  async function check(name,run){
+    try{await run();console.log('PASS pin review: '+name)}
+    catch(error){failures.push({name,message:error.message});console.error('FAIL pin review: '+name+' — '+error.message)}
+  }
+  function setup(firefox=false){
+    const f=fixture({chromeCrossWindowMoves:true}),tab=f.tabs.find(t=>t.id===4);
+    tab.pinned=true;tab.index=0;f.tabs.find(t=>t.id===1).index=1;f.tabs.find(t=>t.id===2).index=2;f.tabs.find(t=>t.id===3).index=3;
+    if(firefox)delete f.api.storage.session;
+    const reveals=[],activations=[],update=f.api.tabs.update;
+    f.api.tabs.update=async(id,value)=>{if('active' in value)activations.push({id,...value});return update(id,value)};
+    const nativeOwner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true,
+      revealWindows:async(session,windows)=>{reveals.push(...windows.map(w=>w.windowID));return true}};
+    const rules={active:true,hideDistractions:true,startupSessionID:'pin-review',nativeWindowVisibility:true,selectedTabIDs:[1,2,3,5]};
+    return {f,tab,rules,reveals,activations,nativeOwner,make:()=>new Visibility(f.api,firefox,nativeOwner)};
+  }
+  function unchanged(context){
+    assert.deepEqual(context.activations,[],'Recovery does not request activation');
+    assert.deepEqual(context.f.tabs.filter(t=>t.windowId===1&&t.active).map(t=>t.id),[1]);
+    assert.deepEqual(context.f.removed.filter(id=>id<=5),[],'No user tab deleted');
+  }
+  for(const firefox of [false,true]){
+    const name=firefox?'Firefox marker-only':'Chrome';
+    await check(name+' preserves a user pin after a manual Add-as-you-go return',async()=>{
+      const c=setup(firefox),{f,tab,make}=c;let v=make();
+      await f.api.tabs.update(4,{pinned:false});
+      const rules={...c.rules,addAsYouGo:true};
+      await v.syncInitial(rules,t=>t.id!==4,()=>true);
+      await f.api.tabs.move(4,{windowId:1,index:-1});await f.api.tabs.update(4,{pinned:true});
+      await v.syncInitial(rules,t=>t.id!==4,()=>true);
+      assert.equal(tab.pinned,true);assert.equal(tab.windowId,1);
+      v=make();await v.sync({active:false},()=>true);
+      assert.equal(tab.pinned,true,'Do not undo the user pin when Intent did not perform the return');
+      assert.equal(tab.windowId,1);assert.equal(v.state.moved.length,0);assert(!c.reveals.includes(1));unchanged(c);
+    });
+    await check(name+' respects a manual move into a third window across worker reload',async()=>{
+      const c=setup(firefox),{f,tab,rules,make}=c;let v=make();
+      await v.sync(rules,t=>t.id!==4);
+      f.windows.push({id:9,type:'normal',state:'normal',left:0,top:0,width:800,height:600});
+      f.tabs.push({id:99,windowId:9,index:0,active:true,url:'https://destination.example'});
+      await f.api.tabs.move(4,{windowId:9,index:-1});await f.api.tabs.update(4,{pinned:false});
+      v=make();await v.sync({active:false},()=>true);
+      assert.equal(tab.windowId,9,'A marker follows the tab, but does not confer ownership of its new window');
+      assert.equal(tab.pinned,false);assert(!c.reveals.includes(9));assert.equal(v.state.moved.length,0);unchanged(c);
+    });
+    await check(name+' preserves a user pin change after parking repair completed',async()=>{
+      const c=setup(firefox),{f,tab,rules,make}=c,v=make();
+      await v.sync(rules,t=>t.id!==4);assert.equal(tab.pinned,true);
+      await f.api.tabs.update(4,{pinned:false});
+      await v.sync(rules,t=>t.id!==4);
+      assert.equal(tab.pinned,false,'Completed repair must not continually enforce stale pin state');
+      await v.sync({active:false},()=>true);
+      assert.equal(tab.pinned,false);assert.equal(tab.windowId,1);assert.equal(v.state.moved.length,0);unchanged(c);
+    });
+    await check(name+' preserves a new pin choice after a failed return move',async()=>{
+      const c=setup(firefox),{f,tab,rules,make}=c,v=make();await v.sync(rules,t=>t.id!==4);
+      const move=f.api.tabs.move;let refused=false;
+      f.api.tabs.move=async(ids,value)=>{if(value.windowId===1&&!refused){refused=true;throw Error('busy')}return move(ids,value)};
+      await v.sync({active:false},()=>true);assert.notEqual(tab.windowId,1);
+      await f.api.tabs.update(4,{pinned:false});
+      await v.sync({active:false},()=>true);
+      assert.equal(tab.windowId,1);assert.equal(tab.pinned,false);assert.equal(v.state.moved.length,0);unchanged(c);
+    });
+    await check(name+' respects a pin change while return ordering awaits',async()=>{
+      const c=setup(firefox),{f,tab,rules,make}=c,v=make();f.tabs.find(t=>t.id===1).pinned=true;
+      await v.sync(rules,t=>t.id!==4);
+      const query=f.api.tabs.query;let changed=false;
+      f.api.tabs.query=async q=>{const snapshot=await query(q);if(q.windowId===1&&!changed){changed=true;await f.api.tabs.update(4,{pinned:false})}return snapshot};
+      await v.sync({active:false},()=>true);await v.sync({active:false},()=>true);
+      assert(changed);assert.equal(tab.pinned,false,'Do not retry an already-verified pin over the user change');
+      assert.equal(v.state.moved.length,0);unchanged(c);
+    });
+    for(const inventoryFails of [false,true])await check(name+' retains ownership after return read error (inventory '+(inventoryFails?'fails':'confirms live')+')',async()=>{
+      const c=setup(firefox),{f,tab,rules,make}=c;let v=make();
+      await v.sync(rules,t=>t.id!==4);
+      const get=f.api.tabs.get,query=f.api.tabs.query;let sourceReads=0,failInventory=false;
+      f.api.tabs.get=async id=>{
+        if(id===4&&tab.windowId===1&&++sourceReads===2){failInventory=inventoryFails;throw Error('temporary read failure')}
+        return get(id);
+      };
+      f.api.tabs.query=async q=>{if(failInventory){failInventory=false;throw Error('temporary inventory failure')}return query(q)};
+      await v.sync({active:false},()=>true);
+      assert.equal(tab.windowId,1);assert.equal(tab.pinned,false);
+      assert(v.state.moved.some(item=>item.id===4),'Unknown read state must retain pin ownership');
+      v=make();await v.sync({active:false},()=>true);
+      assert.equal(tab.pinned,true);assert.equal(v.state.moved.length,0);unchanged(c);
+    });
+    await check(name+' permits cleanup only after a closed tab is confirmed absent',async()=>{
+      const c=setup(firefox),{f,rules,make}=c,v=make();await v.sync(rules,t=>t.id!==4);
+      f.tabs.splice(f.tabs.findIndex(t=>t.id===4),1); // User closes it outside Intent.
+      await v.sync({active:false},()=>true);
+      assert.equal(v.state.moved.length,0);assert(!f.removed.includes(4));unchanged(c);
+    });
+  }
+  await check('Firefox waits for verified identity before classifying a moved marker window',async()=>{
+    const c=setup(true),{f,tab,rules,make,nativeOwner}=c;let v=make();await v.sync(rules,t=>t.id!==4);
+    f.windows.push({id:9,type:'normal',state:'normal',left:0,top:0,width:800,height:600});
+    f.tabs.push({id:99,windowId:9,index:0,active:true,url:'https://destination.example'});
+    await f.api.tabs.move(4,{windowId:9,index:-1});
+    nativeOwner.identity=()=>null;v=make();await v.sync({active:false},()=>true);
+    assert.equal(tab.windowId,9);assert(await f.api.sessions.getTabValue(4,v.key),'Keep marker until process identity can be verified');
+    nativeOwner.identity=()=>structuredClone(nativeIdentity);await v.sync({active:false},()=>true);
+    assert.equal(tab.windowId,9);assert.equal(await f.api.sessions.getTabValue(4,v.key),undefined);unchanged(c);
+  });
+  await check('Pin index repair never pulls a user-moved tab back into its old window',async()=>{
+    const c=setup(),{f,tab,make}=c,v=make();
+    f.tabs.find(t=>t.id===1).pinned=true;f.tabs.find(t=>t.id===1).index=0;tab.index=1;
+    f.windows.push({id:9,type:'normal',state:'normal',left:0,top:0,width:800,height:600});
+    f.tabs.push({id:99,windowId:9,index:0,pinned:false,active:true,url:'https://destination.example'});
+    const query=f.api.tabs.query,move=f.api.tabs.move;let userMoved=false,correctionMoves=0;
+    f.api.tabs.move=async(ids,value)=>{correctionMoves++;assert.equal(value.windowId,undefined,'Index-only repair must not target a window');return move(ids,value)};
+    f.api.tabs.query=async q=>{
+      const snapshot=await query(q);
+      if(q.windowId===1&&!userMoved){userMoved=true;await move(4,{windowId:9,index:-1})}
+      return snapshot;
+    };
+    const repaired=await v.repairPin({id:4,windowId:1,parking:50,pinned:true,index:0},1,true);
+    assert.equal(repaired,false);assert.equal(tab.windowId,9,'User destination must remain intact');
+    assert.equal(correctionMoves,0,'No correction follows an observed move to another window');unchanged(c);
+  });
+  await check('Native orphan read errors retain pin metadata after reveal acknowledgement',async()=>{
+    const c=setup(),{f,tab,rules,make,nativeOwner}=c,v=make();
+    const get=f.api.tabs.get,update=f.api.tabs.update;let denyPin=true,failRead=false;
+    f.api.tabs.update=async(id,value)=>{if(id===4&&value.pinned===true&&denyPin)throw Error('pin busy');return update(id,value)};
+    f.api.tabs.get=async id=>{if(id===4&&failRead){failRead=false;throw Error('temporary read failure')}return get(id)};
+    nativeOwner.revealWindows=async()=>{failRead=true;return true};
+    await v.sync(rules,t=>t.id!==4);f.windows.splice(f.windows.findIndex(w=>w.id===1),1);
+    await v.sync({active:false},()=>true);
+    assert(v.state.moved.some(item=>item.id===4),'Native ACK is not permission to discard unknown pin state');
+    denyPin=false;nativeOwner.revealWindows=async()=>true;
+    await v.sync({active:false},()=>true);
+    assert.equal(tab.pinned,true);assert.equal(v.state.moved.length,0);assert(!f.removed.includes(4));
+  });
+  assert.deepEqual(failures,[],'Pin review regression failures');
+}
+
+async function testOrderRestoreRaces() {
+  const failures=[];
+  async function check(name,run){
+    try{await run();console.log('PASS restore order: '+name)}
+    catch(error){failures.push({name,message:error.message});console.error('FAIL restore order: '+name+' — '+error.message)}
+  }
+  for(const firefox of [false,true]) for(const timing of ['query','move'])
+    await check((firefox?'Firefox':'Chrome')+' preserves the user window and pin during the final order '+timing,async()=>{
+      const f=fixture({chromeCrossWindowMoves:true}),v=new Visibility(f.api,firefox);
+      const tab=f.tabs.find(t=>t.id===4),move=f.api.tabs.move,query=f.api.tabs.query;
+      f.tabs.find(t=>t.id===1).pinned=true;tab.pinned=true;
+      [1,4,3,2].forEach((id,index)=>f.tabs.find(t=>t.id===id).index=index);
+      f.windows.push({id:9,type:'normal',state:'normal',left:0,top:0,width:800,height:600});
+      f.tabs.push({id:99,windowId:9,index:0,active:true,url:'https://destination.example'});
+      await v.load();v.state.orders.push({windowId:1,tabIDs:[4,1,2,3]});await v.save();
+      let userMoved=false;const activationRequests=[],update=f.api.tabs.update;
+      f.api.tabs.update=async(id,value)=>{if('active' in value)activationRequests.push({id,...value});return update(id,value)};
+      async function userMove(){
+        userMoved=true;await move(4,{windowId:9,index:-1});await f.api.tabs.update(4,{pinned:true});
+      }
+      if(timing==='query')f.api.tabs.query=async q=>{
+        const snapshot=await query(q);
+        if(q.windowId===1&&!userMoved)await userMove();
+        return snapshot;
+      };
+      else f.api.tabs.move=async(ids,value)=>{
+        if((Array.isArray(ids)?ids:[ids]).includes(4)&&!userMoved)await userMove();
+        return move(ids,value);
+      };
+      await v.sync({active:false},()=>true);
+      assert(userMoved);assert.equal(tab.windowId,9,'Final order normalization must not undo a user move');
+      assert.equal(tab.pinned,true,'Never unpin a user tab by pulling it across windows');
+      assert.deepEqual((await query({windowId:1})).map(t=>t.id),[1,2,3]);
+      assert.equal(v.state.orders.length,0);assert.deepEqual(activationRequests,[]);
+      assert.deepEqual(f.tabs.filter(t=>t.windowId===1&&t.active).map(t=>t.id),[1]);
+      assert.deepEqual(f.tabs.filter(t=>t.windowId===9&&t.active).map(t=>t.id),[99]);
+      assert.deepEqual(f.removed,[]);
+    });
+  assert.deepEqual(failures,[],'Final order race regression failures');
+}
+
 (async()=>{
+  await testPinPreservation();
+  await testPinReviewRegressions();
+  await testOrderRestoreRaces();
   const active={active:true,hideDistractions:true,startupSessionID:'one',selectedTabIDs:[1]};
   {
     const f=fixture(), v=new Visibility(f.api,true);

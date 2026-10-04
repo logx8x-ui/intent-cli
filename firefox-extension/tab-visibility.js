@@ -161,6 +161,7 @@
       if (native && !nativeIdentity) return false;
       if (native && !this.firefox && !this.api.storage.local) return false;
       if (native) { this.state.nativeBrowserIdentity = nativeIdentity; await this.save(); }
+      await this.repairParkingPins(tabs);
       for (const id of this.state.parking) {
         await this.api.windows.update(id, {state: 'minimized'}).catch(() => {});
       }
@@ -234,7 +235,7 @@
           for (const member of batch) {
             processed.add(member.id);
             if (!this.state.moved.some(x => x.id === member.id)) {
-              const entry = {id: member.id, windowId, index: member.index, parking, pinned: Boolean(member.pinned), splitViewId: member.splitViewId, sourceToken,
+              const entry = {id: member.id, windowId, index: member.index, parking, pinned: Boolean(member.pinned), parkingPinPending: true, splitViewId: member.splitViewId, sourceToken,
                 ...(native ? {nativeSessionID: this.state.nativeSessionID,
                   nativeBrowserSessionID: nativeIdentity.browserSessionID,
                   nativeBrowserProcessIdentity: {...nativeIdentity.processIdentity}, nativeParkingWindowID: parking} : {})};
@@ -245,10 +246,85 @@
           }
           const pinnedCount = tab.pinned ? (await this.api.tabs.query({windowId: parking})).filter(t => t.pinned).length : -1;
           await this.api.tabs.move(batch.length === 1 ? tab.id : batch.map(t => t.id), {windowId: parking, index: pinnedCount}).catch(() => {});
+          for (const member of batch) {
+            const owned = this.state.moved.find(item => item.id === member.id);
+            if (owned) await this.repairParkingPin(owned, parking);
+          }
         }
         await this.api.windows.update(parking, {state: 'minimized'}).catch(() => {});
       }
       return true;
+    }
+    async repairPin(item, windowId, restoreIndex = false) {
+      // Chrome cross-window moves insert an unpinned tab. Keep the original
+      // pin in durable ownership until both the update and readback succeed.
+      if (typeof item.pinned !== 'boolean') return true;
+      try {
+        let tab = await this.api.tabs.get(item.id);
+        if (tab.windowId !== windowId) return false;
+        if (Boolean(tab.pinned) !== item.pinned) {
+          await this.api.tabs.update(item.id, {pinned: item.pinned});
+          tab = await this.api.tabs.get(item.id);
+        }
+        if (tab.windowId !== windowId || Boolean(tab.pinned) !== item.pinned) return false;
+        if (restoreIndex && item.pinned) {
+          // Pinning appends at the pinned boundary. Firefox marker-only recovery
+          // has no saved order array, so restore the original pinned slot here.
+          const tabs = await this.api.tabs.query({windowId});
+          // A user may move or repin the tab while the query is in flight.
+          tab = await this.api.tabs.get(item.id);
+          if (tab.windowId !== windowId) return false;
+          if (Boolean(tab.pinned) !== item.pinned) {
+            // The desired pin was already verified before this query. A later
+            // change is external, not a failed update to keep overwriting.
+            item.pinned = Boolean(tab.pinned);
+            return true;
+          }
+          const index = Math.min(Math.max(0, item.index), tabs.filter(candidate => candidate.pinned).length - 1);
+          if (tab.index !== index) {
+            // Omit windowId: an index correction must never become a
+            // cross-window move if the user moves the tab concurrently.
+            await this.api.tabs.move(item.id, {index});
+            tab = await this.api.tabs.get(item.id);
+          }
+          if (tab.windowId !== windowId || !tab.pinned || tab.index !== index) return false;
+        }
+        return true;
+      } catch (_) { return false; }
+    }
+    async persistMovedEntry(item) {
+      await this.save();
+      if (this.firefox && this.api.sessions)
+        await this.api.sessions.setTabValue(item.id, this.key, {...item, kind: 'moved'});
+    }
+    async repairParkingPin(item, windowId) {
+      if (item.parkingPinPending === false) return true;
+      if (!await this.repairPin(item, windowId)) return false;
+      item.parkingPinPending = false;
+      await this.persistMovedEntry(item);
+      return true;
+    }
+    async repairParkingPins(snapshot = null) {
+      // Retry only our unfinished mutation. Once verified, later user pin
+      // changes belong to the user and are captured before our return move.
+      if (!this.state.moved.some(item => item.parkingPinPending !== false)) return;
+      const tabs = new Map((snapshot || await this.api.tabs.query({})).map(tab => [tab.id, tab]));
+      for (const item of this.state.moved) {
+        const tab = tabs.get(item.id);
+        if (tab?.windowId === item.parking) await this.repairParkingPin(item, item.parking);
+      }
+    }
+    async readOwnedTab(id) {
+      try { return {confirmed: true, tab: await this.api.tabs.get(id)}; }
+      catch (_) {
+        // A failed read is not proof that a tab closed. Release ownership only
+        // after a successful inventory confirms absence; otherwise retry later.
+        try {
+          if (!(await this.api.tabs.query({})).some(tab => tab.id === id))
+            return {confirmed: true, tab: null};
+        } catch (_) { /* Keep ownership while the browser cannot answer. */ }
+        return {confirmed: false, tab: null};
+      }
     }
     windowDescriptor(window, tabs) {
       return {windowID: window.id, title: tabs.find(tab => tab.active)?.title || '',
@@ -332,8 +408,13 @@
         // Firefox markers are the restart proof. Keep them until either native
         // accepts ownership or generation-verified startup recovery succeeds.
         const sourceIDs = new Set((await this.api.windows.getAll({populate: false})).map(window => window.id));
-        const relinquished = this.state.moved.filter(item => released.has(item.parking) && !sourceIDs.has(item.windowId));
-        for (const item of relinquished) {
+        const relinquished = [];
+        for (const item of this.state.moved.filter(item => released.has(item.parking) && !sourceIDs.has(item.windowId))) {
+          const observed = await this.readOwnedTab(item.id);
+          if (!observed.confirmed) continue;
+          const tab = observed.tab;
+          if (tab?.windowId === item.parking && !await this.repairParkingPin(item, item.parking)) continue;
+          relinquished.push(item);
           if (this.firefox && this.api.sessions) await this.api.sessions.removeTabValue(item.id, this.key).catch(() => {});
         }
         this.state.moved = this.state.moved.filter(item => !relinquished.includes(item));
@@ -406,14 +487,26 @@
           const token = await this.api.sessions.getWindowValue(window.id, this.key + 'Source').catch(() => null);
           if (token) sourceWindows.set(token, window.id);
         }
-        for (const tab of await this.api.tabs.query({})) {
+        const markerTabs = await this.api.tabs.query({});
+        for (const tab of markerTabs) {
           const owned = await this.api.sessions.getTabValue(tab.id, this.key).catch(() => false);
           if (!owned) continue;
           if (owned.kind === 'moved') {
             if (!this.state.moved.some(item => item.id === tab.id)) {
-              this.state.moved.push({...owned, id: tab.id, windowId: sourceWindows.get(owned.sourceToken) ?? -1, parking: tab.windowId});
+              const sourceID = sourceWindows.get(owned.sourceToken) ?? -1;
+              // A failed pin update may leave a marker on a tab already returned
+              // to source. In the same verified process, also respect a user's
+              // move elsewhere: its current window is not our recorded holder.
+              const identity = this.verifiedNativeIdentity();
+              const isHolder = markerTabs.some(other => other.windowId === tab.windowId && this.holdingPage(other.url));
+              if (owned.nativeSessionID && !identity && tab.windowId !== sourceID && !isHolder)
+                throw new Error('Waiting for verified native recovery identity');
+              const sameProcess = this.sameProcess(owned.nativeBrowserProcessIdentity, identity?.processIdentity);
+              const movedElsewhere = sameProcess && !isHolder && tab.windowId !== owned.parking && tab.windowId !== sourceID;
+              const parking = tab.windowId === sourceID || movedElsewhere ? null : tab.windowId;
+              this.state.moved.push({...owned, id: tab.id, windowId: sourceID, parking});
               if (owned.nativeSessionID) this.state.nativeSessionID ||= owned.nativeSessionID;
-              if (!this.state.parking.includes(tab.windowId)) this.state.parking.push(tab.windowId);
+              if (parking != null && !this.state.parking.includes(parking)) this.state.parking.push(parking);
               await this.save();
             }
             continue;
@@ -453,14 +546,26 @@
         if (tab?.hidden) { try { await this.api.tabs.show(id); } catch (_) { continue; } }
         this.state.hidden = this.state.hidden.filter(x => x !== id); await this.save();
       }
+      await this.repairParkingPins();
       const restoredIDs = new Set();
       for (const item of [...this.state.moved].sort((a,b) => a.windowId - b.windowId || a.index - b.index)) {
         if (restoredIDs.has(item.id)) continue;
         const batch = item.splitViewId != null && item.splitViewId >= 0
           ? this.state.moved.filter(other => other.windowId === item.windowId && other.parking === item.parking && other.splitViewId === item.splitViewId).sort((a,b) => a.index - b.index) : [item];
-        const tab = await this.api.tabs.get(item.id).catch(() => null);
+        const observed = await this.readOwnedTab(item.id);
+        if (!observed.confirmed) continue;
+        const tab = observed.tab;
         if (tab && tab.windowId === item.parking) {
           try {
+            for (const member of batch) {
+              const current = await this.api.tabs.get(member.id);
+              if (current.windowId !== member.parking) throw new Error('Tab moved before return');
+              if (member.parkingPinPending === false) member.pinned = Boolean(current.pinned);
+              // This durable phase distinguishes our failed return from a tab
+              // the user moved back themselves while Add as you go was active.
+              member.returnPinPending = true;
+              await this.persistMovedEntry(member);
+            }
             await this.api.tabs.move(batch.length === 1 ? item.id : batch.map(member => member.id), {windowId: item.windowId, index: item.index});
             // Firefox may silently refuse a move; retain ownership until it is verified.
             const returned = await this.api.tabs.get(item.id);
@@ -477,6 +582,13 @@
           }
         }
         for (const member of batch) {
+          const observed = await this.readOwnedTab(member.id);
+          if (!observed.confirmed) continue;
+          const current = observed.tab;
+          if (current?.windowId === member.windowId && member.returnPinPending) {
+            // Only an Intent-owned return may repair a tab already in source.
+            if (!await this.repairPin(member, member.windowId, true)) continue;
+          } else if (current?.windowId === member.parking && !await this.repairParkingPin(member, member.parking)) continue;
           restoredIDs.add(member.id);
           if (this.firefox && this.api.sessions && tab) await this.api.sessions.removeTabValue(member.id, this.key).catch(() => {});
           this.state.moved = this.state.moved.filter(x => x.id !== member.id);
@@ -501,11 +613,18 @@
             const expected = [true, false].flatMap(pinned => desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned));
             if (current.map(tab => tab.id).join(',') !== expected.join(',')) {
               stable = 0;
-              // Pinned and ordinary tabs have distinct insertion ranges.
-              for (const pinned of [true, false]) {
-                const ids = desired.filter(id => Boolean(existing.get(id)?.pinned) === pinned);
-                if (ids.length) await this.api.tabs.move(ids, {windowId: order.windowId,
-                  index: pinned ? 0 : current.filter(tab => tab.pinned).length});
+              // Recheck each tab after the awaited snapshot, then reorder only
+              // within its current window. An explicit target window could pull
+              // a user's concurrent move back here and clear its pin in Chrome.
+              for (const [index, id] of expected.entries()) {
+                let live = await this.api.tabs.get(id);
+                const pinned = Boolean(existing.get(id)?.pinned);
+                if (live.windowId !== order.windowId || Boolean(live.pinned) !== pinned) break;
+                if (live.index !== index) {
+                  await this.api.tabs.move(id, {index});
+                  live = await this.api.tabs.get(id);
+                  if (live.windowId !== order.windowId || Boolean(live.pinned) !== pinned) break;
+                }
               }
             }
             await new Promise(resolve => setTimeout(resolve, 250));
