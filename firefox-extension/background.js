@@ -14,9 +14,12 @@ let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
+let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeVisibility && browser.storage.session
+    && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
-    ? [...EXTENSION_CAPABILITIES, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : EXTENSION_CAPABILITIES;
+    ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
 }
 
 const {
@@ -24,7 +27,9 @@ const {
   isSearchStagingURL
 } = IntentBrowserRules;
 
-const tabVisibility = typeof IntentTabVisibility !== "undefined" ? new IntentTabVisibility(browser, true) : null;
+const nativeWindowVisibility = typeof IntentNativeWindowVisibility !== "undefined"
+  ? new IntentNativeWindowVisibility(browser, postCommandPort, () => browserSessionID) : null;
+const tabVisibility = typeof IntentTabVisibility !== "undefined" ? new IntentTabVisibility(browser, true, nativeWindowVisibility) : null;
 let rules = inactiveRules();
 let lastAllowedTabId = null;
 let enforcing = false;
@@ -137,13 +142,17 @@ function connectCommandPort() {
     nativeConnectionConfirmed = false;
     port.onMessage.addListener(async (message) => {
       if (commandPort !== port) return;
+      const visibilityWasReady = Boolean(nativeWindowVisibility?.identity());
+      nativeWindowVisibility?.receive(message);
       nativeConnectionConfirmed = true;
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
       const groupsSupported = message?.hostCapabilities?.includes("native-tab-groups-host-v1") === true;
       const identitySupported = message?.hostCapabilities?.includes("tab-session-identity-host-v1") === true;
-      if (identitySupported !== hostSupportsSessionIdentity || supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview || groupsSupported !== hostSupportsNativeTabGroups) {
+      const visibilitySupported = message?.hostCapabilities?.includes("native-window-visibility-host-v1") === true;
+      if (visibilityWasReady !== Boolean(nativeWindowVisibility?.identity()) || visibilitySupported !== hostSupportsNativeVisibility || identitySupported !== hostSupportsSessionIdentity || supported !== hostSupportsQuickSelection || previewSupported !== hostSupportsTabPreview || groupsSupported !== hostSupportsNativeTabGroups) {
+        hostSupportsNativeVisibility = visibilitySupported;
         hostSupportsQuickSelection = supported;
         hostSupportsTabPreview = previewSupported;
         hostSupportsNativeTabGroups = groupsSupported;
@@ -157,6 +166,7 @@ function connectCommandPort() {
     port.onDisconnect.addListener(() => {
       if (commandPort !== port) return;
       commandPort = null;
+      nativeWindowVisibility?.disconnected();
       nativeConnectionConfirmed = false;
       settlePendingRuleRefresh();
       scheduleCommandReconnect();
@@ -369,6 +379,7 @@ function effectiveRules(nativeRules) {
     active: true,
     websiteFeaturePolicies: nativeRules.websiteFeaturePolicies || {},
     hideDistractions: Boolean(nativeRules.hideDistractions),
+    nativeWindowVisibility: Boolean(nativeWindowVisibility && hostSupportsNativeVisibility && nativeRules.nativeWindowVisibility),
     accessMode: nativeRules.accessMode === "blacklist" ? "blacklist" : "whitelist",
     allowedWebsites: Array.isArray(nativeRules.allowedWebsites) ? nativeRules.allowedWebsites : [],
     startupWebsites: Array.isArray(nativeRules.startupWebsites) ? nativeRules.startupWebsites : [],
@@ -417,7 +428,7 @@ function settlePendingRuleRefresh() {
 }
 
 function sendHeartbeat() {
-  tabVisibility?.sync(rules, isRuntimeAllowedTab);
+  syncTabVisibility();
   if (rules.active && Array.isArray(rules.selectedTabIDs)) {
     browser.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => {
       if (tabs.some(tab => tab.active && !isRuntimeAllowedTab(tab))) returnToAllowedTab();
@@ -427,7 +438,6 @@ function sendHeartbeat() {
   postCommandPort({ type: "heartbeat" });
 }
 
-let initialVisibilitySession = null;
 let ruleApplication = Promise.resolve();
 let requestedRulesFingerprint = null;
 let ruleApplicationRevision = 0;
@@ -493,20 +503,22 @@ async function applyEffectiveRules(nextRules, revision) {
     completedStartupFingerprint = null;
   }
   if (revision !== ruleApplicationRevision) return;
-  // Start with only the chosen workspace; later opens are allowed. The
-  // visibility ledger keeps the initial distractions parked until completion.
-  if (rules.active && rules.addAsYouGo && initialVisibilitySession !== rules.startupSessionID
-      && (Array.isArray(rules.selectedTabIDs) || rules.startupWebsites.length > 0)) {
-    initialVisibilitySession = rules.startupSessionID;
-    await tabVisibility?.syncInitial(rules, tab => Array.isArray(rules.selectedTabIDs)
-      ? rules.selectedTabIDs.includes(tab.id)
-      : isAllowedURL(tab.url, {...rules, addAsYouGo: false}), isRuntimeAllowedTab);
-  } else {
-    await tabVisibility?.sync(rules, isRuntimeAllowedTab);
-  }
+  await syncTabVisibility();
   if (revision !== ruleApplicationRevision) return;
-  if (!rules.active) initialVisibilitySession = null;
   scheduleTabSnapshot(true);
+}
+
+function syncTabVisibility() {
+  // The visibility ledger owns completion, so a failed native receipt retries
+  // the original inventory instead of allowing setup to be skipped on heartbeat.
+  const current = rules;
+  if (current.active && current.addAsYouGo
+      && (Array.isArray(current.selectedTabIDs) || current.startupWebsites.length > 0)) {
+    return tabVisibility?.syncInitial(current, tab => Array.isArray(current.selectedTabIDs)
+      ? current.selectedTabIDs.includes(tab.id)
+      : isAllowedURL(tab.url, {...current, addAsYouGo: false}), isRuntimeAllowedTab);
+  }
+  return tabVisibility?.sync(current, isRuntimeAllowedTab);
 }
 
 async function removeAlreadyBlockedTabs() {
@@ -543,7 +555,9 @@ function isFreshBlankTab(tab) {
 // Our holding page is infrastructure, never a user-created search tab.
 // Browsers can emit onCreated as about:blank before its extension URL loads.
 function isHoldingPage(url) {
-  return Boolean(url && url === browser.runtime.getURL?.('parked.html'));
+  const base = browser.runtime.getURL?.('parked.html');
+  return Boolean(typeof url === 'string' && base && (url === base
+    || (url.startsWith(base) && /^#intent-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(url.slice(base.length)))));
 }
 function forgetHoldingSearch(tabId) {
   if (searchSessionTabs.delete(tabId)) saveSearchLedger();
@@ -1019,7 +1033,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
-  if (tab.url === browser.runtime.getURL?.('parked.html')) return;
+  if (isHoldingPage(tab.url)) return;
   committedURLByTab.set(tab.id, tab.url || "about:blank");
   if (rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist" && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) {
     searchSessionTabs.add(tab.id);

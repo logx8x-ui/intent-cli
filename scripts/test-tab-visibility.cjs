@@ -1,17 +1,21 @@
 const assert = require('node:assert/strict');
 const Visibility = require('../chrome-extension/tab-visibility.js');
 const fs = require('node:fs');
+const nativeIdentity={browserSessionID:'browser-one',processIdentity:{pid:123,launched:100}};
 assert.equal(fs.readFileSync('chrome-extension/tab-visibility.js','utf8'), fs.readFileSync('firefox-extension/tab-visibility.js','utf8'));
 function fixture() {
   let serial = 50;
   const data = {};
-  const windows = [{id:1,type:'normal',state:'normal'}, {id:2,type:'normal',state:'minimized'}];
+  const localData = {};
+  const windows = [{id:1,type:'normal',state:'normal'}, {id:2,type:'normal',state:'minimized'}]
+    .map(window=>({...window,left:20,top:40,width:900,height:700}));
   const tabs = [1,2,3,4].map((id,index) => ({id,windowId:1,index,active:id===1,url:'https://example.com/'+id,groupId:-1}));
   tabs.push({id:5,windowId:2,index:0,url:'https://hidden.example',active:true});
   const removed = [];
   const groupData = new Map([[9, {id:9, windowId:1, title:'Study',color:'blue',collapsed:true}]]);
   const api = {
-    storage:{session:{get:async key=>structuredClone(data),set:async value=>Object.assign(data,structuredClone(value))}},
+    storage:{session:{get:async key=>structuredClone(data),set:async value=>Object.assign(data,structuredClone(value))},
+      local:{get:async()=>structuredClone(localData),set:async value=>Object.assign(localData,structuredClone(value)),remove:async key=>{delete localData[key]}}},
     sessions:{
       setTabValue:async(id,key,value)=>{(tabs.find(t=>t.id===id).owned ||= {})[key]=structuredClone(value)},
       getTabValue:async(id,key)=>tabs.find(t=>t.id===id)?.owned?.[key],
@@ -25,7 +29,7 @@ function fixture() {
       getAll:async()=>structuredClone(windows),
       get:async id=>{const w=windows.find(x=>x.id===id);if(!w)throw Error();return structuredClone(w)},
       update:async(id,value)=>{const w=windows.find(x=>x.id===id);if(!w)throw Error();Object.assign(w,value);return w},
-      create:async value=>{const id=serial++;const w={id,type:'normal',...value};windows.push(w);tabs.push({id:serial++,windowId:id,index:0,url:value.url});return w}
+      create:async value=>{const id=serial++;const w={id,type:'normal',left:20,top:40,width:900,height:700,...value};windows.push(w);tabs.push({id:serial++,windowId:id,index:0,url:value.url,active:true,title:'Intent'});return w}
     },
     tabGroups:{get:async id=>{if(!groupData.has(id))throw Error('missing');return structuredClone(groupData.get(id))},
       update:async(id,value)=>Object.assign(groupData.get(id),value)},
@@ -50,7 +54,8 @@ function fixture() {
       remove:async id=>{removed.push(id);tabs.splice(tabs.findIndex(t=>t.id===id),1)}
     }
   };
-  return {api,tabs,windows,removed,groupData};
+  return {api,tabs,windows,removed,groupData,localData,
+    clearSession:()=>{for(const key of Object.keys(data))delete data[key]}};
 }
 (async()=>{
   const active={active:true,hideDistractions:true,startupSessionID:'one',selectedTabIDs:[1]};
@@ -225,5 +230,348 @@ function fixture() {
     f.tabs[1].groupId=9; f.api.tabGroups.get=async()=>{throw Error('busy')};
     await v.sync(active,t=>t.id===1);
     assert.equal(f.tabs[1].windowId,1,'Do not destroy a group if recovery metadata is unavailable');}
-  console.log('Tab visibility: restore, suspended worker, mode reversal, owned state, last window, missing destination and serialization passed');
+  for (const firefox of [true, false]) {
+    const f=fixture(), calls=[], plans=[], reveals=[];
+    f.windows[1].state='normal';
+    for (const window of f.windows) Object.assign(window,{left:20,top:40,width:900,height:700});
+    for (const tab of f.tabs) tab.title='QA '+tab.id;
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{calls.push({id,...patch});return update(id,patch)};
+    const owner={identity:()=>structuredClone(nativeIdentity),publishPlan:async(rules,windows,parking)=>{plans.push(structuredClone({rules,windows,parking}));return true},
+      revealWindows:async(session,windows)=>{reveals.push({session,windows});return true}};
+    const v=new Visibility(f.api,firefox,owner), native={...active,nativeWindowVisibility:true};
+    await v.sync(native,t=>t.id===1);
+    assert.deepEqual(plans.at(-1).windows.map(w=>w.windowID),[2],'Native owner receives fully blocked user windows');
+    assert.deepEqual(plans.at(-1).windows[0],{windowID:2,title:'QA 5',frame:{left:20,top:40,width:900,height:700},state:'normal'});
+    assert.equal(calls.some(x=>x.id===2),false,'Exclusive native ownership never uses browser window state changes');
+    assert.equal(v.state.minimized.length,0,'Native windows are not also owned by the JS ledger');
+    assert.equal(await f.api.sessions.getWindowValue(2,v.key),undefined,'Firefox has no competing legacy restoration marker');
+    assert(plans.at(-1).parking.length>0,'Parking ownership is reported separately');
+    await v.sync({active:false},()=>true);
+    assert.equal(calls.some(x=>x.id===2),false,'Session completion leaves whole-window restoration to native ownership');
+    assert.equal(reveals.length,0,'An empty holding page is closed without revealing a window');
+  }
+  {
+    const f=fixture(), plans=[]; let available=false;
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async(_rules,windows)=>{plans.push(windows);if(!available)throw Error('Disconnected');return true}});
+    const native={...active,nativeWindowVisibility:true};
+    await v.sync(native,t=>t.id===1);
+    assert.equal(v.state.nativeSessionID,'one','Native ownership mode persists before transport can fail');
+    assert.equal(v.state.minimized.length,0,'Failed native transport must not fall back to JS minimization');
+    available=true;
+    await v.sync(native,t=>t.id===1);
+    assert(plans.length>=2,'The next heartbeat republishes a failed native plan');
+    assert.equal(plans.at(-1)[0].state,'minimized','Preexisting minimized state is preserved for native ownership decisions');
+  }
+  {
+    const f=fixture(); let acceptParking=false; const receipts=[];
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async(_rules,_windows,parking)=>{
+      receipts.push(parking.map(w=>w.windowID)); return !parking.length || acceptParking;
+    }});
+    const native={...active,nativeWindowVisibility:true};
+    await v.sync(native,t=>t.id===1);
+    assert(v.state.parking.length>0,'An empty holding window may be prepared before registration');
+    assert.equal(f.tabs.find(t=>t.id===2).windowId,1,'No user tab enters parking before its native registration receipt');
+    assert.equal(v.state.moved.length,0,'Rejected registration creates no fictitious moved ownership');
+    acceptParking=true;
+    await v.sync(native,t=>t.id===1);
+    assert.notEqual(f.tabs.find(t=>t.id===2).windowId,1,'Accepted parking registration allows reversible tab movement');
+    assert(receipts.filter(ids=>ids.length).length>=2);
+  }
+  {
+    const f=fixture(), plans=[]; f.windows[1].state='normal';
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async(_rules,windows)=>{plans.push(windows.map(w=>w.windowID));return true}});
+    const open={...active,nativeWindowVisibility:true,addAsYouGo:true};
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.deepEqual(plans.at(-1),[2],'Add as you go publishes initial whole-window restrictions');
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.deepEqual(plans.at(-1),[],'Later allowed windows are not repeatedly minimized by the initial restriction');
+  }
+  {
+    const f=fixture(); let accepted=false;
+    const owner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>accepted};
+    let v=new Visibility(f.api,true,owner);
+    const open={...active,nativeWindowVisibility:true,addAsYouGo:true};
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.notEqual(v.state.initialSession,'one','Rejected receipt leaves initial visibility pending');
+    f.tabs.push({id:88,windowId:1,index:8,url:'https://example.com/new',active:false});
+    accepted=true;
+    v=new Visibility(f.api,true,owner);
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.equal(f.tabs.find(t=>t.id===88).windowId,1,'Retried initial setup preserves new Add-as-you-go tabs after worker suspension');
+    assert.notEqual(f.tabs.find(t=>t.id===2).windowId,1,'The same retry still parks original distractions');
+    assert.equal(v.state.initialSession,'one');
+  }
+  {
+    const f=fixture(); f.windows[1].state='normal'; let plans=0, failRestore=true;
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>{plans++;return true}});
+    await v.sync(active,t=>t.id===1);
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{if(id===2&&patch.state==='normal'&&failRestore)throw Error('Busy');return update(id,patch)};
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    assert.equal(plans,0,'Native ownership waits until existing legacy minimized ownership restores');
+    assert(await f.api.sessions.getWindowValue(2,v.key),'Failed migration retains Firefox ownership');
+    failRestore=false;
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    assert(plans>=1);
+    assert.equal(await f.api.sessions.getWindowValue(2,v.key),undefined,'Successful legacy restoration clears its marker before native adoption');
+  }
+  for (const firefox of [true,false]) {
+    const f=fixture(), changes=[], reveals=[]; let accepted=false;
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    const owner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true,revealWindows:async(session,windows)=>{reveals.push({session,windows});return accepted}};
+    let v=new Visibility(f.api,firefox,owner);
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    const parking=f.tabs.find(t=>t.id===2).windowId;
+    f.windows.splice(f.windows.findIndex(w=>w.id===1),1);
+    await v.sync({active:false},()=>true);
+    assert.equal(changes.some(x=>x.id===parking&&x.state==='normal'),false,'Native parking reveal never silently falls back to browser deminimization');
+    assert(v.state.nativeReveals.some(x=>x.windowID===parking),'Rejected reveal remains durable for retry');
+    accepted=true;
+    v=new Visibility(f.api,firefox,owner);
+    await v.sync({active:false},()=>true);
+    assert.equal(v.state.nativeReveals.length,0,'A resumed worker clears a reveal only after native acceptance');
+    assert(reveals.every(x=>x.session==='one'),'Inactive reveal retains the owning intention session');
+    assert(reveals.some(x=>x.windows.some(w=>w.windowID===parking)));
+    assert.equal(changes.some(x=>x.id===parking&&x.state==='normal'),false);
+  }
+  {
+    const f=fixture(), v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true,revealWindows:async()=>true});
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    await v.sync({active:false},()=>true);
+    await v.sync({...active,startupSessionID:'legacy-next'},t=>t.id===1);
+    assert.equal(v.state.nativeSessionID,null,'A distinct older-host session does not inherit native parking ownership');
+    const parking=f.tabs.find(t=>t.id===2).windowId;
+    f.windows.splice(f.windows.findIndex(w=>w.id===1),1);
+    await v.sync({active:false},()=>true);
+    assert.equal(f.windows.find(w=>w.id===parking).state,'normal','Later legacy orphan parking retains its existing restoration route');
+  }
+  {
+    const f=fixture(); f.windows[1].state='normal';
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true});
+    await v.sync({...active,startupSessionID:null,nativeWindowVisibility:true},()=>false);
+    assert(f.windows.every(w=>w.state==='normal'),'Malformed native session identity never falls back to JS window minimization');
+  }
+  for(const firefox of [true,false]) for(const planAccepted of [true,false]) {
+    const f=fixture(), changes=[]; f.windows[1].state='normal';
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    const v=new Visibility(f.api,firefox,{identity:()=>null,publishPlan:async()=>planAccepted});
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    assert.equal(f.tabs.find(t=>t.id===2).windowId,1,'Native parking waits for verified host process identity before moving tabs');
+    await v.sync({active:false},()=>true);
+    assert.deepEqual(changes,[],'Missing native identity never allows browser whole-window minimize or finish restoration');
+  }
+  async function chromeParked({sourceClosed=false,restart=false}={}) {
+    const f=fixture();
+    const v=new Visibility(f.api,false,{identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true});
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    const originalParking=f.tabs.find(t=>t.id===2).windowId;
+    const holder=f.tabs.find(t=>t.windowId===originalParking&&t.url.startsWith('extension://'));
+    assert.match(holder.url,/#intent-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      'Native Chrome parking has a strict durable UUID marker');
+    assert(f.localData[v.shadowKey]?.state.moved.length,'The full Chrome return ledger survives an extension update');
+    if(sourceClosed) {
+      f.windows.splice(f.windows.findIndex(w=>w.id===1),1);
+      for(let i=f.tabs.length-1;i>=0;i--)if(f.tabs[i].windowId===1)f.tabs.splice(i,1);
+    }
+    if(restart) {
+      for(const window of f.windows)window.id+=1000;
+      for(const tab of f.tabs){tab.id+=10000;tab.windowId+=1000;}
+      // Recycled IDs are unrelated user content and must never be destinations.
+      f.windows.push({id:1,type:'normal',state:'normal',left:20,top:40,width:900,height:700});
+      f.tabs.push({id:2,windowId:1,index:0,active:true,url:'https://unrelated.example/reused-id'});
+    }
+    f.clearSession();
+    return {...f,originalParking,parking:originalParking+(restart?1000:0)};
+  }
+  {
+    const f=await chromeParked(), changes=[];
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    const v=new Visibility(f.api,false,{identity:()=>({browserSessionID:'extension-updated',processIdentity:{...nativeIdentity.processIdentity}}),
+      revealWindows:async()=>false,recoverPriorWindows:async()=>true});
+    await v.sync({active:false},()=>true);
+    assert.deepEqual((await f.api.tabs.query({windowId:1})).map(t=>t.id),[1,2,3,4],
+      'Chrome extension update restores original source and order from durable same-process ledger');
+    assert.equal(changes.some(change=>change.state==='normal'),false,'Updating Chrome extension cannot bypass native window ownership');
+    assert.equal(f.localData[v.shadowKey],undefined,'Completed Chrome recovery removes the durable ledger');
+    assert(f.removed.every(id=>![1,2,3,4,5].includes(id)),'Only the empty Intent holder is removed');
+  }
+  {
+    const f=await chromeParked({sourceClosed:true}), recovered=[], changes=[];
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    let verified=false;
+    const owner={identity:()=>verified?{browserSessionID:'extension-updated',processIdentity:{...nativeIdentity.processIdentity}}:null,
+      revealWindows:async()=>false,recoverPriorWindows:async proof=>{recovered.push(proof);return true}};
+    const v=new Visibility(f.api,false,owner);
+    await v.sync({active:false},()=>true);
+    assert.deepEqual(changes,[],'Chrome waits safely for verified host identity after session storage is cleared');
+    assert(f.localData[v.shadowKey],'Missing identity cannot erase durable ownership');
+    verified=true;
+    await v.sync({active:false},()=>true);
+    assert.deepEqual(recovered[0].windowIDs,[f.originalParking],'Same-process Chrome orphan uses native recovery of original registered window');
+    assert.equal(changes.some(change=>change.state==='normal'),false);
+    assert.equal(v.state.nativeReveals.length,0);
+    assert.deepEqual(f.tabs.filter(t=>[2,3,4].includes(t.id)).map(t=>t.windowId),[f.parking,f.parking,f.parking]);
+  }
+  {
+    const f=await chromeParked({sourceClosed:true,restart:true}), proofs=[], changes=[], moves=[];
+    const update=f.api.windows.update, move=f.api.tabs.move;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    f.api.tabs.move=async(ids,patch)=>{moves.push({ids,...patch});return move(ids,patch)};
+    let accepted=false;
+    const v=new Visibility(f.api,false,{identity:()=>({browserSessionID:'browser-two',processIdentity:{pid:456,launched:200}}),
+      revealWindows:async()=>false,authorizeRestartRecovery:async proof=>{proofs.push(proof);return accepted}});
+    await v.sync({active:false},()=>true);
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'minimized','Restart rejection retains the owned Chrome holder for retry');
+    assert(f.localData[v.shadowKey],'Rejected restart keeps the durable nonce and native proof');
+    accepted=true;
+    await v.sync({active:false},()=>true);
+    assert.deepEqual(changes,[{id:f.parking,state:'normal',focused:false}],'Only the nonce-owned Chrome holder receives authorized restart reveal');
+    assert.deepEqual(moves,[],'A full Chrome restart never reuses stale numeric source/tab identities');
+    assert.equal(v.state.nativeReveals.length,0);
+    assert.equal(f.localData[v.shadowKey],undefined);
+    assert(proofs.every(proof=>proof.previousBrowserSessionID==='browser-one'&&proof.previousProcessIdentity.pid===123));
+    assert.equal(f.tabs.find(t=>t.id===2).url,'https://unrelated.example/reused-id');
+    assert.equal(f.tabs.filter(t=>[10002,10003,10004].includes(t.id)).length,3,'All original user tabs survive full restart recovery');
+  }
+  {
+    const f=await chromeParked({sourceClosed:true,restart:true}), changes=[];
+    const holder=f.tabs.find(t=>t.windowId===f.parking&&t.url.startsWith('extension://'));
+    holder.url='extension://intent/parked.html#intent-00000000-0000-4000-8000-000000000000';
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    const v=new Visibility(f.api,false,{identity:()=>({browserSessionID:'browser-two',processIdentity:{pid:456,launched:200}}),
+      revealWindows:async()=>true,authorizeRestartRecovery:async()=>true});
+    await v.sync({active:false},()=>true);
+    assert.deepEqual(changes,[],'A different holder nonce cannot authorize recovery, even if its numeric ID looks familiar');
+    assert.equal(f.tabs.filter(t=>[10002,10003,10004].includes(t.id)).length,3);
+    assert(f.localData[v.shadowKey],'Unresolved proof survives partial browser session restoration');
+  }
+  {
+    const f=await chromeParked({sourceClosed:true,restart:true});
+    const holder=f.tabs.find(t=>t.windowId===f.parking&&t.url.startsWith('extension://'));
+    const url=holder.url; holder.url='about:blank';
+    const v=new Visibility(f.api,false,{identity:()=>({browserSessionID:'browser-two',processIdentity:{pid:456,launched:200}}),
+      revealWindows:async()=>false,authorizeRestartRecovery:async()=>true});
+    await v.sync({active:false},()=>true);
+    assert(f.localData[v.shadowKey],'A holder that has not loaded yet retains durable recovery proof');
+    holder.url=url;
+    await v.sync({active:false},()=>true);
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'normal','A later browser-restored holder is recovered on the next heartbeat');
+    assert.equal(f.localData[v.shadowKey],undefined);
+  }
+  {
+    const f=await chromeParked({sourceClosed:true,restart:true}); let entered,release;
+    const started=new Promise(resolve=>{entered=resolve}),gate=new Promise(resolve=>{release=resolve});
+    const v=new Visibility(f.api,false,{identity:()=>({browserSessionID:'browser-two',processIdentity:{pid:456,launched:200}}),
+      publishPlan:async()=>true,revealWindows:async()=>false,authorizeRestartRecovery:async()=>{entered();await gate;return true}});
+    const restoring=v.sync({active:false},()=>true); await started;
+    const newer=v.sync({...active,nativeWindowVisibility:true,startupSessionID:'newer'},()=>true);
+    release();await restoring;await newer;
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'minimized','A new intention fences delayed Chrome restart reveal');
+    assert(f.localData[v.shadowKey],'Interrupted Chrome recovery keeps its durable proof');
+  }
+  for(const unavailable of ['missing','write-failed']) {
+    const f=fixture(), owner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true};
+    if(unavailable==='missing')delete f.api.storage.local;
+    else f.api.storage.local.set=async()=>{throw Error('Disk unavailable')};
+    const v=new Visibility(f.api,false,owner);
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    assert.equal(f.tabs.find(t=>t.id===2).windowId,1,unavailable+' durable Chrome storage stops before user tabs enter parking');
+  }
+  async function restartedOrphan() {
+    const f=fixture();
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true});
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    const parking=f.tabs.find(t=>t.id===2).windowId;
+    const owned=await f.api.sessions.getTabValue(2,v.key);
+    assert.equal(owned.nativeBrowserSessionID,nativeIdentity.browserSessionID);
+    assert.deepEqual(owned.nativeBrowserProcessIdentity,nativeIdentity.processIdentity,'Firefox marker contains durable native process-generation proof');
+    assert.equal(owned.nativeParkingWindowID,parking,'The original registered parking ID survives browser ID changes');
+    f.windows.splice(f.windows.findIndex(w=>w.id===1),1);
+    for(let i=f.tabs.length-1;i>=0;i--)if(f.tabs[i].windowId===1)f.tabs.splice(i,1);
+    // Firefox session values follow their real window/tab after a full restart,
+    // whereas storage.session and numeric IDs belong to the old lifetime.
+    for(const window of f.windows)window.id+=1000;
+    for(const tab of f.tabs){tab.id+=10000;tab.windowId+=1000;}
+    const fresh={};
+    f.api.storage.session={get:async()=>structuredClone(fresh),set:async data=>Object.assign(fresh,structuredClone(data))};
+    return {...f,parking:parking+1000};
+  }
+  {
+    const f=await restartedOrphan(), authorizations=[]; let accepted=false;
+    const identity={browserSessionID:'browser-two',processIdentity:{pid:456,launched:200}};
+    const owner={identity:()=>structuredClone(identity),publishPlan:async()=>true,revealWindows:async()=>false,
+      authorizeRestartRecovery:async proof=>{authorizations.push(proof);return accepted}};
+    const v=new Visibility(f.api,true,owner);
+    await v.sync({active:false},()=>true);
+    assert(v.state.nativeReveals.length>0,'Denied restart authorization retains a durable retry');
+    assert(await f.api.sessions.getTabValue(10002,v.key),'Firefox marker survives until recovery accepts ownership');
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'minimized');
+    accepted=true;
+    await v.sync({active:false},()=>true);
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'normal','Verified full restart reveals only the owned orphan holding window');
+    assert.equal(v.state.nativeReveals.length,0,'Restart recovery does not leave permanent pending reveals');
+    assert.equal(await f.api.sessions.getTabValue(10002,v.key),undefined,'Successful recovery clears stale ownership markers');
+    assert(authorizations.every(proof=>JSON.stringify(proof)===JSON.stringify({intentionSessionID:'one',previousBrowserSessionID:'browser-one',previousProcessIdentity:nativeIdentity.processIdentity})));
+    await v.sync({...active,startupSessionID:'after-restart',nativeWindowVisibility:true},()=>true);
+    assert.equal(v.state.nativeSessionID,'after-restart','Recovered orphans do not block the next intention');
+  }
+  {
+    const f=await restartedOrphan(); let calls=0;
+    const v=new Visibility(f.api,true,{identity:()=>({browserSessionID:'extension-reloaded',processIdentity:{...nativeIdentity.processIdentity}}),
+      revealWindows:async()=>false,authorizeRestartRecovery:async()=>{calls++;return true}});
+    await v.sync({active:false},()=>true);
+    assert.equal(calls,0,'A same-process worker/extension reload never takes the full-restart fallback');
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'minimized');
+    assert(await f.api.sessions.getTabValue(10002,v.key),'Same-generation denial retains its ownership proof');
+  }
+  for(const browserSessionID of ['extension-reloaded','browser-one']) {
+    const f=await restartedOrphan(), recovered=[], changes=[];
+    const update=f.api.windows.update;
+    f.api.windows.update=async(id,patch)=>{changes.push({id,...patch});return update(id,patch)};
+    const v=new Visibility(f.api,true,{identity:()=>({browserSessionID,processIdentity:{...nativeIdentity.processIdentity}}),
+      revealWindows:async()=>false,recoverPriorWindows:async proof=>{recovered.push(proof);return true},
+      authorizeRestartRecovery:async()=>{throw Error('Same-process reload is never restart authorization')}});
+    await v.sync({active:false},()=>true);
+    assert.equal(v.state.nativeReveals.length,0,'Durable native prior-window recovery clears an extension-reload orphan');
+    assert.deepEqual(recovered[0].windowIDs,[f.parking-1000],'Prior-window recovery uses the original registered browser window ID');
+    assert.equal(changes.some(change=>change.state==='normal'),false,'Same-process recovery remains exclusively native');
+    assert.equal(await f.api.sessions.getTabValue(10002,v.key),undefined);
+  }
+  {
+    const f=fixture(), owner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true,revealWindows:async()=>true};
+    const v=new Visibility(f.api,true,owner);
+    await v.sync({...active,nativeWindowVisibility:true},t=>t.id===1);
+    const move=f.api.tabs.move; let fail=true;
+    f.api.tabs.move=async(ids,value)=>{if(value.windowId===1&&fail)throw Error('Source temporarily busy');return move(ids,value)};
+    await v.sync({active:false},()=>true);
+    assert(v.state.moved.length>0,'Revealing parking cannot discard return-to-source ownership while that source still exists');
+    assert(await f.api.sessions.getTabValue(2,v.key));
+    fail=false;
+    await v.sync({active:false},()=>true);
+    assert.equal(f.tabs.find(t=>t.id===2).windowId,1,'The next restore retries the original window');
+  }
+  for(const interrupt of ['new-intention','changed-process']) {
+    const f=await restartedOrphan(); let release,entered;
+    const started=new Promise(resolve=>{entered=resolve});
+    const gate=new Promise(resolve=>{release=resolve});
+    let identity={browserSessionID:'browser-two',processIdentity:{pid:456,launched:200}};
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(identity),publishPlan:async()=>true,revealWindows:async()=>false,
+      authorizeRestartRecovery:async()=>{entered();await gate;return true}});
+    const restoring=v.sync({active:false},()=>true);
+    await started;
+    let next;
+    if(interrupt==='new-intention')next=v.sync({...active,startupSessionID:'newer',nativeWindowVisibility:true},()=>true);
+    else identity={browserSessionID:'browser-three',processIdentity:{pid:789,launched:300}};
+    release(); await restoring; if(next)await next;
+    assert.equal(f.windows.find(w=>w.id===f.parking).state,'minimized',interrupt+' fences a delayed restart authorization');
+    assert(v.state.nativeReveals.length>0);
+    assert(await f.api.sessions.getTabValue(10002,v.key),'Interrupted recovery must retain Firefox ownership');
+  }
+  console.log('Tab visibility: restore, suspended worker, mode reversal, owned state, last window, missing destination, serialization and exclusive native ownership passed');
 })().catch(e=>{console.error(e);process.exit(1)});

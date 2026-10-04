@@ -26,6 +26,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const reloads = [];
   const removals = [];
   const nativeMessages = [];
+  const nativeReceivers = [];
   const intervals = [];
   const storage = {
     guardEnabled: options.guardEnabled !== false,
@@ -122,22 +123,30 @@ function createHarness(activeRules, initialTabs, options = {}) {
     }
   };
 
+  if (options.nativeVisibility) {
+    const session = {};
+    browser.storage.session = {get: async () => ({...session}), set: async value => Object.assign(session, value)};
+  }
   if (options.withCommandPort) {
-    const messages = [];
+    const messages = nativeReceivers;
     browser.runtime.connectNative = () => ({
       onMessage: { addListener: listener => messages.push(listener) },
       onDisconnect: { addListener() {} },
       postMessage(message) {
         nativeMessages.push(message);
-        Promise.resolve().then(() => messages.forEach(listener => listener(activeRules)));
+        const response = message.type === "windowVisibilityPlan"
+          ? {...activeRules, visibilityPlanReceipt: {revision: message.visibilityPlan.revision, accepted: true}} : null;
+        Promise.resolve().then(() => messages.forEach(listener => listener(response || activeRules)));
       }
     });
   }
   const context = {
     browser,
+    IntentNativeWindowVisibility: options.nativeVisibility ? require("../firefox-extension/native-window-visibility.js") : undefined,
     IntentTabVisibility: options.onVisibilitySync ? class {
-      sync(rules) { return options.onVisibilitySync(rules); }
-      syncInitial(rules) { return options.onVisibilitySync(rules); }
+      constructor(_api, _firefox, owner) { this.owner = owner; }
+      sync(rules) { return options.onVisibilitySync(rules, this.owner, "sync"); }
+      syncInitial(rules) { return options.onVisibilitySync(rules, this.owner, "initial"); }
     } : undefined,
     IntentBrowserRules: helpers,
     IntentWebsiteFeatures: require("../firefox-extension/website-features.js"),
@@ -266,6 +275,10 @@ function createHarness(activeRules, initialTabs, options = {}) {
       }
     },
     async receiveNative(message) {
+      if (options.withCommandPort) {
+        for (const listener of nativeReceivers) await listener(message);
+        return;
+      }
       if (message?.tabCommand) {
         await context.handleRequestedTab(message.tabCommand);
       }
@@ -275,6 +288,56 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  // The real adapter waits for a receipt inside the serialized rules pipeline.
+  // Delivering receipts after awaiting that same pipeline would deadlock setup.
+  for (const [compatible, processProof] of [[true, true], [true, false], [false, true]]) {
+    const receipts = [];
+    const syncModes = [];
+    const native = createHarness({active: true, addAsYouGo: true,
+      nativeWindowVisibility: true, hideDistractions: true,
+      browserProcessIdentity: processProof ? {pid: 321, launched: 800001000} : null,
+      startupSessionID: "native-visibility-port", selectedTabIDs: [1],
+      allowedWebsites: ["example.com"], startupWebsites: [],
+      hostCapabilities: compatible ? ["native-window-visibility-host-v1"] : []},
+      [{id: 1, windowId: 1, active: true, url: "https://example.com/"}], {
+        nativeVisibility: true, withCommandPort: true,
+        onVisibilitySync: async (rules, owner, mode) => {
+          if (!rules.active) return;
+          syncModes.push(mode);
+          if (rules.nativeWindowVisibility) receipts.push(await owner.publishPlan(rules, [], []));
+        }
+      });
+    for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+    assert.equal(receipts.includes(true), compatible, "Native visibility requires negotiated host capability and a processed receipt");
+    const before = syncModes.length;
+    native.intervals.find(interval => interval.delay === 3000).callback();
+    for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+    assert.ok(syncModes.length > before);
+    assert.equal(syncModes.at(-1), "initial", "Heartbeat must retry initial selection through the durable visibility ledger");
+    assert.equal(native.nativeMessages.some(message => message.type === "windowVisibilityPlan"), compatible);
+    assert.equal(native.nativeMessages.some(message => message.extensionCapabilities?.includes('native-window-visibility-v1')),
+      compatible && processProof, 'Readiness requires both modern host and verified current process proof');
+  }
+
+  {
+    const base = {active:false, hostCapabilities:['native-window-visibility-host-v1']};
+    const proof = {pid:321, launched:800001000};
+    const native = createHarness({...base, browserProcessIdentity:proof}, [],
+      {nativeVisibility:true, withCommandPort:true});
+    for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+    for (const available of [false, true]) {
+      const response = available ? {...base, browserProcessIdentity:proof} : base;
+      await native.applyRules(response);
+      const before = native.nativeMessages.filter(message => message.type === 'heartbeat').length;
+      await native.receiveNative(response);
+      for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+      const beats = native.nativeMessages.filter(message => message.type === 'heartbeat');
+      assert.ok(beats.length > before, 'Readiness changes publish immediately without waiting for the timer');
+      assert.equal(beats.at(-1).extensionCapabilities.includes('native-window-visibility-v1'), available,
+        'Omitted process proof revokes readiness and verified proof restores it');
+    }
+  }
+
   for (const outcome of ["finish", "new-click", "leave-browser", "own-activation"]) {
     let releaseActivation, activationStarted;
     let pauseActivation = false;
@@ -437,6 +500,8 @@ async function run() {
     await freshSearch.create({id: 10, windowId: 2, active: false, url: 'about:blank'});
     await freshSearch.commit(10, 'extension://intent/parked.html', 'auto_toplevel');
     assert.equal(freshSearch.tabs.get(10).url, 'extension://intent/parked.html', 'Holding page must not be rewritten as a search tab');
+    await freshSearch.commit(10, 'extension://intent/parked.html#intent-12345678-abcd-1234-abcd-123456789012', 'auto_toplevel');
+    assert.equal(freshSearch.tabs.get(10).url, 'extension://intent/parked.html#intent-12345678-abcd-1234-abcd-123456789012', 'Nonce-bound holding page must remain outside fresh search allowance');
     assert(!freshSearch.allowedTabIDs().includes(10), 'Holding sentinel never becomes search-authorized');
 
   }

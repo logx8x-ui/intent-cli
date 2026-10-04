@@ -1,55 +1,142 @@
 /* Reversible, serialized visibility ownership. No user tab is closed or reloaded. */
 (function(root) {
   class IntentTabVisibility {
-    constructor(api, firefox = false) {
+    constructor(api, firefox = false, nativeOwner = null) {
       this.api = api; this.firefox = firefox; this.tail = Promise.resolve();
+      this.nativeOwner = nativeOwner;
+      this.desiredRules = null;
       this.key = 'intentHiddenWorkspaceV1'; this.state = null; this.recoveredOnce = false;
+      this.shadowKey = 'intentNativeVisibilityLedgerV1';
     }
     sync(rules, allowed) {
+      this.desiredRules = rules;
       const operation = () => this.reconcile(rules, allowed);
       this.tail = this.tail.then(operation, operation).catch(() => {});
       return this.tail;
     }
     syncInitial(rules, initiallyAllowed, subsequentlyAllowed) {
+      this.desiredRules = rules;
       const operation = async () => {
         await this.load();
         if (this.state.initialSession === rules.startupSessionID) {
           return this.reconcile(rules, subsequentlyAllowed);
         }
-        await this.reconcile(rules, initiallyAllowed);
+        // A native ownership receipt can take several heartbeats. Freeze the
+        // original inventory so retrying setup does not hide a user's later opens.
+        if (this.state.initialPending?.sessionID !== rules.startupSessionID) {
+          this.state.initialPending = {sessionID: rules.startupSessionID,
+            tabIDs: (await this.api.tabs.query({})).map(tab => tab.id)};
+          await this.save();
+        }
+        const initialIDs = new Set(this.state.initialPending.tabIDs);
+        if (await this.reconcile(rules, tab => !initialIDs.has(tab.id) || initiallyAllowed(tab)) === false) return;
         this.state.initialSession = rules.startupSessionID;
+        this.state.initialPending = null;
         await this.save();
       };
       this.tail = this.tail.then(operation, operation).catch(() => {});
       return this.tail;
     }
     async load() {
-      if (this.state) return;
+      if (this.state) { await this.recoverChromeHolders(); return; }
       // Session storage survives a suspended Chrome service worker, but cannot
       // apply recycled tab IDs to an unrelated browser lifetime after restart.
       const store = this.api.storage.session;
       this.state = store ? (await store.get(this.key))[this.key] : null;
+      if (!this.state && !this.firefox && this.api.storage.local) {
+        const saved = (await this.api.storage.local.get(this.shadowKey))[this.shadowKey];
+        if (saved?.version === 1 && saved.state?.nativeParkingProofs?.length) {
+          const identity = this.verifiedNativeIdentity();
+          if (!identity) throw new Error('Waiting for verified native recovery identity');
+          if (this.sameProcess(identity.processIdentity, saved.identity?.processIdentity)) {
+            // Extension updates may clear session storage without restarting the
+            // browser. Numeric IDs remain valid only in this verified process.
+            this.state = saved.state;
+          } else {
+            // Across a process restart, use only our durable random holder token.
+            // Never apply old numeric tab/window IDs to a new browser lifetime.
+            this.state = {hidden: [], moved: [], minimized: [], parking: [], nativeReveals: [],
+              nativeParkingProofs: [], nativeBrowserIdentity: saved.identity};
+            for (const proof of saved.state.nativeParkingProofs) {
+              if (!this.validParkingProof(proof)) continue;
+              this.state.nativeSessionID ||= proof.intentionSessionID;
+              this.state.nativeParkingProofs.push({...proof, windowID: null});
+            }
+          }
+        }
+      }
       this.state ||= { hidden: [], moved: [], minimized: [], parking: [] };
       this.state.recovered ||= [];
       this.state.groups ||= [];
       this.state.orders ||= [];
+      this.state.nativeReveals ||= [];
+      this.state.nativeParkingProofs ||= [];
+      await this.recoverChromeHolders();
+    }
+    async recoverChromeHolders() {
+      if (this.firefox || !this.state?.nativeParkingProofs?.some(proof => proof.windowID == null)) return;
+      const tabs = await this.api.tabs.query({});
+      for (const proof of this.state.nativeParkingProofs) {
+        if (proof.windowID != null || !this.validParkingProof(proof)) continue;
+        const holders = tabs.filter(tab => this.parkingNonce(tab.url) === proof.nonce);
+        // Session windows can restore after extension startup. Keep the proof
+        // for a later heartbeat; duplicated tokens are ambiguous, not authority.
+        if (holders.length !== 1) continue;
+        proof.windowID = holders[0].windowId;
+        if (!this.state.parking.includes(proof.windowID)) this.state.parking.push(proof.windowID);
+        if (!this.state.nativeReveals.some(item => item.windowID === proof.windowID))
+          this.state.nativeReveals.push({windowID: proof.windowID, sessionID: proof.intentionSessionID});
+      }
     }
     async save() {
       if (!this.api.storage.session) {
         if (this.firefox && this.api.sessions) return; // Persistent Firefox session markers own recovery.
         throw new Error('Safe visibility storage unavailable');
       }
-      try { await this.api.storage.session.set({ [this.key]: this.state }); }
+      try {
+        if (!this.firefox && this.api.storage.local) {
+          this.state.nativeParkingProofs = this.state.nativeParkingProofs.filter(proof =>
+            proof.windowID == null || this.state.parking.includes(proof.windowID) || this.state.nativeReveals.some(item => item.windowID === proof.windowID)
+              || this.state.moved.some(item => item.parking === proof.windowID));
+          if (this.state.nativeParkingProofs.length && this.state.nativeBrowserIdentity) {
+            // Durable before every tab move. A session-store reset must not lose
+            // either the return order or the proof that a holder belongs to us.
+            await this.api.storage.local.set({[this.shadowKey]: {version: 1,
+              identity: this.state.nativeBrowserIdentity, state: this.state}});
+          } else await this.api.storage.local.remove(this.shadowKey);
+        }
+        await this.api.storage.session.set({ [this.key]: this.state });
+      }
       catch (error) { this.state = null; throw error; }
     }
     async reconcile(rules, allowed) {
       await this.load();
       if (!rules.active || !rules.hideDistractions) {
-        if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length && !this.state.groups.length && !this.state.orders.length) return;
-        await this.restore(); this.state.initialSession = null; await this.save(); this.recoveredOnce = true; return;
+        if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length && !this.state.groups.length && !this.state.orders.length && !this.state.nativeReveals.length) return;
+        await this.restore(); this.state.initialSession = null; this.state.initialPending = null; await this.save(); this.recoveredOnce = true; return;
       }
       this.recoveredOnce = false;
       if (!this.api.storage.session && !(this.firefox && this.api.sessions)) return;
+      if (rules.nativeWindowVisibility && (typeof rules.startupSessionID !== 'string' || !rules.startupSessionID)) return false;
+      // A negotiated native owner remains exclusive through transport outages.
+      // Restore older JS ownership before adopting it; never discard recovery
+      // metadata merely because a newer host is available.
+      if (rules.nativeWindowVisibility && this.state.nativeSessionID !== rules.startupSessionID) {
+        await this.restore();
+        if (await this.hasLegacyWindowOwnership()) return false;
+        if (this.state.hidden.length || this.state.moved.length || this.state.parking.length || this.state.groups.length || this.state.orders.length) return false;
+        if (this.state.nativeReveals.length) return false;
+        this.state.nativeSessionID = rules.startupSessionID;
+        await this.save();
+      } else if (!rules.nativeWindowVisibility && this.state.nativeSessionID && this.state.nativeSessionID !== rules.startupSessionID) {
+        // A later session may use an older host. Finish the prior native
+        // workspace before giving newly created parking windows legacy ownership.
+        await this.restore();
+        if (this.state.nativeReveals.length || this.state.moved.length || this.state.parking.length) return false;
+        this.state.nativeSessionID = null;
+        await this.save();
+      }
+      const native = Boolean(this.state.nativeSessionID && this.state.nativeSessionID === rules.startupSessionID);
       const policy = JSON.stringify([rules.startupSessionID, rules.accessMode, rules.selectedTabIDs, rules.allowedWebsites]);
       if (this.state.policy && this.state.policy !== policy) await this.restore();
       this.state.policy = policy;
@@ -63,6 +150,17 @@
         if (!byWindow.has(tab.windowId)) byWindow.set(tab.windowId, []);
         byWindow.get(tab.windowId).push(tab);
       }
+      const nativeWindows = native ? [...byWindow].flatMap(([id, group]) => {
+        const window = windows.find(w => w.id === id);
+        return window?.type === 'normal' && !group.some(allowed) ? [this.windowDescriptor(window, group)] : [];
+      }) : [];
+      // Acceptance records parking identities before a user's tab can enter
+      // them. A failed/ambiguous receipt must never switch to browser ownership.
+      if (native && !await this.publishNativePlan(rules, nativeWindows)) return false;
+      const nativeIdentity = native ? this.verifiedNativeIdentity() : null;
+      if (native && !nativeIdentity) return false;
+      if (native && !this.firefox && !this.api.storage.local) return false;
+      if (native) { this.state.nativeBrowserIdentity = nativeIdentity; await this.save(); }
       for (const id of this.state.parking) {
         await this.api.windows.update(id, {state: 'minimized'}).catch(() => {});
       }
@@ -73,6 +171,7 @@
         if (!blocked.length) continue;
         const permitted = group.filter(allowed);
         if (!permitted.length) {
+          if (native) continue;
           if (window.state !== 'minimized') {
             if (!this.state.minimized.some(x => x.id === windowId)) {
               this.state.minimized.push({id: windowId, state: window.state || 'normal'});
@@ -93,8 +192,14 @@
         if (!candidates.length) continue;
         let parking = this.state.parking.find(id => windows.some(w => w.id === id && Boolean(w.incognito) === Boolean(window.incognito)));
         if (parking == null) {
-          const made = await this.api.windows.create({url: this.api.runtime.getURL('parked.html'), focused: false, state: 'minimized', incognito: Boolean(window.incognito)});
-          parking = made.id; this.state.parking.push(parking); await this.save();
+          const nonce = native && !this.firefox ? this.newParkingNonce() : null;
+          const made = await this.api.windows.create({url: this.api.runtime.getURL('parked.html') + (nonce ? '#intent-' + nonce : ''), focused: false, state: 'minimized', incognito: Boolean(window.incognito)});
+          parking = made.id; this.state.parking.push(parking);
+          if (nonce) this.state.nativeParkingProofs.push({nonce, windowID: parking, intentionSessionID: rules.startupSessionID,
+            previousBrowserSessionID: nativeIdentity.browserSessionID, previousProcessIdentity: {...nativeIdentity.processIdentity},
+            windowIDs: [parking]});
+          await this.save();
+          if (native && !await this.publishNativePlan(rules, nativeWindows)) return false;
         }
         let sourceToken = null;
         if (this.firefox && this.api.sessions) {
@@ -121,6 +226,7 @@
         }
         const processed = new Set();
         for (const tab of candidates.sort((a,b) => a.index - b.index)) {
+          if (native && !this.sameNativeIdentity(nativeIdentity, this.verifiedNativeIdentity())) return false;
           if (processed.has(tab.id)) continue;
           // Move a fully blocked split pair together to retain its relationship.
           const batch = tab.splitViewId != null && tab.splitViewId >= 0
@@ -128,7 +234,10 @@
           for (const member of batch) {
             processed.add(member.id);
             if (!this.state.moved.some(x => x.id === member.id)) {
-              const entry = {id: member.id, windowId, index: member.index, parking, pinned: Boolean(member.pinned), splitViewId: member.splitViewId, sourceToken};
+              const entry = {id: member.id, windowId, index: member.index, parking, pinned: Boolean(member.pinned), splitViewId: member.splitViewId, sourceToken,
+                ...(native ? {nativeSessionID: this.state.nativeSessionID,
+                  nativeBrowserSessionID: nativeIdentity.browserSessionID,
+                  nativeBrowserProcessIdentity: {...nativeIdentity.processIdentity}, nativeParkingWindowID: parking} : {})};
               this.state.moved.push(entry);
               await this.save(); // Durable ownership before changing any user's tab.
               if (this.firefox && this.api.sessions) await this.api.sessions.setTabValue(member.id, this.key, {...entry, kind: 'moved'});
@@ -139,6 +248,155 @@
         }
         await this.api.windows.update(parking, {state: 'minimized'}).catch(() => {});
       }
+      return true;
+    }
+    windowDescriptor(window, tabs) {
+      return {windowID: window.id, title: tabs.find(tab => tab.active)?.title || '',
+        frame: {left: window.left, top: window.top, width: window.width, height: window.height}, state: window.state || 'normal'};
+    }
+    verifiedNativeIdentity() {
+      const identity = this.nativeOwner?.identity?.();
+      return typeof identity?.browserSessionID === 'string' && identity.browserSessionID.length > 0
+        && Number.isInteger(identity.processIdentity?.pid) && identity.processIdentity.pid > 0
+        && Number.isFinite(identity.processIdentity?.launched) && identity.processIdentity.launched > 0 ? identity : null;
+    }
+    sameNativeIdentity(a, b) {
+      return Boolean(a && b && a.browserSessionID === b.browserSessionID
+        && a.processIdentity.pid === b.processIdentity.pid && a.processIdentity.launched === b.processIdentity.launched);
+    }
+    sameProcess(a, b) {
+      return Boolean(a && b && Number.isInteger(a.pid) && a.pid > 0 && Number.isFinite(a.launched) && a.launched > 0
+        && a.pid === b.pid && a.launched === b.launched);
+    }
+    newParkingNonce() {
+      return globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const n = Math.floor(Math.random() * 16); return (c === 'x' ? n : (n & 3) | 8).toString(16);
+      });
+    }
+    parkingNonce(url) {
+      const prefix = this.api.runtime.getURL('parked.html') + '#intent-';
+      const nonce = typeof url === 'string' && url.startsWith(prefix) ? url.slice(prefix.length) : '';
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nonce) ? nonce : null;
+    }
+    holdingPage(url) { return url === this.api.runtime.getURL('parked.html') || this.parkingNonce(url) !== null; }
+    validParkingProof(proof) {
+      return typeof proof?.nonce === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(proof.nonce)
+        && typeof proof.intentionSessionID === 'string' && proof.intentionSessionID.length > 0
+        && typeof proof.previousBrowserSessionID === 'string' && proof.previousBrowserSessionID.length > 0
+        && this.sameProcess(proof.previousProcessIdentity, proof.previousProcessIdentity)
+        && Array.isArray(proof.windowIDs) && proof.windowIDs.length === 1 && Number.isInteger(proof.windowIDs[0]) && proof.windowIDs[0] >= 0;
+    }
+    async describeWindows(ids) {
+      const windows = await this.api.windows.getAll({populate: false});
+      const tabs = await this.api.tabs.query({});
+      return windows.filter(window => ids.includes(window.id)).map(window =>
+        this.windowDescriptor(window, tabs.filter(tab => tab.windowId === window.id)));
+    }
+    async publishNativePlan(rules, windows) {
+      const parking = await this.describeWindows(this.state.parking);
+      return await this.nativeOwner?.publishPlan?.(rules, windows, parking) === true;
+    }
+    async hasLegacyWindowOwnership() {
+      if (this.state.minimized.length) return true;
+      if (this.firefox && this.api.sessions) {
+        for (const window of await this.api.windows.getAll({populate: false})) {
+          if (await this.api.sessions.getWindowValue(window.id, this.key).catch(() => null)) return true;
+        }
+      }
+      return false;
+    }
+    async revealWindow(id, sessionID = this.state.nativeSessionID) {
+      if (!sessionID) {
+        await this.api.windows.update(id, {state: 'normal', focused: false});
+        return;
+      }
+      if (!this.state.nativeReveals.some(item => item.windowID === id)) {
+        this.state.nativeReveals.push({windowID: id, sessionID});
+        await this.save();
+      }
+    }
+    async retryNativeReveals() {
+      for (const sessionID of new Set(this.state.nativeReveals.map(item => item.sessionID))) {
+        const pending = this.state.nativeReveals.filter(item => item.sessionID === sessionID);
+        const windows = await this.describeWindows(pending.map(item => item.windowID));
+        const existing = new Set(windows.map(window => window.windowID));
+        // Closed windows need no reveal. Every existing one keeps its receipt
+        // until native ownership has durably accepted restoration responsibility.
+        const accepted = !windows.length || await Promise.resolve().then(() => this.nativeOwner?.revealWindows?.(sessionID, windows)).catch(() => false) === true;
+        const released = new Set(pending.filter(item => accepted || !existing.has(item.windowID)).map(item => item.windowID));
+        if (!accepted) {
+          for (const window of windows) {
+            if (await this.recoverPriorParkingWindow(sessionID, window.windowID)) released.add(window.windowID);
+          }
+        }
+        // Firefox markers are the restart proof. Keep them until either native
+        // accepts ownership or generation-verified startup recovery succeeds.
+        const sourceIDs = new Set((await this.api.windows.getAll({populate: false})).map(window => window.id));
+        const relinquished = this.state.moved.filter(item => released.has(item.parking) && !sourceIDs.has(item.windowId));
+        for (const item of relinquished) {
+          if (this.firefox && this.api.sessions) await this.api.sessions.removeTabValue(item.id, this.key).catch(() => {});
+        }
+        this.state.moved = this.state.moved.filter(item => !relinquished.includes(item));
+        this.state.parking = this.state.parking.filter(id => !released.has(id) || this.state.moved.some(item => item.parking === id));
+        this.state.nativeReveals = this.state.nativeReveals.filter(item => item.sessionID !== sessionID || !released.has(item.windowID));
+        await this.save();
+      }
+    }
+    async parkingOwnershipProof(sessionID, windowID, orphanOnly = false) {
+      if (!this.firefox) {
+        if (!this.api.storage.local) return null;
+        const saved = (await this.api.storage.local.get(this.shadowKey))[this.shadowKey];
+        const tabs = await this.api.tabs.query({windowId: windowID});
+        const proof = saved?.state?.nativeParkingProofs?.find(item => this.validParkingProof(item)
+          && item.intentionSessionID === sessionID && tabs.some(tab => this.parkingNonce(tab.url) === item.nonce));
+        return proof ? {intentionSessionID: proof.intentionSessionID, previousBrowserSessionID: proof.previousBrowserSessionID,
+          previousProcessIdentity: {...proof.previousProcessIdentity}, windowIDs: [...proof.windowIDs]} : null;
+      }
+      if (!this.api.sessions) return null;
+      const windows = await this.api.windows.getAll({populate: false});
+      if (!windows.some(window => window.id === windowID)) return null;
+      for (const tab of await this.api.tabs.query({windowId: windowID})) {
+        const owned = await this.api.sessions.getTabValue(tab.id, this.key).catch(() => null);
+        const previous = owned?.nativeBrowserProcessIdentity;
+        if (owned?.kind !== 'moved' || owned.nativeSessionID !== sessionID || !owned.sourceToken
+            || typeof owned.nativeBrowserSessionID !== 'string' || !owned.nativeBrowserSessionID
+            || !Number.isInteger(owned.nativeParkingWindowID) || owned.nativeParkingWindowID < 0
+            || !Number.isInteger(previous?.pid) || previous.pid <= 0 || !Number.isFinite(previous?.launched) || previous.launched <= 0) continue;
+        // A surviving original window must use ordinary tab restoration. Never
+        // guess at its old numeric ID after Firefox has recycled session IDs.
+        let sourceExists = false;
+        for (const window of windows) {
+          if (await this.api.sessions.getWindowValue(window.id, this.key + 'Source').catch(() => null) === owned.sourceToken) {
+            sourceExists = true; break;
+          }
+        }
+        if (!orphanOnly || !sourceExists) return {intentionSessionID: sessionID, previousBrowserSessionID: owned.nativeBrowserSessionID,
+          previousProcessIdentity: {...previous}, windowIDs: [owned.nativeParkingWindowID]};
+      }
+      return null;
+    }
+    async recoverPriorParkingWindow(sessionID, windowID) {
+      const identity = this.verifiedNativeIdentity();
+      let proof = await this.parkingOwnershipProof(sessionID, windowID);
+      if (!identity || !proof) return false;
+      if (identity.processIdentity.pid === proof.previousProcessIdentity.pid
+          && identity.processIdentity.launched === proof.previousProcessIdentity.launched) {
+        const accepted = await Promise.resolve().then(() => this.nativeOwner?.recoverPriorWindows?.(proof)).catch(() => false);
+        return accepted === true && this.sameNativeIdentity(identity, this.verifiedNativeIdentity());
+      }
+      if (this.desiredRules?.active !== false) return false;
+      proof = await this.parkingOwnershipProof(sessionID, windowID, true);
+      if (!proof) return false;
+      const {windowIDs: _windowIDs, ...authorization} = proof;
+      const accepted = await Promise.resolve().then(() => this.nativeOwner?.authorizeRestartRecovery?.(authorization)).catch(() => false);
+      if (accepted !== true || this.desiredRules?.active !== false || !this.sameNativeIdentity(identity, this.verifiedNativeIdentity())) return false;
+      const confirmed = await this.parkingOwnershipProof(sessionID, windowID, true);
+      if (JSON.stringify(confirmed) !== JSON.stringify(proof) || this.desiredRules?.active !== false
+          || !this.sameNativeIdentity(identity, this.verifiedNativeIdentity())) return false;
+      // This is exclusively a verified full-process restart recovery, after the
+      // old process died. Ordinary finish/reload never reaches browser restore.
+      try { await this.api.windows.update(windowID, {state: 'normal', focused: false}); return true; }
+      catch (_) { return false; }
     }
     async restore() {
       // Firefox session values follow the real tab/window across browser restarts.
@@ -154,6 +412,7 @@
           if (owned.kind === 'moved') {
             if (!this.state.moved.some(item => item.id === tab.id)) {
               this.state.moved.push({...owned, id: tab.id, windowId: sourceWindows.get(owned.sourceToken) ?? -1, parking: tab.windowId});
+              if (owned.nativeSessionID) this.state.nativeSessionID ||= owned.nativeSessionID;
               if (!this.state.parking.includes(tab.windowId)) this.state.parking.push(tab.windowId);
               await this.save();
             }
@@ -179,9 +438,12 @@
       // page and reveal its window, never guess identities from a user's URLs.
       {
         for (const tab of await this.api.tabs.query({})) {
-          if (tab.url !== this.api.runtime.getURL('parked.html') || this.state.parking.includes(tab.windowId) || this.state.recovered.includes(tab.windowId)) continue;
+          if (!this.holdingPage(tab.url) || this.state.parking.includes(tab.windowId) || this.state.recovered.includes(tab.windowId)) continue;
+          // With a native owner, an unregistered holder is not permission to
+          // resurrect a browser window. Native or durable marker proof is required.
+          if (this.nativeOwner) continue;
           try {
-            await this.api.windows.update(tab.windowId, {state: 'normal', focused: false});
+            await this.revealWindow(tab.windowId);
             this.state.recovered.push(tab.windowId); await this.save();
           } catch (_) { /* Retry next heartbeat if the browser is busy. */ }
         }
@@ -207,10 +469,11 @@
           catch (_) {
             // The user may have closed the original window. Keep their live
             // tab intact and make the holding window visible for recovery.
-            await this.api.windows.update(item.parking, {state: 'normal', focused: false}).catch(() => {});
+            await this.revealWindow(item.parking, item.nativeSessionID || this.state.nativeSessionID).catch(() => {});
             if (await this.api.windows.get(item.windowId).catch(() => null)) continue;
             // Original window is gone: relinquish ownership of the recovered tabs.
             this.state.recovered.push(item.parking);
+            if (item.nativeSessionID || this.state.nativeSessionID) continue;
           }
         }
         for (const member of batch) {
@@ -281,11 +544,12 @@
       for (const id of [...this.state.parking]) {
         const tabs = await this.api.tabs.query({windowId: id}).catch(() => []);
         // Close only our own empty holding page, never a user's tab/window.
-        if (tabs.length === 1 && tabs[0].url === this.api.runtime.getURL('parked.html')) await this.api.tabs.remove(tabs[0].id).catch(() => {});
-        else if (tabs.length) await this.api.windows.update(id, {state: 'normal', focused: false}).catch(() => {});
+        if (tabs.length === 1 && this.holdingPage(tabs[0].url)) await this.api.tabs.remove(tabs[0].id).catch(() => {});
+        else if (tabs.length) await this.revealWindow(id).catch(() => {});
         if (!this.state.moved.some(x => x.parking === id)) this.state.parking = this.state.parking.filter(x => x !== id);
         await this.save();
       }
+      await this.retryNativeReveals();
     }
   }
   root.IntentTabVisibility = IntentTabVisibility;
