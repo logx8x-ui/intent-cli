@@ -23,6 +23,7 @@ with another delayed activation or an independent copy of session state.
 | Session completion and deferred work | `IntentAppModel.swift`, `IntentLock`; occurrence/lifecycle regressions and isolated presenter checks |
 | Runtime window-enforcement failure notice | `SessionFailureNoticePolicy.swift`, `SessionFailureNotice.swift`; typed-error presenter order, security/resume policy and actual nonactivating panel checks |
 | Notch sizing, view and nonactivating windows | `OverlayWindowController.swift` and notch layout/presentation helpers; core layout specs and `--qa-notch-checks` |
+| Compact HUD palette and completion laser | `SessionChromeStyle.swift`, `SessionCompletionLight.swift`; `SessionCompletionLaserChecks.swift` samples the actual finite animation layers |
 | Browser activation after completion | Firefox/Chrome background recovery; separate browser harnesses and matching-profile live QA |
 
 ## Invariants
@@ -38,6 +39,19 @@ with another delayed activation or an independent copy of session state.
   recompute geometry; legacy saved panel frames do not override the anchor.
 - Checklist interaction stays usable without displacing the anchor. No-notch
   displays, long names and combined modifiers need explicit coverage.
+- The physical camera gap, not the asymmetric outer HUD frame, owns the anchor
+  and laser origins. Timing uses 13-point menu-bar typography; the hardware name
+  lip is 14 points. Checklist input lives in a separate below-notch panel:
+  the entire screen-top header must pass clicks through to the menu bar.
+- Replace hosted content only through `SessionNotchPanel.setHostedContent`:
+  disable automatic window-size negotiation and apply the authoritative frame
+  after assigning/layout of the controller. Exercise real controller replacement
+  across expand/collapse, not only NSHostingView bitmap renders. Cropped-away
+  content must not expose invisible Accessibility controls in the other panel.
+- Whitelist/blacklist dots and completion use one resolved dark-mode accent.
+  The completion core is 1 point with bounded short tails, never a white flash
+  or a persistent whole-screen animation timer. Inspect real header/control
+  crops as well as the combined preview whenever their geometry changes.
 - The same completion path handles normal timer, end-time, checklist and manual
   finish. It cancels old focus work before clearing session ownership. Failures
   and explicit safety-stop reporting remain distinct from successful completion.

@@ -13,16 +13,28 @@ func runSessionNotchLayoutSpecs() throws {
         let right = CGRect(x: screen.minX + 856, y: screen.maxY - 32, width: 656, height: 32)
         let timer = SessionNotchLayout(screen: screen, visibleFrame: visible, safeAreaTop: 32, auxiliaryLeft: left, auxiliaryRight: right)
         try expect(timer.hasHardwareNotch && timer.notchWidth == 200, "HUD uses the camera exclusion, never a guessed MacBook notch width")
-        try expect(timer.frame.maxY == screen.maxY && timer.frame.midX == screen.midX, "HUD surrounds the physical notch on offset displays")
-        try expect(timer.headerHeight == 32 && timer.frame.height == 60, "Timer has one fixed size, including name below the camera")
+        try expect(timer.frame.maxY == screen.maxY && timer.notchFrame.midX == screen.midX,
+            "Asymmetric compact wings preserve the physical camera anchor on offset displays")
+        try expect(timer.headerHeight == 32 && timer.frame.height == 46 && timer.frame.width == 300,
+            "Timer has narrow wings and a shallow fourteen-point name lip, never the old oversized bar")
+        try expect(timer.notchFrame.minX == left.maxX && timer.notchFrame.maxX == right.minX,
+            "Actual camera exclusion is separate from the asymmetric outer panel centre")
+        try expect(timer.controlsFrame.width == timer.notchWidth && timer.controlsFrame.maxY == timer.notchFrame.minY,
+            "Collapsed checklist interaction stays entirely below the camera and menu stripe")
         let checklist = SessionNotchLayout(screen: screen, visibleFrame: visible, safeAreaTop: 32, auxiliaryLeft: left, auxiliaryRight: right, checklistCount: 100, checklistExpanded: true)
         try expect(checklist.frame.maxY == timer.frame.maxY && checklist.frame.midX == timer.frame.midX, "Checklist expansion never moves the notch anchor")
-        try expect(checklist.checklistHeight == 252 && screen.contains(checklist.frame), "Long lists scroll within a bounded screen-safe tray")
+        try expect(checklist.checklistHeight == 204 && screen.contains(checklist.frame), "Long lists scroll within a compact screen-safe tray")
+        try expect(checklist.controlsFrame.maxY == timer.notchFrame.minY,
+            "Expanded controls cannot intercept menu clicks or register a menu-stripe input exclusion")
         let collapsed = SessionNotchLayout(screen: screen, visibleFrame: visible, safeAreaTop: 32, auxiliaryLeft: left, auxiliaryRight: right, checklistCount: 5)
         try expect(collapsed == timer, "Collapsed checklist retains exact timer geometry")
         let fallback = SessionNotchLayout(screen: screen, visibleFrame: visible, safeAreaTop: 0)
         try expect(!fallback.hasHardwareNotch && fallback.frame.maxY == visible.maxY, "External displays use a fixed top-centre cap below the menu bar")
         try expect(screen.contains(fallback.frame), "Fallback remains on its selected screen")
+        try expect(fallback.frame.width == 228 && fallback.frame.height == 24 && fallback.titleHeight == 0,
+            "No-notch displays get one compact named row, not a large empty fake camera cutout")
+        try expect(fallback.controlsFrame == fallback.frame && fallback.frame.maxY <= visible.maxY,
+            "Fallback interaction is wholly below the real menu bar")
         let stale = SessionNotchLayout(screen: screen, visibleFrame: visible, safeAreaTop: 32)
         try expect(!stale.hasHardwareNotch, "Missing camera areas use safe fallback rather than inventing camera geometry")
         for areas in [(Optional(left), Optional<CGRect>.none), (nil, Optional(right))] {

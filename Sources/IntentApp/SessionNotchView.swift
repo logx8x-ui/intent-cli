@@ -16,6 +16,20 @@ extension NSScreen {
 final class SessionNotchPanel: IntentInteractivePanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+
+    /// Replacing NSWindow.contentViewController can resize and reposition its
+    /// window. The physical notch anchor must be applied after that assignment,
+    /// and SwiftUI content updates must never negotiate a different window size.
+    static func setHostedContent<Content: View>(_ content: Content, in panel: NSPanel, frame: CGRect) {
+        let host = NSHostingController(rootView: content)
+        host.sizingOptions = []
+        host.view.frame = CGRect(origin: .zero, size: frame.size)
+        host.view.autoresizingMask = [.width, .height]
+        panel.contentViewController = host
+        host.view.layoutSubtreeIfNeeded()
+        panel.setFrame(frame, display: panel.isVisible)
+    }
+
     static func make() -> SessionNotchPanel {
         let panel = SessionNotchPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
@@ -31,8 +45,10 @@ final class SessionNotchPanel: IntentInteractivePanel {
 struct SessionNotchView: View {
     @ObservedObject var model: IntentAppModel
     let layout: SessionNotchLayout
+    var slice: SessionNotchSlice = .whole
     var body: some View {
-        if model.activeSessionEndsAt != nil || model.stopwatchStarted != nil {
+        if (model.activeSessionEndsAt != nil || model.stopwatchStarted != nil)
+            && !(slice == .controls && layout.hasHardwareNotch) {
             TimelineView(.periodic(from: .now, by: 1)) { context in content(now: context.date) }
         } else { content(now: .now) }
     }
@@ -44,10 +60,13 @@ struct SessionNotchView: View {
                 ?? (model.stopwatchStarted == nil ? nil : model.stopwatchText),
             timeLabel: showsEnd ? "Ends at" : (model.stopwatchStarted != nil && model.activeSessionEndsAt == nil ? "Elapsed" : "Remaining"),
             checklist: model.activeChecklist, completed: model.completedChecklist, layout: layout,
+            slice: slice,
             toggleChecklist: model.toggleSessionControlsExpansion,
             setCompleted: model.setTaskCompleted)
     }
 }
+
+enum SessionNotchSlice { case whole, header, controls }
 
 /// Data-only content makes the real HUD renderable in isolated regression checks.
 struct SessionNotchContent: View {
@@ -58,94 +77,135 @@ struct SessionNotchContent: View {
     let checklist: [String]
     let completed: Set<Int>
     let layout: SessionNotchLayout
+    var slice: SessionNotchSlice = .whole
     var toggleChecklist: () -> Void = {}
     var setCompleted: (Int, Bool) -> Void = { _, _ in }
-    private var accent: Color { mode == .blacklist ? .red : .green }
-    var body: some View {
+    private var accent: Color { Color(nsColor: SessionChromeStyle.accent(for: mode)) }
+    @ViewBuilder var body: some View {
+        switch slice {
+        case .whole: chrome
+        case .header:
+            chrome.frame(height: layout.headerHeight, alignment: .top).clipped()
+        case .controls:
+            let crop = layout.controlsCrop
+            chrome.offset(x: -crop.minX, y: -crop.minY)
+                .frame(width: crop.width, height: crop.height, alignment: .topLeading).clipped()
+        }
+    }
+    private var chrome: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                HStack(spacing: 7) {
-                    Circle().fill(accent).frame(width: 7, height: 7)
-                        .shadow(color: accent.opacity(0.6), radius: 4)
-                    Text(mode == .blacklist ? "BLOCK" : "FOCUS")
-                        .font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(.white.opacity(0.6))
-                }.frame(width: layout.wingWidth, height: layout.headerHeight)
-                    .accessibilityElement(children: .ignore)
+                Circle().fill(accent).frame(width: 5, height: 5)
+                    .frame(width: layout.leadingWingWidth, height: layout.headerHeight)
                     .accessibilityLabel(mode == .blacklist ? "Blacklist intention" : "Whitelist intention")
-                Color.clear.frame(width: layout.notchWidth, height: layout.headerHeight).allowsHitTesting(false)
-                VStack(spacing: 1) {
+                Group {
+                    if layout.hasHardwareNotch { Color.clear.allowsHitTesting(false) }
+                    else { nameControl }
+                }.frame(width: layout.notchWidth, height: layout.headerHeight)
+                Group {
                     if let time {
-                        Text(time).font(.system(size: 12, weight: .medium, design: .rounded)).monospacedDigit()
+                        Text(time).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
                             .accessibilityLabel("\(timeLabel) \(time)")
+                    } else if !checklist.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(accent)
+                            Text("\(completed.count)/\(checklist.count)").monospacedDigit()
+                        }.accessibilityLabel("\(completed.count) of \(checklist.count) tasks complete")
                     }
-                    if !checklist.isEmpty {
-                        Button(action: toggleChecklist) {
-                            HStack(spacing: 5) {
-                                Image(systemName: "checkmark.circle").foregroundStyle(accent)
-                                Text("\(completed.count)/\(checklist.count)").monospacedDigit()
-                            }.font(.system(size: time == nil ? 12 : 9, weight: .medium))
-                        }.buttonStyle(.plain)
-                            .accessibilityLabel("\(completed.count) of \(checklist.count) tasks complete. Toggle checklist")
-                    }
-                }.frame(width: layout.wingWidth, height: layout.headerHeight)
+                }.font(.system(size: SessionChromeStyle.timingFontSize, weight: .medium))
+                    .frame(width: min(SessionChromeStyle.timingContentWidth, layout.trailingWingWidth), alignment: .leading)
+                    .padding(.leading, 4)
+                    .frame(width: layout.trailingWingWidth, height: layout.headerHeight, alignment: .leading)
+            }.accessibilityHidden(slice == .controls && layout.hasHardwareNotch)
+            if layout.hasHardwareNotch {
+                nameControl.frame(width: layout.notchWidth, height: layout.titleHeight)
+                    .frame(width: layout.frame.width, alignment: .leading).offset(x: layout.leadingWingWidth)
+                    .accessibilityHidden(slice == .header)
             }
-            Group {
-                if checklist.isEmpty { titleLabel }
-                else {
-                    Button(action: toggleChecklist) {
-                        HStack(spacing: 7) {
-                            titleLabel
-                            Image(systemName: layout.checklistHeight > 0 ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 8, weight: .semibold)).foregroundStyle(.white.opacity(0.45))
-                        }
-                    }.buttonStyle(.plain).accessibilityLabel("\(title). Toggle checklist")
-                }
-            }.frame(width: layout.notchWidth + 24, height: layout.titleHeight)
             if layout.checklistHeight > 0 {
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(Array(checklist.enumerated()), id: \.offset) { index, task in
                             Button { setCompleted(index, !completed.contains(index)) } label: {
-                                HStack(alignment: .center, spacing: 10) {
+                                HStack(spacing: 8) {
                                     Image(systemName: completed.contains(index) ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 16)).foregroundStyle(completed.contains(index) ? accent : .white.opacity(0.35))
-                                    Text(task).font(.system(size: 12)).lineLimit(2)
+                                        .font(.system(size: 13)).foregroundStyle(completed.contains(index) ? accent : .white.opacity(0.35))
+                                    Text(task).font(.system(size: 11)).lineLimit(2)
                                         .strikethrough(completed.contains(index))
-                                        .foregroundStyle(.white.opacity(completed.contains(index) ? 0.45 : 0.9))
+                                        .foregroundStyle(.white.opacity(completed.contains(index) ? 0.45 : 0.88))
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                }.padding(.horizontal, 20).frame(height: 44).contentShape(Rectangle())
+                                }.padding(.horizontal, 14).frame(height: 34).contentShape(Rectangle())
                             }.buttonStyle(.plain).help(task)
                                 .accessibilityLabel("\(task), \(completed.contains(index) ? "complete" : "incomplete")")
                         }
-                    }.padding(.vertical, 10)
-                }.frame(height: layout.checklistHeight)
+                    }.padding(.vertical, 6)
+                }.frame(height: layout.checklistHeight).accessibilityHidden(slice == .header)
             }
         }.frame(width: layout.frame.width, height: layout.frame.height, alignment: .top)
-            .background(SessionNotchSilhouette(layout: layout).fill(.black))
-            .foregroundStyle(.white).preferredColorScheme(.dark)
+            .background(SessionNotchSilhouette(layout: layout).fill(
+                LinearGradient(colors: [Color(white: 0.005), Color(white: 0.045)], startPoint: .top, endPoint: .bottom)))
+            .foregroundStyle(.white.opacity(0.92)).preferredColorScheme(.dark)
             .help("` hide or show running controls")
     }
+    @ViewBuilder private var nameControl: some View {
+        if checklist.isEmpty { titleLabel.padding(.horizontal, 8) }
+        else {
+            Button(action: toggleChecklist) {
+                HStack(spacing: 5) {
+                    titleLabel
+                    if time != nil {
+                        Text("\(completed.count)/\(checklist.count)").font(.system(size: 9)).monospacedDigit().foregroundStyle(accent)
+                    }
+                    Image(systemName: layout.checklistHeight > 0 ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 7, weight: .semibold)).foregroundStyle(.white.opacity(0.45))
+                }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("\(title). Toggle checklist")
+        }
+    }
     private var titleLabel: some View {
-        Text(title).font(.system(size: 11, weight: .medium)).lineLimit(1).truncationMode(.middle)
+        Text(title).font(.system(size: SessionChromeStyle.titleFontSize, weight: .medium))
+            .foregroundStyle(.white.opacity(0.65)).lineLimit(1).truncationMode(.middle)
             .help(title).accessibilityLabel(title)
     }
 }
 
 /// The wings end at the camera's bottom edge; only the title branches below it.
-private struct SessionNotchSilhouette: Shape {
+struct SessionNotchSilhouette: Shape {
     let layout: SessionNotchLayout
     func path(in rect: CGRect) -> Path {
         var p = Path()
+        let h = layout.headerHeight, w = rect.width, bottom = rect.height
+        let left = layout.leadingWingWidth, right = left + layout.notchWidth
+        p.move(to: .zero); p.addLine(to: CGPoint(x: w, y: 0))
+        p.addQuadCurve(to: CGPoint(x: w - 3, y: 4), control: CGPoint(x: w - 2, y: 0))
         if layout.checklistHeight > 0 {
-            p.addRoundedRect(in: rect, cornerSize: CGSize(width: 16, height: 16))
-            p.addRect(CGRect(x: 0, y: 0, width: rect.width, height: layout.headerHeight / 2))
+            p.addLine(to: CGPoint(x: w, y: h + 8))
+            p.addLine(to: CGPoint(x: w, y: bottom - 10))
+            p.addQuadCurve(to: CGPoint(x: w - 10, y: bottom), control: CGPoint(x: w, y: bottom))
+            p.addLine(to: CGPoint(x: 10, y: bottom))
+            p.addQuadCurve(to: CGPoint(x: 0, y: bottom - 10), control: CGPoint(x: 0, y: bottom))
+            p.addLine(to: CGPoint(x: 0, y: h + 8))
+        } else if layout.hasHardwareNotch {
+            p.addLine(to: CGPoint(x: w - 7, y: h - 5))
+            p.addQuadCurve(to: CGPoint(x: w - 12, y: h), control: CGPoint(x: w - 8, y: h))
+            p.addLine(to: CGPoint(x: right + 4, y: h))
+            p.addQuadCurve(to: CGPoint(x: right, y: h + 4), control: CGPoint(x: right, y: h))
+            p.addLine(to: CGPoint(x: right, y: bottom - 6))
+            p.addQuadCurve(to: CGPoint(x: right - 6, y: bottom), control: CGPoint(x: right, y: bottom))
+            p.addLine(to: CGPoint(x: left + 6, y: bottom))
+            p.addQuadCurve(to: CGPoint(x: left, y: bottom - 6), control: CGPoint(x: left, y: bottom))
+            p.addLine(to: CGPoint(x: left, y: h + 4))
+            p.addQuadCurve(to: CGPoint(x: left - 4, y: h), control: CGPoint(x: left, y: h))
+            p.addLine(to: CGPoint(x: 16, y: h))
+            p.addQuadCurve(to: CGPoint(x: 11, y: h - 5), control: CGPoint(x: 12, y: h))
         } else {
-            p.addRoundedRect(in: CGRect(x: 0, y: 0, width: rect.width, height: layout.headerHeight), cornerSize: CGSize(width: 12, height: 12))
-            p.addRect(CGRect(x: 12, y: 0, width: rect.width - 24, height: layout.headerHeight))
-            let tongue = CGRect(x: layout.wingWidth - 18, y: layout.headerHeight - 14,
-                width: layout.notchWidth + 36, height: layout.titleHeight + 14)
-            p.addRoundedRect(in: tongue, cornerSize: CGSize(width: 14, height: 14))
+            p.addLine(to: CGPoint(x: w - 6, y: bottom - 5))
+            p.addQuadCurve(to: CGPoint(x: w - 12, y: bottom), control: CGPoint(x: w - 7, y: bottom))
+            p.addLine(to: CGPoint(x: 12, y: bottom))
+            p.addQuadCurve(to: CGPoint(x: 6, y: bottom - 5), control: CGPoint(x: 7, y: bottom))
         }
+        p.addLine(to: CGPoint(x: 3, y: 4))
+        p.addQuadCurve(to: .zero, control: CGPoint(x: 2, y: 0)); p.closeSubpath()
         return p
     }
 }

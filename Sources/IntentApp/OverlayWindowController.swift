@@ -11,6 +11,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private let accountManager: IntentAccountManager
     private var panel: NSPanel?
     private var sessionTimerPanel: NSPanel?
+    private var sessionChecklistPanel: NSPanel?
     private var sessionOverlayState = SessionOverlayPolicy()
     private var sessionScreenID: CGDirectDisplayID?
     private var screenObserver: NSObjectProtocol?
@@ -183,17 +184,17 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
             sessionScreenID = workingScreen()?.intentDisplayID
         }
         layoutSessionControls()
-        if sessionOverlayState.visible { timerPanel.orderFrontRegardless() }
-        else { timerPanel.orderOut(nil) }
     }
 
     func hideSessionTimer() {
         sessionTimerPanel?.orderOut(nil)
+        sessionChecklistPanel?.orderOut(nil)
         sessionOverlayState.end()
         sessionScreenID = nil
     }
 
-    var isSessionControlsExpanded: Bool { !model.activeChecklist.isEmpty && sessionOverlayState.expanded && sessionTimerPanel?.isVisible == true }
+    var isSessionControlsExpanded: Bool { !model.activeChecklist.isEmpty && sessionOverlayState.expanded
+        && sessionChecklistPanel?.isVisible == true }
 
     @discardableResult
     func collapseSessionControlsIfExpanded() -> Bool {
@@ -314,7 +315,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         if sessionOverlayState.occurrenceID != occurrence { showSessionControls(occurrenceID: occurrence); return }
         sessionOverlayState.toggleVisibility()
         if sessionOverlayState.visible { showSessionControls(occurrenceID: occurrence) }
-        else { sessionTimerPanel?.orderOut(nil) }
+        else { sessionTimerPanel?.orderOut(nil); sessionChecklistPanel?.orderOut(nil) }
     }
 
     func toggleSessionControlsExpansion() {
@@ -332,11 +333,30 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
               let screen = NSScreen.screens.first(where: { $0.intentDisplayID == sessionScreenID }) ?? workingScreen() else { return }
         sessionScreenID = screen.intentDisplayID
         let layout = screen.intentNotchLayout(checklistCount: model.activeChecklist.count, expanded: sessionOverlayState.expanded)
-        panel.setFrame(layout.frame, display: true)
-        // Timer-only HUDs cannot intercept a menu-bar click or become a text editor.
-        panel.ignoresMouseEvents = model.activeChecklist.isEmpty
-        panel.contentViewController = NSHostingController(rootView: SessionNotchView(model: model, layout: layout))
-        if sessionOverlayState.visible { panel.orderFrontRegardless() }
+        let hasChecklist = !model.activeChecklist.isEmpty
+        // The screen-top stripe NEVER becomes an input exception. SwiftUI
+        // hit-testing alone cannot make an AppKit window pass menu clicks through.
+        panel.ignoresMouseEvents = true
+        let headerFrame = CGRect(x: layout.frame.minX, y: layout.frame.maxY - layout.headerHeight,
+            width: layout.frame.width, height: layout.headerHeight)
+        if hasChecklist && !layout.hasHardwareNotch {
+            panel.contentViewController = nil // The fallback's one live clock is in the controls panel.
+        } else {
+            SessionNotchPanel.setHostedContent(SessionNotchView(model: model,
+                layout: layout, slice: hasChecklist ? .header : .whole), in: panel,
+                frame: hasChecklist ? headerFrame : layout.frame)
+        }
+        if sessionOverlayState.visible && (!hasChecklist || layout.hasHardwareNotch) { panel.orderFrontRegardless() }
+        else { panel.orderOut(nil) }
+        if hasChecklist {
+            let controls = sessionChecklistPanel ?? SessionNotchPanel.make()
+            sessionChecklistPanel = controls
+            controls.ignoresMouseEvents = false
+            SessionNotchPanel.setHostedContent(SessionNotchView(model: model,
+                layout: layout, slice: .controls), in: controls, frame: layout.controlsFrame)
+            if sessionOverlayState.visible { controls.orderFrontRegardless() }
+            else { controls.orderOut(nil) }
+        } else { sessionChecklistPanel?.orderOut(nil) }
     }
 
 }
