@@ -8,7 +8,7 @@ const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
 const NEW_TAB_GRACE_MS = 250;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
-const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "add-as-you-go-v1", "website-features-v1"];
+const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "add-as-you-go-v1", "website-features-v1", "firefox-window-minimize-bootstrap-v1"];
 const browserSessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
@@ -30,6 +30,9 @@ const {
 const nativeWindowVisibility = typeof IntentNativeWindowVisibility !== "undefined"
   ? new IntentNativeWindowVisibility(browser, postCommandPort, () => browserSessionID) : null;
 const tabVisibility = typeof IntentTabVisibility !== "undefined" ? new IntentTabVisibility(browser, true, nativeWindowVisibility) : null;
+const minimizeBootstrap = typeof IntentFirefoxMinimizeBootstrap !== 'undefined'
+  ? new IntentFirefoxMinimizeBootstrap(browser,{send:postCommandPort,identity:()=>nativeWindowVisibility?.identity(),
+      validate:offer=>tabVisibility?.validateBootstrap(offer) ?? false}) : null;
 let rules = inactiveRules();
 let lastAllowedTabId = null;
 let enforcing = false;
@@ -159,6 +162,8 @@ function connectCommandPort() {
         hostSupportsSessionIdentity = identitySupported;
         sendHeartbeat();
       }
+      const desired = effectiveRules(message);
+      minimizeBootstrap?.receive(message,{rules:desired,fingerprint:fingerprintRules(desired)});
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
       await applyNativeRules(message).catch(() => {});
       settlePendingRuleRefresh();
@@ -167,6 +172,7 @@ function connectCommandPort() {
       if (commandPort !== port) return;
       commandPort = null;
       nativeWindowVisibility?.disconnected();
+      minimizeBootstrap?.disconnected();
       nativeConnectionConfirmed = false;
       settlePendingRuleRefresh();
       scheduleCommandReconnect();
@@ -914,6 +920,7 @@ let windowFocusRevision = 0;
 browser.windows?.onFocusChanged?.addListener(async (windowId) => {
   // Losing browser focus need not activate another tab. Invalidate pending recovery.
   ++windowFocusRevision;
+  minimizeBootstrap?.invalidateWindow(windowId);
   if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
   const tabs = await browser.tabs.query({active: true, windowId});
@@ -965,6 +972,7 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
 browser.tabs.onHighlighted?.addListener(() => scheduleTabSnapshot());
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (typeof changeInfo.url === 'string') minimizeBootstrap?.invalidateWindow(tab?.windowId);
   if (isHoldingPage(changeInfo.url || tab.url)) { forgetHoldingSearch(tabId); return; }
   scheduleTabSnapshot();
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
@@ -1033,6 +1041,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
+  minimizeBootstrap?.invalidateWindow(tab?.windowId);
   if (isHoldingPage(tab.url)) return;
   committedURLByTab.set(tab.id, tab.url || "about:blank");
   if (rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist" && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) {
@@ -1083,10 +1092,11 @@ browser.tabs.onCreated.addListener(async (tab) => {
 });
 
 for (const event of [browser.tabs.onMoved, browser.tabs.onAttached, browser.tabs.onDetached]) {
-  event?.addListener(() => { if (rules.active) scheduleTabSnapshot(true); });
+  event?.addListener((_id,info) => { minimizeBootstrap?.invalidateWindow(info?.windowId ?? info?.oldWindowId ?? info?.newWindowId); if (rules.active) scheduleTabSnapshot(true); });
 }
 
-browser.tabs.onRemoved.addListener(async (tabId) => {
+browser.tabs.onRemoved.addListener(async (tabId,info) => {
+  minimizeBootstrap?.invalidateWindow(info?.windowId);
   searchSessionTabs.delete(tabId); saveSearchLedger(); committedURLByTab.delete(tabId);
   scheduleTabSnapshot();
   if (!rules.active) {

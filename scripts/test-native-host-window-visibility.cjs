@@ -195,7 +195,7 @@ async function until(predicate, message, timeout = 4000) {
   }
   throw new Error(message);
 }
-async function withLiveHost(browser, body) {
+async function withLiveHost(browser, body, registration = {}) {
   const directory = temporaryDirectory(); writeRules(directory);
   const child = spawn(qaHost, { env: hostEnvironment(directory) });
   const replies = []; let pending = Buffer.alloc(0);
@@ -209,7 +209,7 @@ async function withLiveHost(browser, body) {
   child.stderr.resume();
   const send = message => child.stdin.write(frame(message));
   try {
-    send(connect(browser)); await until(() => replies.some(reply => reply.nativeWindowVisibility), "Initial grant missing");
+    send(connect(browser, registration)); await until(() => replies.some(reply => reply.nativeWindowVisibility), "Initial grant missing");
     await body({ directory, child, replies, send });
   } finally {
     child.kill("SIGCONT"); child.stdin.end();
@@ -534,12 +534,125 @@ function checkQAIdentityIsolation() {
   assert.equal(malformed[0].browserProcessIdentity, undefined, "QA identities must still pass validity checks");
   assertReceipt(malformed, 1, false);
 }
+
+const bootstrapCapability = "firefox-window-minimize-bootstrap-v1";
+const bootstrapRegistration = { extensionCapabilities: [capability, bootstrapCapability] };
+function bootstrapMessage(kind = "Claim", changes = {}, outer = {}) {
+  const key = `minimizeBootstrap${kind}`;
+  return { type: `windowMinimizeBootstrap${kind}`, browserBundleIdentifier: "org.mozilla.firefox", browserSessionID: profile,
+    [key]: { effectID: "bootstrap-effect", intentionSessionID: session, previousBrowserSessionID: profile,
+      previousProcessIdentity: simulatedQAIdentity, ...(kind === "Result" ? { outcome: "settled" } : {}), ...changes }, ...outer };
+}
+function bootstrapReceipt(messages, kind, expected, why) {
+  const field = `minimizeBootstrap${kind}Receipt`;
+  assert.deepEqual(messages.findLast(message => message[field])?.[field], expected, why);
+}
+function seedBootstrap(directory, { phase = "prepared", outcome, expires = Date.now() + 2500 } = {}) {
+  const browser = "org.mozilla.firefox", file = recordPath(directory, browser), saved = readRecord(directory, browser);
+  saved.bootstrapEffects = [{ effectID: "bootstrap-effect", nativeWindowID: 12687, planRevision: saved.plan.revision,
+    expiresAtUnixMS: expires, descriptor: saved.plan.windows[0], phase, ...(outcome ? { outcome } : {}) }];
+  fs.writeFileSync(file, JSON.stringify(saved), { mode: 0o600 }); return saved;
+}
+function checkBootstrapProtocol() {
+  const browser = "org.mozilla.firefox", directory = temporaryDirectory(); writeRules(directory);
+  let responses = call(directory, [connect(browser, bootstrapRegistration), request(browser)]);
+  assert.ok(responses[0].hostCapabilities.includes("firefox-window-minimize-bootstrap-host-v1"));
+  assert.ok(heartbeat(directory, browser).capabilities.includes(bootstrapCapability));
+  assert.equal(responses.at(-1).visibilityEnforcement, undefined, "A plan ACK cannot assert hiding");
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage()]), "Claim",
+    { effectID: "bootstrap-effect", granted: false }, "Unprepared effect cannot self-publish");
+  seedBootstrap(directory);
+  responses = call(directory, [connect(browser, bootstrapRegistration)]);
+  assert.equal(responses[0].minimizeBootstrapOffers[0].effectID, "bootstrap-effect");
+  for (const [label, changes, outer, registration] of [
+    ["wrong process", { previousProcessIdentity: { ...simulatedQAIdentity, launched: 2 } }],
+    ["wrong effect", { effectID: "foreign" }], ["wrong intention", { intentionSessionID: "other" }],
+    ["wrong previous profile", { previousBrowserSessionID: "other" }],
+    ["wrong current profile", {}, { browserSessionID: "other" }],
+    ["missing negotiated capability", {}, {}, {}],
+    ["malformed proof", { previousProcessIdentity: { pid: "not-a-pid", launched: 1 } }],
+    ["oversized", {}, { padding: "a".repeat(17000) }]
+  ]) {
+    const before = fs.readFileSync(recordPath(directory, browser), "utf8");
+    bootstrapReceipt(call(directory, [connect(browser, registration ?? bootstrapRegistration), bootstrapMessage("Claim", changes, outer)]), "Claim",
+      { effectID: changes.effectID ?? "bootstrap-effect", granted: false }, label);
+    assert.equal(fs.readFileSync(recordPath(directory, browser), "utf8"), before, label + " cannot consume ownership");
+  }
+  bootstrapReceipt(call(directory, [bootstrapMessage("Claim", {}, { extensionCapabilities: [capability, bootstrapCapability] })]),
+    "Claim", { effectID: "bootstrap-effect", granted: false }, "Claims cannot self-register");
+  seedBootstrap(directory, { expires: Date.now() - 1 });
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage()]), "Claim",
+    { effectID: "bootstrap-effect", granted: false }, "Expired offers cannot dispatch");
+  seedBootstrap(directory);
+  writeRules(directory, { active: false });
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage()]), "Claim",
+    { effectID: "bootstrap-effect", granted: false }, "Finish revokes prepared effect");
+  writeRules(directory); seedBootstrap(directory);
+  const next = plan(2); next.windows[0].title = "New title"; next.windows[0].frame.left = 45;
+  assertReceipt(call(directory, [connect(browser, bootstrapRegistration), request(browser, next)]), 2, true);
+  responses = call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage()]);
+  assert.equal(responses[0].minimizeBootstrapOffers[0].planRevision, 2);
+  assert.equal(responses[0].minimizeBootstrapOffers[0].descriptor.title, "New title");
+  bootstrapReceipt(responses, "Claim", { effectID: "bootstrap-effect", granted: true }, "Same native target survives unrelated title/revision change");
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage()]), "Claim",
+    { effectID: "bootstrap-effect", granted: false }, "Claim is spent exactly once");
+  assert.equal(readRecord(directory, browser).bootstrapEffects[0].phase, "issued");
+  writeRules(directory, { startupSessionID: "newer-session" });
+  responses = call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage("Result")]);
+  bootstrapReceipt(responses, "Result", { effectID: "bootstrap-effect", accepted: true }, "Terminal historical result resolves old ownership during newer session");
+  assert.deepEqual(responses.at(-1).minimizeBootstrapOffers, []); assert.equal(responses.at(-1).visibilityEnforcement, undefined);
+  const bytes = fs.readFileSync(recordPath(directory, browser), "utf8");
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage("Result")]), "Result",
+    { effectID: "bootstrap-effect", accepted: true }, "Result replay is idempotent");
+  assert.equal(fs.readFileSync(recordPath(directory, browser), "utf8"), bytes);
+  for (const outcome of ["uncertain", "unknown", "minimized", "notMinimized"]) bootstrapReceipt(
+    call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage("Result", { outcome })]), "Result",
+    { effectID: "bootstrap-effect", accepted: false }, "Conflicting/invalid outcome cannot rewrite settled result");
+  writeRules(directory);
+  let saved = readRecord(directory, browser); saved.verificationRevision = saved.plan.revision; saved.verifiedWindowIDs = [11];
+  fs.writeFileSync(recordPath(directory, browser), JSON.stringify(saved));
+  responses = call(directory, [connect(browser, bootstrapRegistration)]);
+  assert.deepEqual(responses[0].visibilityEnforcement, { intentionSessionID: session, browserSessionID: profile,
+    browserProcessIdentity: simulatedQAIdentity, revision: 2, windowIDs: [11] }, "App-authored current native confirmation carries exact identity/revision");
+  assertReceipt(call(directory, [connect(browser, bootstrapRegistration), request(browser, plan(3))]), 3, true);
+  assert.equal(call(directory, [connect(browser, bootstrapRegistration)])[0].visibilityEnforcement, undefined,
+    "New descriptors invalidate old native observation");
+  seedBootstrap(directory, { phase: "issued" });
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage("Result", { outcome: "uncertain" })]), "Result",
+    { effectID: "bootstrap-effect", accepted: true }, "Unknown completion remains a durable result");
+  assert.equal(readRecord(directory, browser).bootstrapEffects[0].outcome, "uncertain");
+  bootstrapReceipt(call(directory, [connect(browser, bootstrapRegistration), bootstrapMessage("Result")]), "Result",
+    { effectID: "bootstrap-effect", accepted: false }, "Unknown outcome cannot be upgraded by later observation");
+  const chrome = temporaryDirectory(); writeRules(chrome);
+  bootstrapReceipt(call(chrome, [connect("com.google.Chrome", bootstrapRegistration),
+    bootstrapMessage("Claim", {}, { browserBundleIdentifier: "com.google.Chrome" })]), "Claim",
+    { effectID: "bootstrap-effect", granted: false }, "Bootstrap is Firefox-only");
+  assert.ok(!heartbeat(chrome, "com.google.Chrome").capabilities.includes(bootstrapCapability));
+}
+async function checkBootstrapWatcher() {
+  await withLiveHost("org.mozilla.firefox", async ({ directory, replies, send }) => {
+    send(request("org.mozilla.firefox"));
+    await until(() => replies.some(reply => reply.visibilityPlanReceipt?.accepted), "Initial plan not accepted");
+    seedBootstrap(directory);
+    await until(() => replies.some(reply => reply.minimizeBootstrapOffers?.length), "Native record update must push offer without a rule change");
+    send(bootstrapMessage());
+    await until(() => replies.some(reply => reply.minimizeBootstrapClaimReceipt?.granted), "Prepared offer claim missing");
+    send(bootstrapMessage("Result"));
+    await until(() => replies.some(reply => reply.minimizeBootstrapResultReceipt?.accepted), "Settlement receipt missing");
+    const saved = readRecord(directory, "org.mozilla.firefox"); saved.verificationRevision = 1; saved.verifiedWindowIDs = [11];
+    fs.writeFileSync(recordPath(directory, "org.mozilla.firefox"), JSON.stringify(saved));
+    await until(() => replies.some(reply => reply.visibilityEnforcement?.windowIDs?.includes(11)),
+      "Native verified effect must push independently of unchanged rules");
+  }, bootstrapRegistration);
+}
+
 (async () => {
   assert.ok(fs.existsSync(host), `Build IntentNativeHost first: missing ${host}`);
   try {
     const helperDirectory = temporaryDirectory(); qaHost = path.join(helperDirectory, "IntentQASpec");
     fs.copyFileSync(host, qaHost); fs.chmodSync(qaHost, 0o700);
     checkQAIdentityIsolation();
+    checkBootstrapProtocol(); await checkBootstrapWatcher();
     for (const browser of ["org.mozilla.firefox", "com.google.Chrome"]) {
       checkBrowser(browser); checkNegotiatedReadiness(browser); await checkCaptureAndFinish(browser);
       checkRestartDenials(browser); checkNativeRecoveryDenials(browser); checkNativeClosure(browser);

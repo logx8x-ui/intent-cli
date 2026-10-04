@@ -11,7 +11,7 @@
       this.timeout = options.timeout ?? 2000;
       this.now = options.now ?? Date.now;
       this.tail = Promise.resolve(); this.pending = new Map(); this.sent = new Map();
-      this.state = null; this.processIdentity = null; this.nativeActive = null; this.restartPending = new Map(); this.recoveryPending = new Map();
+      this.state = null; this.enforcement = null; this.processIdentity = null; this.nativeActive = null; this.restartPending = new Map(); this.recoveryPending = new Map();
     }
     enqueue(operation) {
       const result = this.tail.then(operation, operation).catch(() => false);
@@ -51,6 +51,15 @@
       const browserSessionID = this.sessionID();
       return browserSessionID && this.processIdentity
         ? {browserSessionID, processIdentity:{...this.processIdentity}} : null;
+    }
+    verifiedWindowIDs(sessionID) {
+      const receipt = this.enforcement, identity = this.identity();
+      return receipt && this.nativeActive === true && receipt.intentionSessionID === sessionID
+        && receipt.browserSessionID === identity?.browserSessionID
+        && this.sameProcess(receipt.browserProcessIdentity,identity?.processIdentity)
+        && receipt.revision === this.state?.planRevisions?.[sessionID]
+        && Array.isArray(receipt.windowIDs) && receipt.windowIDs.every(id=>Number.isSafeInteger(id) && id>=0)
+        ? [...receipt.windowIDs] : [];
     }
     sameProcess(a, b) {
       return this.validProcess(a) && this.validProcess(b) && a.pid === b.pid && a.launched === b.launched;
@@ -300,6 +309,7 @@
       if (!accepted) return false;
       if (captureParkingProof && plan.parkingWindows.length && JSON.stringify(this.identity()) !== JSON.stringify(identity)) return false;
       this.state.plans[plan.intentionSessionID] = plan;
+      (this.state.planRevisions ||= {})[plan.intentionSessionID] = revision;
       await this.save();
       this.sent.set(plan.intentionSessionID, {fingerprint, at:this.now()});
       return true;
@@ -311,6 +321,7 @@
       if (typeof message?.active === 'boolean' || (message && Object.prototype.hasOwnProperty.call(message, 'browserProcessIdentity'))) {
         this.processIdentity = this.validProcess(message.browserProcessIdentity) ? {...message.browserProcessIdentity} : null;
       }
+      if (typeof message?.active === 'boolean') this.enforcement = message.visibilityEnforcement || null;
       const closed = message?.visibilityClosedReceipt;
       if (typeof closed?.requestID === 'string') this.closedPending.get(closed.requestID)?.(closed.accepted === true);
       const recovery = message?.visibilityRecoveryReceipt;
@@ -325,7 +336,7 @@
       for (const settle of [...this.restartPending.values()]) settle(false);
       for (const settle of [...this.recoveryPending.values()]) settle(false);
       for (const settle of [...this.closedPending.values()]) settle(false);
-      this.processIdentity = null; this.nativeActive = null;
+      this.processIdentity = null; this.nativeActive = null; this.enforcement = null;
       this.sent.clear();
     }
   }

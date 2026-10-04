@@ -84,6 +84,9 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
     /// Browser-confirmed removal is terminal for this registered parking ID.
     /// Kept separate from reveal requests, and monotonic across desired plans.
     public var closedParkingWindowIDs: [Int]
+    public var bootstrapEffects: [BrowserWindowMinimizeBootstrap]
+    public var verificationRevision: Int?
+    public var verifiedWindowIDs: [Int]
 
     public init(browserBundleIdentifier: String, browserSessionID: String, receivedAt: Date = Date(),
                 plan: BrowserWindowVisibilityPlan, registeredParkingWindows: [BrowserWindowVisibilityWindow]? = nil,
@@ -95,10 +98,11 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
         self.requestedRevealWindowIDs = requestedRevealWindowIDs ?? plan.revealWindowIDs
         self.browserProcessIdentity = browserProcessIdentity
         self.closedParkingWindowIDs = closedParkingWindowIDs
+        bootstrapEffects = []; verificationRevision = nil; verifiedWindowIDs = []
     }
 
     private enum CodingKeys: String, CodingKey {
-        case browserBundleIdentifier, browserSessionID, receivedAt, plan, registeredParkingWindows, requestedRevealWindowIDs, browserProcessIdentity, closedParkingWindowIDs
+        case browserBundleIdentifier, browserSessionID, receivedAt, plan, registeredParkingWindows, requestedRevealWindowIDs, browserProcessIdentity, closedParkingWindowIDs, bootstrapEffects, verificationRevision, verifiedWindowIDs
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -110,6 +114,9 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
         requestedRevealWindowIDs = try values.decodeIfPresent([Int].self, forKey: .requestedRevealWindowIDs) ?? plan.revealWindowIDs
         browserProcessIdentity = try values.decodeIfPresent(BrowserProcessIdentity.self, forKey: .browserProcessIdentity)
         closedParkingWindowIDs = try values.decodeIfPresent([Int].self, forKey: .closedParkingWindowIDs) ?? []
+        bootstrapEffects = try values.decodeIfPresent([BrowserWindowMinimizeBootstrap].self, forKey: .bootstrapEffects) ?? []
+        verificationRevision = try values.decodeIfPresent(Int.self, forKey: .verificationRevision)
+        verifiedWindowIDs = try values.decodeIfPresent([Int].self, forKey: .verifiedWindowIDs) ?? []
     }
 
     public var isValid: Bool {
@@ -124,6 +131,14 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
             && Set(plan.revealWindowIDs).isSubset(of: Set(requestedRevealWindowIDs))
             && Set(closedParkingWindowIDs).count == closedParkingWindowIDs.count
             && Set(closedParkingWindowIDs).isSubset(of: Set(registeredParkingWindows.map(\.windowID)))
+            && bootstrapEffects.count <= 256 && bootstrapEffects.allSatisfy(\.isValid)
+            && (bootstrapEffects.isEmpty || (browserBundleIdentifier == "org.mozilla.firefox" && browserProcessIdentity != nil))
+            && Set(bootstrapEffects.map(\.effectID)).count == bootstrapEffects.count
+            && Set(bootstrapEffects.map { $0.descriptor.windowID }).count == bootstrapEffects.count
+            && Set(bootstrapEffects.map(\.nativeWindowID)).count == bootstrapEffects.count
+            && Set(verifiedWindowIDs).count == verifiedWindowIDs.count
+            && Set(verifiedWindowIDs).isSubset(of: Set(plan.windows.map(\.windowID)))
+            && (verificationRevision == nil ? verifiedWindowIDs.isEmpty : verificationRevision == plan.revision)
     }
 }
 
@@ -341,6 +356,10 @@ public final class BrowserWindowVisibilityStore {
                 }
                 record.requestedRevealWindowIDs = Set(previous.requestedRevealWindowIDs).union(plan.revealWindowIDs).sorted()
                 record.closedParkingWindowIDs = previous.closedParkingWindowIDs
+                record.bootstrapEffects = previous.bootstrapEffects
+                // A desired-plan ACK never means its windows were hidden. A new
+                // revision needs a fresh native observation before verification.
+                record.verificationRevision = nil; record.verifiedWindowIDs = []
             } else if revealOnly {
                 return .rejected
             }
@@ -402,6 +421,101 @@ public final class BrowserWindowVisibilityStore {
                     && value.plan.intentionSessionID == intentionSessionID ? value : nil
             }
             return try action(scoped)
+        }
+    }
+
+    /// Called only after the app durably saved an exact pending native journal
+    /// entry. One candidate per browser window/occurrence prevents effect replay.
+    public func prepareBootstrap(_ effect: BrowserWindowMinimizeBootstrap, for expected: BrowserWindowVisibilityRecord,
+                                 now: Date = Date()) throws -> Bool {
+        guard effect.isValid, expected.browserBundleIdentifier == "org.mozilla.firefox",
+              let proof = expected.browserProcessIdentity, proof.isValid,
+              effect.planRevision == expected.plan.revision, expected.plan.windows.contains(effect.descriptor),
+              effect.expiresAtUnixMS > now.timeIntervalSince1970 * 1000,
+              effect.expiresAtUnixMS <= now.timeIntervalSince1970 * 1000 + 3_000 else { return false }
+        return try mutateBootstrapRecord(expected.browserBundleIdentifier, expected.browserSessionID, expected.plan.intentionSessionID, nonBlocking: true) { record in
+            guard record.plan == expected.plan, record.browserProcessIdentity == proof,
+                  record.bootstrapEffects.allSatisfy({ $0.effectID != effect.effectID && $0.descriptor.windowID != effect.descriptor.windowID
+                      && $0.nativeWindowID != effect.nativeWindowID }) else { return false }
+            record.bootstrapEffects.append(effect); return true
+        }
+    }
+
+    /// Atomically spends the only permission. A lost receipt is uncertainty, not
+    /// permission to issue another grant. The host supplies current rule identity.
+    public func claimBootstrap(effectID: String, browserBundleIdentifier: String, browserSessionID: String,
+                               intentionSessionID: String, browserProcessIdentity: BrowserProcessIdentity,
+                               currentIntentionSessionID: String?, now: Date = Date()) throws -> Bool {
+        guard browserBundleIdentifier == "org.mozilla.firefox", intentionSessionID == currentIntentionSessionID else { return false }
+        return try mutateBootstrapRecord(browserBundleIdentifier, browserSessionID, intentionSessionID) { record in
+            guard record.browserProcessIdentity == browserProcessIdentity,
+                  let index = record.bootstrapEffects.firstIndex(where: { $0.effectID == effectID }) else { return false }
+            let effect = record.bootstrapEffects[index]
+            guard effect.phase == .prepared, effect.expiresAtUnixMS > now.timeIntervalSince1970 * 1000,
+                  record.plan.windows.contains(where: { $0.windowID == effect.descriptor.windowID
+                      && ["normal", "maximized"].contains($0.state) }) else { return false }
+            record.bootstrapEffects[index].phase = .issued; return true
+        }
+    }
+
+    /// Historical results resolve ownership only; they never authorize work.
+    public func recordBootstrapResult(effectID: String, browserBundleIdentifier: String, browserSessionID: String,
+                                      intentionSessionID: String, browserProcessIdentity: BrowserProcessIdentity,
+                                      outcome: BrowserWindowMinimizeBootstrap.Outcome) throws -> Bool {
+        guard browserBundleIdentifier == "org.mozilla.firefox" else { return false }
+        return try mutateBootstrapRecord(browserBundleIdentifier, browserSessionID, intentionSessionID) { record in
+            guard record.browserProcessIdentity == browserProcessIdentity,
+                  let index = record.bootstrapEffects.firstIndex(where: { $0.effectID == effectID }) else { return false }
+            let effect = record.bootstrapEffects[index]
+            if effect.phase == .result { return effect.outcome == outcome }
+            guard effect.phase == .issued || outcome == .notDispatched else { return false }
+            record.bootstrapEffects[index].phase = .result
+            record.bootstrapEffects[index].outcome = outcome
+            return true
+        }
+    }
+
+    /// Finish cancels only unissued offers under the claim lock. Never turn an
+    /// in-flight/uncertain dispatch into a claim that nothing happened.
+    public func cancelPreparedBootstrap(effectID: String, browserBundleIdentifier: String, browserSessionID: String,
+                                        intentionSessionID: String, browserProcessIdentity: BrowserProcessIdentity) throws {
+        _ = try mutateBootstrapRecord(browserBundleIdentifier, browserSessionID, intentionSessionID, nonBlocking: true) { record in
+            guard record.browserProcessIdentity == browserProcessIdentity,
+                  let index = record.bootstrapEffects.firstIndex(where: { $0.effectID == effectID }),
+                  record.bootstrapEffects[index].phase == .prepared else { return false }
+            record.bootstrapEffects[index].phase = .result; record.bootstrapEffects[index].outcome = .notDispatched; return true
+        }
+    }
+
+    /// App-only effect observation for the exact latest plan; never accepted
+    /// from a browser request or inferred from plan/capture acknowledgments.
+    public func writeVerification(for expected: BrowserWindowVisibilityRecord, windowIDs: [Int]) throws -> Bool {
+        guard expected.browserProcessIdentity != nil, Set(windowIDs).count == windowIDs.count,
+              Set(windowIDs).isSubset(of: Set(expected.plan.windows.map(\.windowID))) else { return false }
+        return try mutateBootstrapRecord(expected.browserBundleIdentifier, expected.browserSessionID, expected.plan.intentionSessionID,
+                                         nonBlocking: true) { record in
+            guard record.plan == expected.plan, record.browserProcessIdentity == expected.browserProcessIdentity else { return false }
+            let pending = Set(record.bootstrapEffects.filter { $0.disposition == .pending }.map { $0.descriptor.windowID })
+            guard pending.isDisjoint(with: Set(windowIDs)) else { return false }
+            record.verificationRevision = record.plan.revision; record.verifiedWindowIDs = windowIDs.sorted(); return true
+        }
+    }
+
+    private func mutateBootstrapRecord(_ browser: String, _ profile: String, _ intention: String, nonBlocking: Bool = false,
+                                       _ update: (inout BrowserWindowVisibilityRecord) -> Bool) throws -> Bool {
+        guard validVisibilityBundle(browser), validVisibilityIdentity(profile), validVisibilityIdentity(intention) else { return false }
+        let file = fileURL(browserBundleIdentifier: browser, browserSessionID: profile, intentionSessionID: intention)
+        return try withFileLock(file, nonBlocking: nonBlocking) {
+            guard var record = read(file), record.browserBundleIdentifier == browser, record.browserSessionID == profile,
+                  record.plan.intentionSessionID == intention else { return false }
+            let previous = record
+            guard update(&record), record.isValid else { return false }
+            if previous == record { return true }
+            let encoded = try JSONEncoder().encode(record)
+            guard encoded.count <= Self.maximumFileBytes else { return false }
+            try encoded.write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            return true
         }
     }
 

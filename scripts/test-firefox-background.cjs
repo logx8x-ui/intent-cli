@@ -142,6 +142,11 @@ function createHarness(activeRules, initialTabs, options = {}) {
   }
   const context = {
     browser,
+    IntentFirefoxMinimizeBootstrap: options.bootstrapObserver ? class {
+      receive(message,context) { options.bootstrapObserver(message,context); }
+      disconnected() {}
+      invalidateWindow() {}
+    } : undefined,
     IntentNativeWindowVisibility: options.nativeVisibility ? require("../firefox-extension/native-window-visibility.js") : undefined,
     IntentTabVisibility: options.onVisibilitySync ? class {
       constructor(_api, _firefox, owner) { this.owner = owner; }
@@ -288,6 +293,23 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  {
+    let release;const gate=new Promise(resolve=>release=resolve), observed=[];
+    const initial={active:true,nativeWindowVisibility:true,hideDistractions:true,startupSessionID:'bootstrap-routing',
+      allowedWebsites:['example.com'],startupWebsites:[],browserProcessIdentity:{pid:321,launched:800001000},
+      hostCapabilities:['native-window-visibility-host-v1','firefox-window-minimize-bootstrap-host-v1']};
+    const native=createHarness(initial,[{id:1,windowId:1,active:true,url:'https://example.com/'}],{
+      nativeVisibility:true,withCommandPort:true,bootstrapObserver:(message,context)=>observed.push({message,context}),
+      onVisibilitySync:async rules=>{if(rules.active)await gate;}});
+    for(let n=0;n<8;n++)await new Promise(setImmediate);
+    const incoming=native.receiveNative({...initial,active:false,minimizeBootstrapOffers:[]});
+    for(let n=0;n<8;n++)await Promise.resolve();
+    assert.equal(observed.at(-1).context.rules.active,false,'Finish reaches the bootstrap fence before a pending visibility operation settles');
+    release();await incoming;
+    assert(!require('../chrome-extension/manifest.json').background.service_worker?.includes('bootstrap'));
+    assert(!fs.readFileSync(path.join(__dirname,'../chrome-extension/background.js'),'utf8').includes('new IntentFirefoxMinimizeBootstrap'),
+      'Chrome has no Firefox effect executor');
+  }
   // The real adapter waits for a receipt inside the serialized rules pipeline.
   // Delivering receipts after awaiting that same pipeline would deadlock setup.
   for (const [compatible, processProof] of [[true, true], [true, false], [false, true]]) {

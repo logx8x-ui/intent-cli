@@ -641,17 +641,29 @@ async function testParkingClosureRetries() {
     assert(receipts.filter(ids=>ids.length).length>=2);
   }
   {
-    const f=fixture(), plans=[]; f.windows[1].state='normal';
-    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),publishPlan:async(_rules,windows)=>{plans.push(windows.map(w=>w.windowID));return true}});
+    const f=fixture(), plans=[]; f.windows[1].state='normal'; let verified=[];
+    const v=new Visibility(f.api,true,{identity:()=>structuredClone(nativeIdentity),verifiedWindowIDs:()=>verified,
+      publishPlan:async(_rules,windows)=>{plans.push(windows.map(w=>w.windowID));return true}});
     const open={...active,nativeWindowVisibility:true,addAsYouGo:true};
     await v.syncInitial(open,t=>t.id===1,()=>true);
     assert.deepEqual(plans.at(-1),[2],'Add as you go publishes initial whole-window restrictions');
+    assert.notEqual(v.state.initialSession,'one','Durable plan ACK is not confirmation of initial hiding');
     await v.syncInitial(open,t=>t.id===1,()=>true);
-    assert.deepEqual(plans.at(-1),[],'Later allowed windows are not repeatedly minimized by the initial restriction');
+    assert.deepEqual(plans.at(-1),[2],'The still-normal window stays claimed until exact native verification');
+    assert.notEqual(v.state.initialSession,'one');
+    f.windows.push({id:77,type:'normal',state:'normal'});
+    f.tabs.push({id:88,windowId:77,index:0,url:'https://example.com/new',active:true});
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert(!plans.at(-1).includes(77),'New windows remain permitted during the pending initial phase');
+    f.windows[1].state='minimized'; verified=[2];
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.equal(v.state.initialSession,'one','Only native verification completes the initial phase');
+    await v.syncInitial(open,t=>t.id===1,()=>true);
+    assert.deepEqual(plans.at(-1),[],'After verification ordinary additions are permissive');
   }
   {
     const f=fixture(); let accepted=false;
-    const owner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>accepted};
+    const owner={identity:()=>structuredClone(nativeIdentity),verifiedWindowIDs:()=>accepted?[2]:[],publishPlan:async()=>accepted};
     let v=new Visibility(f.api,true,owner);
     const open={...active,nativeWindowVisibility:true,addAsYouGo:true};
     await v.syncInitial(open,t=>t.id===1,()=>true);

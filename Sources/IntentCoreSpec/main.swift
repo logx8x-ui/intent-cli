@@ -36,6 +36,7 @@ do {
     try runSessionAdditionsSpecs()
     try runBrowserCommandSpecs()
     try runBrowserWindowVisibilitySpecs()
+    try runBrowserWindowBootstrapSpecs()
     try runBrowserWindowVisibilityCacheSpecs()
     try runBrowserWindowEnforcementSpecs()
     try runSessionFailureNoticeSpecs()

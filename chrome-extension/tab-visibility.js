@@ -4,7 +4,7 @@
     constructor(api, firefox = false, nativeOwner = null) {
       this.api = api; this.firefox = firefox; this.tail = Promise.resolve();
       this.nativeOwner = nativeOwner;
-      this.desiredRules = null;
+      this.desiredRules = null; this.bootstrapPolicy = null; this.lastNativeClaims = [];
       this.key = 'intentHiddenWorkspaceV1'; this.state = null; this.recoveredOnce = false;
       this.shadowKey = 'intentNativeVisibilityLedgerV1';
     }
@@ -30,6 +30,10 @@
         }
         const initialIDs = new Set(this.state.initialPending.tabIDs);
         if (await this.reconcile(rules, tab => !initialIDs.has(tab.id) || initiallyAllowed(tab)) === false) return;
+        if (rules.nativeWindowVisibility) {
+          const verified = new Set(this.nativeOwner?.verifiedWindowIDs?.(rules.startupSessionID) || []);
+          if (this.lastNativeClaims.some(id=>!verified.has(id))) return;
+        }
         this.state.initialSession = rules.startupSessionID;
         this.state.initialPending = null;
         await this.save();
@@ -112,6 +116,7 @@
     async reconcile(rules, allowed) {
       await this.load();
       if (!rules.active || !rules.hideDistractions) {
+        this.bootstrapPolicy = null; this.lastNativeClaims = [];
         // The native closure ledger outlives our tab state and extension reloads.
         void Promise.resolve(this.nativeOwner?.retireClosedWindows?.()).catch(() => {});
         if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length && !this.state.groups.length && !this.state.orders.length && !this.state.nativeReveals.length) return;
@@ -156,6 +161,11 @@
         const window = windows.find(w => w.id === id);
         return window?.type === 'normal' && !group.some(allowed) ? [this.windowDescriptor(window, group)] : [];
       }) : [];
+      this.lastNativeClaims = nativeWindows.map(window=>window.windowID);
+      // Keep the exact initial Add-as-you-go classifier until native confirms
+      // the initial hiding. This validator never waits for our serialized tail.
+      this.bootstrapPolicy = native ? {rules,allowed,windowIDs:new Set(this.lastNativeClaims),
+        key:JSON.stringify([rules,this.state.initialSession===rules.startupSessionID?'runtime':'initial',this.state.initialPending?.tabIDs||null])} : null;
       // Acceptance records parking identities before a user's tab can enter
       // them. A failed/ambiguous receipt must never switch to browser ownership.
       if (native && !await this.publishNativePlan(rules, nativeWindows)) return false;
@@ -327,6 +337,23 @@
         } catch (_) { /* Keep ownership while the browser cannot answer. */ }
         return {confirmed: false, tab: null};
       }
+    }
+    async validateBootstrap(offer) {
+      const policy = this.bootstrapPolicy;
+      if (!this.firefox || !policy || JSON.stringify(this.desiredRules) !== JSON.stringify(policy.rules)
+          || !policy.rules.active || !policy.rules.nativeWindowVisibility
+          || policy.rules.startupSessionID !== offer.intentionSessionID || !policy.windowIDs.has(offer.windowID)) return false;
+      const identity = this.verifiedNativeIdentity();
+      if (identity?.browserSessionID !== offer.browserSessionID
+          || !this.sameProcess(identity?.processIdentity,offer.browserProcessIdentity)) return false;
+      const window = await this.api.windows.get(offer.windowID,{populate:true}).catch(()=>null);
+      return this.bootstrapPolicy?.key === policy.key && this.bootstrapPolicy?.windowIDs.has(offer.windowID)
+        && JSON.stringify(this.desiredRules) === JSON.stringify(policy.rules)
+        && this.sameNativeIdentity(identity,this.verifiedNativeIdentity())
+        && window?.id === offer.windowID && window.type === 'normal' && window.focused === false
+        && ['normal','maximized'].includes(window.state) && Array.isArray(window.tabs) && window.tabs.length > 0
+        && window.tabs.every(tab=>Number.isSafeInteger(tab.id) && tab.windowId===offer.windowID
+          && typeof tab.url==='string' && !this.holdingPage(tab.url) && !policy.allowed(tab));
     }
     windowDescriptor(window, tabs) {
       return {windowID: window.id, title: tabs.find(tab => tab.active)?.title || '',

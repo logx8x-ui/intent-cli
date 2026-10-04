@@ -122,6 +122,20 @@ async function run() {
   owner.receive({active:false,browserProcessIdentity:previousProcessIdentity});
   owner.receive({visibilityRecoveryReceipt:{requestID:'unknown',accepted:true}});
   assert.ok(owner.identity(), 'Partial receipt does not invent a loss of process proof');
+  // Durable plan acceptance must never stand in for native AX verification.
+  owner.state = {planRevisions:{'verify-session':7}};
+  const verified = {intentionSessionID:'verify-session',browserSessionID:owner.identity().browserSessionID,browserProcessIdentity:previousProcessIdentity,revision:7,windowIDs:[2]};
+  owner.receive({active:true,browserProcessIdentity:previousProcessIdentity,visibilityEnforcement:verified});
+  assert.deepEqual(owner.verifiedWindowIDs('verify-session'),[2]);
+  for (const altered of [{...verified,revision:6},{...verified,browserSessionID:'other-profile'},
+    {...verified,browserProcessIdentity:{...previousProcessIdentity,pid:9999}},{...verified,intentionSessionID:'other-occurrence'}]) {
+    owner.receive({active:true,browserProcessIdentity:previousProcessIdentity,visibilityEnforcement:altered});
+    assert.deepEqual(owner.verifiedWindowIDs('verify-session'),[]);
+  }
+  owner.receive({active:false,browserProcessIdentity:previousProcessIdentity,visibilityEnforcement:verified});
+  assert.deepEqual(owner.verifiedWindowIDs('verify-session'),[]);
+  owner.receive({active:true,browserProcessIdentity:previousProcessIdentity,visibilityEnforcement:verified});owner.disconnected();
+  assert.deepEqual(owner.verifiedWindowIDs('verify-session'),[]);
   console.log('Native-window visibility transport: ownership, retries, reconnect, worker restart, and recovery identity passed.');
 }
 run().catch(error => {console.error(error);process.exitCode=1;});

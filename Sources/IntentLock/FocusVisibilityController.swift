@@ -14,6 +14,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var intentionSessionID: String?
         var browserWindowID: Int?
         var parking: Bool?
+        var bootstrapEffectID: String?
     }
     private struct WindowIdentity: Hashable {
         var pid: pid_t
@@ -67,7 +68,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             RestorationFocusGuard.cancel()
             entries = Self.restore()
             guard spec.hideDistractions && spec.requiresEnforcement, !stopped, timer == nil else {
-                if entries.contains(where: { $0.parking == true }) {
+                if entries.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) {
                     Self.startRecoveryWatcher(generation: Self.recoveryGeneration, parkingOnly: true)
                 }
                 return
@@ -82,6 +83,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
         onMain {
             guard !stopped else { return }
             enforcementPolicy?.stop()
+            for entry in Self.loadEntries() where entry.intentionSessionID == spec.nativeWindowVisibilitySessionID {
+                Self.cancelPreparedBootstrap(entry)
+            }
             // Capture registrations even when finish beats the next refresh.
             if started, let visibilityCache {
                 entries = Self.captureParking(records: visibilityCache.records(forceRefresh: true), entries: Self.loadEntries())
@@ -163,7 +167,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         // An older intention's explicit orphan reveal can arrive during a newer
         // one. Only historical parking ownership is released here, never normal
         // windows hidden for this current session.
-        if entries.contains(where: { $0.parking == true }) {
+        if entries.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) {
             entries = Self.restore(parkingOnly: true)
         }
         reconcileBrowserWindows(records: records, windows: windows)
@@ -184,6 +188,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             } else {
                 for window in windows where window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
                     guard mayEnforce else { return }
+                    guard !entries.contains(where: { $0.pid == window.pid && $0.window == window.id && $0.bootstrapEffectID != nil }) else { continue }
                     guard let element = Self.element(window, launched: launched), Self.boolean(element, kAXMinimizedAttribute).value == false else { continue }
                     if !entries.contains(where: { $0.pid == window.pid && $0.window == window.id }) {
                         entries.append(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id))
@@ -238,6 +243,17 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     liveProcessIdentity: liveIdentity, outcome: outcome))
             }
         }
+        // Persist real effect confirmation independently of durable plan ACKs.
+        // The store rejects an observation if a newer desired plan overtook it.
+        if mayEnforce, let current = Self.currentRules(), current.active, current.isFresh(),
+           current.startupSessionID == spec.nativeWindowVisibilitySessionID {
+            for record in records {
+                let verified = observations.filter { observation in
+                    observation.record == record && (observation.outcome == .verifiedMinimized || observation.outcome == .noLongerExists)
+                }.map(\.windowID)
+                _ = try? BrowserWindowVisibilityStore().writeVerification(for: record, windowIDs: verified)
+            }
+        }
         // AX calls can take time. Recheck the active occurrence immediately
         // before a failure callback; a stop/new session cannot be resurrected.
         let rules = Self.currentRules()
@@ -274,12 +290,33 @@ public final class FocusVisibilityController: @unchecked Sendable {
                                       record: BrowserWindowVisibilityRecord,
                                       claim: BrowserWindowVisibilityWindow, launched: Date,
                                       owned: Bool) -> BrowserWindowEnforcementPolicy.Outcome {
+        var owned = owned
+        if let index = entries.firstIndex(where: { $0.pid == pid && $0.launched == launched && $0.window == id && $0.bootstrapEffectID != nil }) {
+            let pending = entries[index]
+            guard pending.intentionSessionID == record.plan.intentionSessionID,
+                  pending.browserSessionID == record.browserSessionID else { return .unresolved(.minimizeNotConfirmed) }
+            switch Self.bootstrapDisposition(pending) {
+            case .pending: return .unresolved(.minimizeNotConfirmed)
+            case .noEffect:
+                var next = entries; next.remove(at: index)
+                guard Self.save(next) else { return .unresolved(.ownershipNotSaved) }
+                entries = next; owned = false
+            case .nativeConfirmation: owned = true
+            }
+        }
         let boundElement = owned ? Self.accessibilityWindows[.init(pid: pid, launched: launched, window: id)] : nil
         guard let element = boundElement ?? window.flatMap({ Self.element($0, launched: launched) }) else {
+            if !owned, let window, Self.missingFromSuccessfulAXEnumeration(window),
+               prepareFirefoxBootstrap(window, record: record, claim: claim, launched: launched) {
+                return .unresolved(.minimizeNotConfirmed)
+            }
             return .unresolved(.accessibilityUnavailable)
         }
         let before = Self.boolean(element, kAXMinimizedAttribute)
-        if before.value == true { return .verifiedMinimized } // Never adopt user-minimized windows.
+        if before.value == true {
+            guard takeOverBootstrap(pid: pid, launched: launched, id: id) else { return .unresolved(.ownershipNotSaved) }
+            return .verifiedMinimized // Unowned user-minimized windows stay unowned.
+        }
         guard before.value == false else { return .unresolved(.accessibilityUnavailable) }
         if !owned {
             guard window != nil, Self.isFreshClaim(record, pid: pid, launched: launched),
@@ -294,10 +331,85 @@ public final class FocusVisibilityController: @unchecked Sendable {
         guard mayEnforce else { return .unresolved(.minimizeNotConfirmed) }
         let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
         Self.observe("browserMinimize", pid: pid, window: id, status: status)
-        // Dispatch success is not an effect receipt. A timed-out setter can also
-        // succeed; only the following exact AX state establishes enforcement.
-        return Self.boolean(element, kAXMinimizedAttribute).value == true
-            ? .verifiedMinimized : .unresolved(.minimizeNotConfirmed)
+        guard Self.boolean(element, kAXMinimizedAttribute).value == true else { return .unresolved(.minimizeNotConfirmed) }
+        guard takeOverBootstrap(pid: pid, launched: launched, id: id) else { return .unresolved(.ownershipNotSaved) }
+        return .verifiedMinimized
+    }
+
+    private func takeOverBootstrap(pid: pid_t, launched: Date, id: UInt32) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.pid == pid && $0.launched == launched && $0.window == id && $0.bootstrapEffectID != nil }) else { return true }
+        guard Self.bootstrapDisposition(entries[index]) == .nativeConfirmation else { return false }
+        var next = entries; next[index].bootstrapEffectID = nil
+        guard Self.save(next) else { return false }
+        entries = next; return true
+    }
+
+    private func prepareFirefoxBootstrap(_ window: WorkspaceWindow, record: BrowserWindowVisibilityRecord,
+                                         claim: BrowserWindowVisibilityWindow, launched: Date) -> Bool {
+        guard mayEnforce, record.browserBundleIdentifier == "org.mozilla.firefox", ["normal", "maximized"].contains(claim.state),
+              AXIsProcessTrusted(), Self.isFreshClaim(record, pid: window.pid, launched: launched),
+              !WorkspaceWindow.list().contains(where: { $0.id == window.id && $0.pid == window.pid }),
+              !entries.contains(where: { $0.pid == window.pid && $0.launched == launched && $0.window == window.id }),
+              let latest = BrowserWindowVisibilityStore().record(browserBundleIdentifier: record.browserBundleIdentifier,
+                  browserSessionID: record.browserSessionID, intentionSessionID: record.plan.intentionSessionID),
+              latest.plan == record.plan, latest.browserProcessIdentity == record.browserProcessIdentity,
+              !latest.bootstrapEffects.contains(where: { $0.descriptor.windowID == claim.windowID }) else { return false }
+        let effect = BrowserWindowMinimizeBootstrap(nativeWindowID: window.id, planRevision: record.plan.revision,
+            expiresAtUnixMS: Date().timeIntervalSince1970 * 1000 + 2_500, descriptor: claim)
+        let entry = Entry(pid: window.pid, launched: launched, bundle: record.browserBundleIdentifier, window: window.id,
+            browserSessionID: record.browserSessionID, intentionSessionID: record.plan.intentionSessionID,
+            browserWindowID: claim.windowID, parking: false, bootstrapEffectID: effect.effectID)
+        entries.append(entry)
+        guard Self.save(entries) else { entries.removeLast(); return false }
+        func discardUnpublishedEntry() {
+            let next = entries.filter { $0.bootstrapEffectID != effect.effectID }
+            // Only this new, definitely unpublished entry can be retired. A
+            // failed journal save retains its in-memory recovery ownership.
+            if Self.save(next) { entries = next }
+        }
+        return BrowserWindowBootstrapRecovery.publishAfterJournal(mayEnforce: { self.mayEnforce }, publish: {
+            try BrowserWindowVisibilityStore().prepareBootstrap(effect, for: latest)
+        }, retireUnpublished: discardUnpublishedEntry)
+    }
+
+    private static func bootstrapDisposition(_ entry: Entry) -> BrowserWindowMinimizeBootstrap.Disposition {
+        guard let effectID = entry.bootstrapEffectID, let profile = entry.browserSessionID,
+              let intention = entry.intentionSessionID, let native = entry.window,
+              let browserWindow = entry.browserWindowID else { return .pending }
+        let record = BrowserWindowVisibilityStore().record(browserBundleIdentifier: entry.bundle,
+            browserSessionID: profile, intentionSessionID: intention)
+        return BrowserWindowBootstrapRecovery.disposition(record: record, browser: entry.bundle,
+            profile: profile, intention: intention,
+            process: .init(pid: entry.pid, launched: entry.launched.timeIntervalSinceReferenceDate),
+            effectID: effectID, nativeWindowID: native, browserWindowID: browserWindow)
+    }
+
+    private static func cancelPreparedBootstrap(_ entry: Entry) {
+        guard let effect = entry.bootstrapEffectID, let profile = entry.browserSessionID, let intention = entry.intentionSessionID else { return }
+        try? BrowserWindowVisibilityStore().cancelPreparedBootstrap(effectID: effect, browserBundleIdentifier: entry.bundle,
+            browserSessionID: profile, intentionSessionID: intention,
+            browserProcessIdentity: .init(pid: entry.pid, launched: entry.launched.timeIntervalSinceReferenceDate))
+    }
+
+    /// Generic nil AX lookup is insufficient: permission errors and ambiguous
+    /// matches must not grant a browser effect. Every enumerated AX window must
+    /// be readable and this uniquely CG-bound target must be absent.
+    private static func missingFromSuccessfulAXEnumeration(_ window: WorkspaceWindow) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        let app = AXUIElementCreateApplication(window.pid)
+        guard let elements = value(app, kAXWindowsAttribute) as? [AXUIElement], !elements.isEmpty else { return false }
+        for element in elements {
+            guard let title = value(element, kAXTitleAttribute) as? String,
+                  let position = value(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
+                  let size = value(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return false }
+            var point = CGPoint.zero, dimensions = CGSize.zero
+            guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
+                  AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return false }
+            if BrowserWindowMatching.sameWindowTitle(title, window.title), abs(point.x - window.frame.minX) <= 3,
+               abs(point.y - window.frame.minY) <= 3, abs(dimensions.width - window.frame.width) <= 3,
+               abs(dimensions.height - window.frame.height) <= 3 { return false }
+        }
+        return true
     }
 
     private static func liveProcessIdentity(_ record: BrowserWindowVisibilityRecord) -> BrowserProcessIdentity? {
@@ -417,8 +529,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
         let windows = WorkspaceWindow.list(onScreen: false)
         var pending: [Entry] = []
+        let rules = currentRules()
+        let activeSession = rules.flatMap { $0.active && $0.isFresh() ? $0.startupSessionID : nil }
         for entry in remaining {
-            if parkingOnly && entry.parking != true { pending.append(entry); continue }
+            let historicalBootstrap = entry.bootstrapEffectID != nil && entry.intentionSessionID != activeSession
+            if parkingOnly && entry.parking != true && !historicalBootstrap { pending.append(entry); continue }
             // AppKit can temporarily lack an application or its launch metadata.
             // Only positive death/reuse evidence may discard durable ownership.
             let app = NSRunningApplication(processIdentifier: entry.pid)
@@ -447,6 +562,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 case nil: pending.append(entry); continue
                 case true?: break
                 }
+                if entry.bootstrapEffectID != nil {
+                    cancelPreparedBootstrap(entry)
+                    switch bootstrapDisposition(entry) {
+                    case .pending: pending.append(entry); continue
+                    case .noEffect: continue
+                    case .nativeConfirmation: break
+                    }
+                }
                 if entry.parking == true {
                     switch latestParkingDisposition(entry) {
                     case .discard: continue
@@ -458,6 +581,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
                       let element = element(window, launched: entry.launched) else { pending.append(entry); continue }
                 let before = boolean(element, kAXMinimizedAttribute)
                 if before.value == false { continue }
+                // A late settled effect cannot reveal under a newer policy.
+                // The colliding new claim remains unresolved and safety-stops.
+                if entry.bootstrapEffectID != nil, let activeSession, activeSession != entry.intentionSessionID {
+                    pending.append(entry); continue
+                }
                 guard before.value == true else {
                     if before.status == .invalidUIElement { accessibilityWindows.removeValue(forKey: .init(pid: entry.pid, launched: entry.launched, window: id)) }
                     pending.append(entry); continue
@@ -524,7 +652,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 guard fingerprint != recoveryFingerprint else { return }
                 recoveryFingerprint = fingerprint
                 let pending = restore(parkingOnly: parkingOnly)
-                if parkingOnly ? !pending.contains(where: { $0.parking == true }) : pending.isEmpty { stopRecoveryWatcher() }
+                if parkingOnly ? !pending.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) : pending.isEmpty { stopRecoveryWatcher() }
             }
             recoveryWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
@@ -535,7 +663,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         recoveryTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { _ in
             guard generation == recoveryGeneration, recoverySource != nil else { return }
             let pending = restore(parkingOnly: parkingOnly)
-            if parkingOnly ? !pending.contains(where: { $0.parking == true }) : pending.isEmpty { stopRecoveryWatcher() }
+            if parkingOnly ? !pending.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) : pending.isEmpty { stopRecoveryWatcher() }
         }
     }
     private static func stopRecoveryWatcher() {

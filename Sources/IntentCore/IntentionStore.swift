@@ -264,6 +264,7 @@ public enum BrowserGuardCapability: String, Codable, Equatable {
     case nativeTabGroups = "native-tab-groups-v1"
     case tabSessionIdentity = "tab-session-identity-v1"
     case nativeWindowVisibility = "native-window-visibility-v1"
+    case firefoxWindowMinimizeBootstrap = "firefox-window-minimize-bootstrap-v1"
 }
 
 public struct BrowserGuardState: Codable, Equatable {

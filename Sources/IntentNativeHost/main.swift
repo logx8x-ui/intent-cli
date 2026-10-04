@@ -66,6 +66,8 @@ struct HostRequest: Codable {
     var visibilityRestartRequest: HostVisibilityRestartRequest?
     var visibilityRecoveryRequest: HostVisibilityRecoveryRequest?
     var visibilityClosedRequest: HostVisibilityClosedRequest?
+    var minimizeBootstrapClaim: HostMinimizeBootstrapClaim?
+    var minimizeBootstrapResult: HostMinimizeBootstrapResult?
     var tabs: [HostTab]?
     var allTabs: [HostTab]?
     var url: String?
@@ -139,6 +141,38 @@ struct HostVisibilityClosedReceipt: Codable {
     var accepted: Bool
 }
 
+struct HostMinimizeBootstrapClaim: Codable {
+    var effectID: String
+    var intentionSessionID: String
+    var previousBrowserSessionID: String
+    var previousProcessIdentity: BrowserProcessIdentity
+}
+struct HostMinimizeBootstrapResult: Codable {
+    var effectID: String
+    var intentionSessionID: String
+    var previousBrowserSessionID: String
+    var previousProcessIdentity: BrowserProcessIdentity
+    var outcome: BrowserWindowMinimizeBootstrap.Outcome
+}
+private struct MinimizeBootstrapEnvelope: Decodable {
+    struct Effect: Decodable { var effectID: String }
+    var type: String
+    var minimizeBootstrapClaim: Effect?
+    var minimizeBootstrapResult: Effect?
+}
+struct HostMinimizeBootstrapClaimReceipt: Codable { var effectID: String; var granted: Bool }
+struct HostMinimizeBootstrapResultReceipt: Codable { var effectID: String; var accepted: Bool }
+struct HostMinimizeBootstrapOffer: Codable, Equatable {
+    var effectID: String
+    var intentionSessionID: String
+    var browserSessionID: String
+    var browserProcessIdentity: BrowserProcessIdentity
+    var windowID: Int
+    var planRevision: Int
+    var expiresAtUnixMS: Double
+    var descriptor: BrowserWindowVisibilityWindow
+}
+
 struct HostRuleState: Codable, Equatable {
     var addAsYouGo: Bool = false
     var websiteFeaturePolicies: [String: WebsiteFeaturePolicy] = [:]
@@ -163,8 +197,8 @@ struct HostResponse: Codable {
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
-    var bundledExtensionVersion: String = "0.2.31"
-    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1"]
+    var bundledExtensionVersion: String = "0.2.32"
+    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
     var active: Bool
@@ -183,6 +217,10 @@ struct HostResponse: Codable {
     var visibilityRestartReceipt: HostVisibilityRestartReceipt?
     var visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt?
     var visibilityClosedReceipt: HostVisibilityClosedReceipt?
+    var minimizeBootstrapOffers: [HostMinimizeBootstrapOffer] = []
+    var minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt?
+    var minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt?
+    var visibilityEnforcement: BrowserWindowVisibilityEnforcement?
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,
          browserProcessIdentity: BrowserProcessIdentity? = nil, visibilityRestartReceipt: HostVisibilityRestartReceipt? = nil,
@@ -300,6 +338,8 @@ private final class HostRuntime {
     private var rulesSignature: FileSignature?
     private var hasLoadedRules = false
     private var lastPushedState: HostRuleState?
+    private var lastPushedOffers: [HostMinimizeBootstrapOffer] = []
+    private var lastPushedEnforcement: BrowserWindowVisibilityEnforcement?
     private var lastHeartbeatWriteAt: Date?
     private var lastMessageReceivedAt: Date?
     private var lastSnapshotTabs: [BrowserTabItem]?
@@ -354,6 +394,17 @@ private final class HostRuntime {
                     sendCurrentState(tabCommand: takePendingCommand(), force: true,
                         visibilityClosedReceipt: .init(requestID: envelope.visibilityClosedRequest.requestID, accepted: false))
                 }
+            } else if let envelope = try? JSONDecoder().decode(MinimizeBootstrapEnvelope.self, from: requestData) {
+                queue.sync {
+                    refreshRulesIfNeeded()
+                    if envelope.type == "windowMinimizeBootstrapClaim", let effect = envelope.minimizeBootstrapClaim {
+                        sendCurrentState(tabCommand: takePendingCommand(), force: true,
+                            minimizeBootstrapClaimReceipt: .init(effectID: effect.effectID, granted: false))
+                    } else if envelope.type == "windowMinimizeBootstrapResult", let effect = envelope.minimizeBootstrapResult {
+                        sendCurrentState(tabCommand: takePendingCommand(), force: true,
+                            minimizeBootstrapResultReceipt: .init(effectID: effect.effectID, accepted: false))
+                    }
+                }
             }
             return
         }
@@ -365,7 +416,8 @@ private final class HostRuntime {
             // A visibility plan cannot register or change the identity/capabilities
             // it is about to be checked against. They belong to this connection.
             if request.type != "windowVisibilityPlan" && request.type != "windowVisibilityRestartRecovery"
-                && request.type != "windowVisibilityRecovery" && request.type != "windowVisibilityClosed" {
+                && request.type != "windowVisibilityRecovery" && request.type != "windowVisibilityClosed"
+                && request.type != "windowMinimizeBootstrapClaim" && request.type != "windowMinimizeBootstrapResult" {
                 if (browser == browserBundleIdentifier || browserBundleIdentifier == nil),
                    (request.browserSessionID == nil || profileSessionID == nil || request.browserSessionID == profileSessionID) {
                     if let session = request.browserSessionID, !session.isEmpty, profileSessionID == nil {
@@ -399,7 +451,15 @@ private final class HostRuntime {
             var visibilityRestartReceipt: HostVisibilityRestartReceipt?
             var visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt?
             var visibilityClosedReceipt: HostVisibilityClosedReceipt?
+            var minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt?
+            var minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt?
             switch request.type ?? "getRules" {
+            case "windowMinimizeBootstrapClaim":
+                minimizeBootstrapClaimReceipt = .init(effectID: request.minimizeBootstrapClaim?.effectID ?? "",
+                    granted: requestData.count <= 16_384 && claimMinimizeBootstrap(request))
+            case "windowMinimizeBootstrapResult":
+                minimizeBootstrapResultReceipt = .init(effectID: request.minimizeBootstrapResult?.effectID ?? "",
+                    accepted: requestData.count <= 16_384 && receiveMinimizeBootstrapResult(request))
             case "windowVisibilityClosed":
                 visibilityClosedReceipt = .init(requestID: request.visibilityClosedRequest?.requestID ?? "",
                     accepted: requestData.count <= 16_384 && confirmNativeParkingClosed(request))
@@ -469,11 +529,13 @@ private final class HostRuntime {
             // directory watcher. Publish it here; the watcher now sees its cached signature.
             let hasReceipt = visibilityPlanReceipt != nil || visibilityRestartReceipt != nil
                 || visibilityRecoveryReceipt != nil || visibilityClosedReceipt != nil
+                || minimizeBootstrapClaimReceipt != nil || minimizeBootstrapResultReceipt != nil
             if expectsResponse || rulesChanged || tabCommand != nil || hasReceipt {
                 sendCurrentState(tabCommand: tabCommand,
                     force: expectsResponse || hasReceipt,
                     visibilityPlanReceipt: visibilityPlanReceipt, visibilityRestartReceipt: visibilityRestartReceipt,
-                    visibilityRecoveryReceipt: visibilityRecoveryReceipt, visibilityClosedReceipt: visibilityClosedReceipt)
+                    visibilityRecoveryReceipt: visibilityRecoveryReceipt, visibilityClosedReceipt: visibilityClosedReceipt,
+                    minimizeBootstrapClaimReceipt: minimizeBootstrapClaimReceipt, minimizeBootstrapResultReceipt: minimizeBootstrapResultReceipt)
             }
         }
     }
@@ -508,6 +570,57 @@ private final class HostRuntime {
               !profileSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               profileSessionID.utf8.count <= 256 else { return false }
         return extensionCapabilities.contains(BrowserGuardCapability.nativeWindowVisibility.rawValue)
+    }
+
+    private var supportsMinimizeBootstrap: Bool {
+        supportsNativeWindowVisibility && browserBundleIdentifier == "org.mozilla.firefox"
+            && extensionCapabilities.contains(BrowserGuardCapability.firefoxWindowMinimizeBootstrap.rawValue)
+    }
+    private func currentVisibilityRecord() -> BrowserWindowVisibilityRecord? {
+        guard supportsNativeWindowVisibility, let browser = browserBundleIdentifier, let profile = profileSessionID,
+              let rules = cachedRules, rules.active, rules.isFresh(), makeRuleState().nativeWindowVisibility,
+              let session = rules.startupSessionID, let proof = currentBrowserProcessIdentity,
+              let record = BrowserWindowVisibilityStore(directory: paths.directory).record(browserBundleIdentifier: browser,
+                browserSessionID: profile, intentionSessionID: session), record.browserProcessIdentity == proof else { return nil }
+        return record
+    }
+    private func bootstrapOffers(_ record: BrowserWindowVisibilityRecord?) -> [HostMinimizeBootstrapOffer] {
+        guard supportsMinimizeBootstrap, let record, let proof = record.browserProcessIdentity else { return [] }
+        let now = Date().timeIntervalSince1970 * 1000
+        return record.bootstrapEffects.compactMap { effect in
+            guard effect.phase == .prepared, effect.expiresAtUnixMS > now,
+                  let current = record.plan.windows.first(where: { $0.windowID == effect.descriptor.windowID }),
+                  ["normal", "maximized"].contains(current.state) else { return nil }
+            // Native already bound the exact CG/browser lifetime. A title or
+            // unrelated parking revision cannot strand that one-shot offer.
+            return .init(effectID: effect.effectID, intentionSessionID: record.plan.intentionSessionID,
+                browserSessionID: record.browserSessionID, browserProcessIdentity: proof, windowID: effect.descriptor.windowID,
+                planRevision: record.plan.revision, expiresAtUnixMS: effect.expiresAtUnixMS, descriptor: current)
+        }
+    }
+    private func validBootstrapIdentity(_ effect: String, _ session: String, _ profile: String) -> Bool {
+        [effect, session, profile].allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256 }
+    }
+    private func claimMinimizeBootstrap(_ request: HostRequest) -> Bool {
+        guard supportsMinimizeBootstrap, let browser = browserBundleIdentifier, request.browserBundleIdentifier == browser,
+              let profile = profileSessionID, request.browserSessionID == profile,
+              let claim = request.minimizeBootstrapClaim, claim.previousBrowserSessionID == profile,
+              validBootstrapIdentity(claim.effectID, claim.intentionSessionID, claim.previousBrowserSessionID),
+              let proof = currentBrowserProcessIdentity, proof == claim.previousProcessIdentity,
+              let record = currentVisibilityRecord(), record.plan.intentionSessionID == claim.intentionSessionID else { return false }
+        return (try? BrowserWindowVisibilityStore(directory: paths.directory).claimBootstrap(effectID: claim.effectID,
+            browserBundleIdentifier: browser, browserSessionID: profile, intentionSessionID: claim.intentionSessionID,
+            browserProcessIdentity: proof, currentIntentionSessionID: record.plan.intentionSessionID)) == true
+    }
+    private func receiveMinimizeBootstrapResult(_ request: HostRequest) -> Bool {
+        guard supportsMinimizeBootstrap, let browser = browserBundleIdentifier, request.browserBundleIdentifier == browser,
+              let profile = profileSessionID, request.browserSessionID == profile,
+              let result = request.minimizeBootstrapResult,
+              validBootstrapIdentity(result.effectID, result.intentionSessionID, result.previousBrowserSessionID),
+              let proof = currentBrowserProcessIdentity, proof == result.previousProcessIdentity else { return false }
+        return (try? BrowserWindowVisibilityStore(directory: paths.directory).recordBootstrapResult(effectID: result.effectID,
+            browserBundleIdentifier: browser, browserSessionID: result.previousBrowserSessionID,
+            intentionSessionID: result.intentionSessionID, browserProcessIdentity: proof, outcome: result.outcome)) == true
     }
 
     private var currentBrowserProcessIdentity: BrowserProcessIdentity? {
@@ -704,7 +817,10 @@ private final class HostRuntime {
             // This heartbeat gates new session starts. Advertise native readiness
             // only after both sides negotiated it and the parent is verified.
             capabilities: extensionCapabilities.filter {
-                $0 != BrowserGuardCapability.nativeWindowVisibility.rawValue
+                if $0 == BrowserGuardCapability.firefoxWindowMinimizeBootstrap.rawValue {
+                    return supportsMinimizeBootstrap && currentBrowserProcessIdentity != nil
+                }
+                return $0 != BrowserGuardCapability.nativeWindowVisibility.rawValue
                     || (supportsNativeWindowVisibility && currentBrowserProcessIdentity != nil)
             }
         )) != nil {
@@ -877,12 +993,26 @@ private final class HostRuntime {
     private func sendCurrentState(tabCommand: BrowserTabCommand?, force: Bool, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,
                                   visibilityRestartReceipt: HostVisibilityRestartReceipt? = nil,
                                   visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt? = nil,
-                                  visibilityClosedReceipt: HostVisibilityClosedReceipt? = nil) {
+                                  visibilityClosedReceipt: HostVisibilityClosedReceipt? = nil,
+                                  minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt? = nil,
+                                  minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt? = nil) {
         let state = makeRuleState()
-        guard force || tabCommand != nil || state != lastPushedState else { return }
-        if (try? writeMessage(HostResponse(state: state, tabCommand: tabCommand, visibilityPlanReceipt: visibilityPlanReceipt,
+        let record = currentVisibilityRecord()
+        let offers = bootstrapOffers(record)
+        let enforcement = record.flatMap { value -> BrowserWindowVisibilityEnforcement? in
+            value.verificationRevision == value.plan.revision ? .init(record: value) : nil
+        }
+        guard force || tabCommand != nil || state != lastPushedState || offers != lastPushedOffers
+            || enforcement != lastPushedEnforcement else { return }
+        var response = HostResponse(state: state, tabCommand: tabCommand, visibilityPlanReceipt: visibilityPlanReceipt,
             browserProcessIdentity: currentBrowserProcessIdentity, visibilityRestartReceipt: visibilityRestartReceipt,
-            visibilityRecoveryReceipt: visibilityRecoveryReceipt, visibilityClosedReceipt: visibilityClosedReceipt))) != nil {
+            visibilityRecoveryReceipt: visibilityRecoveryReceipt, visibilityClosedReceipt: visibilityClosedReceipt)
+        response.minimizeBootstrapOffers = offers
+        response.visibilityEnforcement = enforcement
+        response.minimizeBootstrapClaimReceipt = minimizeBootstrapClaimReceipt
+        response.minimizeBootstrapResultReceipt = minimizeBootstrapResultReceipt
+        if (try? writeMessage(response)) != nil {
+            lastPushedOffers = offers; lastPushedEnforcement = enforcement
             if tabCommand?.action == .snapshot { requestedSnapshotRefresh = true }
             metrics.sentMessages += 1
             if tabCommand != nil {
@@ -918,11 +1048,10 @@ private final class HostRuntime {
         directoryRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            let rulesChanged = self.refreshRulesIfNeeded()
-            let tabCommand = self.takePendingCommand()
-            if rulesChanged || tabCommand != nil {
-                self.sendCurrentState(tabCommand: tabCommand, force: false)
-            }
+            self.refreshRulesIfNeeded()
+            // Native effect/verification records can change with unchanged rules.
+            // sendCurrentState compares their values and suppresses idle pushes.
+            self.sendCurrentState(tabCommand: self.takePendingCommand(), force: false)
         }
         directoryRefreshWorkItem = workItem
         queue.asyncAfter(
