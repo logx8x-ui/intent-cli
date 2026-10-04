@@ -77,6 +77,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
     public var addAsYouGo = false
     public var websiteFeaturePolicies: [String: WebsiteFeaturePolicy] = [:]
     public var hideDistractions = false
+    public var nativeWindowVisibility = false
     public static let freshnessWindow: TimeInterval = 5
 
     public var active: Bool
@@ -130,6 +131,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         case accessMode
         case addAsYouGo
         case hideDistractions
+        case nativeWindowVisibility
         case unrestrictedBrowserBundleIdentifiers
         case allowedWebsites
         case allowedWebsitesByBrowser
@@ -151,6 +153,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         accessMode = try container.decodeIfPresent(IntentionAccessMode.self, forKey: .accessMode) ?? .whitelist
         addAsYouGo = try container.decodeIfPresent(Bool.self, forKey: .addAsYouGo) ?? false
         hideDistractions = try container.decodeIfPresent(Bool.self, forKey: .hideDistractions) ?? false
+        nativeWindowVisibility = try container.decodeIfPresent(Bool.self, forKey: .nativeWindowVisibility) ?? false
         unrestrictedBrowserBundleIdentifiers = try container.decodeIfPresent(Set<String>.self, forKey: .unrestrictedBrowserBundleIdentifiers) ?? []
         allowedWebsites = try container.decodeIfPresent([String].self, forKey: .allowedWebsites) ?? []
         allowedWebsitesByBrowser = try container.decodeIfPresent([String: [String]].self, forKey: .allowedWebsitesByBrowser) ?? [:]
@@ -183,6 +186,7 @@ public struct ActiveBrowserRules: Codable, Equatable {
         )
         result.addAsYouGo = addAsYouGo
         result.hideDistractions = hideDistractions
+        result.nativeWindowVisibility = nativeWindowVisibility
         result.websiteFeaturePolicies = websiteFeaturePolicies
         result.unrestrictedBrowserBundleIdentifiers = unrestrictedBrowserBundleIdentifiers
         return result
@@ -259,6 +263,7 @@ public enum BrowserGuardCapability: String, Codable, Equatable {
     case tabPreview = "tab-preview-v1"
     case nativeTabGroups = "native-tab-groups-v1"
     case tabSessionIdentity = "tab-session-identity-v1"
+    case nativeWindowVisibility = "native-window-visibility-v1"
 }
 
 public struct BrowserGuardState: Codable, Equatable {

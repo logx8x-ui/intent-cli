@@ -22,6 +22,19 @@ public struct WorkspaceWindow {
             return .init(id: id, pid: pid, bundle: bundle, title: item[kCGWindowName as String] as? String ?? "", frame: frame)
         }
     }
+
+    /// A lifetime probe, not a presentation query. Restoration can temporarily
+    /// move a live window off screen; that must not be mistaken for closure.
+    /// nil means WindowServer could not answer, so a bounded caller can retry.
+    public static func exists(id: UInt32, pid: pid_t,
+        copyInfo: (CGWindowListOption, CGWindowID) -> CFArray? = CGWindowListCopyWindowInfo) -> Bool? {
+        guard let records = copyInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return records.contains {
+            $0[kCGWindowNumber as String] as? UInt32 == id &&
+                $0[kCGWindowOwnerPID as String] as? pid_t == pid
+        }
+    }
+
     public static func focused() -> WorkspaceWindow? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let candidates = list().filter { $0.pid == app.processIdentifier }

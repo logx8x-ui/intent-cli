@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import IntentCore
@@ -61,16 +62,68 @@ struct HostRequest: Codable {
     var browserBundleIdentifier: String?
     var extensionVersion: String?
     var extensionCapabilities: [String]?
+    var visibilityPlan: BrowserWindowVisibilityPlan?
+    var visibilityRestartRequest: HostVisibilityRestartRequest?
+    var visibilityRecoveryRequest: HostVisibilityRecoveryRequest?
     var tabs: [HostTab]?
     var allTabs: [HostTab]?
     var url: String?
     var title: String?
 }
 
+private struct VisibilityPlanEnvelope: Decodable {
+    struct Plan: Decodable { var revision: Int }
+    var type: String
+    var visibilityPlan: Plan
+}
+
+struct HostVisibilityPlanReceipt: Codable {
+    var revision: Int
+    var accepted: Bool
+}
+
+struct HostVisibilityRestartRequest: Codable {
+    var requestID: String
+    var intentionSessionID: String
+    var previousBrowserSessionID: String
+    var previousProcessIdentity: BrowserProcessIdentity
+}
+
+private struct VisibilityRestartEnvelope: Decodable {
+    struct Request: Decodable { var requestID: String }
+    var type: String
+    var visibilityRestartRequest: Request
+}
+
+struct HostVisibilityRestartReceipt: Codable {
+    var requestID: String
+    var accepted: Bool
+}
+
+struct HostVisibilityRecoveryRequest: Codable {
+    var requestID: String
+    var intentionSessionID: String
+    var previousBrowserSessionID: String
+    var previousProcessIdentity: BrowserProcessIdentity
+    var windowIDs: [Int]
+}
+
+private struct VisibilityRecoveryEnvelope: Decodable {
+    struct Request: Decodable { var requestID: String }
+    var type: String
+    var visibilityRecoveryRequest: Request
+}
+
+struct HostVisibilityRecoveryReceipt: Codable {
+    var requestID: String
+    var accepted: Bool
+}
+
 struct HostRuleState: Codable, Equatable {
     var addAsYouGo: Bool = false
     var websiteFeaturePolicies: [String: WebsiteFeaturePolicy] = [:]
     var hideDistractions: Bool = false
+    var nativeWindowVisibility: Bool = false
     var selectedBrowserSessionID: String? = nil
     var selectedTabIDs: [Int]? = nil
     var active: Bool
@@ -89,8 +142,9 @@ struct HostResponse: Codable {
     var websiteFeaturePolicies: [String: WebsiteFeaturePolicy]
     var addAsYouGo: Bool
     var hideDistractions: Bool
-    var bundledExtensionVersion: String = "0.2.28"
-    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1"]
+    var nativeWindowVisibility: Bool = false
+    var bundledExtensionVersion: String = "0.2.29"
+    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
     var active: Bool
@@ -104,11 +158,18 @@ struct HostResponse: Codable {
     var allowGoogleSearchTabs: Bool
     var guardEnabled: Bool
     var tabCommand: BrowserTabCommand?
+    var visibilityPlanReceipt: HostVisibilityPlanReceipt?
+    var browserProcessIdentity: BrowserProcessIdentity?
+    var visibilityRestartReceipt: HostVisibilityRestartReceipt?
+    var visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt?
 
-    init(state: HostRuleState, tabCommand: BrowserTabCommand?) {
+    init(state: HostRuleState, tabCommand: BrowserTabCommand?, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,
+         browserProcessIdentity: BrowserProcessIdentity? = nil, visibilityRestartReceipt: HostVisibilityRestartReceipt? = nil,
+         visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt? = nil) {
         addAsYouGo = state.addAsYouGo
         websiteFeaturePolicies = state.websiteFeaturePolicies
         hideDistractions = state.hideDistractions
+        nativeWindowVisibility = state.nativeWindowVisibility
         selectedBrowserSessionID = state.selectedBrowserSessionID
         selectedTabIDs = state.selectedTabIDs
         active = state.active
@@ -122,6 +183,10 @@ struct HostResponse: Codable {
         allowGoogleSearchTabs = state.allowGoogleSearchTabs
         guardEnabled = state.guardEnabled
         self.tabCommand = tabCommand
+        self.visibilityPlanReceipt = visibilityPlanReceipt
+        self.browserProcessIdentity = browserProcessIdentity
+        self.visibilityRestartReceipt = visibilityRestartReceipt
+        self.visibilityRecoveryReceipt = visibilityRecoveryReceipt
     }
 }
 
@@ -232,31 +297,95 @@ private final class HostRuntime {
 
     func handle(_ requestData: Data) {
         guard let request = try? JSONDecoder().decode(HostRequest.self, from: requestData) else {
+            // Preserve the request revision even when a malformed descriptor
+            // cannot decode, so the extension can abandon the dependent move.
+            if let envelope = try? JSONDecoder().decode(VisibilityPlanEnvelope.self, from: requestData),
+               envelope.type == "windowVisibilityPlan" {
+                queue.sync {
+                    metrics.receivedMessages += 1
+                    refreshRulesIfNeeded()
+                    sendCurrentState(tabCommand: takePendingCommand(), force: true,
+                        visibilityPlanReceipt: .init(revision: envelope.visibilityPlan.revision, accepted: false))
+                }
+            } else if let envelope = try? JSONDecoder().decode(VisibilityRestartEnvelope.self, from: requestData),
+                      envelope.type == "windowVisibilityRestartRecovery" {
+                queue.sync {
+                    metrics.receivedMessages += 1
+                    refreshRulesIfNeeded()
+                    sendCurrentState(tabCommand: takePendingCommand(), force: true,
+                        visibilityRestartReceipt: .init(requestID: envelope.visibilityRestartRequest.requestID, accepted: false))
+                }
+            } else if let envelope = try? JSONDecoder().decode(VisibilityRecoveryEnvelope.self, from: requestData),
+                      envelope.type == "windowVisibilityRecovery" {
+                queue.sync {
+                    metrics.receivedMessages += 1
+                    refreshRulesIfNeeded()
+                    sendCurrentState(tabCommand: takePendingCommand(), force: true,
+                        visibilityRecoveryReceipt: .init(requestID: envelope.visibilityRecoveryRequest.requestID, accepted: false))
+                }
+            }
             return
         }
 
         queue.sync {
             metrics.receivedMessages += 1
             let browser = request.browserBundleIdentifier ?? browserBundleIdentifier ?? "org.mozilla.firefox"
-            if let session = request.browserSessionID, !session.isEmpty { profileSessionID = session }
-            if let version = request.extensionVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !version.isEmpty {
-                extensionVersion = version
+            var capabilitiesChanged = false
+            // A visibility plan cannot register or change the identity/capabilities
+            // it is about to be checked against. They belong to this connection.
+            if request.type != "windowVisibilityPlan" && request.type != "windowVisibilityRestartRecovery"
+                && request.type != "windowVisibilityRecovery" {
+                if (browser == browserBundleIdentifier || browserBundleIdentifier == nil),
+                   (request.browserSessionID == nil || profileSessionID == nil || request.browserSessionID == profileSessionID) {
+                    if let session = request.browserSessionID, !session.isEmpty, profileSessionID == nil {
+                        profileSessionID = session
+                    }
+                    if let version = request.extensionVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !version.isEmpty {
+                        extensionVersion = version
+                    }
+                    if let capabilities = request.extensionCapabilities {
+                        let updated = Array(Set(capabilities)).sorted()
+                        capabilitiesChanged = updated != extensionCapabilities
+                        extensionCapabilities = updated
+                    }
+                }
+                registerBrowserIfNeeded(browser)
             }
-            if let capabilities = request.extensionCapabilities {
-                extensionCapabilities = Array(Set(capabilities)).sorted()
-            }
-            registerBrowserIfNeeded(browser)
+            // Stop and replacement rules must be visible before accepting a plan,
+            // including messages that beat the directory watcher's debounce.
+            let rulesChanged = refreshRulesIfNeeded()
             let now = Date()
             let isMessageBurst = lastMessageReceivedAt.map {
                 now.timeIntervalSince($0) < 0.1
             } ?? false
             lastMessageReceivedAt = now
-            if !isMessageBurst {
-                maybeWriteHeartbeat()
+            if capabilitiesChanged || !isMessageBurst {
+                maybeWriteHeartbeat(force: capabilitiesChanged)
             }
 
+            var visibilityPlanReceipt: HostVisibilityPlanReceipt?
+            var visibilityRestartReceipt: HostVisibilityRestartReceipt?
+            var visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt?
             switch request.type ?? "getRules" {
+            case "windowVisibilityRecovery":
+                visibilityRecoveryReceipt = .init(requestID: request.visibilityRecoveryRequest?.requestID ?? "",
+                    accepted: requestData.count <= 16_384 && requestNativeWindowVisibilityRecovery(request))
+            case "windowVisibilityRestartRecovery":
+                visibilityRestartReceipt = .init(requestID: request.visibilityRestartRequest?.requestID ?? "",
+                    accepted: requestData.count <= 16_384 && permitsWindowVisibilityRestartRecovery(request))
+            case "windowVisibilityPlan":
+                let accepted = requestData.count <= 1_000_000 && persistWindowVisibilityPlan(request)
+                if accepted, let plan = request.visibilityPlan, !hasNativeParkingCapture(plan),
+                   isCurrentNativeVisibilitySession(plan.intentionSessionID) {
+                    // Moving tabs can change the holding window's title. Delay
+                    // permission until the app has persisted its exact native
+                    // identity, without blocking stdin or the runtime queue.
+                    awaitNativeParkingCapture(plan, deadline: .now() + 1.5)
+                } else {
+                    visibilityPlanReceipt = .init(revision: request.visibilityPlan?.revision ?? 0,
+                        accepted: accepted && request.visibilityPlan.map(hasNativeParkingCapture) == true)
+                }
             case "websitePolicyReady":
                 if let session = request.appliedWebsitePolicySessionID,
                    let browserSession = request.browserSessionID, !browserSession.isEmpty,
@@ -296,7 +425,6 @@ private final class HostRuntime {
                 break
             }
 
-            let rulesChanged = refreshRulesIfNeeded()
             let tabCommand = takePendingCommand()
             let expectsResponse = request.type == nil
                 || request.type == "getRules"
@@ -304,8 +432,12 @@ private final class HostRuntime {
 
             // A heartbeat or snapshot can observe a rules change before the
             // directory watcher. Publish it here; the watcher now sees its cached signature.
-            if expectsResponse || rulesChanged || tabCommand != nil {
-                sendCurrentState(tabCommand: tabCommand, force: expectsResponse)
+            let hasReceipt = visibilityPlanReceipt != nil || visibilityRestartReceipt != nil || visibilityRecoveryReceipt != nil
+            if expectsResponse || rulesChanged || tabCommand != nil || hasReceipt {
+                sendCurrentState(tabCommand: tabCommand,
+                    force: expectsResponse || hasReceipt,
+                    visibilityPlanReceipt: visibilityPlanReceipt, visibilityRestartReceipt: visibilityRestartReceipt,
+                    visibilityRecoveryReceipt: visibilityRecoveryReceipt)
             }
         }
     }
@@ -333,6 +465,165 @@ private final class HostRuntime {
         maybeWriteHeartbeat(force: true)
     }
 
+    private var supportsNativeWindowVisibility: Bool {
+        guard let browserBundleIdentifier,
+              ["org.mozilla.firefox", "com.google.Chrome"].contains(browserBundleIdentifier),
+              let profileSessionID,
+              !profileSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              profileSessionID.utf8.count <= 256 else { return false }
+        return extensionCapabilities.contains(BrowserGuardCapability.nativeWindowVisibility.rawValue)
+    }
+
+    private var currentBrowserProcessIdentity: BrowserProcessIdentity? {
+        // The existing QA executable/root contract confines simulated identities
+        // to private marked temporary data. Production host names cannot opt in.
+        let environment = ProcessInfo.processInfo.environment
+        if let executable = Bundle.main.executableURL?.resolvingSymlinksInPath(),
+           executable.lastPathComponent == "IntentQASpec",
+           let root = environment["INTENT_QA_ROOT"],
+           let directory = try? IntentEnvironment.validatedQADirectory(path: root, bundleIdentifier: nil,
+                executableName: executable.lastPathComponent),
+           directory == paths.directory.standardizedFileURL.resolvingSymlinksInPath(),
+           let injected = environment["INTENT_QA_BROWSER_PROCESS_IDENTITY"], injected.utf8.count <= 1024,
+           let identity = try? JSONDecoder().decode(BrowserProcessIdentity.self, from: Data(injected.utf8)),
+           identity.isValid {
+            return identity
+        }
+        let parentPID = getppid()
+        guard let browserBundleIdentifier, parentPID > 0,
+              let app = NSRunningApplication(processIdentifier: parentPID),
+              !app.isTerminated, app.bundleIdentifier == browserBundleIdentifier,
+              let launchDate = app.launchDate else { return nil }
+        let identity = BrowserProcessIdentity(pid: parentPID, launched: launchDate.timeIntervalSinceReferenceDate)
+        return identity.isValid ? identity : nil
+    }
+
+    private func previousBrowserProcessState(_ previous: BrowserProcessIdentity) -> BrowserWindowVisibilityRestartPolicy.PreviousProcessState {
+        guard previous.isValid else { return .unknown }
+        if kill(previous.pid, 0) == -1 {
+            // Lack of permission or missing AppKit metadata is not proof of exit.
+            return errno == ESRCH ? .terminated : .unknown
+        }
+        if let app = NSRunningApplication(processIdentifier: previous.pid),
+           let launchDate = app.launchDate {
+            let observed = BrowserProcessIdentity(pid: previous.pid, launched: launchDate.timeIntervalSinceReferenceDate)
+            if observed.isValid, observed != previous { return .reused(observed) }
+        }
+        return .running
+    }
+
+    private func permitsWindowVisibilityRestartRecovery(_ request: HostRequest) -> Bool {
+        guard supportsNativeWindowVisibility,
+              let browserBundleIdentifier, request.browserBundleIdentifier == browserBundleIdentifier,
+              let profileSessionID, request.browserSessionID == profileSessionID,
+              let recovery = request.visibilityRestartRequest,
+              [recovery.requestID, recovery.intentionSessionID, recovery.previousBrowserSessionID].allSatisfy({
+                  !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256
+              }), recovery.previousProcessIdentity.isValid,
+              let currentIdentity = currentBrowserProcessIdentity,
+              let previous = BrowserWindowVisibilityStore(directory: paths.directory)
+                .records(browserBundleIdentifier: browserBundleIdentifier).first(where: {
+                    $0.browserSessionID == recovery.previousBrowserSessionID
+                        && $0.plan.intentionSessionID == recovery.intentionSessionID
+                }), previous.browserProcessIdentity == recovery.previousProcessIdentity else { return false }
+
+        return BrowserWindowVisibilityRestartPolicy.permits(
+            requestedPreviousIdentity: recovery.previousProcessIdentity,
+            storedPreviousIdentity: previous.browserProcessIdentity,
+            currentIdentity: currentIdentity,
+            previousProcessState: previousBrowserProcessState(recovery.previousProcessIdentity),
+            hasFreshActiveIntention: cachedRules.map { $0.active && $0.isFresh() } ?? false,
+            requestedPreviousBrowserSessionID: recovery.previousBrowserSessionID,
+            storedPreviousBrowserSessionID: previous.browserSessionID,
+            currentBrowserSessionID: profileSessionID)
+    }
+
+    private func requestNativeWindowVisibilityRecovery(_ request: HostRequest) -> Bool {
+        guard supportsNativeWindowVisibility,
+              let browserBundleIdentifier, request.browserBundleIdentifier == browserBundleIdentifier,
+              let profileSessionID, request.browserSessionID == profileSessionID,
+              let recovery = request.visibilityRecoveryRequest,
+              [recovery.requestID, recovery.intentionSessionID, recovery.previousBrowserSessionID].allSatisfy({
+                  !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256
+              }), let currentIdentity = currentBrowserProcessIdentity,
+              currentIdentity == recovery.previousProcessIdentity else { return false }
+        if let rules = cachedRules, rules.active, rules.isFresh(), rules.startupSessionID == recovery.intentionSessionID {
+            return false
+        }
+        do {
+            let result = try BrowserWindowVisibilityStore(directory: paths.directory).requestRegisteredRecovery(
+                browserBundleIdentifier: browserBundleIdentifier, browserSessionID: recovery.previousBrowserSessionID,
+                intentionSessionID: recovery.intentionSessionID, browserProcessIdentity: currentIdentity,
+                windowIDs: recovery.windowIDs)
+            // This queues a native reveal and never grants JS restoration permission.
+            return result == .written || result == .unchanged
+        } catch {
+            return false
+        }
+    }
+
+    private func persistWindowVisibilityPlan(_ request: HostRequest) -> Bool {
+        guard supportsNativeWindowVisibility,
+              let browserBundleIdentifier,
+              request.browserBundleIdentifier == browserBundleIdentifier,
+              let profileSessionID,
+              request.browserSessionID == profileSessionID,
+              let browserProcessIdentity = currentBrowserProcessIdentity,
+              let plan = request.visibilityPlan, plan.isValid else { return false }
+
+        let store = BrowserWindowVisibilityStore(directory: paths.directory)
+        do {
+            let result: BrowserWindowVisibilityStore.Acceptance
+            if let rules = cachedRules, rules.active, rules.isFresh(),
+               plan.intentionSessionID == rules.startupSessionID {
+                guard makeRuleState().nativeWindowVisibility else { return false }
+                result = try store.accept(plan, browserBundleIdentifier: browserBundleIdentifier,
+                    browserSessionID: profileSessionID, currentIntentionSessionID: rules.startupSessionID,
+                    browserProcessIdentity: browserProcessIdentity)
+            } else {
+                // Finish/recovery may reveal only parking windows already recorded
+                // by this same profile and intention, with all metadata unchanged.
+                result = try store.acceptReveal(plan, browserBundleIdentifier: browserBundleIdentifier,
+                    browserSessionID: profileSessionID)
+            }
+            return result == .written || result == .unchanged
+        } catch {
+            return false
+        }
+    }
+
+    private func isCurrentNativeVisibilitySession(_ intentionSessionID: String) -> Bool {
+        cachedRules?.startupSessionID == intentionSessionID && makeRuleState().nativeWindowVisibility
+            && supportsNativeWindowVisibility && currentBrowserProcessIdentity != nil
+    }
+
+    private func hasNativeParkingCapture(_ plan: BrowserWindowVisibilityPlan) -> Bool {
+        let required = Set(plan.parkingWindows.map(\.windowID)).union(plan.revealWindowIDs)
+        guard !required.isEmpty else { return true }
+        guard let browserBundleIdentifier, let profileSessionID else { return false }
+        let captured = BrowserWindowVisibilityStore(directory: paths.directory).capturedWindowIDs(
+            browserBundleIdentifier: browserBundleIdentifier, browserSessionID: profileSessionID,
+            intentionSessionID: plan.intentionSessionID)
+        return required.isSubset(of: captured)
+    }
+
+    private func awaitNativeParkingCapture(_ plan: BrowserWindowVisibilityPlan, deadline: DispatchTime) {
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            self.refreshRulesIfNeeded()
+            let currentSession = self.isCurrentNativeVisibilitySession(plan.intentionSessionID)
+            let captured = currentSession && self.hasNativeParkingCapture(plan)
+            if captured || !currentSession || DispatchTime.now() >= deadline {
+                // A true receipt means identity was durably captured; it does
+                // not report that minimizing or restoring the window succeeded.
+                self.sendCurrentState(tabCommand: self.takePendingCommand(), force: true,
+                    visibilityPlanReceipt: .init(revision: plan.revision, accepted: captured))
+            } else {
+                self.awaitNativeParkingCapture(plan, deadline: deadline)
+            }
+        }
+    }
+
     private func maybeWriteHeartbeat(force: Bool = false) {
         guard let browserBundleIdentifier else { return }
         let now = Date()
@@ -351,7 +642,12 @@ private final class HostRuntime {
         if (try? store.write(
             date: now,
             extensionVersion: extensionVersion,
-            capabilities: extensionCapabilities
+            // This heartbeat gates new session starts. Advertise native readiness
+            // only after both sides negotiated it and the parent is verified.
+            capabilities: extensionCapabilities.filter {
+                $0 != BrowserGuardCapability.nativeWindowVisibility.rawValue
+                    || (supportsNativeWindowVisibility && currentBrowserProcessIdentity != nil)
+            }
         )) != nil {
             metrics.heartbeatWrites += 1
             lastHeartbeatWriteAt = now
@@ -483,13 +779,19 @@ private final class HostRuntime {
             }
         }
         let unrestricted = rules.unrestrictedBrowserBundleIdentifiers.contains(browserBundleIdentifier)
+        let active = rules.active && (!unrestricted || !rules.websiteFeaturePolicies.isEmpty)
         return HostRuleState(
             addAsYouGo: rules.addAsYouGo || (unrestricted && rules.accessMode == .whitelist),
             websiteFeaturePolicies: rules.websiteFeaturePolicies,
             hideDistractions: rules.hideDistractions,
+            nativeWindowVisibility: active && rules.isFresh() && rules.nativeWindowVisibility
+                && rules.hideDistractions && rules.startupSessionID?.isEmpty == false
+                // Required ownership is not a readiness signal. Clearing it on
+                // a temporary handshake/proof failure would enable JS fallback.
+                && ["org.mozilla.firefox", "com.google.Chrome"].contains(browserBundleIdentifier),
             selectedBrowserSessionID: unrestricted ? nil : selectedSession,
             selectedTabIDs: unrestricted ? nil : selectedIDs,
-            active: rules.active && (!unrestricted || !rules.websiteFeaturePolicies.isEmpty),
+            active: active,
             accessMode: rules.accessMode.rawValue,
             allowedWebsites: browserWebsites,
             startupWebsites: rules.startupWebsitesByBrowser[browserBundleIdentifier] ?? [],
@@ -513,10 +815,14 @@ private final class HostRuntime {
         ).take()
     }
 
-    private func sendCurrentState(tabCommand: BrowserTabCommand?, force: Bool) {
+    private func sendCurrentState(tabCommand: BrowserTabCommand?, force: Bool, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,
+                                  visibilityRestartReceipt: HostVisibilityRestartReceipt? = nil,
+                                  visibilityRecoveryReceipt: HostVisibilityRecoveryReceipt? = nil) {
         let state = makeRuleState()
         guard force || tabCommand != nil || state != lastPushedState else { return }
-        if (try? writeMessage(HostResponse(state: state, tabCommand: tabCommand))) != nil {
+        if (try? writeMessage(HostResponse(state: state, tabCommand: tabCommand, visibilityPlanReceipt: visibilityPlanReceipt,
+            browserProcessIdentity: currentBrowserProcessIdentity, visibilityRestartReceipt: visibilityRestartReceipt,
+            visibilityRecoveryReceipt: visibilityRecoveryReceipt))) != nil {
             if tabCommand?.action == .snapshot { requestedSnapshotRefresh = true }
             metrics.sentMessages += 1
             if tabCommand != nil {

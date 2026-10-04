@@ -1,8 +1,38 @@
 import Foundation
+import CoreGraphics
 import IntentCore
 import IntentLock
 
 func runRestorationFocusSpecs() throws {
+    // The real CG provider seam catches query-flag regressions as well as
+    // identity matching: optionAll has value zero, so contains(optionAll) alone
+    // would not detect an accidental optionOnScreenOnly query.
+    var windowQuery: (CGWindowListOption, CGWindowID)?
+    func targetExists(_ records: [[String: Any]]?) -> Bool? {
+        WorkspaceWindow.exists(id: 12687, pid: 31075) { options, relativeTo in
+            windowQuery = (options, relativeTo)
+            return records.map { $0 as CFArray }
+        }
+    }
+    let target: [String: Any] = [kCGWindowNumber as String: UInt32(12687),
+        kCGWindowOwnerPID as String: Int32(31075), kCGWindowIsOnscreen as String: true]
+    var temporarilyOffscreen = target
+    temporarilyOffscreen[kCGWindowIsOnscreen as String] = false
+    try expect(targetExists([target]) == true, "Restoration recognizes its visible window")
+    try expect(windowQuery?.0 == [.optionAll, .excludeDesktopElements] && windowQuery?.1 == kCGNullWindowID,
+        "Restoration lifetime query must include offscreen windows, not just presentation candidates")
+    let other: [String: Any] = [kCGWindowNumber as String: UInt32(11783),
+        kCGWindowOwnerPID as String: Int32(31075), kCGWindowIsOnscreen as String: true]
+    try expect(targetExists([other, temporarilyOffscreen]) == true,
+        "An old window coming forward cannot make the still-live offscreen work window count as closed")
+    try expect(targetExists([temporarilyOffscreen]) == true,
+        "An offscreen target remains the same identity even without presentation frame/title data")
+    var recycledID = temporarilyOffscreen
+    recycledID[kCGWindowOwnerPID as String] = Int32(999)
+    try expect(targetExists([other, recycledID]) == false, "A reused window number in a different process is not the target")
+    try expect(targetExists([]) == false, "A successful inventory without the target confirms closure")
+    try expect(targetExists(nil) == nil, "Unavailable WindowServer inventory defers instead of manufacturing closure")
+
     let actions = DeferredSessionActionGate()
     var effects: [String] = []
     let queuedSwitcher = actions.token
@@ -32,6 +62,17 @@ func runRestorationFocusSpecs() throws {
     try expect(!appSpec.deferringBrowserWebsiteStartupToGuard().closeSessionResourcesOnFinish
         && !appSpec.deferringBrowserWebsiteStartupToGuard().restorePreviousApplicationOnStop,
         "Browser startup deferral preserves the no-focus-changing completion contract")
+    var nativeVisibilitySpec = appSpec
+    nativeVisibilitySpec.hideDistractions = true
+    nativeVisibilitySpec.nativeWindowVisibilitySessionID = "current-browser-visibility-occurrence"
+    nativeVisibilitySpec.initialAllowedApps = ["org.mozilla.firefox"]
+    nativeVisibilitySpec.initialSelectedWindows = ["org.mozilla.firefox": [42]]
+    let deferredVisibility = nativeVisibilitySpec.deferringBrowserWebsiteStartupToGuard()
+    try expect(deferredVisibility.hideDistractions
+        && deferredVisibility.nativeWindowVisibilitySessionID == nativeVisibilitySpec.nativeWindowVisibilitySessionID
+        && deferredVisibility.initialAllowedApps == nativeVisibilitySpec.initialAllowedApps
+        && deferredVisibility.initialSelectedWindows == nativeVisibilitySpec.initialSelectedWindows,
+        "Deferring browser startup cannot erase exact visibility occurrence ownership or initial selection policy")
     let idle = FocusSessionSpec.workPeriodIdle(controllerBundleIdentifier: "test.intent", alwaysAllowed: ["test.preset"],
         currentWorkBundleIdentifier: "org.mozilla.firefox", presentWorkspace: false, finishShortcut: .defaultFinish)
     try expect(idle.startupSteps.isEmpty && idle.fallbackBundleIdentifier.isEmpty

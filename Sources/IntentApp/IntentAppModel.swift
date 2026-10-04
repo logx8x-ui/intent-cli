@@ -1532,6 +1532,7 @@ final class IntentAppModel: ObservableObject {
 
     private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
         defer { releaseWorkPeriodAfterFailedStart() }
+        let hidesDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
         guard !intention.selectionRequiresTabReselection || quickSelectionIntentionID == intention.id else {
             errorMessage = "This intention used specific windows or tabs. Open ` to review the current workspace before running it again."
             return
@@ -1585,6 +1586,10 @@ final class IntentAppModel: ObservableObject {
                 errorMessage = "Update \(browser.name) Browser Guard to use Add as you go."
                 return
             }
+            if hidesDistractions && !heartbeatStore.supports(.nativeWindowVisibility, maxAge: 5) {
+                errorMessage = "\(browser.name) Browser Guard needs its quiet window-restoration update before this intention can start."
+                return
+            }
             let stateStore = BrowserGuardStateStore(
                 fileURL: BrowserGuardStateStore.fileURL(for: browser.bundleIdentifier)
             )
@@ -1634,7 +1639,8 @@ final class IntentAppModel: ObservableObject {
         )
 
         configuredRules?.addAsYouGo = intention.addAsYouGo
-        configuredRules?.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
+        configuredRules?.hideDistractions = hidesDistractions
+        configuredRules?.nativeWindowVisibility = hidesDistractions
         configuredRules?.websiteFeaturePolicies = intention.websiteFeaturePolicies
         let scopedBrowsers = Set(browserGuards.map(\.bundleIdentifier))
         configuredRules?.unrestrictedBrowserBundleIdentifiers = Set(alwaysAllowedApps.filter(\.isBrowser).map(\.bundleIdentifier)).subtracting(scopedBrowsers).union(intention.accessMode == .whitelist ? intention.wholeBrowserBundleIdentifiers : [])
@@ -1662,7 +1668,8 @@ final class IntentAppModel: ObservableObject {
             lockSpec.initialAllowedApps = Set(intention.allowedApps.map(\.bundleIdentifier)).union(alwaysAllowedApps.map(\.bundleIdentifier))
             lockSpec.initialSelectedWindows = quickSelectionIntentionID == intention.id ? quickSelectionWindowIDs : [:]
         }
-        lockSpec.hideDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
+        lockSpec.hideDistractions = hidesDistractions
+        lockSpec.nativeWindowVisibilitySessionID = rules?.nativeWindowVisibility == true ? rules?.startupSessionID : nil
         // Finishing should leave the user where they are, not reactivate the
         // application that happened to be frontmost before the session.
         lockSpec.restorePreviousApplicationOnStop = false

@@ -35,6 +35,8 @@ do {
     try runSessionNotchLayoutSpecs()
     try runSessionAdditionsSpecs()
     try runBrowserCommandSpecs()
+    try runBrowserWindowVisibilitySpecs()
+    try runBrowserWindowVisibilityCacheSpecs()
     try runOnboardingSpecs()
     try runOnboardingSavePlanSpecs()
     try runOnboardingPresentationSpecs()

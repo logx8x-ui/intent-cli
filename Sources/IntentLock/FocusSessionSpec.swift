@@ -3,6 +3,9 @@ import IntentCore
 
 public struct FocusSessionSpec {
     public var hideDistractions = false
+    /// The exact shared-rule occurrence whose browser visibility plans this
+    /// native lock may own. Nil keeps legacy/CLI sessions out of the bridge.
+    public var nativeWindowVisibilitySessionID: String?
     public var initialAllowedApps: Set<String>?
     public var initialSelectedWindows: [String: Set<UInt32>] = [:]
     public var selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
@@ -153,7 +156,7 @@ public struct FocusSessionSpec {
             return .openBundle(bundleIdentifier)
         }
 
-        return FocusSessionSpec(
+        var result = FocusSessionSpec(
             displayName: displayName,
             accessMode: accessMode,
             startupSteps: guardedStartupSteps,
@@ -177,6 +180,11 @@ public struct FocusSessionSpec {
             presetBlockedBundleIdentifiers: presetBlockedBundleIdentifiers,
             presetAllowedBundleIdentifiers: presetAllowedBundleIdentifiers
         )
+        result.hideDistractions = hideDistractions
+        result.nativeWindowVisibilitySessionID = nativeWindowVisibilitySessionID
+        result.initialAllowedApps = initialAllowedApps
+        result.initialSelectedWindows = initialSelectedWindows
+        return result
     }
 
     /// GUI completion is observational: release restrictions while leaving the

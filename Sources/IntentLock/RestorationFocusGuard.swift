@@ -2,8 +2,8 @@ import AppKit
 import ApplicationServices
 import IntentCore
 
-/// A short-lived restoration transaction. Never opens an app, changes Spaces,
-/// or follows a stale session-start window. Real input ends preservation.
+/// A short-lived exact-window restoration transaction. Never opens an app or
+/// follows a stale session-start window. Observed input ends preservation.
 final class RestorationFocusGuard {
     private static var current: RestorationFocusGuard?
     private let application: NSRunningApplication
@@ -15,9 +15,12 @@ final class RestorationFocusGuard {
     private var globalInput: Any?
     private var localInput: Any?
     private var activation: NSObjectProtocol?
+    private var spaceChange: NSObjectProtocol?
     private let beganAt = Date()
     private var observations: [[String: Any]] = []
     private var lastForegroundPID: pid_t?
+    private var lastTargetOnScreen: Bool?
+    private var lastTargetMinimized: Bool?
 
     private init(application: NSRunningApplication, restoringPIDs: Set<pid_t>, visibleWindow: WorkspaceWindow) {
         self.application = application
@@ -52,17 +55,31 @@ final class RestorationFocusGuard {
             "visibleWindowID": visible.id, "resolution": guarder.targetResolution])
         if guarder.window == nil { guarder.observe("unresolvedVisibleWindow"); return }
         current = guarder
-        let input: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
-        guarder.globalInput = NSEvent.addGlobalMonitorForEvents(matching: input) { _ in cancel(reason: "globalInput") }
-        guarder.localInput = NSEvent.addLocalMonitorForEvents(matching: input) { event in cancel(reason: "localInput"); return event }
+        let input: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
+            .gesture, .beginGesture, .swipe, .magnify, .rotate, .smartMagnify]
+        guarder.globalInput = NSEvent.addGlobalMonitorForEvents(matching: input) { [weak guarder] _ in
+            guard let guarder, current === guarder else { return }
+            cancel(reason: "globalInput")
+        }
+        guarder.localInput = NSEvent.addLocalMonitorForEvents(matching: input) { [weak guarder] event in
+            if let guarder, current === guarder { cancel(reason: "localInput") }
+            return event
+        }
         guarder.activation = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak guarder] _ in
             guarder?.preserve()
+        }
+        // The notification cannot distinguish a user Space gesture from a
+        // programmatic restore. Never chase the old target across Spaces.
+        // Quiet restoration must prevent the transition at its owning layer.
+        guarder.spaceChange = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak guarder] _ in
+            guard let guarder, current === guarder else { return }
+            cancel(reason: "spaceChanged")
         }
         // Window deminiaturization and Browser Guard tab restoration finish
         // asynchronously after the native session loop has already stopped.
         let deadline = Date().addingTimeInterval(5)
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak guarder] _ in
-            guard let guarder else { return }
+            guard let guarder, current === guarder else { return }
             if Date() >= deadline { cancel(reason: "complete"); return }
             guarder.preserve()
         }
@@ -149,11 +166,22 @@ final class RestorationFocusGuard {
         if let monitor = guarder.globalInput { NSEvent.removeMonitor(monitor) }
         if let monitor = guarder.localInput { NSEvent.removeMonitor(monitor) }
         if let observer = guarder.activation { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        if let observer = guarder.spaceChange { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
     private func preserve() {
+        guard Self.current === self else { return }
         guard !application.isTerminated, !application.isHidden else { Self.cancel(reason: "targetUnavailable"); return }
-        if !WorkspaceWindow.list().contains(where: { $0.id == visibleWindowID }) {
-            Self.cancel(reason: "windowUnavailable"); return
+        switch WorkspaceWindow.exists(id: visibleWindowID, pid: application.processIdentifier) {
+        case false?: Self.cancel(reason: "windowClosed"); return
+        case nil: observe("windowInventoryDeferred"); return
+        case true?: break
+        }
+        let onScreen = WorkspaceWindow.list().contains {
+            $0.id == visibleWindowID && $0.pid == application.processIdentifier
+        }
+        if lastTargetOnScreen != onScreen {
+            lastTargetOnScreen = onScreen
+            observe("windowVisibility", details: ["exists": true, "onScreen": onScreen])
         }
         // AppKit can briefly report no foreground application between activation
         // notifications; that is not evidence the user moved to another app.
@@ -172,6 +200,10 @@ final class RestorationFocusGuard {
             // return. A timeout is not evidence that the target closed; retry
             // on the bounded timer without activating a guessed replacement.
             if status == .cannotComplete { observe("windowProbeDeferred"); return }
+            if status == .success, let isMinimized = minimized as? Bool, lastTargetMinimized != isMinimized {
+                lastTargetMinimized = isMinimized
+                observe("windowMinimized", details: ["minimized": isMinimized])
+            }
             guard status == .success, minimized as? Bool != true else {
                 observe("windowState", details: ["AXStatus": status.rawValue, "minimized": minimized as? Bool ?? false])
                 Self.cancel(reason: "windowClosedOrMinimized"); return

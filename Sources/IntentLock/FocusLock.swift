@@ -156,6 +156,7 @@ public final class FocusLock {
         shouldStop = true
         stopStateLock.unlock()
         cancelPendingFocusActions()
+        visibilityController.stop()
     }
 
     private var suppressReturnActivation = false
@@ -166,6 +167,7 @@ public final class FocusLock {
         shouldStop = true
         stopStateLock.unlock()
         cancelPendingFocusActions()
+        visibilityController.stop()
     }
 
     public func updateFinishShortcut(_ shortcut: FocusKeyboardShortcut) {
