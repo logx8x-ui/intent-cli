@@ -83,7 +83,11 @@ function fixture({chromeCrossWindowMoves = false} = {}) {
         remaining.splice(index,0,...moving);remaining.forEach((t,i)=>t.index=i);
         return moving;
       },
-      remove:async id=>{removed.push(id);tabs.splice(tabs.findIndex(t=>t.id===id),1)}
+      remove:async id=>{
+        const index=tabs.findIndex(t=>t.id===id);if(index<0)throw Error('missing tab');
+        const windowId=tabs[index].windowId;removed.push(id);tabs.splice(index,1);
+        if(!tabs.some(t=>t.windowId===windowId))windows.splice(windows.findIndex(w=>w.id===windowId),1);
+      }
     }
   };
   return {api,tabs,windows,removed,groupData,localData,
@@ -371,10 +375,51 @@ async function testOrderRestoreRaces() {
   assert.deepEqual(failures,[],'Final order race regression failures');
 }
 
+async function testParkingClosureRetries() {
+  const failures=[];
+  async function check(name,run){try{await run();console.log('PASS holder cleanup: '+name)}catch(error){failures.push({name,message:error.message});console.error('FAIL holder cleanup: '+name+' — '+error.message)}}
+  for(const firefox of [false,true])for(const failure of ['remove-rejected','remove-ignored','tabs-query','window-readback','malformed-inventory'])
+    await check((firefox?'Firefox':'Chrome')+' retains ownership after '+failure,async()=>{
+      const f=fixture({chromeCrossWindowMoves:true}),nativeOwner={identity:()=>structuredClone(nativeIdentity),publishPlan:async()=>true,revealWindows:async()=>true};
+      const rules={active:true,hideDistractions:true,nativeWindowVisibility:true,startupSessionID:'closure-retry',selectedTabIDs:[1,2,3,5]};
+      const v=new Visibility(f.api,firefox,nativeOwner);await v.sync(rules,t=>t.id!==4);
+      const parking=f.tabs.find(t=>t.id===4).windowId,remove=f.api.tabs.remove,query=f.api.tabs.query,getAll=f.api.windows.getAll;
+      let failed=false,removed=false;
+      f.api.tabs.remove=async id=>{
+        if(f.tabs.find(t=>t.id===id)?.windowId===parking&&!failed&&(failure==='remove-rejected'||failure==='remove-ignored')){
+          failed=true;if(failure==='remove-rejected')throw Error('busy');return;
+        }
+        await remove(id);removed=true;
+      };
+      f.api.tabs.query=async value=>{
+        if(failure==='tabs-query'&&value.windowId===parking&&!failed&&f.tabs.find(t=>t.id===4).windowId===1){failed=true;throw Error('busy')}
+        return query(value);
+      };
+      f.api.windows.getAll=async value=>{
+        if(removed&&!failed&&(failure==='window-readback'||failure==='malformed-inventory')){
+          failed=true;if(failure==='window-readback')throw Error('busy');return [{}];
+        }
+        return getAll(value);
+      };
+      await v.sync({active:false},()=>true);assert(failed);assert(v.state.parking.includes(parking),'Retry ownership survives inconclusive closure');
+      f.api.tabs.remove=remove;f.api.tabs.query=query;f.api.windows.getAll=getAll;
+      await v.sync({active:false},()=>true);assert(!v.state.parking.includes(parking));assert(!f.windows.some(w=>w.id===parking));
+      assert.equal(f.tabs.find(t=>t.id===4).windowId,1);assert.deepEqual(f.removed.filter(id=>id<=5),[]);
+    });
+  await check('background retirement timeout does not block tab visibility completion',async()=>{
+    const f=fixture(),v=new Visibility(f.api,false,{retireClosedWindows:()=>new Promise(()=>{})});
+    let done=false;const sync=v.sync({active:false},()=>true).then(()=>done=true);
+    for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));
+    assert(done,'A host cleanup receipt must not gate tab/session interaction');await sync;
+  });
+  assert.deepEqual(failures,[],'Holder closure retry regressions');
+}
+
 (async()=>{
   await testPinPreservation();
   await testPinReviewRegressions();
   await testOrderRestoreRaces();
+  await testParkingClosureRetries();
   const active={active:true,hideDistractions:true,startupSessionID:'one',selectedTabIDs:[1]};
   {
     const f=fixture(), v=new Visibility(f.api,true);

@@ -113,6 +113,38 @@ The post-finish watcher tracks captured journal ownership only, not arbitrary
 unmatched plans. Uncaptured holders cannot contain moved user tabs because of the
 capture-before-move barrier. All stop routes stop native visibility synchronously.
 
+### Browser-confirmed holding-window closure
+
+WindowServer can retain a backing CG window after the browser closes its holding
+window. Browser Guard therefore persists profile-local closure proof before
+registration transport, then confirms absence only through a successful unfiltered
+`windows.getAll({populate:false})` inventory with valid unique IDs. Failed reads
+and failed removals retain retry metadata.
+
+It sends `type: "windowVisibilityClosed"` with `visibilityClosedRequest: {
+requestID, intentionSessionID, previousBrowserSessionID,
+previousProcessIdentity, windowIDs }`. The reply is
+`visibilityClosedReceipt: { requestID, accepted }`. The host requires its current
+authenticated browser connection and process lifetime to match the prior proof;
+all IDs must be registered and natively captured parking windows. No ordinary
+window can be retired this way.
+
+The host durably appends monotonic `closedParkingWindowIDs` before acknowledging.
+Later desired plans and reveal requests preserve these terminal IDs. Native
+recovery retires only the matching parking journal tuple, without CG/AX work or
+reveal. Final parking reveal dispatch and closure acceptance share a scoped file
+lock; app-side acquisition is nonblocking. This prevents a stale reveal dispatch
+after accepted closure, but cannot cancel an OS effect dispatched beforehand.
+Failed journal writes retain ownership and its recovery watcher.
+
+Cleanup uses independent, throttled, bounded transport and short serialized local
+ledger writes. Rejected mixed batches fall back to fair singleton retries, so one
+uncaptured candidate cannot indefinitely prevent captured siblings from retiring.
+New tab operations do not wait for closure-transport timeouts. Profile-local proof
+survives worker reloads; previous-process IDs are never submitted as current IDs.
+Already-closed legacy holders without their original profile-owned proof cannot
+be retroactively adopted from a shared browser PID alone.
+
 ## Firefox process-restart recovery
 
 A browser restart is distinct from an extension background reload. The host

@@ -407,6 +407,106 @@ function checkNativeRecoveryDenials(browser) {
       "Neither active-rule state supplies missing current-process proof");
   }
 }
+function nativeClosedRequest(browser, overrides = {}, outer = {}) {
+  return { type: "windowVisibilityClosed", browserBundleIdentifier: browser,
+    browserSessionID: "reloaded-profile", visibilityClosedRequest: {
+      requestID: "native-closed-request", intentionSessionID: session, previousBrowserSessionID: profile,
+      previousProcessIdentity: simulatedQAIdentity, windowIDs: [21], ...overrides
+    }, ...outer };
+}
+function assertClosedReceipt(messages, requestID, accepted, reason) {
+  const receipt = messages.findLast(reply => reply.visibilityClosedReceipt)?.visibilityClosedReceipt;
+  assert.deepEqual(receipt, { requestID, accepted }, reason);
+  assert.ok(messages.every(reply => !reply.visibilityRecoveryReceipt && !reply.visibilityRestartReceipt),
+    "Closure acknowledgment is not a native reveal or browser restoration permission");
+}
+function checkNativeClosure(browser) {
+  const directory = temporaryDirectory(); writeRules(directory);
+  assertReceipt(call(directory, [connect(browser), request(browser)]), 1, true);
+  const file = recordPath(directory, browser), saved = readRecord(directory, browser);
+  saved.registeredParkingWindows = [windowDescriptor(21), windowDescriptor(22)];
+  fs.writeFileSync(file, JSON.stringify(saved)); writeCapture(directory, browser, [21]);
+  const registration = connect(browser, { browserSessionID: "reloaded-profile" });
+  const original = fs.readFileSync(file, "utf8");
+  for (const [label, message, registrationOverride = {}] of [
+    ["Wrong current profile", nativeClosedRequest(browser, {}, { browserSessionID: "wrong-profile" })],
+    ["Missing current profile", nativeClosedRequest(browser, {}, { browserSessionID: undefined })],
+    ["Wrong browser", nativeClosedRequest(browser, {}, { browserBundleIdentifier: "com.apple.Safari" })],
+    ["Missing browser", nativeClosedRequest(browser, {}, { browserBundleIdentifier: undefined })],
+    ["Wrong previous profile", nativeClosedRequest(browser, { previousBrowserSessionID: "unregistered-profile" })],
+    ["Wrong intention", nativeClosedRequest(browser, { intentionSessionID: "unregistered-intention" })],
+    ["Wrong previous process", nativeClosedRequest(browser, { previousProcessIdentity: { pid: process.pid, launched: 2 } })],
+    ["Malformed process", nativeClosedRequest(browser, { previousProcessIdentity: { pid: process.pid } })],
+    ["Invalid process", nativeClosedRequest(browser, { previousProcessIdentity: { pid: -1, launched: 1 } })],
+    ["Missing capability", nativeClosedRequest(browser), { extensionCapabilities: [] }],
+    ["Cannot self-register capability", nativeClosedRequest(browser, {}, { extensionCapabilities: [capability] }), { extensionCapabilities: [] }],
+    ["Blank request ID", nativeClosedRequest(browser, { requestID: " " })],
+    ["Overlong request ID", nativeClosedRequest(browser, { requestID: "r".repeat(257) })],
+    ["Ordinary window", nativeClosedRequest(browser, { windowIDs: [11] })],
+    ["Uncaptured parking", nativeClosedRequest(browser, { windowIDs: [22] })],
+    ["Unknown parking ID", nativeClosedRequest(browser, { windowIDs: [999] })],
+    ["Partly unknown parking IDs", nativeClosedRequest(browser, { windowIDs: [21, 999] })],
+    ["Empty parking IDs", nativeClosedRequest(browser, { windowIDs: [] })],
+    ["Duplicate parking IDs", nativeClosedRequest(browser, { windowIDs: [21, 21] })],
+    ["Malformed parking IDs", nativeClosedRequest(browser, { windowIDs: ["invalid"] })],
+    ["Negative parking ID", nativeClosedRequest(browser, { windowIDs: [-1] })],
+    ["Unsafe parking ID", nativeClosedRequest(browser, { windowIDs: [Number.MAX_SAFE_INTEGER + 1] })],
+    ["Too many parking IDs", nativeClosedRequest(browser, { windowIDs: Array.from({ length: 257 }, (_, id) => id) })],
+    ["Oversized closure request", nativeClosedRequest(browser, {}, { padding: "x".repeat(16_384) })]
+  ]) {
+    assertClosedReceipt(call(directory, [{ ...registration, ...registrationOverride }, message]),
+      message.visibilityClosedRequest.requestID, false, label);
+    assert.equal(fs.readFileSync(file, "utf8"), original, `${label}: denial preserves registered ownership`);
+  }
+  assertClosedReceipt(call(directory, [nativeClosedRequest(browser, {}, { extensionCapabilities: [capability] })]),
+    "native-closed-request", false, "Closure cannot register its own connection identity");
+  assertClosedReceipt(call(directory, [registration, connect(browser, { browserSessionID: "swapped-profile" }),
+    nativeClosedRequest(browser, {}, { browserSessionID: "swapped-profile" })]),
+    "native-closed-request", false, "Closure cannot replace an authenticated connection profile");
+  const changedProcess = { INTENT_QA_BROWSER_PROCESS_IDENTITY: JSON.stringify({ pid: process.pid, launched: 2 }) };
+  assertClosedReceipt(call(directory, [registration, nativeClosedRequest(browser)], { environment: changedProcess }),
+    "native-closed-request", false, "Different verified process cannot close earlier ownership");
+  assertClosedReceipt(callProduction(directory, [registration, nativeClosedRequest(browser)], {
+    INTENT_QA_ROOT: directory, INTENT_QA_BROWSER_PROCESS_IDENTITY: JSON.stringify(simulatedQAIdentity)
+  }), "native-closed-request", false, "Production host requires a real verified browser parent");
+  const proofless = { ...saved }; delete proofless.browserProcessIdentity;
+  fs.writeFileSync(file, JSON.stringify(proofless));
+  assertClosedReceipt(call(directory, [registration, nativeClosedRequest(browser)]),
+    "native-closed-request", false, "Legacy proofless record cannot gain closure authority");
+  fs.writeFileSync(file, original);
+  const blockedLock = file + ".lock";
+  fs.rmSync(blockedLock); fs.mkdirSync(blockedLock);
+  assertClosedReceipt(call(directory, [registration, nativeClosedRequest(browser)]),
+    "native-closed-request", false, "A failed lock/write cannot acknowledge closure");
+  assert.equal(fs.readFileSync(file, "utf8"), original, "Failed closure persistence retains prior ownership");
+  fs.rmdirSync(blockedLock);
+  // A confirmed empty holder can close while this exact intention is still active.
+  assertClosedReceipt(call(directory, [connect(browser), nativeClosedRequest(browser, {}, { browserSessionID: profile })]),
+    "native-closed-request", true, "Exact current session can retire captured parking, without relaxing active rules");
+  const closed = readRecord(directory, browser);
+  assert.deepEqual(closed.closedParkingWindowIDs, [21]);
+  assert.deepEqual(closed.plan, saved.plan, "Closure does not advance a plan revision");
+  assert.deepEqual(closed.registeredParkingWindows, saved.registeredParkingWindows);
+  assert.deepEqual(closed.requestedRevealWindowIDs, [], "Closure cannot request a reveal");
+  const closedBytes = fs.readFileSync(file, "utf8");
+  assertClosedReceipt(call(directory, [registration, nativeClosedRequest(browser)]), "native-closed-request", true,
+    "Closure replay survives worker reload and is idempotent");
+  assert.equal(fs.readFileSync(file, "utf8"), closedBytes, "Identical closure must not churn the file watcher");
+  assertReceipt(call(directory, [connect(browser), request(browser, plan(2, { windows: [] }))]), 2, true);
+  assert.deepEqual(readRecord(directory, browser).closedParkingWindowIDs, [21], "Later active plan preserves closure");
+  writeRules(directory, { active: false });
+  assertReceipt(call(directory, [connect(browser), request(browser, plan(3, { windows: [] }))]), 3, true);
+  assert.deepEqual(readRecord(directory, browser).closedParkingWindowIDs, [21], "Later reveal delivery preserves closure");
+  writeCapture(directory, browser, [21, 22]);
+  assertClosedReceipt(call(directory, [registration, nativeClosedRequest(browser, { requestID: "second", windowIDs: [22] })]),
+    "second", true, "A second captured closure accumulates");
+  assert.deepEqual(readRecord(directory, browser).closedParkingWindowIDs, [21, 22]);
+  writeRules(directory, { startupSessionID: "new-active-intention" });
+  assertClosedReceipt(call(directory, [registration, nativeClosedRequest(browser, { requestID: "replay" })]),
+    "replay", true, "Historical closure remains idempotent during a newer intention");
+  assert.equal(fs.readdirSync(directory).filter(file => file.startsWith("browser-window-visibility-") && file.endsWith(".json")).length, 1,
+    "Closure never registers a new occurrence");
+}
 function checkQAIdentityIsolation() {
   const browser = "org.mozilla.firefox";
   const injected = JSON.stringify(simulatedQAIdentity);
@@ -442,11 +542,11 @@ function checkQAIdentityIsolation() {
     checkQAIdentityIsolation();
     for (const browser of ["org.mozilla.firefox", "com.google.Chrome"]) {
       checkBrowser(browser); checkNegotiatedReadiness(browser); await checkCaptureAndFinish(browser);
-      checkRestartDenials(browser); checkNativeRecoveryDenials(browser);
+      checkRestartDenials(browser); checkNativeRecoveryDenials(browser); checkNativeClosure(browser);
     }
     assert.equal(rejectedCase("com.apple.Safari", "Unsupported browser")[0].nativeWindowVisibility, false);
     await checkRuleRefresh();
-    console.log("Native host window visibility: isolated simulated QA identity/protocol/capture fixtures and production identity/restart/native-recovery denials passed (not live AppKit acceptance)");
+    console.log("Native host window visibility: isolated simulated QA identity/protocol/capture fixtures and production identity/restart/native-recovery/closure denials plus cumulative closure receipts passed (not live AppKit acceptance)");
   } finally {
     for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true });
   }

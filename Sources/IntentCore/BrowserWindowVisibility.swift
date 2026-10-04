@@ -81,19 +81,24 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
     public var registeredParkingWindows: [BrowserWindowVisibilityWindow]
     /// A later plan must never retract an already accepted completion reveal.
     public var requestedRevealWindowIDs: [Int]
+    /// Browser-confirmed removal is terminal for this registered parking ID.
+    /// Kept separate from reveal requests, and monotonic across desired plans.
+    public var closedParkingWindowIDs: [Int]
 
     public init(browserBundleIdentifier: String, browserSessionID: String, receivedAt: Date = Date(),
                 plan: BrowserWindowVisibilityPlan, registeredParkingWindows: [BrowserWindowVisibilityWindow]? = nil,
-                requestedRevealWindowIDs: [Int]? = nil, browserProcessIdentity: BrowserProcessIdentity? = nil) {
+                requestedRevealWindowIDs: [Int]? = nil, browserProcessIdentity: BrowserProcessIdentity? = nil,
+                closedParkingWindowIDs: [Int] = []) {
         self.browserBundleIdentifier = browserBundleIdentifier; self.browserSessionID = browserSessionID
         self.receivedAt = receivedAt; self.plan = plan
         self.registeredParkingWindows = registeredParkingWindows ?? plan.parkingWindows
         self.requestedRevealWindowIDs = requestedRevealWindowIDs ?? plan.revealWindowIDs
         self.browserProcessIdentity = browserProcessIdentity
+        self.closedParkingWindowIDs = closedParkingWindowIDs
     }
 
     private enum CodingKeys: String, CodingKey {
-        case browserBundleIdentifier, browserSessionID, receivedAt, plan, registeredParkingWindows, requestedRevealWindowIDs, browserProcessIdentity
+        case browserBundleIdentifier, browserSessionID, receivedAt, plan, registeredParkingWindows, requestedRevealWindowIDs, browserProcessIdentity, closedParkingWindowIDs
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -104,6 +109,7 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
         registeredParkingWindows = try values.decodeIfPresent([BrowserWindowVisibilityWindow].self, forKey: .registeredParkingWindows) ?? plan.parkingWindows
         requestedRevealWindowIDs = try values.decodeIfPresent([Int].self, forKey: .requestedRevealWindowIDs) ?? plan.revealWindowIDs
         browserProcessIdentity = try values.decodeIfPresent(BrowserProcessIdentity.self, forKey: .browserProcessIdentity)
+        closedParkingWindowIDs = try values.decodeIfPresent([Int].self, forKey: .closedParkingWindowIDs) ?? []
     }
 
     public var isValid: Bool {
@@ -116,6 +122,8 @@ public struct BrowserWindowVisibilityRecord: Codable, Equatable {
             && Set(requestedRevealWindowIDs).isSubset(of: Set(registeredParkingWindows.map(\.windowID)))
             && Set(plan.parkingWindows.map(\.windowID)).isSubset(of: Set(registeredParkingWindows.map(\.windowID)))
             && Set(plan.revealWindowIDs).isSubset(of: Set(requestedRevealWindowIDs))
+            && Set(closedParkingWindowIDs).count == closedParkingWindowIDs.count
+            && Set(closedParkingWindowIDs).isSubset(of: Set(registeredParkingWindows.map(\.windowID)))
     }
 }
 
@@ -265,6 +273,40 @@ public final class BrowserWindowVisibilityStore {
         }
     }
 
+    /// Only the authenticated host may attest browser-confirmed removal. This
+    /// retires captured parking ownership without a reveal, registration or new
+    /// plan revision. The current host must independently prove the same process.
+    @discardableResult
+    public func confirmRegisteredParkingClosed(browserBundleIdentifier: String, browserSessionID: String,
+                                               intentionSessionID: String, browserProcessIdentity: BrowserProcessIdentity,
+                                               windowIDs: [Int], receivedAt: Date = Date()) throws -> Acceptance {
+        guard validVisibilityBundle(browserBundleIdentifier), validVisibilityIdentity(browserSessionID),
+              validVisibilityIdentity(intentionSessionID), browserProcessIdentity.isValid,
+              receivedAt.timeIntervalSinceReferenceDate.isFinite,
+              browserProcessIdentity.launched <= receivedAt.timeIntervalSinceReferenceDate,
+              !windowIDs.isEmpty, windowIDs.count <= 256, Set(windowIDs).count == windowIDs.count,
+              windowIDs.allSatisfy({ $0 >= 0 && $0 <= 9_007_199_254_740_991 }) else { return .rejected }
+        let file = fileURL(browserBundleIdentifier: browserBundleIdentifier, browserSessionID: browserSessionID,
+            intentionSessionID: intentionSessionID)
+        return try withFileLock(file) {
+            guard var record = read(file), record.browserBundleIdentifier == browserBundleIdentifier,
+                  record.browserSessionID == browserSessionID, record.plan.intentionSessionID == intentionSessionID,
+                  record.browserProcessIdentity == browserProcessIdentity,
+                  Set(windowIDs).isSubset(of: Set(record.registeredParkingWindows.map(\.windowID))),
+                  Set(windowIDs).isSubset(of: capturedWindowIDs(for: record)) else { return .rejected }
+            let requested = Set(windowIDs)
+            if requested.isSubset(of: Set(record.closedParkingWindowIDs)) { return .unchanged }
+            record.closedParkingWindowIDs = Set(record.closedParkingWindowIDs).union(requested).sorted()
+            record.receivedAt = max(record.receivedAt, receivedAt)
+            guard record.isValid else { return .rejected }
+            let encoded = try JSONEncoder().encode(record)
+            guard encoded.count <= Self.maximumFileBytes else { return .rejected }
+            try encoded.write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            return .written
+        }
+    }
+
     private func persist(_ record: BrowserWindowVisibilityRecord, revealOnly: Bool) throws -> Acceptance {
         var record = record
         let browserBundleIdentifier = record.browserBundleIdentifier
@@ -298,6 +340,7 @@ public final class BrowserWindowVisibilityStore {
                     !previous.registeredParkingWindows.contains { $0.windowID == current.windowID }
                 }
                 record.requestedRevealWindowIDs = Set(previous.requestedRevealWindowIDs).union(plan.revealWindowIDs).sorted()
+                record.closedParkingWindowIDs = previous.closedParkingWindowIDs
             } else if revealOnly {
                 return .rejected
             }
@@ -339,6 +382,29 @@ public final class BrowserWindowVisibilityStore {
         return record
     }
 
+    /// Serialize the final parking reveal check + bounded AX dispatch with
+    /// closure acceptance. The app must not wait on a host writer on its main
+    /// thread: a busy lock throws, so the caller keeps recovery ownership.
+    /// This callback must not call another locking store operation.
+    public func withLockedRecordForRestoration<T>(browserBundleIdentifier: String, browserSessionID: String,
+                                                 intentionSessionID: String,
+                                                 _ action: (BrowserWindowVisibilityRecord?) throws -> T) throws -> T {
+        guard validVisibilityBundle(browserBundleIdentifier), validVisibilityIdentity(browserSessionID),
+              validVisibilityIdentity(intentionSessionID) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+        }
+        let file = fileURL(browserBundleIdentifier: browserBundleIdentifier, browserSessionID: browserSessionID,
+            intentionSessionID: intentionSessionID)
+        return try withFileLock(file, nonBlocking: true) {
+            let record = read(file)
+            let scoped = record.flatMap { value in
+                value.browserBundleIdentifier == browserBundleIdentifier && value.browserSessionID == browserSessionID
+                    && value.plan.intentionSessionID == intentionSessionID ? value : nil
+            }
+            return try action(scoped)
+        }
+    }
+
     private func baseFileURL(browserBundleIdentifier: String) -> URL {
         let safe = browserBundleIdentifier.map { $0.isLetter || $0.isNumber ? String($0) : "-" }.joined()
         return directory.appendingPathComponent("browser-window-visibility-\(safe).json")
@@ -357,12 +423,12 @@ public final class BrowserWindowVisibilityStore {
         return data
     }
 
-    private func withFileLock<T>(_ file: URL, _ action: () throws -> T) throws -> T {
+    private func withFileLock<T>(_ file: URL, nonBlocking: Bool = false, _ action: () throws -> T) throws -> T {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let descriptor = open(file.appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
         defer { close(descriptor) }
-        guard flock(descriptor, LOCK_EX) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        guard flock(descriptor, LOCK_EX | (nonBlocking ? LOCK_NB : 0)) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
         defer { flock(descriptor, LOCK_UN) }
         return try action()
     }
@@ -424,6 +490,26 @@ public enum BrowserWindowVisibilityRestorationPolicy {
         case unknown
     }
     public enum Disposition: Equatable { case restore, retain, discard }
+
+    /// An exact durable closure acknowledgment retires only its parking ledger
+    /// tuple. No CG existence query, AX lookup, process activation or reveal is
+    /// needed: browsers may retain their native window after removing the holder.
+    public static func parkingDisposition(expectedIdentity: BrowserProcessIdentity,
+                                          expectedBundleIdentifier: String,
+                                          browserSessionID: String?, intentionSessionID: String?,
+                                          browserWindowID: Int?, nativeWindowID: UInt32?, isParking: Bool,
+                                          record: BrowserWindowVisibilityRecord) -> Disposition {
+        guard isParking, let nativeWindowID, nativeWindowID > 0,
+              let browserSessionID, let intentionSessionID, let browserWindowID,
+              expectedIdentity.isValid, record.isValid,
+              record.browserBundleIdentifier == expectedBundleIdentifier,
+              record.browserProcessIdentity == expectedIdentity,
+              record.browserSessionID == browserSessionID,
+              record.plan.intentionSessionID == intentionSessionID,
+              record.registeredParkingWindows.contains(where: { $0.windowID == browserWindowID }) else { return .retain }
+        if record.closedParkingWindowIDs.contains(browserWindowID) { return .discard }
+        return record.requestedRevealWindowIDs.contains(browserWindowID) ? .restore : .retain
+    }
 
     public static func disposition(expectedIdentity: BrowserProcessIdentity, expectedBundleIdentifier: String,
                                    processState: ProcessState) -> Disposition {
@@ -489,7 +575,8 @@ public enum BrowserWindowVisibilityMatching {
     public static func matches(records: [BrowserWindowVisibilityRecord], candidates: [NativeCandidate]) -> [Match] {
         let proposed = records.filter(\.isValid).flatMap { record in
             (record.plan.windows + record.plan.parkingWindows).compactMap { window -> Match? in
-                guard let candidate = match(window: window, browserBundleIdentifier: record.browserBundleIdentifier,
+                guard !record.closedParkingWindowIDs.contains(window.windowID),
+                      let candidate = match(window: window, browserBundleIdentifier: record.browserBundleIdentifier,
                                             candidates: candidates) else { return nil }
                 return Match(record: record, window: window, candidate: candidate,
                     isParking: record.plan.parkingWindows.contains { $0.windowID == window.windowID })

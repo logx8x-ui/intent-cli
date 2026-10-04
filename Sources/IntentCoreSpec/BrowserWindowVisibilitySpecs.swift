@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import IntentCore
 
 func runBrowserWindowVisibilitySpecs() throws {
@@ -120,6 +121,15 @@ func runBrowserWindowVisibilitySpecs() throws {
     let parkingMatches = Matcher.matches(records: [parkedRecord], candidates: [native, parkingNative])
     try expect(parkingMatches.count == 2 && parkingMatches.filter(\.isParking).map(\.window.windowID) == [80],
         "Native matching identifies parking windows without treating them as normal restore targets")
+    var closedObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(parkedRecord)) as! [String: Any]
+    closedObject["closedParkingWindowIDs"] = [parking.windowID]
+    let closedRecord = try JSONDecoder().decode(BrowserWindowVisibilityRecord.self,
+        from: JSONSerialization.data(withJSONObject: closedObject))
+    let closedRoundTrip = try JSONSerialization.jsonObject(with: JSONEncoder().encode(closedRecord)) as! [String: Any]
+    try expect(closedRoundTrip["closedParkingWindowIDs"] as? [Int] == [parking.windowID],
+        "A confirmed closed holder must survive native record decoding and re-encoding")
+    try expect(Matcher.matches(records: [closedRecord], candidates: [native, parkingNative]).map(\.window.windowID) == [window.windowID],
+        "Closed parking cannot rebind its old native CG window even if WindowServer still reports it")
     parkedRecord.plan.parkingWindows[0].title = window.title; parkedRecord.plan.parkingWindows[0].frame = window.frame
     try expect(Matcher.matches(records: [parkedRecord], candidates: [native]).isEmpty,
         "A parking and user-window claim cannot both own the same native window")
@@ -368,6 +378,180 @@ func runBrowserWindowVisibilitySpecs() throws {
     let laterRecoveryRecord = store.records(browserBundleIdentifier: browser).first { $0.browserSessionID == "old-extension-profile" }
     try expect(laterRecoveryRecord?.plan == registeredRecoveryPlan && laterRecoveryRecord?.requestedRevealWindowIDs == [parking.windowID],
         "A later desired plan cannot retract a registered-recovery receipt")
+
+    // Closure is a terminal, same-process acknowledgment, not a reveal or plan.
+    var closurePlan = plan; closurePlan.intentionSessionID = "closed-parking-intention"
+    var secondParking = parking; secondParking.windowID += 1
+    closurePlan.parkingWindows = [parking, secondParking]
+    _ = try store.accept(closurePlan, browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        currentIntentionSessionID: closurePlan.intentionSessionID, receivedAt: timestamp, browserProcessIdentity: process)
+    func confirmClosed(_ ids: [Int], proof: BrowserProcessIdentity = process,
+                       bundle: String = "org.mozilla.firefox", profile: String = "closure-profile",
+                       intention: String = "closed-parking-intention") throws -> BrowserWindowVisibilityStore.Acceptance {
+        try store.confirmRegisteredParkingClosed(browserBundleIdentifier: bundle, browserSessionID: profile,
+            intentionSessionID: intention, browserProcessIdentity: proof, windowIDs: ids, receivedAt: timestamp)
+    }
+    let closureBeforeCapture = try confirmClosed([parking.windowID])
+    try expect(closureBeforeCapture == .rejected, "Registration without native capture cannot retire a holder")
+    _ = try store.writeCaptureReceipt(.init(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID, windowIDs: [parking.windowID]))
+    let closureFile = store.fileURL(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID)
+    let closureBytes = try Data(contentsOf: closureFile)
+    let invalidClosures = try [
+        confirmClosed([]), confirmClosed([parking.windowID, parking.windowID]), confirmClosed([-1]),
+        confirmClosed([9_007_199_254_740_992]), confirmClosed(Array(0..<257)), confirmClosed([999]),
+        confirmClosed([parking.windowID, 999]), confirmClosed([window.windowID]), confirmClosed([secondParking.windowID]),
+        confirmClosed([parking.windowID], proof: restarted), confirmClosed([parking.windowID], proof: recycled),
+        confirmClosed([parking.windowID], bundle: "com.google.Chrome"), confirmClosed([parking.windowID], profile: "foreign"),
+        confirmClosed([parking.windowID], intention: "foreign"), confirmClosed([parking.windowID], profile: " ")
+    ]
+    try expect(invalidClosures.allSatisfy { $0 == .rejected },
+        "Closures reject malformed IDs, uncaptured/ordinary windows and foreign process/profile/intention proof")
+    let closureBytesAfterDenials = try Data(contentsOf: closureFile)
+    try expect(closureBytesAfterDenials == closureBytes, "Rejected closure cannot mutate the registered plan")
+    let closureAccepted = try confirmClosed([parking.windowID])
+    let closureRecord = store.record(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID)!
+    try expect(closureAccepted == .written && closureRecord.closedParkingWindowIDs == [parking.windowID]
+        && closureRecord.plan == closurePlan && closureRecord.requestedRevealWindowIDs.isEmpty
+        && closureRecord.registeredParkingWindows == [parking, secondParking],
+        "Confirmed closure adds only the terminal parking ID without a reveal, revision or registration")
+    let closureFileDate = Date(timeIntervalSince1970: 3_000)
+    try FileManager.default.setAttributes([.modificationDate: closureFileDate], ofItemAtPath: closureFile.path)
+    let closureReplay = try confirmClosed([parking.windowID])
+    let afterClosureDate = try FileManager.default.attributesOfItem(atPath: closureFile.path)[.modificationDate] as? Date
+    try expect(closureReplay == .unchanged && afterClosureDate == closureFileDate,
+        "Closure acknowledgment survives host reload without repeating writes")
+    closurePlan.revision += 1; closurePlan.parkingWindows = []
+    _ = try store.accept(closurePlan, browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        currentIntentionSessionID: closurePlan.intentionSessionID, receivedAt: timestamp, browserProcessIdentity: process)
+    closurePlan.revision += 1
+    _ = try store.acceptReveal(closurePlan, browserBundleIdentifier: browser, browserSessionID: "closure-profile", receivedAt: timestamp)
+    _ = try store.requestRegisteredRecovery(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID, browserProcessIdentity: process, windowIDs: [parking.windowID], receivedAt: timestamp)
+    let afterClosurePlans = store.record(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID)!
+    try expect(afterClosurePlans.closedParkingWindowIDs == [parking.windowID] && afterClosurePlans.plan == closurePlan,
+        "Later active, reveal and recovery plans cannot erase a terminal closure")
+    _ = try store.writeCaptureReceipt(.init(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID, windowIDs: [secondParking.windowID]))
+    let secondClosure = try confirmClosed([secondParking.windowID])
+    let combinedClosure = store.record(browserBundleIdentifier: browser, browserSessionID: "closure-profile",
+        intentionSessionID: closurePlan.intentionSessionID)!
+    try expect(secondClosure == .written && combinedClosure.closedParkingWindowIDs == [parking.windowID, secondParking.windowID],
+        "Multiple confirmed closures accumulate independently of current desired parking descriptors")
+    var legacyClosureObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(closureRecord)) as! [String: Any]
+    legacyClosureObject.removeValue(forKey: "closedParkingWindowIDs")
+    let legacyClosureRecord = try JSONDecoder().decode(BrowserWindowVisibilityRecord.self,
+        from: JSONSerialization.data(withJSONObject: legacyClosureObject))
+    try expect(legacyClosureRecord.closedParkingWindowIDs.isEmpty && legacyClosureRecord.isValid,
+        "Compatible older records default to no confirmed closures")
+    var invalidClosureRecord = closureRecord
+    invalidClosureRecord.closedParkingWindowIDs = [parking.windowID, parking.windowID]
+    try expect(!invalidClosureRecord.isValid, "A malformed duplicate closure record is invalid")
+    invalidClosureRecord.closedParkingWindowIDs = [window.windowID]
+    try expect(!invalidClosureRecord.isValid, "A record cannot claim ordinary windows as closed parking")
+    var staleParkingPlan = closureRecord
+    staleParkingPlan.plan.windows = []; staleParkingPlan.plan.parkingWindows = [parking]
+    try expect(Matcher.matches(records: [staleParkingPlan], candidates: [parkingNative]).isEmpty,
+        "A stale descriptor cannot recapture the old CG window after confirmed closure")
+    var changedRole = staleParkingPlan
+    changedRole.plan.windows = [parking]; changedRole.plan.parkingWindows = []
+    try expect(Matcher.matches(records: [changedRole], candidates: [parkingNative]).isEmpty,
+        "A later ordinary-window descriptor cannot rebind an already closed parking ID")
+    func retiresClosed(record: BrowserWindowVisibilityRecord = closureRecord,
+                       proof: BrowserProcessIdentity = process, bundle: String = "org.mozilla.firefox",
+                       profile: String? = "closure-profile", intention: String? = "closed-parking-intention",
+                       browserWindow: Int? = parking.windowID, nativeWindow: UInt32? = 12800, isParking: Bool = true) -> Bool {
+        BrowserWindowVisibilityRestorationPolicy.parkingDisposition(expectedIdentity: proof,
+            expectedBundleIdentifier: bundle, browserSessionID: profile, intentionSessionID: intention,
+            browserWindowID: browserWindow, nativeWindowID: nativeWindow, isParking: isParking, record: record) == .discard
+    }
+    try expect(retiresClosed(), "The exact captured parking journal tuple can retire without inspecting CG/AX state")
+    try expect(!retiresClosed(isParking: false) && !retiresClosed(nativeWindow: nil) && !retiresClosed(nativeWindow: 0),
+        "A closure cannot retire an ordinary window or whole-app visibility entry")
+    try expect(!retiresClosed(profile: "foreign") && !retiresClosed(intention: "foreign")
+        && !retiresClosed(browserWindow: secondParking.windowID) && !retiresClosed(bundle: "com.google.Chrome")
+        && !retiresClosed(proof: recycled) && !retiresClosed(proof: restarted)
+        && !retiresClosed(profile: nil) && !retiresClosed(intention: nil) && !retiresClosed(browserWindow: nil),
+        "Closure retirement requires every profile, intention, window and process identity component to match")
+    var queuedReveal = closureRecord
+    queuedReveal.closedParkingWindowIDs = []; queuedReveal.requestedRevealWindowIDs = [parking.windowID]
+    func pendingParkingAction(_ record: BrowserWindowVisibilityRecord) -> BrowserWindowVisibilityRestorationPolicy.Disposition {
+        BrowserWindowVisibilityRestorationPolicy.parkingDisposition(expectedIdentity: process,
+            expectedBundleIdentifier: browser, browserSessionID: "closure-profile", intentionSessionID: closurePlan.intentionSessionID,
+            browserWindowID: parking.windowID, nativeWindowID: 12800, isParking: true, record: record)
+    }
+    try expect(pendingParkingAction(queuedReveal) == .restore,
+        "An exact captured parking entry can reveal while its latest durable record still permits it")
+    queuedReveal.closedParkingWindowIDs = [parking.windowID]
+    try expect(pendingParkingAction(queuedReveal) == .discard,
+        "A closure received during queued AX work overrides the old reveal snapshot before the effect")
+    queuedReveal.closedParkingWindowIDs = []; queuedReveal.requestedRevealWindowIDs = []
+    try expect(pendingParkingAction(queuedReveal) == .retain,
+        "Missing current reveal permission retains a pending parking entry")
+    var missingProofClosure = closureRecord; missingProofClosure.browserProcessIdentity = nil
+    try expect(!retiresClosed(record: missingProofClosure) && !retiresClosed(record: legacyClosureRecord),
+        "Legacy missing process/closure proof retains native ownership")
+
+    // The app reveal guard never blocks behind a host writer, and the same
+    // per-occurrence lock serializes an accepted closure with effect dispatch.
+    let lockFile = store.fileURL(browserBundleIdentifier: browser, browserSessionID: "closure-lock-profile",
+        intentionSessionID: closureRecord.plan.intentionSessionID)
+    var lockRecord = closureRecord; lockRecord.browserSessionID = "closure-lock-profile"
+    lockRecord.closedParkingWindowIDs = []; lockRecord.requestedRevealWindowIDs = [parking.windowID]
+    try JSONEncoder().encode(lockRecord).write(to: lockFile, options: .atomic)
+    _ = try store.writeCaptureReceipt(.init(browserBundleIdentifier: browser, browserSessionID: lockRecord.browserSessionID,
+        intentionSessionID: lockRecord.plan.intentionSessionID, windowIDs: [parking.windowID]))
+    let writerStarted = DispatchSemaphore(value: 0), writerFinished = DispatchSemaphore(value: 0)
+    final class ClosureWriteOutcome: @unchecked Sendable {
+        var result: BrowserWindowVisibilityStore.Acceptance?
+        var error: Error?
+    }
+    let closureWriteOutcome = ClosureWriteOutcome()
+    let lockProfile = lockRecord.browserSessionID, lockIntention = lockRecord.plan.intentionSessionID
+    var lockRejected = false, closureWaitedForDispatch = false
+    try store.withLockedRecordForRestoration(browserBundleIdentifier: browser, browserSessionID: lockProfile,
+                                            intentionSessionID: lockIntention) { record in
+        try expect(record?.closedParkingWindowIDs == [], "The first locked read sees the existing reveal authority")
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            try store.withLockedRecordForRestoration(browserBundleIdentifier: browser, browserSessionID: lockProfile,
+                intentionSessionID: lockIntention) { _ in throw SpecFailure(description: "Busy restore lock ran its effect") }
+        } catch let error as NSError {
+            lockRejected = error.domain == NSPOSIXErrorDomain && (error.code == Int(EWOULDBLOCK) || error.code == Int(EAGAIN))
+        }
+        try expect(ProcessInfo.processInfo.systemUptime - started < 0.5,
+            "A contended restoration lock fails promptly instead of blocking the app's main thread")
+        DispatchQueue.global().async {
+            writerStarted.signal()
+            do {
+                closureWriteOutcome.result = try store.confirmRegisteredParkingClosed(browserBundleIdentifier: browser,
+                    browserSessionID: lockProfile, intentionSessionID: lockIntention, browserProcessIdentity: process,
+                    windowIDs: [parking.windowID], receivedAt: timestamp)
+            } catch { closureWriteOutcome.error = error }
+            writerFinished.signal()
+        }
+        try expect(writerStarted.wait(timeout: .now() + 1) == .success, "Concurrent closure writer starts")
+        closureWaitedForDispatch = writerFinished.wait(timeout: .now() + 0.05) == .timedOut
+        let during = store.record(browserBundleIdentifier: browser, browserSessionID: lockProfile, intentionSessionID: lockIntention)
+        try expect(during?.closedParkingWindowIDs == [], "Closure cannot be accepted while a preceding reveal dispatch holds the lock")
+    }
+    try expect(writerFinished.wait(timeout: .now() + 2) == .success && closureWriteOutcome.result == .written
+        && closureWriteOutcome.error == nil && closureWaitedForDispatch && lockRejected,
+        "Closure acceptance and parking dispatch share one exact-record lock, with nonblocking app contention")
+    var effectsAfterClosure = 0
+    try store.withLockedRecordForRestoration(browserBundleIdentifier: browser, browserSessionID: lockProfile,
+                                            intentionSessionID: lockIntention) { record in
+        guard let record else { throw SpecFailure(description: "Locked closure record disappeared") }
+        let disposition = BrowserWindowVisibilityRestorationPolicy.parkingDisposition(expectedIdentity: process,
+            expectedBundleIdentifier: browser, browserSessionID: lockProfile, intentionSessionID: lockIntention,
+            browserWindowID: parking.windowID, nativeWindowID: 12800, isParking: true, record: record)
+        if disposition == .restore { effectsAfterClosure += 1 }
+        try expect(disposition == .discard, "The locked latest record overrides a queued old reveal after closure acceptance")
+    }
+    try expect(effectsAfterClosure == 0, "No parking reveal effect can dispatch after its closure receipt was accepted")
 
     typealias RestartPolicy = BrowserWindowVisibilityRestartPolicy
     func permitsRestart(requested: BrowserProcessIdentity? = process, stored: BrowserProcessIdentity? = process,

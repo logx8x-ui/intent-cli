@@ -164,7 +164,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         // one. Only historical parking ownership is released here, never normal
         // windows hidden for this current session.
         if entries.contains(where: { $0.parking == true }) {
-            entries = Self.restore(parkingOnly: true, currentRecords: records)
+            entries = Self.restore(parkingOnly: true)
         }
         reconcileBrowserWindows(records: records, windows: windows)
         guard mayEnforce else { return }
@@ -207,7 +207,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var observations: [BrowserWindowEnforcementPolicy.Observation] = []
         for record in records {
             let liveIdentity = Self.liveProcessIdentity(record)
-            for claim in record.plan.windows {
+            for claim in record.plan.windows where !record.closedParkingWindowIDs.contains(claim.windowID) {
                 guard mayEnforce else { return }
                 var outcome: BrowserWindowEnforcementPolicy.Outcome = .unresolved(.windowIdentityUnavailable)
                 if let liveIdentity, liveIdentity == record.browserProcessIdentity {
@@ -311,7 +311,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         guard let data = try? Data(contentsOf: ActiveBrowserRulesStore.defaultFileURL()) else { return nil }
         return try? JSONDecoder().decode(ActiveBrowserRules.self, from: data)
     }
-    private static func recoveryRecords(entries: [Entry], currentRecords: [BrowserWindowVisibilityRecord]) -> [BrowserWindowVisibilityRecord] {
+    private static func recoveryRecords(entries: [Entry]) -> [BrowserWindowVisibilityRecord] {
         let store = BrowserWindowVisibilityStore()
         var seen: Set<URL> = []
         return entries.compactMap { entry in
@@ -320,10 +320,6 @@ public final class FocusVisibilityController: @unchecked Sendable {
             let file = store.fileURL(browserBundleIdentifier: entry.bundle, browserSessionID: browserSession,
                 intentionSessionID: session)
             guard seen.insert(file).inserted else { return nil }
-            if let record = currentRecords.first(where: {
-                $0.browserBundleIdentifier == entry.bundle && $0.browserSessionID == browserSession
-                    && $0.plan.intentionSessionID == session
-            }) { return record }
             return store.record(browserBundleIdentifier: entry.bundle, browserSessionID: browserSession,
                 intentionSessionID: session)
         }
@@ -343,6 +339,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         return result
     }
     private static func captureParkingMatch(_ match: BrowserWindowVisibilityMatching.Match, launched: Date, entries: [Entry]) -> [Entry] {
+        guard !match.record.closedParkingWindowIDs.contains(match.window.windowID) else { return entries }
         var result = entries
         if let previous = entries.first(where: { $0.pid == match.candidate.pid && $0.launched == launched && $0.window == match.candidate.id }) {
             // Do not transfer a native identity between profile-local claims.
@@ -377,14 +374,18 @@ public final class FocusVisibilityController: @unchecked Sendable {
         guard let proof = record.browserProcessIdentity else { return false }
         return proof.pid == pid && proof.launched == launched.timeIntervalSinceReferenceDate
     }
-    private static func parkingMayReveal(_ entry: Entry, records: [BrowserWindowVisibilityRecord]) -> Bool {
-        guard entry.parking == true, let browserSession = entry.browserSessionID,
-              let session = entry.intentionSessionID, let window = entry.browserWindowID else { return false }
-        return records.contains {
-            $0.browserBundleIdentifier == entry.bundle && $0.browserSessionID == browserSession &&
-                $0.plan.intentionSessionID == session && $0.registeredParkingWindows.contains { $0.windowID == window } &&
-                $0.requestedRevealWindowIDs.contains(window)
-        }
+    private static func parkingDisposition(_ entry: Entry, record: BrowserWindowVisibilityRecord?) -> BrowserWindowVisibilityRestorationPolicy.Disposition {
+        guard let record else { return .retain }
+        return BrowserWindowVisibilityRestorationPolicy.parkingDisposition(
+            expectedIdentity: .init(pid: entry.pid, launched: entry.launched.timeIntervalSinceReferenceDate),
+            expectedBundleIdentifier: entry.bundle, browserSessionID: entry.browserSessionID,
+            intentionSessionID: entry.intentionSessionID, browserWindowID: entry.browserWindowID,
+            nativeWindowID: entry.window, isParking: entry.parking == true, record: record)
+    }
+    private static func latestParkingDisposition(_ entry: Entry) -> BrowserWindowVisibilityRestorationPolicy.Disposition {
+        guard let profile = entry.browserSessionID, let intention = entry.intentionSessionID else { return .retain }
+        return parkingDisposition(entry, record: BrowserWindowVisibilityStore().record(
+            browserBundleIdentifier: entry.bundle, browserSessionID: profile, intentionSessionID: intention))
     }
 
     private static func loadEntries() -> [Entry] {
@@ -399,12 +400,24 @@ public final class FocusVisibilityController: @unchecked Sendable {
             return true
         } catch { return false }
     }
-    private static func restore(parkingOnly: Bool = false, currentRecords: [BrowserWindowVisibilityRecord] = []) -> [Entry] {
+    private static func restore(parkingOnly: Bool = false) -> [Entry] {
         let entries = loadEntries()
+        let records = recoveryRecords(entries: entries)
+        // Retire browser-confirmed closures before any CG/AX lookup. Chrome can
+        // retain a native CG window after its extension window ID is gone.
+        let remaining = entries.filter { entry in
+            !records.contains { record in
+                parkingDisposition(entry, record: record) == .discard
+            }
+        }
+        if !entries.isEmpty && remaining.isEmpty {
+            guard save([]) else { return entries }
+            accessibilityWindows.removeAll()
+            return []
+        }
         let windows = WorkspaceWindow.list(onScreen: false)
-        let records = recoveryRecords(entries: entries, currentRecords: currentRecords)
         var pending: [Entry] = []
-        for entry in entries {
+        for entry in remaining {
             if parkingOnly && entry.parking != true { pending.append(entry); continue }
             // AppKit can temporarily lack an application or its launch metadata.
             // Only positive death/reuse evidence may discard durable ownership.
@@ -434,7 +447,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 case nil: pending.append(entry); continue
                 case true?: break
                 }
-                if entry.parking == true && !parkingMayReveal(entry, records: records) { pending.append(entry); continue }
+                if entry.parking == true {
+                    switch latestParkingDisposition(entry) {
+                    case .discard: continue
+                    case .retain: pending.append(entry); continue
+                    case .restore: break
+                    }
+                }
                 guard let window = windows.first(where: { $0.id == id && $0.pid == entry.pid }),
                       let element = element(window, launched: entry.launched) else { pending.append(entry); continue }
                 let before = boolean(element, kAXMinimizedAttribute)
@@ -443,7 +462,33 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     if before.status == .invalidUIElement { accessibilityWindows.removeValue(forKey: .init(pid: entry.pid, launched: entry.launched, window: id)) }
                     pending.append(entry); continue
                 }
-                let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                let status: AXError
+                if entry.parking == true {
+                    // AX reads can block. Revalidate under the same scoped lock
+                    // as closure writes and hold it through bounded dispatch, so
+                    // no old reveal can dispatch after a closure was accepted.
+                    // LOCK_NB keeps a busy host writer from stalling the app UI.
+                    guard let profile = entry.browserSessionID, let intention = entry.intentionSessionID else {
+                        pending.append(entry); continue
+                    }
+                    var disposition: BrowserWindowVisibilityRestorationPolicy.Disposition = .retain
+                    var dispatched: AXError?
+                    do {
+                        try BrowserWindowVisibilityStore().withLockedRecordForRestoration(
+                            browserBundleIdentifier: entry.bundle, browserSessionID: profile, intentionSessionID: intention
+                        ) { record in
+                            disposition = parkingDisposition(entry, record: record)
+                            if disposition == .restore {
+                                dispatched = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                            }
+                        }
+                    } catch { pending.append(entry); continue }
+                    if disposition == .discard { continue }
+                    guard let dispatched else { pending.append(entry); continue }
+                    status = dispatched
+                } else {
+                    status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                }
                 observe("restore", pid: entry.pid, window: id, status: status)
                 RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 // Successful dispatch is not completion. A request that timed
@@ -456,7 +501,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
             RestorationFocusGuard.preserveCurrent()
         }
-        _ = save(pending)
+        // Failed persistence cannot make the watcher forget durable ownership.
+        guard save(pending) else { return entries }
         let identities = Set(pending.compactMap { entry in entry.window.map { WindowIdentity(pid: entry.pid, launched: entry.launched, window: $0) } })
         accessibilityWindows = accessibilityWindows.filter { identities.contains($0.key) }
         RestorationFocusGuard.preserveCurrent()

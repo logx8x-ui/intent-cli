@@ -112,6 +112,8 @@
     async reconcile(rules, allowed) {
       await this.load();
       if (!rules.active || !rules.hideDistractions) {
+        // The native closure ledger outlives our tab state and extension reloads.
+        void Promise.resolve(this.nativeOwner?.retireClosedWindows?.()).catch(() => {});
         if (this.recoveredOnce && !this.state.hidden.length && !this.state.moved.length && !this.state.minimized.length && !this.state.parking.length && !this.state.groups.length && !this.state.orders.length && !this.state.nativeReveals.length) return;
         await this.restore(); this.state.initialSession = null; this.state.initialPending = null; await this.save(); this.recoveredOnce = true; return;
       }
@@ -480,6 +482,10 @@
       catch (_) { return false; }
     }
     async restore() {
+      // Backfill a previous accepted plan only with the original durable
+      // profile/process proof; current identity alone cannot create ownership.
+      if (this.state.nativeSessionID && this.state.nativeBrowserIdentity)
+        await this.nativeOwner?.rememberParkingOwnership?.(this.state.nativeSessionID, this.state.nativeBrowserIdentity);
       // Firefox session values follow the real tab/window across browser restarts.
       if (this.firefox && this.api.sessions) {
         const sourceWindows = new Map();
@@ -660,15 +666,35 @@
         }
         this.state.minimized = this.state.minimized.filter(x => x.id !== item.id); await this.save();
       }
+      let closedParking = false;
       for (const id of [...this.state.parking]) {
-        const tabs = await this.api.tabs.query({windowId: id}).catch(() => []);
-        // Close only our own empty holding page, never a user's tab/window.
-        if (tabs.length === 1 && this.holdingPage(tabs[0].url)) await this.api.tabs.remove(tabs[0].id).catch(() => {});
-        else if (tabs.length) await this.revealWindow(id).catch(() => {});
-        if (!this.state.moved.some(x => x.parking === id)) this.state.parking = this.state.parking.filter(x => x !== id);
-        await this.save();
+        try {
+          const windows = await this.api.windows.getAll({populate:false});
+          if (!Array.isArray(windows) || windows.some(window => !Number.isSafeInteger(window?.id) || window.id < 0)
+              || new Set(windows.map(window => window.id)).size !== windows.length) continue;
+          if (windows.some(window => window.id === id)) {
+            const tabs = await this.api.tabs.query({windowId: id});
+            // Close only our own empty holding page. A failed read/removal or a
+            // window still present afterward keeps retry ownership intact.
+            if (tabs.length === 1 && this.holdingPage(tabs[0].url)) {
+              await this.api.tabs.remove(tabs[0].id);
+              const remaining = await this.api.windows.getAll({populate:false});
+              if (!Array.isArray(remaining) || remaining.some(window => !Number.isSafeInteger(window?.id) || window.id < 0)
+                  || new Set(remaining.map(window => window.id)).size !== remaining.length
+                  || remaining.some(window => window.id === id)) continue;
+              closedParking = true;
+            } else if (tabs.length) {
+              await this.revealWindow(id);
+            } else continue;
+          } else closedParking = true;
+          if (!this.state.moved.some(x => x.parking === id)) this.state.parking = this.state.parking.filter(x => x !== id);
+          await this.save();
+        } catch (_) { /* Absence must be confirmed, never inferred from an error. */ }
       }
       await this.retryNativeReveals();
+      // Accepted parking proof was durable before tabs entered the holder, so
+      // this receipt can retry independently after tab state has been cleared.
+      void Promise.resolve(this.nativeOwner?.retireClosedWindows?.({force:closedParking})).catch(() => {});
     }
   }
   root.IntentTabVisibility = IntentTabVisibility;

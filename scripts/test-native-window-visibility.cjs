@@ -10,9 +10,11 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const window = id => ({windowID:id,title:'QA window '+id,frame:{left:0,top:30,width:1000,height:700},state:'normal'});
 const rules = {active:true,nativeWindowVisibility:true,startupSessionID:'intention-a'};
 async function run() {
-  let storage = {}, messages = [], sendWorks = true, time = 100;
-  const api = {storage:{session:{get:async () => clone(storage),set:async data => {storage = clone({...storage,...data});}}}};
+  let storage = {}, localStorage = {}, messages = [], sendWorks = true, time = 100;
+  const initialProcess = {pid:100,launched:800000000};
+  const api = {storage:{session:{get:async () => clone(storage),set:async data => {storage = clone({...storage,...data});}},local:{get:async()=>clone(localStorage),set:async data=>{localStorage=clone({...localStorage,...data});}}}};
   let owner = new Owner(api, message => {messages.push(message); return sendWorks;}, ()=>'browser-a',{timeout:25,now:()=>time});
+  owner.receive({browserProcessIdentity:initialProcess});
   let promise = owner.publishPlan(rules,[window(1)],[window(9)]);
   await tick();
   assert.equal(messages.length,1);
@@ -24,12 +26,14 @@ async function run() {
   assert.equal(await owner.publishPlan(rules,[window(1)],[window(9)]),true);
   assert.equal(messages.length,1,'same accepted plan throttled');
   owner.disconnected();
+  owner.receive({browserProcessIdentity:initialProcess});
   promise = owner.publishPlan(rules,[window(1)],[window(9)]); await tick();
   assert.equal(messages.at(-1).visibilityPlan.revision,2,'reconnect resends even inside throttle period');
   owner.receive({visibilityPlanReceipt:{revision:2,accepted:true}}); assert.equal(await promise,true);
 
   // A new worker in the same browser lifetime cannot replay old revisions.
   owner = new Owner(api, message => {messages.push(message); return sendWorks;}, ()=>'browser-a',{timeout:25,now:()=>time});
+  owner.receive({browserProcessIdentity:initialProcess});
   promise = owner.publishPlan(rules,[window(1)],[window(9)]); await tick();
   assert.equal(messages.at(-1).visibilityPlan.revision,3);
   owner.receive({visibilityPlanReceipt:{revision:3,accepted:false}}); assert.equal(await promise,false);
