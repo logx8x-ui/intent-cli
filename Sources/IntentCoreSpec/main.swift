@@ -38,6 +38,7 @@ do {
     try runBrowserWindowVisibilitySpecs()
     try runBrowserWindowVisibilityCacheSpecs()
     try runBrowserWindowEnforcementSpecs()
+    try runSessionFailureNoticeSpecs()
     try runOnboardingSpecs()
     try runOnboardingSavePlanSpecs()
     try runOnboardingPresentationSpecs()

@@ -427,3 +427,29 @@ Logan was asked whether a quiet finish should leave ordinary windows minimized
 until he chooses them. No answer had arrived at this checkpoint. No deferred
 restoration semantics, global macOS preferences, private window APIs or further
 timing workaround were introduced while that product choice remained pending.
+
+### Nonactivating runtime failure notice
+
+The typed browser-window enforcement failure now requests a separate 12-second,
+mouse-transparent notice below the notch only after ordinary session UI cleanup.
+It never activates Intent or requests key/main focus; the detailed error remains
+available on deliberate reopening. The notice is armed by the actual occurrence
+independently of timer/checklist visibility, not by a reusable saved intention.
+Normal success and generic startup errors do not take this path.
+
+Occurrence/generation fences reject duplicate notices and stale dismissals.
+Security notifications apply synchronously on their main-queue delivery, without
+an extra unstructured task that could suppress a newer occurrence. Wake/unlock
+can rearm only the exact still-running lock and only before any failure attempt
+was consumed. This preserves a fresh post-wake failure while preventing replay
+of an old stopped/presented failure. Physical lock/wake remains a live check.
+
+The final same-source session gate passed at
+`/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-session-checks-n0uZcacy`,
+including core policy, native input, release build, 46 isolated app-model checks
+and 24 actual panel/render checks. Tested app UUID:
+`17A2B80B-781F-3EE0-8936-C71C2D0474D2`. The generated
+`intent-qa-0RTUTpSk/session-failure-notice.png` was visually inspected: all warning
+text and the details hint fit. This offscreen rendering is not installed focus
+acceptance. The underlying automatic window-restoration no-pop failure remains
+unchanged; this notice must not be described as fixing that separate issue.

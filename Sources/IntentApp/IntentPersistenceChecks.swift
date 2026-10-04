@@ -27,6 +27,32 @@ enum IntentPersistenceChecks {
             try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry", "complete-blacklist"],
                 "Completion dismisses all controls before requesting nonactivating mode-aware feedback")
             try check(presentation.completionID == completionID, "Completion feedback carries its occurrence identity")
+            let process = BrowserProcessIdentity(pid: 42, launched: 100)
+            let visibilityRecord = BrowserWindowVisibilityRecord(browserBundleIdentifier: "com.google.Chrome",
+                browserSessionID: "qa-profile", receivedAt: Date(timeIntervalSinceReferenceDate: 200),
+                plan: .init(intentionSessionID: "qa-occurrence", revision: 1, windows: [
+                    .init(windowID: 7, title: "QA", frame: .init(left: 0, top: 40, width: 800, height: 600), state: "normal")
+                ]), browserProcessIdentity: process)
+            var enforcement = BrowserWindowEnforcementPolicy(intentionSessionID: "qa-occurrence")
+            let unresolved = BrowserWindowEnforcementPolicy.Observation(record: visibilityRecord, windowID: 7,
+                liveProcessIdentity: process, outcome: .unresolved(.windowIdentityUnavailable))
+            _ = enforcement.update([unresolved], activeIntentionSessionID: "qa-occurrence", now: 0)
+            guard let failure = enforcement.update([unresolved], activeIntentionSessionID: "qa-occurrence", now: 3) else {
+                throw NSError(domain: "IntentPersistenceChecks", code: 4)
+            }
+            presentation.events = []
+            model.presentEnforcementFailure(occurrenceID: completionID, error: .browserWindowEnforcementFailed(failure))
+            try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry", "failure"],
+                "Typed runtime failure dismisses old UI before its nonactivating notice, without showing the main overlay")
+            try check(presentation.failureID == completionID && presentation.failureMessage == failure.message
+                && model.errorMessage == failure.message, "Failure preserves exact details for explicit later opening")
+            presentation.events = []
+            model.presentEnforcementFailure(occurrenceID: completionID, error: .eventTapUnavailable)
+            try check(presentation.events.isEmpty, "A generic startup error cannot produce the runtime restriction notice")
+            model.activeSessionName = "Replacement"
+            model.presentEnforcementFailure(occurrenceID: completionID, error: .browserWindowEnforcementFailed(failure))
+            try check(presentation.events.isEmpty, "An old failure cannot replace UI after a new session starts")
+            model.activeSessionName = nil; model.errorMessage = nil
             presentation.events = []
             model.emergencyStop()
             try check(!presentation.events.contains("show"), "Safety stop stores its reason without opening a new screen")
@@ -175,11 +201,14 @@ enum IntentPersistenceChecks {
 private final class SessionDismissalProbe: IntentOverlayPresenting {
     var events: [String] = []
     var completionID: UUID?
+    var failureID: UUID?
+    var failureMessage: String?
     var isOverlayVisible: Bool { true }
     var isSessionControlsExpanded: Bool { true }
     func showOverlay(animated: Bool) { events.append("show") }
     func hideOverlay(animated: Bool) { events.append(animated ? "hide-animated" : "hide-immediately") }
     func toggleOverlay() { events.append("toggle") }
+    func prepareSessionPresentation(occurrenceID: UUID) { events.append("prepare") }
     func showSessionControls(occurrenceID: UUID) { events.append("show-controls") }
     func collapseSessionControlsIfExpanded() -> Bool { false }
     func toggleSessionControls() { events.append("toggle-controls") }
@@ -188,5 +217,8 @@ private final class SessionDismissalProbe: IntentOverlayPresenting {
     func hideSessionExpiry() { events.append("hide-expiry") }
     func showSessionCompletion(occurrenceID: UUID, mode: IntentionAccessMode) {
         completionID = occurrenceID; events.append("complete-\(mode.rawValue)")
+    }
+    func showSessionFailure(occurrenceID: UUID, message: String) {
+        failureID = occurrenceID; failureMessage = message; events.append("failure")
     }
 }

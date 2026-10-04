@@ -21,6 +21,7 @@ with another delayed activation or an independent copy of session state.
 | Timer deadlines, controls visibility | `SessionRuntimePolicy.swift`, `SessionTimerFormatter.swift`; `SessionRuntimeSpecs.swift` |
 | Named/generated intention text | `SessionNaming.swift`; `IntentCoreSpec` and isolated app-model persistence checks |
 | Session completion and deferred work | `IntentAppModel.swift`, `IntentLock`; occurrence/lifecycle regressions and isolated presenter checks |
+| Runtime window-enforcement failure notice | `SessionFailureNoticePolicy.swift`, `SessionFailureNotice.swift`; typed-error presenter order, security/resume policy and actual nonactivating panel checks |
 | Notch sizing, view and nonactivating windows | `OverlayWindowController.swift` and notch layout/presentation helpers; core layout specs and `--qa-notch-checks` |
 | Browser activation after completion | Firefox/Chrome background recovery; separate browser harnesses and matching-profile live QA |
 
@@ -44,6 +45,10 @@ with another delayed activation or an independent copy of session state.
   raise a browser or accept clicks. Delayed work from an ended/replaced occurrence
   cannot act on a new one. Locked/sleeping sessions never replay old celebration
   on unlock. Respect Reduce Motion.
+- A runtime browser-window enforcement failure stops the session and shows a
+  finite, nonactivating, mouse-transparent notice independent of timer visibility.
+  Keep details for deliberate reopening. Sleep/lock cancels transient feedback;
+  wake can rearm only an exact still-running occurrence, never a consumed failure.
 
 ## Automated gate
 

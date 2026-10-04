@@ -15,8 +15,10 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private var sessionScreenID: CGDirectDisplayID?
     private var screenObserver: NSObjectProtocol?
     private let completionLight = SessionCompletionLight()
+    private let failureNotice = SessionFailureNotice()
     private var sessionSecurityObservers: [NSObjectProtocol] = []
     private var lockObserver: NSObjectProtocol?
+    private var unlockObserver: NSObjectProtocol?
     private var targetFrame: NSRect = .zero
     private var isAnimating = false
     private var presentationGeneration = 0
@@ -47,11 +49,19 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         let notifications = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             sessionSecurityObservers.append(notifications.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.hideSessionExpiry() }
+                MainActor.assumeIsolated { self?.cancelTransientFeedbackForSecurity() }
             })
         }
         lockObserver = DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.hideSessionExpiry() }
+            MainActor.assumeIsolated { self?.cancelTransientFeedbackForSecurity() }
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            sessionSecurityObservers.append(notifications.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.resumeFeedbackForRunningSession() }
+            })
+        }
+        unlockObserver = DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resumeFeedbackForRunningSession() }
         }
     }
 
@@ -158,6 +168,10 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         return didOpen
     }
 
+    func prepareSessionPresentation(occurrenceID: UUID) {
+        failureNotice.prepare(occurrenceID: occurrenceID)
+    }
+
     func showSessionControls(occurrenceID: UUID) {
         let newOccurrence = sessionOverlayState.occurrenceID != occurrenceID
         sessionOverlayState.update(occurrenceID: occurrenceID, hasTimer: model.activeSessionEndsAt != nil, hasChecklist: !model.activeChecklist.isEmpty, hasStopwatch: model.stopwatchStarted != nil)
@@ -191,11 +205,27 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
 
     func hideSessionExpiry() {
         completionLight.hide()
+        failureNotice.hide()
+    }
+
+    private func cancelTransientFeedbackForSecurity() {
+        completionLight.hide()
+        failureNotice.suppressForSecurity()
+    }
+
+    private func resumeFeedbackForRunningSession() {
+        guard let occurrence = model.resumableSessionFeedbackOccurrenceID else { return }
+        failureNotice.resumeRunningSession(occurrenceID: occurrence)
     }
 
     func showSessionCompletion(occurrenceID: UUID, mode: IntentionAccessMode) {
         guard let screen = workingScreen() else { return }
         completionLight.show(occurrenceID: occurrenceID, mode: mode, screen: screen)
+    }
+
+    func showSessionFailure(occurrenceID: UUID, message: String) {
+        guard !model.hasActiveSession else { return }
+        failureNotice.show(occurrenceID: occurrenceID, message: message, screen: workingScreen())
     }
 
     private func workingScreen() -> NSScreen? {

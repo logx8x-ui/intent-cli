@@ -55,8 +55,33 @@ enum SessionNotchChecks {
                 try check(layer.sublayers?.count == (reduced ? 4 : 5), "Reduced motion omits moving sparkle")
                 try check(layer.sublayers?.allSatisfy { ($0.animation(forKey: "completion") ?? $0.animation(forKey: "meeting"))?.duration == SessionCompletionLight.duration } == true, "All animation work is finite and shares one completion lifetime")
             }
+            let noticeFrame = SessionFailureNoticePolicy.frame(screen: frame,
+                visibleFrame: CGRect(x: 0, y: 30, width: 1512, height: 920), safeAreaTop: 32)
+            let notice = SessionFailureNotice.makePanel(frame: noticeFrame, message:
+                "The intention stopped because Intent could not safely hide a blocked Chrome window. Window restrictions could not be confirmed, so Intent is releasing this intention and restoring its workspace.")
+            try check(!notice.canBecomeKey && !notice.canBecomeMain && notice.ignoresMouseEvents,
+                "Failure feedback cannot intercept typing, clicks or become the active main window")
+            try check(notice.styleMask.contains(.nonactivatingPanel) && !notice.hidesOnDeactivate
+                && !notice.collectionBehavior.contains(.moveToActiveSpace)
+                && notice.collectionBehavior.contains(.fullScreenAuxiliary),
+                "Failure feedback is nonactivating and can accompany fullscreen work without moving Spaces")
+            try check(!notice.isMovable && !notice.isMovableByWindowBackground
+                && !notice.styleMask.contains(.resizable) && !notice.isVisible,
+                "Notice factory is fixed-layout and never orders a live test window")
+            guard let content = notice.contentView else { throw NSError(domain: "SessionNotchChecks", code: 4) }
+            content.layoutSubtreeIfNeeded()
+            guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+                throw NSError(domain: "SessionNotchChecks", code: 5)
+            }
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                throw NSError(domain: "SessionNotchChecks", code: 6)
+            }
+            try png.write(to: IntentEnvironment.dataDirectory.appendingPathComponent("session-failure-notice.png"))
+            try check(bitmap.pixelsWide > 0 && bitmap.pixelsHigh > 0 && notice.frame == noticeFrame,
+                "The actual failure notice renders real content at its below-notch frame")
             try check(NSWorkspace.shared.frontmostApplication?.processIdentifier == before, "Isolated checks did not activate Intent")
-            timer.close(); completion.close()
+            timer.close(); completion.close(); notice.close()
             print("Notch presentation checks passed (\(count) assertions; rendered real content, no live UI claim).")
             return 0
         } catch {

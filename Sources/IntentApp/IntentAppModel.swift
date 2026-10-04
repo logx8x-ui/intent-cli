@@ -11,6 +11,7 @@ protocol IntentOverlayPresenting: AnyObject {
     func showOverlay(animated: Bool)
     func hideOverlay(animated: Bool)
     func toggleOverlay()
+    func prepareSessionPresentation(occurrenceID: UUID)
     func showSessionControls(occurrenceID: UUID)
     var isSessionControlsExpanded: Bool { get }
     @discardableResult func collapseSessionControlsIfExpanded() -> Bool
@@ -19,6 +20,7 @@ protocol IntentOverlayPresenting: AnyObject {
     func hideSessionTimer()
     func hideSessionExpiry()
     func showSessionCompletion(occurrenceID: UUID, mode: IntentionAccessMode)
+    func showSessionFailure(occurrenceID: UUID, message: String)
 }
 
 @MainActor
@@ -215,6 +217,10 @@ final class IntentAppModel: ObservableObject {
     }
 
     var hasActiveSession: Bool { activeSessionName != nil }
+    var resumableSessionFeedbackOccurrenceID: UUID? {
+        guard hasActiveSession, let activeLock, !activeLock.isStopRequested else { return nil }
+        return activeSessionOccurrenceID
+    }
     var activeSessionAccessMode: IntentionAccessMode { activeSessionIntention?.accessMode ?? .whitelist }
 
     var isZeroDriftActive: Bool {
@@ -1358,6 +1364,13 @@ final class IntentAppModel: ObservableObject {
         overlayPresenter?.showSessionCompletion(occurrenceID: occurrenceID, mode: mode)
     }
 
+    func presentEnforcementFailure(occurrenceID: UUID, error: FocusLockError) {
+        guard !hasActiveSession, case .browserWindowEnforcementFailed = error else { return }
+        dismissSessionPresentation()
+        if errorMessage != error.description { errorMessage = error.description }
+        overlayPresenter?.showSessionFailure(occurrenceID: occurrenceID, message: error.description)
+    }
+
     func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
     func toggleSessionControlsExpansion() { overlayPresenter?.toggleSessionControlsExpansion() }
 
@@ -1679,6 +1692,7 @@ final class IntentAppModel: ObservableObject {
         activeSessionID = intention.id
         activeSessionOccurrenceID = UUID()
         let occurrence = activeSessionOccurrenceID
+        if let occurrence { overlayPresenter?.prepareSessionPresentation(occurrenceID: occurrence) }
         lock.onManualFinishRequest = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.activeSessionOccurrenceID == occurrence else { return }
@@ -1774,6 +1788,7 @@ final class IntentAppModel: ObservableObject {
             }
 
             let failureMessage: String?
+            let enforcementFailure: FocusLockError?
             do {
                 if let rules, !rules.websiteFeaturePolicies.isEmpty, let session = rules.startupSessionID {
                     let began = Date()
@@ -1811,14 +1826,18 @@ final class IntentAppModel: ObservableObject {
                     }
                 })
                 failureMessage = nil
+                enforcementFailure = nil
             } catch let error as FocusLockError {
                 if case .browserWindowEnforcementFailed = error {
                     failureMessage = error.description
+                    enforcementFailure = error
                 } else {
                     failureMessage = "Could not start session: \(error)"
+                    enforcementFailure = nil
                 }
             } catch {
                 failureMessage = "Could not start session: \(error)"
+                enforcementFailure = nil
             }
 
             renewalTimer?.cancel()
@@ -1892,7 +1911,9 @@ final class IntentAppModel: ObservableObject {
                 self.completedChecklist = []
                 // Keep interrupted drafts in the journal for explicit recovery;
                 // opening their workspace here would replace the current screen.
-                if failureMessage == nil, !lock.didStopForSafety, let occurrence {
+                if let enforcementFailure, let occurrence {
+                    self.presentEnforcementFailure(occurrenceID: occurrence, error: enforcementFailure)
+                } else if failureMessage == nil, !lock.didStopForSafety, let occurrence {
                     self.completeSessionPresentation(occurrenceID: occurrence, mode: intention.accessMode)
                 } else { self.dismissSessionPresentation() }
                 self.saveSessionOnFinish = false
