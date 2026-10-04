@@ -453,3 +453,48 @@ and 24 actual panel/render checks. Tested app UUID:
 text and the details hint fit. This offscreen rendering is not installed focus
 acceptance. The underlying automatic window-restoration no-pop failure remains
 unchanged; this notice must not be described as fixing that separate issue.
+
+Firefox/Chrome extension suites, release-readiness consistency checks, Mozilla
+lint (zero errors/warnings/notices), and the full native-host suite also passed.
+The host stress fixture peaked at 10.0 MiB. Source was committed as `cd10a8c`.
+
+Using Head Chat's install-only lease, the development installer completed at
+`/tmp/intent-failure-notice-install-20261004.log`. Installed app UUID matches the
+tested value above; installed and tested host UUID is
+`9EC07046-FD34-3AB4-A9A3-4154256B2D1E`. Strict deep signing passed. Daily app PID
+was 93277, bundle `dev.loganmondi.intent`, with `LSUIElement=true`. Rules stayed
+inactive and the journal stayed empty through the installation. Chrome's fresh
+heartbeat retained 0.2.29 and native visibility. Firefox permanent 0.2.28 and the
+separate disposable QA-profile warning remained unchanged. Desktop ownership
+was returned immediately to Head Chat for the passive installed warning check.
+
+### Installed warning acceptance: passed in the duplicate-window case
+
+On installed `cd10a8c`, Head Chat repeated the duplicate-title restriction failure
+and recorded 45 seconds without CUA after Run. Evidence:
+
+- `/tmp/intent-chrome-029-visible-stop.jsonl`
+- `/tmp/intent-visible-stop-restoration-focus-diagnostics.json`
+
+Independent trace accounting found 353 samples, including 223 samples and 30.74
+seconds after the guard's start (`1791117267.8213151`). Foreground PID was always
+Chrome 36078 and the first normal Chrome window always CG 9047 during that tail.
+The actual notice CG 13749 appeared at trace +14.419 seconds, layer 26, alpha 1,
+frame 440 x 148 at (635, 47). It was absent at +26.799 seconds, consistent with
+the finite 12-second notice plus sampling granularity. Guard diagnostics completed
+at 5.031 seconds with no Space change or later corrective raise. Rules were
+inactive. This verifies an automatically displayed/dismissed installed notice
+without reopening Intent or displacing the working window in this case.
+
+This is not physical lock/wake, fullscreen, multi-display or arbitrary failure
+acceptance. It also does not supersede the separately recorded unique-title
+whole-window restoration failure: the ambiguous ordinary window was never
+minimized in this safety-stop case.
+
+At the checkpoint, Firefox's fresh native window CG 13770 successfully loaded
+the debugging page, while old CG 12687 remained offscreen. The temporary add-on
+picker did not open through the supported background UI attempts. Head Chat
+requested that Logan foreground Firefox and click Load Temporary Add-on, leaving
+the picker open. No temporary 0.2.29 was installed, and permanent 0.2.28 remains.
+The Firefox exact-profile bridge test and permanent signed update remain open,
+along with the explicit product choice about automatic window restoration.
