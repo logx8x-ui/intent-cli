@@ -24,7 +24,7 @@ public struct FocusSessionSpec {
     public let allowSpotifyForeground: Bool
     public let finishShortcut: FocusKeyboardShortcut
     public let allowsManualFinish: Bool
-    public let closeSessionResourcesOnFinish: Bool
+    public var closeSessionResourcesOnFinish: Bool
     public var restorePreviousApplicationOnStop: Bool
     public let allowedWebsitesByBrowser: [String: [String]]
 
@@ -176,6 +176,38 @@ public struct FocusSessionSpec {
             selectedWindowIDsByApp: selectedWindowIDsByApp,
             presetBlockedBundleIdentifiers: presetBlockedBundleIdentifiers,
             presetAllowedBundleIdentifiers: presetAllowedBundleIdentifiers
+        )
+    }
+
+    /// GUI completion is observational: release restrictions while leaving the
+    /// user's current app, windows and tabs intact. Legacy CLI cleanup options
+    /// remain available on an unmodified specification.
+    public func preservingForegroundOnStop() -> FocusSessionSpec {
+        var result = self
+        result.restorePreviousApplicationOnStop = false
+        result.closeSessionResourcesOnFinish = false
+        return result
+    }
+
+    public static func workPeriodIdle(
+        controllerBundleIdentifier: String,
+        alwaysAllowed: Set<String>,
+        currentWorkBundleIdentifier: String?,
+        presentWorkspace: Bool,
+        finishShortcut: FocusKeyboardShortcut
+    ) -> FocusSessionSpec {
+        let current = currentWorkBundleIdentifier.flatMap {
+            $0 == "com.apple.loginwindow" || $0 == controllerBundleIdentifier ? nil : $0
+        }
+        return FocusSessionSpec(
+            displayName: "Require an intention", startupSteps: [],
+            allowedBundleIdentifiers: alwaysAllowed.union([controllerBundleIdentifier]).union(current.map { [$0] } ?? []),
+            fallbackBundleIdentifier: presentWorkspace ? controllerBundleIdentifier : "",
+            strictSingleApp: false, blockAppSwitching: false, blockNewApps: true,
+            keepFocused: true, blockBrowserTabEscape: false, blockFirefoxChromeClicks: false,
+            allowGoogleSearchTabs: false, spotifyPlaylistURI: nil, allowSpotifyForeground: false,
+            finishShortcut: finishShortcut, allowsManualFinish: false,
+            closeSessionResourcesOnFinish: false, restorePreviousApplicationOnStop: false
         )
     }
 

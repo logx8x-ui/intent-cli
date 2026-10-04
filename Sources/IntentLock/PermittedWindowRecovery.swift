@@ -5,7 +5,8 @@ import IntentCore
 /// Keeps an AX reference to the actual last permitted window, not just its owning app.
 final class PermittedWindowRecovery: @unchecked Sendable {
     private let queue = DispatchQueue(label: "intent.permitted-window-recovery", qos: .userInteractive)
-    private let mutex = NSLock()
+    private let mutex = NSRecursiveLock()
+    private let actions: DeferredSessionActionGate
     private var window: AXUIElement?
     private var pid: pid_t = 0
     private var lastSample = Date.distantPast
@@ -16,6 +17,8 @@ final class PermittedWindowRecovery: @unchecked Sendable {
     private var restoreRequests = 0
     private var verifiedReturns = 0
     private var awaitingVerification = false
+
+    init() { actions = DeferredSessionActionGate(lock: mutex) }
 
     func noteSpaceChange() {
         queue.async { [weak self] in
@@ -64,6 +67,7 @@ final class PermittedWindowRecovery: @unchecked Sendable {
             self.window = nil; mutex.unlock(); return false
         }
         guard Date().timeIntervalSince(lastRestore) >= 0.12 else { mutex.unlock(); return true }
+        let token = actions.token
         lastRestore = Date(); mutex.unlock()
         queue.async { [weak self] in
             guard let self else { return }
@@ -73,20 +77,26 @@ final class PermittedWindowRecovery: @unchecked Sendable {
             AXUIElementSetMessagingTimeout(window, 0.02)
             // Selecting/raising the remembered window also handles a different full-screen
             // Space belonging to an app macOS still reports as already active.
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            let raised = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            // Each AX call can block while another queue requests completion.
+            // Revalidate between effects, not only before entering this worker.
+            guard self.actions.perform(ifCurrent: token, {
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            }) != nil else { return }
+            guard let raised = self.actions.perform(ifCurrent: token, {
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            }) else { return }
             self.awaitingVerification = raised == .success
             if raised == .invalidUIElement {
                 self.mutex.lock(); self.window = nil; self.mutex.unlock()
             }
-            app.activate(options: [.activateIgnoringOtherApps])
+            self.actions.perform(ifCurrent: token) { app.activate(options: [.activateIgnoringOtherApps]) }
             self.publishDiagnostics()
         }
         return true
     }
 
     func stop() {
-        mutex.lock(); stopped = true; window = nil; mutex.unlock()
+        mutex.lock(); stopped = true; window = nil; actions.invalidate(); mutex.unlock()
     }
 
     static func visibleApplication() -> NSRunningApplication? {

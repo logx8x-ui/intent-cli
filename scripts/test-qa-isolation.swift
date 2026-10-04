@@ -4,6 +4,17 @@ import Foundation
 struct IntentQASpec {
     static func main() throws {
         let fm = FileManager.default
+        if let requestedRoot = ProcessInfo.processInfo.environment["INTENT_QA_ROOT"] {
+            IntentEnvironment.validateLaunch()
+            precondition(IntentEnvironment.isQA, "An explicit QA invocation must never select daily mode")
+            let expected = URL(fileURLWithPath: requestedRoot).standardizedFileURL.resolvingSymlinksInPath()
+            let actual = IntentEnvironment.dataDirectory.standardizedFileURL.resolvingSymlinksInPath()
+            let daily = fm.homeDirectoryForCurrentUser.appendingPathComponent(".intent").standardizedFileURL.resolvingSymlinksInPath()
+            precondition(actual == expected && actual != daily, "Runtime data must resolve only to the requested QA workspace")
+            precondition(IntentEnvironment.dataDirectory(forHome: fm.homeDirectoryForCurrentUser).standardizedFileURL.resolvingSymlinksInPath() == expected,
+                "Default-home store lookup must stay inside the QA workspace")
+            print("Runtime QA isolation passed; no daily workspace selected")
+        }
         let directory = fm.temporaryDirectory.appendingPathComponent("intent-qa-" + UUID().uuidString)
         try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: directory) }

@@ -11,12 +11,16 @@ final class AllowedBrowserTabSwitcher {
         let icon: NSImage
     }
 
-    private let stateLock = NSLock()
+    private let stateLock = NSRecursiveLock()
+    private let actions: DeferredSessionActionGate
     private var browserBundleIdentifier: String?
     private var items: [Item] = []
     private var selectedIndex = 0
     private var visible = false
+    private var stopped = false
     private var panelController: BrowserTabSwitcherPanelController?
+
+    init() { actions = DeferredSessionActionGate(lock: stateLock) }
 
     var isVisible: Bool {
         stateLock.lock()
@@ -27,6 +31,7 @@ final class AllowedBrowserTabSwitcher {
     @discardableResult
     func advance(browserBundleIdentifier: String, reverse: Bool) -> Bool {
         stateLock.lock()
+        guard !stopped else { stateLock.unlock(); return false }
         if !visible || self.browserBundleIdentifier != browserBundleIdentifier {
             items = makeItems(browserBundleIdentifier: browserBundleIdentifier)
             guard items.count > 1 else {
@@ -49,26 +54,29 @@ final class AllowedBrowserTabSwitcher {
             )
         }
         let index = selectedIndex
+        let token = actions.invalidate()
         stateLock.unlock()
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let controller = self.panelController ?? BrowserTabSwitcherPanelController(
-                onHover: { [weak self] index in self?.select(index: index) },
-                onClick: { [weak self] index in
-                    self?.select(index: index)
-                    self?.commit()
-                }
-            )
-            self.panelController = controller
-            controller.show(items: panelItems, selectedIndex: index)
+            self.actions.perform(ifCurrent: token) {
+                let controller = self.panelController ?? BrowserTabSwitcherPanelController(
+                    onHover: { [weak self] index in self?.select(index: index) },
+                    onClick: { [weak self] index in
+                        self?.select(index: index)
+                        self?.commit()
+                    }
+                )
+                self.panelController = controller
+                controller.show(items: panelItems, selectedIndex: index)
+            }
         }
         return true
     }
 
     func commit() {
         stateLock.lock()
-        guard visible,
+        guard !stopped, visible,
               items.indices.contains(selectedIndex),
               let browserBundleIdentifier else {
             stateLock.unlock()
@@ -78,15 +86,19 @@ final class AllowedBrowserTabSwitcher {
         let browserSessionID = items[selectedIndex].browserSessionID
         visible = false
         items = []
+        let token = actions.invalidate()
         stateLock.unlock()
 
         let command = BrowserTabCommand(tabID: tab.id, windowID: tab.windowID, browserSessionID: browserSessionID)
-        try? BrowserTabCommandStore(browserBundleIdentifier: browserBundleIdentifier).write(command)
         DispatchQueue.main.async { [weak self] in
-            self?.panelController?.hide()
-            NSWorkspace.shared.runningApplications
-                .first(where: { $0.bundleIdentifier == browserBundleIdentifier })?
-                .activate(options: [.activateIgnoringOtherApps])
+            guard let self else { return }
+            self.actions.perform(ifCurrent: token) {
+                self.panelController?.hide()
+                try? BrowserTabCommandStore(browserBundleIdentifier: browserBundleIdentifier).write(command)
+                NSWorkspace.shared.runningApplications
+                    .first(where: { $0.bundleIdentifier == browserBundleIdentifier })?
+                    .activate(options: [.activateIgnoringOtherApps])
+            }
         }
     }
 
@@ -94,10 +106,18 @@ final class AllowedBrowserTabSwitcher {
         stateLock.lock()
         visible = false
         items = []
+        let token = actions.invalidate()
         stateLock.unlock()
         DispatchQueue.main.async { [weak self] in
-            self?.panelController?.hide()
+            guard let self else { return }
+            self.actions.perform(ifCurrent: token) { self.panelController?.hide() }
         }
+    }
+
+    func stop() {
+        stateLock.lock(); defer { stateLock.unlock() }
+        stopped = true
+        cancel()
     }
 
     private func select(index: Int) {
@@ -107,9 +127,11 @@ final class AllowedBrowserTabSwitcher {
             return
         }
         selectedIndex = index
+        let token = actions.token
         stateLock.unlock()
         DispatchQueue.main.async { [weak self] in
-            self?.panelController?.updateSelection(index)
+            guard let self else { return }
+            self.actions.perform(ifCurrent: token) { self.panelController?.updateSelection(index) }
         }
     }
 

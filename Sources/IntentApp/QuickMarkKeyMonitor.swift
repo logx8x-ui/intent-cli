@@ -10,10 +10,25 @@ final class QuickMarkKeyMonitor {
     let spotlight = SpotlightSelectionMonitor()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    private var timer: Timer?
+    private let expiryTimer = QuickMarkExpiryTimer()
     private var gesture = QuickMarkGesture()
+    private var normalizer = QuickMarkKeyboardNormalizer()
     private var generation = UUID()
-    func cancelPending() { gesture.reset(); generation = UUID() }
+    func cancelPending() {
+        gesture.reset()
+        expiryTimer.cancel()
+        generation = UUID()
+    }
+    private func refreshExpiryTimer() {
+        let generation = generation
+        expiryTimer.schedule(deadline: gesture.pendingSingleDeadline) { [weak self] in
+            guard let self, self.generation == generation else { return }
+            if self.editingText && !self.gesture.isHoldingPrefix { self.cancelPending(); return }
+            let action = self.gesture.expire(now: ProcessInfo.processInfo.systemUptime)
+            self.refreshExpiryTimer()
+            if let action { self.onAction?(action) }
+        }
+    }
     private var editingText: Bool {
         guard NSApp.isActive, let window = NSApp.keyWindow,
               window.isVisible, window.isKeyWindow, !window.isMiniaturized,
@@ -32,6 +47,7 @@ final class QuickMarkKeyMonitor {
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, pointer in
             guard let pointer else { return Unmanaged.passUnretained(event) }
             let owner = Unmanaged<QuickMarkKeyMonitor>.fromOpaque(pointer).takeUnretainedValue()
+            defer { owner.refreshExpiryTimer() }
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 owner.cancelPending()
                 // Callback is bounded; recover once on the next main-loop turn.
@@ -42,14 +58,12 @@ final class QuickMarkKeyMonitor {
             if event.getIntegerValueField(.eventSourceUserData) == NativeSpotlightKeyboard.dismissalTag {
                 return Unmanaged.passUnretained(event)
             }
-            // AlphaShift is a latched state. Read the physical Caps Lock key,
-            // otherwise leaving capitals enabled would turn every backtick into Run.
-            let capsHeld = CGEventSource.keyState(.hidSystemState, key: 57)
+            guard let input = owner.normalizer.normalize(type: type, event: event) else {
+                return Unmanaged.passUnretained(event)
+            }
             if type == .flagsChanged {
-                guard code == 57, capsHeld, !owner.editingText else { return Unmanaged.passUnretained(event) }
-                let result = owner.gesture.key(code: code, down: true,
-                    modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
-                    repeatKey: false, now: ProcessInfo.processInfo.systemUptime)
+                guard !owner.editingText else { owner.cancelPending(); return Unmanaged.passUnretained(event) }
+                let result = owner.gesture.key(input, now: ProcessInfo.processInfo.systemUptime)
                 if let action = result.action {
                     let generation = owner.generation
                     DispatchQueue.main.async { [weak owner] in
@@ -59,36 +73,32 @@ final class QuickMarkKeyMonitor {
                 }
                 return result.consume ? nil : Unmanaged.passUnretained(event)
             }
-            let opening = code == 49 && event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]) == .maskCommand
+            let opening = input.opensSpotlight
             if let context = owner.spotlightContext?() { owner.spotlight.setOverview(active: context.0, candidates: context.1) }
             if opening && type == .keyDown { owner.cancelPending(); owner.onSpotlightOpening?() }
             let intentOwnsInput = NSApp.isActive
             // Escape is urgent even if Spotlight owns focus. Search text and
             // Return must reach the Spotlight route before overview shortcuts.
-            if code == 53, owner.overviewKeyHandler?(code, type == .keyDown,
-                !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
-                event.getIntegerValueField(.keyboardEventAutorepeat) != 0) == true {
+            if code == 53, owner.overviewKeyHandler?(code, input.down,
+                input.modified, input.repeatKey) == true {
                 owner.cancelPending()
                 return intentOwnsInput ? nil : Unmanaged.passUnretained(event)
             }
-            if let consume = owner.spotlight.handle(code: code, down: type == .keyDown,
-                modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
+            if let consume = owner.spotlight.handle(code: code, down: input.down,
+                modified: input.modified,
                 openingShortcut: opening,
-                repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0) {
+                repeatKey: input.repeatKey) {
                 owner.cancelPending()
                 return consume ? nil : Unmanaged.passUnretained(event)
             }
-            if intentOwnsInput, owner.overviewKeyHandler?(code, type == .keyDown,
-                !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
-                event.getIntegerValueField(.keyboardEventAutorepeat) != 0) == true {
+            if intentOwnsInput, owner.overviewKeyHandler?(code, input.down,
+                input.modified, input.repeatKey) == true {
                 owner.cancelPending(); return nil
             }
             // Preserve Intent's text editors and marked IME composition. The
             // physical-key gesture is only active outside those text contexts.
             if owner.editingText && !owner.gesture.isHoldingPrefix { owner.cancelPending(); return Unmanaged.passUnretained(event) }
-            let result = owner.gesture.key(code: Int(event.getIntegerValueField(.keyboardEventKeycode)), down: type == .keyDown,
-                modified: !event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate]).isEmpty,
-                repeatKey: event.getIntegerValueField(.keyboardEventAutorepeat) != 0, now: ProcessInfo.processInfo.systemUptime, capsLockHeld: capsHeld)
+            let result = owner.gesture.key(input, now: ProcessInfo.processInfo.systemUptime)
             if let action = result.action {
                 let generation = owner.generation
                 DispatchQueue.main.async { [weak owner] in
@@ -102,17 +112,10 @@ final class QuickMarkKeyMonitor {
         source = CFMachPortCreateRunLoopSource(nil, tap, 0)
         if let source { CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes) }
         CGEvent.tapEnable(tap: tap, enable: true)
-        timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if self.editingText && !self.gesture.isHoldingPrefix { self.cancelPending(); return }
-            guard let action = self.gesture.expire(now: ProcessInfo.processInfo.systemUptime) else { return }
-            self.onAction?(action)
-        }
-        RunLoop.main.add(timer!, forMode: .common)
         return true
     }
     deinit {
-        timer?.invalidate()
+        expiryTimer.cancel()
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         if let tap { CFMachPortInvalidate(tap) }
     }

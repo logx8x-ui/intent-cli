@@ -32,6 +32,7 @@ do {
     try runQuickGestureRegressionSpecs()
     try runTabSelectionSpecs()
     try runSessionRuntimeSpecs()
+    try runSessionNotchLayoutSpecs()
     try runSessionAdditionsSpecs()
     try runBrowserCommandSpecs()
     try runOnboardingSpecs()

@@ -46,7 +46,7 @@ public struct WorkspaceWindow {
         // the actual foreground application, never an arbitrary background app.
         return candidates.first
     }
-    public static func raise(ids: Set<UInt32>, bundle: String) -> Bool {
+    public static func raise(ids: Set<UInt32>, bundle: String, actionGate: DeferredSessionActionGate? = nil) -> Bool {
         guard let target = list(onScreen: false).first(where: { ids.contains($0.id) && $0.bundle == bundle }),
               let app = NSRunningApplication(processIdentifier: target.pid) else { return false }
         let element = AXUIElementCreateApplication(target.pid)
@@ -65,6 +65,14 @@ public struct WorkspaceWindow {
                 var point = CGPoint.zero
                 guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
                       abs(point.x - target.frame.minX) < 3, abs(point.y - target.frame.minY) < 3 else { continue }
+                // Focus enforcement may end while the AX queries above wait.
+                // Session callers fence each side effect against that stop.
+                if let actionGate {
+                    guard actionGate.perform(ifCurrent: 0, { app.activate(options: []) }) != nil else { return false }
+                    return actionGate.perform(ifCurrent: 0) {
+                        AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
+                    } ?? false
+                }
                 app.activate(options: [])
                 return AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
             }

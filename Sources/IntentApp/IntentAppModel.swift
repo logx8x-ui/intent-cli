@@ -17,8 +17,8 @@ protocol IntentOverlayPresenting: AnyObject {
     func toggleSessionControls()
     func toggleSessionControlsExpansion()
     func hideSessionTimer()
-    func showSessionExpiry(occurrenceID: UUID, name: String)
     func hideSessionExpiry()
+    func showSessionCompletion(occurrenceID: UUID, mode: IntentionAccessMode)
 }
 
 @MainActor
@@ -215,6 +215,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     var hasActiveSession: Bool { activeSessionName != nil }
+    var activeSessionAccessMode: IntentionAccessMode { activeSessionIntention?.accessMode ?? .whitelist }
 
     var isZeroDriftActive: Bool {
         guard let zeroDriftEndsAt else { return false }
@@ -374,7 +375,7 @@ final class IntentAppModel: ObservableObject {
     }
     private func checkWorkPeriods() {
         if let end = zeroDriftEndsAt, end <= Date() { finishWorkPeriod(); return }
-        if let end = breakEndsAt, end <= Date() { breakEndsAt = nil; startZeroDriftIdleLockIfNeeded() }
+        if let end = breakEndsAt, end <= Date() { breakEndsAt = nil; startZeroDriftIdleLockIfNeeded(presentWorkspace: false) }
         guard !IntentEnvironment.isQA, !isZeroDriftActive, !hasActiveSession else { return }
         for schedule in journal.workSchedules {
             guard let interval = schedule.occurrence(at: Date()) else { continue }
@@ -1344,11 +1345,17 @@ final class IntentAppModel: ObservableObject {
         remainingFrictions = []
     }
 
-    /// All successful completion paths are silent, including timer and checklist completion.
+    /// Completion never opens a window or activates an application. The optional
+    /// feedback is a mouse-transparent, nonactivating edge animation only.
     func dismissSessionPresentation() {
         overlayPresenter?.hideOverlay(animated: false)
         overlayPresenter?.hideSessionTimer()
         overlayPresenter?.hideSessionExpiry()
+    }
+
+    func completeSessionPresentation(occurrenceID: UUID, mode: IntentionAccessMode) {
+        dismissSessionPresentation()
+        overlayPresenter?.showSessionCompletion(occurrenceID: occurrenceID, mode: mode)
     }
 
     func toggleSessionControls() { overlayPresenter?.toggleSessionControls() }
@@ -1414,7 +1421,6 @@ final class IntentAppModel: ObservableObject {
         try? browserRulesStore.clear()
         if showMessage {
             errorMessage = "Safety stop: all active restrictions have been released."
-            showOverlay()
         }
     }
 
@@ -1591,7 +1597,7 @@ final class IntentAppModel: ObservableObject {
         let spec = FocusSessionSpec.make(
             for: intention,
             finishShortcut: FinishShortcutStore.load().focusShortcut
-        )
+        ).preservingForegroundOnStop()
         let browserGuards = requiredBrowserGuards(for: intention)
         let websitesByBrowser = Dictionary(uniqueKeysWithValues: browserGuards.map { browser in
             let websites = intention.websites(for: browser.bundleIdentifier).map(\.value)
@@ -1661,12 +1667,17 @@ final class IntentAppModel: ObservableObject {
         // application that happened to be frontmost before the session.
         lockSpec.restorePreviousApplicationOnStop = false
         let lock = FocusLock(spec: lockSpec)
-        lock.onManualFinishRequest = { [weak self] in Task { @MainActor [weak self] in self?.endActiveSession() } }
         pendingOnboardingReplacement = nil
         activeLock = lock
         activeSessionID = intention.id
         activeSessionOccurrenceID = UUID()
         let occurrence = activeSessionOccurrenceID
+        lock.onManualFinishRequest = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.activeSessionOccurrenceID == occurrence else { return }
+                self.endActiveSession()
+            }
+        }
         let onboardingOrigin = quickSelectionIntentionID == intention.id ? quickSelectionOnboardingOrigin : nil
         overlayPresenter?.hideSessionExpiry()
         if isZeroDriftActive { workPhase = .running; breakEndsAt = nil }
@@ -1695,7 +1706,6 @@ final class IntentAppModel: ObservableObject {
                             // Safety failures must release even a user-locked timer.
                             self.activeLock?.stopForSafety()
                             self.errorMessage = "The selected-tab intention stopped because Browser Guard disconnected or was turned off."
-                            self.showOverlay()
                             return
                         }
                         guard let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
@@ -1775,7 +1785,7 @@ final class IntentAppModel: ObservableObject {
                 }
                 try lock.run(onReady: { [weak self] in
                     Task { @MainActor [weak self] in
-                        guard let self, self.activeSessionOccurrenceID == occurrence else { return }
+                        guard let self, !lock.isStopRequested, self.activeSessionOccurrenceID == occurrence else { return }
                         if let occurrence {
                             self.currentRecord = IntentSessionRecord(id: occurrence, intention: intention, workspace: self.pendingWorkspace)
                             self.journal.upsert(self.currentRecord!)
@@ -1802,8 +1812,10 @@ final class IntentAppModel: ObservableObject {
             renewalQueue?.sync {}
             try? ActiveBrowserRulesStore().clear()
             Task { @MainActor in
-                let interruptedWorkspace = (lock.didStopForSafety || failureMessage != nil)
-                    ? (self.currentRecord?.workspace ?? self.pendingWorkspace) : nil
+                // A delayed old teardown must not clear a replacement's state,
+                // hide its HUD, or replay completion after recovery/relaunch.
+                guard self.activeLock === lock, self.activeSessionOccurrenceID == occurrence else { return }
+                if lock.didStopForSafety || failureMessage != nil { self.captureRecoveryCheckpoint() }
                 if var record = self.currentRecord, record.id == occurrence {
                     record.endedAt = Date(); record.completedTasks = self.completedChecklist
                     record.remainingSeconds = self.activeSessionEndsAt.map { max(0, $0.timeIntervalSinceNow) }
@@ -1825,7 +1837,6 @@ final class IntentAppModel: ObservableObject {
                 self.stopwatchStarted = nil
                 self.activeSessionAbsoluteEndTime = nil
                 self.activeSessionOccurrenceID = nil
-                self.dismissSessionPresentation()
                 if lock.didStopForSafety {
                     self.emergencyStop()
                 } else if failureMessage == nil {
@@ -1866,13 +1877,16 @@ final class IntentAppModel: ObservableObject {
                 }
                 self.activeChecklist = []
                 self.completedChecklist = []
-                if let interruptedWorkspace { self.restoreInterruptedWorkspace?(intention, interruptedWorkspace) }
-                if failureMessage != nil || lock.didStopForSafety { self.overlayPresenter?.showOverlay(animated: true) }
+                // Keep interrupted drafts in the journal for explicit recovery;
+                // opening their workspace here would replace the current screen.
+                if failureMessage == nil, let occurrence {
+                    self.completeSessionPresentation(occurrenceID: occurrence, mode: intention.accessMode)
+                } else { self.dismissSessionPresentation() }
                 self.saveSessionOnFinish = false
                 if let replacement, !lock.didStopForSafety, failureMessage == nil {
                     self.requestStart(replacement)
                 } else {
-                    self.startZeroDriftIdleLockIfNeeded()
+                    self.startZeroDriftIdleLockIfNeeded(presentWorkspace: false)
                 }
             }
         }
@@ -1890,7 +1904,7 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    private func startZeroDriftIdleLockIfNeeded() {
+    private func startZeroDriftIdleLockIfNeeded(presentWorkspace shouldPresentWorkspace: Bool = true) {
         guard isZeroDriftActive, breakEndsAt == nil,
               !hasActiveSession,
               zeroDriftIdleLock == nil else {
@@ -1898,30 +1912,26 @@ final class IntentAppModel: ObservableObject {
         }
 
         workPhase = .choosing
-        guard presentWorkspace?() == true else {
+        // Automatic transitions preserve the visible work app; explicit entry
+        // still opens the chooser. The idle lock continues guarding other apps
+        // without launching anything or selecting another window at startup.
+        if shouldPresentWorkspace, presentWorkspace?() != true {
             emergencyStop(showMessage: false); workPhase = .recovery
             errorMessage = "Could not open your workspace. Restrictions have been released."
             return
         }
         let intentBundleIdentifier = Bundle.main.bundleIdentifier ?? "dev.loganmondi.intent"
-        let spec = FocusSessionSpec(
-            displayName: "Require an intention",
-            startupSteps: [],
-            allowedBundleIdentifiers: Set(alwaysAllowedApps.map(\.bundleIdentifier)).union([intentBundleIdentifier]),
-            fallbackBundleIdentifier: intentBundleIdentifier,
-            strictSingleApp: false,
-            blockAppSwitching: false,
-            blockNewApps: true,
-            keepFocused: true,
-            blockBrowserTabEscape: false,
-            blockFirefoxChromeClicks: false,
-            allowGoogleSearchTabs: false,
-            spotifyPlaylistURI: nil,
-            allowSpotifyForeground: false,
-            finishShortcut: FinishShortcutStore.load().focusShortcut,
-            allowsManualFinish: false,
-            closeSessionResourcesOnFinish: false,
-            restorePreviousApplicationOnStop: false
+        let foreground = NSWorkspace.shared.frontmostApplication
+        guard foreground?.bundleIdentifier != "com.apple.loginwindow" else { return }
+        let visibleWork = WorkspaceWindow.list().first { $0.bundle != intentBundleIdentifier && $0.bundle != "com.apple.loginwindow" }
+        let currentWork = foreground?.activationPolicy == .regular && foreground?.bundleIdentifier != intentBundleIdentifier
+            ? foreground?.bundleIdentifier : visibleWork?.bundle
+        let spec = FocusSessionSpec.workPeriodIdle(
+            controllerBundleIdentifier: intentBundleIdentifier,
+            alwaysAllowed: Set(alwaysAllowedApps.map(\.bundleIdentifier)),
+            currentWorkBundleIdentifier: shouldPresentWorkspace ? nil : currentWork,
+            presentWorkspace: shouldPresentWorkspace,
+            finishShortcut: FinishShortcutStore.load().focusShortcut
         )
         let lock = FocusLock(spec: spec)
         zeroDriftIdleLock = lock
@@ -1960,7 +1970,7 @@ final class IntentAppModel: ObservableObject {
                     return
                 }
 
-                self.startZeroDriftIdleLockIfNeeded()
+                self.startZeroDriftIdleLockIfNeeded(presentWorkspace: false)
             }
         }
     }

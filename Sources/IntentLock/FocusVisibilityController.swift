@@ -20,11 +20,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var entries: [Entry] = []
     private var stopped = false
+    private var started = false
     private var initialVisibilityApplied = false
     public init(spec: FocusSessionSpec) { self.spec = spec }
 
     public func start() {
         onMain {
+            guard !stopped else { return }
+            started = true
             RestorationFocusGuard.cancel()
             guard spec.hideDistractions && spec.requiresEnforcement, !stopped, timer == nil else { return }
             Self.recoveryGeneration &+= 1
@@ -40,6 +43,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             guard !stopped else { return }
             stopped = true
             timer?.cancel(); timer = nil
+            guard started else { return }
             entries = Self.beginRecovery()
         }
     }

@@ -6,6 +6,7 @@
   "scripts": {
     "test": "npm run test:swift && npm run test:extensions && npm run test:native-host && npm run test:ai && npm run test:release-readiness && npm run extension:lint",
     "test:swift": "bash scripts/test-swift.sh",
+    "test:session-ui": "bash scripts/test-session-ui.sh",
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs && python3 scripts/test-firefox-installation.py",
     "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
     "test:extensions": "npm run test:firefox && npm run test:chrome && node scripts/test-browser-idle-work.cjs && node scripts/test-browser-popup.cjs && node scripts/test-tab-visibility.cjs && node scripts/test-website-features.cjs",

@@ -9,6 +9,10 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         IntentEnvironment.validateLaunch()
+        if CommandLine.arguments.contains("--qa-notch-checks") {
+            guard IntentEnvironment.isQA else { exit(2) }
+            exit(SessionNotchChecks.run())
+        }
         if CommandLine.arguments.contains("--qa-persistence-checks") {
             guard IntentEnvironment.isQA else { exit(2) }
             exit(IntentPersistenceChecks.run())

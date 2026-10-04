@@ -11,17 +11,20 @@ final class AllowedAppSwitcher {
 
     private let allowedBundleIdentifiers: Set<String>
     private let accessMode: IntentionAccessMode
-    private let stateLock = NSLock()
+    private let stateLock = NSRecursiveLock()
+    private let actions: DeferredSessionActionGate
     private var activationOrder: [String] = []
     private var items: [Item] = []
     private var selectedIndex = 0
     private var visible = false
+    private var stopped = false
     private var panelController: AllowedAppSwitcherPanelController?
 
     init(
         allowedBundleIdentifiers: Set<String>,
         accessMode: IntentionAccessMode = .whitelist
     ) {
+        actions = DeferredSessionActionGate(lock: stateLock)
         self.allowedBundleIdentifiers = allowedBundleIdentifiers
         self.accessMode = accessMode
     }
@@ -43,7 +46,8 @@ final class AllowedAppSwitcher {
     }
 
     func advance(reverse: Bool) {
-        let snapshot: ([AllowedAppSwitcherPanelController.Item], Int)? = stateLock.withLock {
+        let snapshot: ([AllowedAppSwitcherPanelController.Item], Int, UInt64)? = stateLock.withLock {
+            guard !stopped else { return nil }
             if !visible {
                 items = makeItems()
                 guard items.count > 1 else { return nil }
@@ -57,62 +61,81 @@ final class AllowedAppSwitcher {
             let panelItems = items.map {
                 AllowedAppSwitcherPanelController.Item(name: $0.name, icon: $0.icon)
             }
-            return (panelItems, selectedIndex)
+            return (panelItems, selectedIndex, actions.invalidate())
         }
 
         guard let snapshot else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let controller = self.panelController ?? AllowedAppSwitcherPanelController(
-                onHover: { [weak self] index in
-                    self?.select(index: index)
-                },
-                onClick: { [weak self] index in
-                    self?.select(index: index)
-                    self?.commit()
-                }
-            )
-            self.panelController = controller
-            controller.show(items: snapshot.0, selectedIndex: snapshot.1)
+            self.actions.perform(ifCurrent: snapshot.2) {
+                let controller = self.panelController ?? AllowedAppSwitcherPanelController(
+                    onHover: { [weak self] index in
+                        self?.select(index: index)
+                    },
+                    onClick: { [weak self] index in
+                        self?.select(index: index)
+                        self?.commit()
+                    }
+                )
+                self.panelController = controller
+                controller.show(items: snapshot.0, selectedIndex: snapshot.1)
+            }
         }
     }
 
     private func select(index: Int) {
-        let selectedIndex: Int? = stateLock.withLock {
+        let selected: (Int, UInt64)? = stateLock.withLock {
             guard visible, items.indices.contains(index) else { return nil }
             self.selectedIndex = index
-            return index
+            return (index, actions.token)
         }
 
-        guard let selectedIndex else { return }
+        guard let selected else { return }
         DispatchQueue.main.async { [weak self] in
-            self?.panelController?.updateSelection(selectedIndex)
+            guard let self else { return }
+            self.actions.perform(ifCurrent: selected.1) { self.panelController?.updateSelection(selected.0) }
         }
     }
 
     func commit() {
-        let application: NSRunningApplication? = stateLock.withLock {
-            guard visible, items.indices.contains(selectedIndex) else { return nil }
+        let selection: (NSRunningApplication, UInt64)? = stateLock.withLock {
+            guard !stopped, visible, items.indices.contains(selectedIndex) else { return nil }
             visible = false
             let application = items[selectedIndex].application
             items = []
-            return application
+            return (application, actions.invalidate())
         }
 
+        guard let selection else { return }
         DispatchQueue.main.async { [weak self] in
-            self?.panelController?.hide()
-            application?.unhide()
-            application?.activate(options: [.activateIgnoringOtherApps])
+            guard let self else { return }
+            self.actions.perform(ifCurrent: selection.1) {
+                self.panelController?.hide()
+                selection.0.unhide()
+                // An activation notification may synchronously cancel this work.
+                self.actions.perform(ifCurrent: selection.1) {
+                    selection.0.activate(options: [.activateIgnoringOtherApps])
+                }
+            }
         }
     }
 
     func cancel() {
-        stateLock.withLock {
+        let token = stateLock.withLock {
             visible = false
             items = []
+            return actions.invalidate()
         }
         DispatchQueue.main.async { [weak self] in
-            self?.panelController?.hide()
+            guard let self else { return }
+            self.actions.perform(ifCurrent: token) { self.panelController?.hide() }
+        }
+    }
+
+    func stop() {
+        stateLock.withLock {
+            stopped = true
+            cancel()
         }
     }
 

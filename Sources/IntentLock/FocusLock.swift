@@ -118,6 +118,7 @@ public final class FocusLock {
         return safetyStop
     }
     private let stopStateLock = NSLock()
+    private let focusActions = DeferredSessionActionGate()
     private let allowedAppSwitcher: AllowedAppSwitcher
     private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
     private let nativeTabClickGuard = NativeBrowserTabClickGuard()
@@ -154,6 +155,7 @@ public final class FocusLock {
         stopStateLock.lock()
         shouldStop = true
         stopStateLock.unlock()
+        cancelPendingFocusActions()
     }
 
     private var suppressReturnActivation = false
@@ -163,6 +165,7 @@ public final class FocusLock {
         suppressReturnActivation = true
         shouldStop = true
         stopStateLock.unlock()
+        cancelPendingFocusActions()
     }
 
     public func updateFinishShortcut(_ shortcut: FocusKeyboardShortcut) {
@@ -182,14 +185,26 @@ public final class FocusLock {
         safetyStop = true
         shouldStop = true
         stopStateLock.unlock()
+        cancelPendingFocusActions()
         // Quit can terminate the process before run-loop cleanup executes.
         // Release owned visibility synchronously before returning to AppKit.
         visibilityController.stop()
     }
 
+    private func cancelPendingFocusActions() {
+        // Do this at the stop request, not up to one run-loop turn later in
+        // cleanup: queued Cmd-Tab/Ctrl-Tab and AX work can otherwise steal focus
+        // after the session has already ended.
+        focusActions.invalidate()
+        permittedWindowRecovery.stop()
+        allowedAppSwitcher.stop()
+        allowedBrowserTabSwitcher.stop()
+    }
+
     public var isStopRequested: Bool { isStopped }
 
     public func run(onReady: (@Sendable () -> Void)? = nil) throws {
+        guard !isStopped else { return }
         if Thread.isMainThread { RestorationFocusGuard.cancel() }
         else { DispatchQueue.main.sync { RestorationFocusGuard.cancel() } }
         returnApplication = NSWorkspace.shared.frontmostApplication
@@ -203,6 +218,7 @@ public final class FocusLock {
         guard !spec.requiresEnforcement || requestAccessibilityIfNeeded() else {
             throw FocusLockError.accessibilityPermissionRequired
         }
+        guard !isStopped else { return }
 
         baselinePids = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
         defer { cleanup() }
@@ -280,6 +296,7 @@ public final class FocusLock {
             let snapshotStore = BrowserTabSnapshotStore(browserBundleIdentifier: bundleIdentifier)
             let deadline = Date(timeIntervalSinceNow: 0.8)
             repeat {
+                guard !isStopped else { return }
                 if let snapshot = snapshotStore.load(maxAge: 2),
                    let browserSessionID = snapshot.browserSessionID, !browserSessionID.isEmpty,
                    let tab = snapshot.tabs.first(where: {
@@ -332,6 +349,7 @@ public final class FocusLock {
     }
 
     private func open(arguments: [String], label: String) throws {
+        guard !isStopped else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = arguments
@@ -345,6 +363,7 @@ public final class FocusLock {
     }
 
     private func playSpotifyPlaylist(_ uri: String) throws {
+        guard !isStopped else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = [
@@ -377,8 +396,10 @@ public final class FocusLock {
             return false
         }
 
-        _ = app.activate(options: [.activateIgnoringOtherApps])
-        return app.isActive
+        return focusActions.perform(ifCurrent: 0) {
+            _ = app.activate(options: [.activateIgnoringOtherApps])
+            return app.isActive
+        } ?? false
     }
 
     @discardableResult
@@ -387,7 +408,9 @@ public final class FocusLock {
             return false
         }
 
-        return app.activate(options: [.activateIgnoringOtherApps])
+        return focusActions.perform(ifCurrent: 0) {
+            app.activate(options: [.activateIgnoringOtherApps])
+        } ?? false
     }
 
     private func installEventTap() throws {
@@ -679,6 +702,7 @@ public final class FocusLock {
     }
 
     private func scheduleSpaceRecovery() {
+        guard !isStopped else { return }
         permittedWindowRecovery.noteSpaceChange()
         systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 0.15)
         pendingSpaceRecovery?.cancel()
@@ -703,13 +727,15 @@ public final class FocusLock {
     }
 
     private func handleLaunched(_ app: NSRunningApplication) {
-        guard spec.blockNewApps else { return }
+        guard !isStopped, spec.blockNewApps else { return }
         guard let bundleIdentifier = app.bundleIdentifier else { return }
         guard !spec.permitsApplication(bundleIdentifier) else { return }
         guard app.activationPolicy == .regular else { return }
         guard !baselinePids.contains(app.processIdentifier) else { return }
 
-        if !spec.hideDistractions, spec.accessMode != .blacklist, !spec.presetBlockedBundleIdentifiers.contains(bundleIdentifier) { app.terminate() }
+        if !spec.hideDistractions, spec.accessMode != .blacklist, !spec.presetBlockedBundleIdentifiers.contains(bundleIdentifier) {
+            focusActions.perform(ifCurrent: 0) { app.terminate() }
+        }
         refocus()
     }
 
@@ -847,13 +873,13 @@ public final class FocusLock {
             let candidates: Set<UInt32>
             if spec.accessMode == .whitelist { candidates = spec.selectedWindowIDsByApp[bundle] ?? [] }
             else { candidates = Set(WorkspaceWindow.list().filter { $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle) }.map(\.id)) }
-            if WorkspaceWindow.raise(ids: candidates, bundle: bundle) { return }
+            if WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions) { return }
             // A blacklist may exclude the only window in this application.
             // Recover to another permitted application without ending the lock.
             if let fallback = WorkspaceWindow.list(onScreen: false).first(where: {
                 $0.bundle != Bundle.main.bundleIdentifier && $0.id != window.id
                     && spec.permitsWindow($0.id, bundleIdentifier: $0.bundle)
-            }), WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle) { return }
+            }), WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle, actionGate: focusActions) { return }
             // No usable destination: release instead of trapping the computer.
             stopForSafety()
             return
@@ -909,13 +935,14 @@ public final class FocusLock {
     }
 
     private func activateBestPermittedApplication() {
+        guard !isStopped else { return }
         if permittedWindowRecovery.restore() { return }
         if let lastPermittedApplication,
            let bundleIdentifier = lastPermittedApplication.bundleIdentifier,
            spec.permitsApplication(bundleIdentifier),
            !lastPermittedApplication.isTerminated,
            !lastPermittedApplication.isHidden {
-            _ = lastPermittedApplication.activate(options: [.activateIgnoringOtherApps])
+            _ = activateApp(processIdentifier: lastPermittedApplication.processIdentifier)
             return
         }
 
@@ -923,7 +950,7 @@ public final class FocusLock {
            let bundleIdentifier = returnApplication.bundleIdentifier,
            spec.permitsApplication(bundleIdentifier),
            !returnApplication.isTerminated {
-            _ = returnApplication.activate(options: [.activateIgnoringOtherApps])
+            _ = activateApp(processIdentifier: returnApplication.processIdentifier)
             return
         }
 
@@ -934,7 +961,7 @@ public final class FocusLock {
                 && !$0.isTerminated
                 && spec.permitsApplication(bundleIdentifier)
         }) else { return }
-        _ = application.activate(options: [.activateIgnoringOtherApps])
+        _ = activateApp(processIdentifier: application.processIdentifier)
     }
 
     private func shouldAllowMouseDown(at point: CGPoint) -> Bool {
@@ -1142,6 +1169,7 @@ public final class FocusLock {
     }
 
     private func cleanup() {
+        cancelPendingFocusActions()
         blurController.stop()
         nativeTabClickGuard.stop()
         permittedWindowRecovery.stop()

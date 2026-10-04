@@ -106,20 +106,6 @@ struct IntentionEditorMenu: View {
 
                 browserWebsiteEditors
 
-                if intention.accessMode == .whitelist {
-                    Divider()
-                    fieldLabel("When finished")
-                    Toggle(
-                        "Close session resources",
-                        isOn: $intention.closeSessionResourcesOnFinish
-                    )
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 12, weight: .medium))
-                    Text("Closes this intention's allowed apps and website tabs when it ends.")
-                        .font(.caption)
-                        .foregroundStyle(GraphTheme.muted(colorScheme))
-                }
-
                 Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete intention", systemImage: "trash")

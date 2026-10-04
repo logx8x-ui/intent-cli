@@ -5,16 +5,16 @@ import IntentCore
 import IntentLock
 
 @MainActor
-final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindowDelegate {
+final class OverlayWindowController: NSObject, IntentOverlayPresenting {
     private let model: IntentAppModel
     private let calendarSync: CalendarSyncManager
     private let accountManager: IntentAccountManager
     private var panel: NSPanel?
     private var sessionTimerPanel: NSPanel?
     private var sessionOverlayState = SessionOverlayPolicy()
-    private var expiryPanel: NSPanel?
-    private var expiryDismissal: DispatchWorkItem?
-    private var lastExpiryOccurrence: UUID?
+    private var sessionScreenID: CGDirectDisplayID?
+    private var screenObserver: NSObjectProtocol?
+    private let completionLight = SessionCompletionLight()
     private var sessionSecurityObservers: [NSObjectProtocol] = []
     private var lockObserver: NSObjectProtocol?
     private var targetFrame: NSRect = .zero
@@ -35,6 +35,10 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         self.calendarSync = calendarSync
         self.accountManager = accountManager
         super.init()
+        screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.layoutSessionControls() }
+            }
         permissionHandoffObserver = model.onboarding.$permissionHandoffActive.sink { [weak self] active in
             // This also wins over a currently running open animation. Its
             // completion below must not bring an ordered-out canvas back.
@@ -160,25 +164,11 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
         guard sessionOverlayState.eligible else { hideSessionTimer(); return }
         let timerPanel = sessionTimerPanel ?? makeSessionTimerPanel()
         sessionTimerPanel = timerPanel
-        if newOccurrence || timerPanel.contentViewController == nil { installSessionTimerContent() }
-
-        let screen = workingScreen()
-        guard let screen else { return }
-        let size = sessionTimerSize
-        var frame = NSRect(
-            x: screen.visibleFrame.midX - size.width / 2,
-            y: screen.visibleFrame.maxY - size.height - 12,
-            width: size.width,
-            height: size.height
-        )
-        if let saved = UserDefaults.standard.string(forKey: "intentSessionControlsFrame") {
-            let previous = NSRectFromString(saved)
-            if let savedScreen = NSScreen.screens.first(where: { $0.visibleFrame.contains(CGPoint(x: previous.midX, y: previous.midY)) }) {
-                frame.origin.x = min(max(previous.minX, savedScreen.visibleFrame.minX), savedScreen.visibleFrame.maxX - size.width)
-                frame.origin.y = min(max(previous.maxY - size.height, savedScreen.visibleFrame.minY), savedScreen.visibleFrame.maxY - size.height)
-            }
+        if newOccurrence {
+            completionLight.hide()
+            sessionScreenID = workingScreen()?.intentDisplayID
         }
-        if newOccurrence { timerPanel.setFrame(frame, display: true) }
+        layoutSessionControls()
         if sessionOverlayState.visible { timerPanel.orderFrontRegardless() }
         else { timerPanel.orderOut(nil) }
     }
@@ -186,47 +176,26 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     func hideSessionTimer() {
         sessionTimerPanel?.orderOut(nil)
         sessionOverlayState.end()
+        sessionScreenID = nil
     }
 
-    var isSessionControlsExpanded: Bool { sessionOverlayState.expanded && sessionTimerPanel?.isVisible == true }
+    var isSessionControlsExpanded: Bool { !model.activeChecklist.isEmpty && sessionOverlayState.expanded && sessionTimerPanel?.isVisible == true }
 
     @discardableResult
     func collapseSessionControlsIfExpanded() -> Bool {
-        guard sessionOverlayState.collapse() else { return false }
+        guard !model.activeChecklist.isEmpty, sessionOverlayState.collapse() else { return false }
         resizeSessionControls()
         return true
     }
 
-    func showSessionExpiry(occurrenceID: UUID, name: String) {
-        guard lastExpiryOccurrence != occurrenceID else { return }
-        lastExpiryOccurrence = occurrenceID
-        hideSessionExpiry()
-        // A locked or inactive login session must not receive a stale notice on
-        // unlock; expiry still ends restrictions in the runtime immediately.
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
-              session["CGSSessionScreenIsLocked"] as? Bool != true,
-              session["kCGSSessionOnConsoleKey"] as? Bool != false,
-              NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow",
-              let screen = workingScreen() else { return }
-        let size = NSSize(width: min(360, screen.visibleFrame.width - 32), height: 112)
-        let notice = SessionExpiryPanel(contentRect: NSRect(x: screen.visibleFrame.midX - size.width / 2,
-            y: screen.visibleFrame.midY - size.height / 2 + 60, width: size.width, height: size.height),
-            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        notice.level = .statusBar
-        notice.isOpaque = false; notice.backgroundColor = .clear; notice.hasShadow = true
-        notice.hidesOnDeactivate = false; notice.isReleasedWhenClosed = false
-        notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        notice.contentView = NSHostingView(rootView: SessionExpiryView(name: name) { [weak self] in self?.hideSessionExpiry() })
-        expiryPanel = notice
-        notice.orderFrontRegardless()
-        let dismissal = DispatchWorkItem { [weak self] in self?.hideSessionExpiry() }
-        expiryDismissal = dismissal
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: dismissal)
-    }
 
     func hideSessionExpiry() {
-        expiryDismissal?.cancel(); expiryDismissal = nil
-        expiryPanel?.orderOut(nil); expiryPanel = nil
+        completionLight.hide()
+    }
+
+    func showSessionCompletion(occurrenceID: UUID, mode: IntentionAccessMode) {
+        guard let screen = workingScreen() else { return }
+        completionLight.show(occurrenceID: occurrenceID, mode: mode, screen: screen)
     }
 
     private func workingScreen() -> NSScreen? {
@@ -245,11 +214,6 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
             }), match.frame.intersects(native) { return match }
         }
         return NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main ?? NSScreen.screens.first
-    }
-
-    func windowDidMove(_ notification: Notification) {
-        guard let moved = notification.object as? NSPanel, moved === sessionTimerPanel else { return }
-        UserDefaults.standard.set(NSStringFromRect(moved.frame), forKey: "intentSessionControlsFrame")
     }
 
     private func makePanel() -> NSPanel {
@@ -308,25 +272,7 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     }
 
     private func makeSessionTimerPanel() -> NSPanel {
-        let panel = IntentInteractivePanel(
-            contentRect: .zero,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.ignoresMouseEvents = false
-        panel.isReleasedWhenClosed = false
-        // Manual header dragging avoids macOS edge-tiling/snap gestures.
-        panel.isMovableByWindowBackground = false
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.animationBehavior = .none
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.delegate = self
-        return panel
+        SessionNotchPanel.make()
     }
 
     func toggleSessionControls() {
@@ -342,168 +288,30 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting, NSWindow
     }
 
     func toggleSessionControlsExpansion() {
-        guard sessionOverlayState.eligible else { return }
+        guard sessionOverlayState.eligible, !model.activeChecklist.isEmpty else { return }
         sessionOverlayState.toggle()
         resizeSessionControls()
     }
 
     private func resizeSessionControls() {
-        guard let panel = sessionTimerPanel else { return }
-        let size = sessionTimerSize
-        let old = panel.frame
-        var frame = NSRect(x: old.minX, y: old.maxY - size.height, width: size.width, height: size.height)
-        if let screen = panel.screen {
-            // Keep the header reachable when expanding beside a screen edge.
-            frame.origin.x = min(max(frame.minX, screen.visibleFrame.minX), screen.visibleFrame.maxX - frame.width)
-            frame.origin.y = min(max(frame.minY, screen.visibleFrame.minY), screen.visibleFrame.maxY - frame.height)
-        }
-        panel.setFrame(frame, display: true)
-        installSessionTimerContent()
+        layoutSessionControls()
+    }
+
+    private func layoutSessionControls() {
+        guard sessionOverlayState.eligible, let panel = sessionTimerPanel,
+              let screen = NSScreen.screens.first(where: { $0.intentDisplayID == sessionScreenID }) ?? workingScreen() else { return }
+        sessionScreenID = screen.intentDisplayID
+        let layout = screen.intentNotchLayout(checklistCount: model.activeChecklist.count, expanded: sessionOverlayState.expanded)
+        panel.setFrame(layout.frame, display: true)
+        // Timer-only HUDs cannot intercept a menu-bar click or become a text editor.
+        panel.ignoresMouseEvents = model.activeChecklist.isEmpty
+        panel.contentViewController = NSHostingController(rootView: SessionNotchView(model: model, layout: layout))
         if sessionOverlayState.visible { panel.orderFrontRegardless() }
     }
-    private var sessionTimerSize: NSSize {
-        if !sessionOverlayState.expanded { return NSSize(width: 300, height: 48) }
-        let timerHeight: CGFloat = model.activeSessionEndsAt == nil ? 0 : (model.activeSessionAbsoluteEndTime == nil ? 54 : 74)
-        let checklistHeight: CGFloat = model.activeChecklist.isEmpty ? 0 : 28 + min(230, CGFloat(model.activeChecklist.count) * 36)
-        return NSSize(width: 336, height: 86 + timerHeight + checklistHeight + (model.stopwatchStarted == nil ? 0 : 54))
-    }
 
-    private func installSessionTimerContent() {
-        sessionTimerPanel?.contentViewController = NSHostingController(rootView: SessionControlsView(model: model, expanded: sessionOverlayState.expanded).frame(width: sessionTimerSize.width, height: sessionTimerSize.height))
-    }
-
-}
-
-private struct SessionTimerDragRegion: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        DragView()
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class DragView: NSView {
-        private var dragOrigin: NSPoint?
-        private var windowOrigin: NSPoint?
-        override func mouseDown(with event: NSEvent) {
-            dragOrigin = NSEvent.mouseLocation
-            windowOrigin = window?.frame.origin
-        }
-        override func mouseDragged(with event: NSEvent) {
-            guard let start = dragOrigin, let origin = windowOrigin else { return }
-            let current = NSEvent.mouseLocation
-            window?.setFrameOrigin(NSPoint(x: origin.x + current.x - start.x, y: origin.y + current.y - start.y))
-        }
-        override func mouseUp(with event: NSEvent) {
-            dragOrigin = nil; windowOrigin = nil
-        }
-    }
 }
 
 private final class IntentOverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
-}
-
-private struct SessionControlsView: View {
-    @ObservedObject var model: IntentAppModel
-    let expanded: Bool
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Circle().fill(Color.green).frame(width: 6, height: 6)
-                ZStack(alignment: .leading) {
-                    Text(model.activeSessionName ?? "Intent").font(.system(size: 14, weight: .semibold)).lineLimit(1).allowsHitTesting(false)
-                    SessionTimerDragRegion()
-                }.frame(height: 22)
-                if !expanded {
-                    if model.stopwatchStarted != nil {
-                        TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            Text(model.stopwatchText).monospacedDigit().font(.system(size: 12)).accessibilityLabel("Elapsed time")
-                        }
-                    }
-                    if let end = model.activeSessionEndsAt {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            Text(SessionTimerFormatter.countdownText(until: end, now: context.date)).monospacedDigit().font(.system(size: 12))
-                        }
-                    }
-                    if !model.activeChecklist.isEmpty {
-                        Text("\(model.completedChecklist.count)/\(model.activeChecklist.count)").font(.system(size: 12)).monospacedDigit()
-                    }
-                }
-                Button { model.toggleSessionControlsExpansion() } label: {
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 12, weight: .semibold)).frame(width: 24, height: 24)
-                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Expand or collapse controls").accessibilityLabel(expanded ? "Collapse running controls" : "Expand running controls")
-            }
-            if expanded, model.activeSessionEndsAt != nil {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    VStack(alignment: .leading, spacing: 3) {
-                        if let end = model.activeSessionEndsAt {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(SessionTimerFormatter.countdownText(until: end, now: context.date))
-                                    .font(.system(size: 29, weight: .medium, design: .rounded)).monospacedDigit()
-                                Text("remaining").font(.system(size: 11)).foregroundStyle(.secondary)
-                            }
-                        }
-                        if let end = model.activeSessionAbsoluteEndTime {
-                            Text("Ends at \(end.formatted(date: .omitted, time: .shortened))").font(.system(size: 12)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            if expanded, model.stopwatchStarted != nil {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(model.stopwatchText).font(.system(size: 29, weight: .medium, design: .rounded)).monospacedDigit()
-                        Text("elapsed").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }.accessibilityElement(children: .combine)
-                }
-            }
-            if expanded, !model.activeChecklist.isEmpty {
-                HStack {
-                    Text("TASKS").font(.system(size: 10, weight: .semibold)).tracking(1)
-                    Spacer()
-                    Text("\(model.completedChecklist.count) / \(model.activeChecklist.count)").font(.system(size: 11)).monospacedDigit()
-                }.foregroundStyle(.secondary)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(model.activeChecklist.enumerated()), id: \.offset) { index, task in
-                            Toggle(task, isOn: Binding(get: { model.completedChecklist.contains(index) }, set: { model.setTaskCompleted(index, completed: $0) }))
-                                .toggleStyle(.checkbox).font(.system(size: 13)).strikethrough(model.completedChecklist.contains(index))
-                                .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
-            if expanded { Text(verbatim: "` hide / show controls").font(.system(size: 10)).foregroundStyle(.secondary) }
-        }.padding(expanded ? 16 : 12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background { if reduceTransparency { RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.13)) } else { RoundedRectangle(cornerRadius: 18).fill(.regularMaterial) } }
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18)))
-            .tint(.green).preferredColorScheme(.dark)
-    }
-}
-
-private final class SessionExpiryPanel: IntentInteractivePanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
-}
-
-private struct SessionExpiryView: View {
-    let name: String
-    let close: () -> Void
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            Image(systemName: "checkmark.circle.fill").font(.system(size: 31)).foregroundStyle(.green)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Time’s up").font(.system(size: 19, weight: .semibold))
-                Text(name).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: close) { Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).frame(width: 26, height: 26) }
-                .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Dismiss timer notification")
-        }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background { if reduceTransparency { RoundedRectangle(cornerRadius: 20).fill(Color(white: 0.13)) } else { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) } }
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.20)))
-            .preferredColorScheme(.dark)
-    }
 }

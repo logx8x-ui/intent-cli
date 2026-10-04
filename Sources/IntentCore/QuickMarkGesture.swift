@@ -10,6 +10,9 @@ public struct QuickMarkGesture {
     private var usedChord = false
     private var runIssued = false
     private var pendingSingle: TimeInterval?
+    /// The native monitor schedules one wakeup for this deadline, not an idle
+    /// polling loop. A held prefix can never expire into a single action.
+    public var pendingSingleDeadline: TimeInterval? { held ? nil : pendingSingle }
     private var swallowed: Set<Int> = []
     public init() {}
     public mutating func reset() { self = Self() }

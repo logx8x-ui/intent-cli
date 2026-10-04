@@ -21,6 +21,15 @@ enum IntentPersistenceChecks {
             model.dismissSessionPresentation()
             try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry"],
                 "Session completion dismisses every presentation without activation or a completion screen")
+            presentation.events = []
+            let completionID = UUID()
+            model.completeSessionPresentation(occurrenceID: completionID, mode: .blacklist)
+            try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry", "complete-blacklist"],
+                "Completion dismisses all controls before requesting nonactivating mode-aware feedback")
+            try check(presentation.completionID == completionID, "Completion feedback carries its occurrence identity")
+            presentation.events = []
+            model.emergencyStop()
+            try check(!presentation.events.contains("show"), "Safety stop stores its reason without opening a new screen")
             model.overlayPresenter = nil
             let app = AllowedApp(name: "Calculator", bundleIdentifier: "com.apple.calculator")
             var selection = QuickSelection(); selection.apps = [app.bundleIdentifier]
@@ -165,6 +174,7 @@ enum IntentPersistenceChecks {
 @MainActor
 private final class SessionDismissalProbe: IntentOverlayPresenting {
     var events: [String] = []
+    var completionID: UUID?
     var isOverlayVisible: Bool { true }
     var isSessionControlsExpanded: Bool { true }
     func showOverlay(animated: Bool) { events.append("show") }
@@ -175,6 +185,8 @@ private final class SessionDismissalProbe: IntentOverlayPresenting {
     func toggleSessionControls() { events.append("toggle-controls") }
     func toggleSessionControlsExpansion() {}
     func hideSessionTimer() { events.append("hide-controls") }
-    func showSessionExpiry(occurrenceID: UUID, name: String) { events.append("show-expiry") }
     func hideSessionExpiry() { events.append("hide-expiry") }
+    func showSessionCompletion(occurrenceID: UUID, mode: IntentionAccessMode) {
+        completionID = occurrenceID; events.append("complete-\(mode.rawValue)")
+    }
 }

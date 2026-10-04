@@ -458,7 +458,12 @@ final class QuickSelectionController: ObservableObject {
             // A popover may dismiss after overview has closed. Never recreate
             // its strip here: only a new quick mark or shortcut can show it.
             if selection.apps.isEmpty { hideStagedModifiers() }
-            stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps])
+            // SwiftUI can dismiss a popover after its strip was ordered out
+            // for Run/finish. Only the still-visible editor may return focus;
+            // a late dismissal must not resurrect its previous application.
+            if !model.hasActiveSession, stagedModifiersPanel?.isVisible == true, NSApp.isActive {
+                stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps])
+            }
             stagedPreviousApp = nil
         }
     }

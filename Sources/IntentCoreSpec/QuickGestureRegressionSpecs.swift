@@ -2,6 +2,7 @@ import Foundation
 import IntentCore
 
 func runQuickGestureRegressionSpecs() throws {
+    try runQuickMarkKeyboardInputSpecs()
     for capsFirst in [true, false] {
         var run = QuickMarkGesture()
         let first = run.key(code: 50, down: true, modified: false, repeatKey: false, now: 0, capsLockHeld: capsFirst)
