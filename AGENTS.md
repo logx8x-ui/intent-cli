@@ -21,9 +21,33 @@ After installation, confirm `/Applications/Intent.app` exists and open it. The i
 
 # Session UI reliability
 
-For shortcut, timer/checklist HUD or session-completion changes, follow
-`docs/session-ui-regression-contract.md` and run `npm run test:session-ui` after
-edits settle. Keep shared input and completion ownership in one place; add a
-behavioural regression for the reported sequence. A passing isolated gate is not
-physical-key, foreground-focus, installed-build or browser-profile acceptance.
-Record those checks separately and preserve user data throughout QA.
+For every Intent change, follow `docs/session-ui-regression-contract.md`. Before
+editing, record the reported sequence and adjacent working behaviours; run
+`npm run qa:plan` to see the change-impact map. Add a behavioural regression for
+the real broken surface, not a nearby substitute (a selected overview thumbnail
+does **not** prove a green outline on the actual Firefox tab/window in DBT).
+
+After edits settle, run `npm run test:changed`. For an already committed change,
+pass `-- --base <pre-change-commit>`; a clean `HEAD` diff cannot certify that
+commit. The gate runs existing suites serially and rejects source drift. Do not
+weaken/remove neighbouring regressions to make a fix pass. Keep shared input and
+completion ownership in one place. Never run bare lifecycle spec executables:
+use `test:session-ui`, `test:swift`, or `scripts/run-isolated-spec.sh` so QA cannot
+read the daily recovery ledger. Coordinate shared build and desktop ownership.
+
+Protect Logan's physically confirmed Caps Lock + backtick Run and backtick-number
+toggles (baseline `f969241`, October 5, 2026) when touching selection or input.
+DBT Run preserves the tab/native window where Run is invoked. Every finish mode
+preserves the exact window (and browser tab) where the user finishes, not the
+session's starting window or another window of the same app. Restoring minimized
+windows must not violate that priority; deferred windows stay in the Dock until
+the user reopens them. Do not add delayed raises or forced Space correction.
+
+A passing isolated gate is not physical-key, actual-outline, foreground-focus,
+installed-build or browser-profile acceptance. Install matching authorized
+development components, check the exact profile/extension and installed UUID,
+and exercise both the changed flow and adjacent protected flows. Report each
+unverified item plainly; never turn a prior build's user confirmation into a
+current-build pass. Record reproduction, cause, regression, source identity and
+acceptance in a focused `docs/qa/` note. Preserve user data throughout QA. These
+are standing requirements for future work, not a guarantee that bugs are impossible.

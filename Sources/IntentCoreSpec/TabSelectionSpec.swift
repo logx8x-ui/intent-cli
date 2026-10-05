@@ -3,6 +3,7 @@ import IntentCore
 import IntentLock
 
 func runTabSelectionSpecs() throws {
+    try runWorkspaceTabOutlineSpecs()
     try expect(WorkspaceOutlinePresentation.windowID(frontmostPID: 1, ownPID: 1, focusedWindowID: nil,
         topExternalWindowID: 42, preserveBehindIntentPanels: true) == 42,
         "A staged modifier editor retains the outline on the still-visible underlying window")

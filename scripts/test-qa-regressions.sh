@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 qa_logs="$(mktemp -d "${TMPDIR:-/tmp}/intent-qa-checks-XXXXXXXX")"
 printf 'QA logs: %s\n' "$qa_logs"
-for product in IntentCoreSpec IntentAccountSpec; do
+npm run test:session-ui > "$qa_logs/session-ui.log" 2>&1
+for product in IntentAccountSpec; do
   swift build --product "$product" > "$qa_logs/build-$product.log" 2>&1
 done
 for product in IntentApp IntentNativeHost Intent; do
@@ -15,8 +16,7 @@ done
 qa_debug="$(swift build --show-bin-path)"
 for pass in 1 2 3; do
   {
-    "$qa_debug/IntentCoreSpec"
-    "$qa_debug/IntentAccountSpec"
+    bash scripts/run-isolated-spec.sh "$qa_debug/IntentAccountSpec"
     npm run test:extensions
     node scripts/test-native-host.cjs
     node scripts/test-native-host-snapshot-refresh.cjs

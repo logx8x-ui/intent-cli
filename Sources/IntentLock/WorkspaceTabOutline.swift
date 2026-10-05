@@ -6,13 +6,19 @@ import IntentCore
 enum WorkspaceTabOutline {
     static func scan(window: WorkspaceWindow, tabs: [BrowserTabItem], selected: Set<Int>) -> (regions: [CGRect], complete: Bool) {
         let deadline = Date(timeIntervalSinceNow: 0.12)
+        var readsComplete = true
         func value(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
-            guard Date() < deadline else { return nil }
+            guard Date() < deadline else { readsComplete = false; return nil }
             AXUIElementSetMessagingTimeout(element, 0.008)
             var result: CFTypeRef?
-            return AXUIElementCopyAttributeValue(element, key as CFString, &result) == .success ? result : nil
+            let status = AXUIElementCopyAttributeValue(element, key as CFString, &result)
+            if status != .success && status != .attributeUnsupported && status != .noValue { readsComplete = false }
+            return status == .success ? result : nil
         }
-        func text(_ element: AXUIElement, _ key: String) -> String? { value(element, key) as? String }
+        func text(_ element: AXUIElement, _ key: String) -> String? {
+            guard let result = value(element, key) else { return nil }
+            return result as? String ?? (key == kAXURLAttribute ? String(describing: result) : nil)
+        }
         func children(_ element: AXUIElement) -> [AXUIElement] {
             let result = value(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
             return result.isEmpty ? (value(element, kAXVisibleChildrenAttribute) as? [AXUIElement] ?? []) : result
@@ -39,56 +45,9 @@ enum WorkspaceTabOutline {
             BrowserWindowMatching.sameWindowTitle(text($0, kAXTitleAttribute) ?? "", window.title)
         }
         guard matchingWindows.count == 1, let root = matchingWindows.first else { return ([], false) }
-        var pending: [(AXUIElement, CGRect?)] = [(root, nil)]
-        var cursor = 0; var regions: [CGRect] = []
-        var visited: [CFHashCode: [AXUIElement]] = [:]
-        while cursor < pending.count, cursor < 1800, Date() < deadline {
-            let (element, inheritedSidebar) = pending[cursor]; cursor += 1
-            let hash = CFHash(element)
-            if visited[hash, default: []].contains(where: { CFEqual($0, element) }) { continue }
-            visited[hash, default: []].append(element)
-            let role = text(element, kAXRoleAttribute) ?? ""
-            if role == kAXImageRole { continue }
-            var sidebar = inheritedSidebar
-            if role == "AXWebArea" {
-                let url = value(element, kAXURLAttribute).map { String(describing: $0) } ?? ""
-                if window.bundle == "org.mozilla.firefox", url == "chrome://browser/content/webext-panels.xhtml" { sidebar = frame(element) }
-                else if sidebar == nil { continue }
-            }
-            let descendants = children(element)
-            let labels = sidebar != nil && descendants.isEmpty
-                ? [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].compactMap { text(element, $0) } : []
-            let matches = tabs.filter { tab in !tab.title.isEmpty && labels.contains { $0 == tab.title || $0.hasPrefix(tab.title + " - Memory usage - ") } }
-            if let sidebar, descendants.isEmpty, !matches.isEmpty, matches.allSatisfy({ selected.contains($0.id) }), let bounds = frame(element) {
-                let row = CGRect(x: sidebar.minX + 2, y: bounds.minY - 5, width: sidebar.width - 4, height: bounds.height + 10).intersection(sidebar)
-                if FocusBlurPolicy.valid(row) { regions.append(row) }
-            }
-            if sidebar == nil, role == kAXTabGroupRole {
-                var nodes = descendants.reversed().map { ($0, 0) }; var native: [AXUIElement] = []
-                while let (node, depth) = nodes.popLast(), Date() < deadline, native.count < 500 {
-                    let kind = text(node, kAXRoleAttribute) ?? ""
-                    if kind == kAXRadioButtonRole || kind == "AXTab" { native.append(node); continue }
-                    if depth < 4, kind != "AXWebArea", kind != kAXImageRole { nodes.append(contentsOf: children(node).reversed().map { ($0, depth + 1) }) }
-                }
-                let ordered = tabs.sorted { $0.index < $1.index }
-                let exactOrder = ordered.count == native.count && ordered.enumerated().allSatisfy { $0.offset == $0.element.index }
-                for (index, node) in native.enumerated() {
-                    let marked: Bool
-                    if exactOrder {
-                        // Do not burn the bounded scan budget reading every
-                        // label before measuring the selected tab's outline.
-                        marked = selected.contains(ordered[index].id)
-                    } else {
-                        let nodeLabels = [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute].compactMap { text(node, $0) }
-                        let matching = ordered.filter { tab in !tab.title.isEmpty && nodeLabels.contains { $0 == tab.title || $0.hasPrefix(tab.title + " - Memory usage - ") } }
-                        marked = !matching.isEmpty && matching.allSatisfy { selected.contains($0.id) }
-                    }
-                    if marked, let rect = frame(node), FocusBlurPolicy.valid(rect) { regions.append(rect.insetBy(dx: 1, dy: 1)) }
-                }
-                continue
-            }
-            pending.append(contentsOf: descendants.prefix(max(0, 1800 - pending.count)).map { ($0, sidebar) })
-        }
-        return (regions, cursor >= pending.count && Date() < deadline)
+        return WorkspaceTabOutlineScanner.scan(root: root, browser: window.bundle, tabs: tabs, selected: selected,
+            reader: WorkspaceTabOutlineReader(text: text, children: children, frame: frame,
+                key: { Int(CFHash($0)) }, equal: { CFEqual($0, $1) },
+                hasTime: { Date() < deadline }, readsComplete: { readsComplete }))
     }
 }

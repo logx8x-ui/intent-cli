@@ -10,6 +10,7 @@ final class RestorationFocusGuard {
     private let window: AXUIElement?
     private let visibleWindowID: UInt32
     private let targetResolution: String
+    private let observationOnly: Bool
     // NSEvent monitors are delivered on the main queue. AX IPC can briefly
     // block that queue, so also consult public WindowServer input counters
     // before effects rather than waiting for a queued cancellation callback.
@@ -29,18 +30,25 @@ final class RestorationFocusGuard {
     private var lastTargetOnScreen: Bool?
     private var lastTargetMinimized: Bool?
 
-    private init(application: NSRunningApplication, restoringPIDs: Set<pid_t>, visibleWindow: WorkspaceWindow) {
+    private init(application: NSRunningApplication, restoringPIDs: Set<pid_t>, visibleWindow: WorkspaceWindow,
+                 observationOnly: Bool) {
         self.application = application
+        self.observationOnly = observationOnly
         initialInputCounts = Self.inputCounts()
         visibleWindowID = visibleWindow.id
         policy = RestorationFocusPolicy(originalPID: application.processIdentifier, restoringPIDs: restoringPIDs)
-        let element = AXUIElementCreateApplication(application.processIdentifier)
-        AXUIElementSetMessagingTimeout(element, 0.05)
-        let target = Self.accessibilityWindow(matching: visibleWindow, application: element)
-        window = target.window
-        targetResolution = target.method
+        if observationOnly {
+            window = nil
+            targetResolution = "native-observation-only"
+        } else {
+            let element = AXUIElementCreateApplication(application.processIdentifier)
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            let target = Self.accessibilityWindow(matching: visibleWindow, application: element)
+            window = target.window
+            targetResolution = target.method
+        }
     }
-    static func begin(restoringPIDs: Set<pid_t>) {
+    static func begin(restoringPIDs: Set<pid_t>, observationOnly: Bool = false) {
         precondition(Thread.isMainThread)
         cancel()
         let controllerPID = ProcessInfo.processInfo.processIdentifier
@@ -55,13 +63,14 @@ final class RestorationFocusGuard {
         // The Finish menu may still own activation until the controls close.
         // It is part of this restoration, not a new destination chosen by the user.
         let permittedPIDs = fromControls ? restoringPIDs.union([controllerPID]) : restoringPIDs
-        let guarder = RestorationFocusGuard(application: app, restoringPIDs: permittedPIDs, visibleWindow: visible)
+        let guarder = RestorationFocusGuard(application: app, restoringPIDs: permittedPIDs,
+                                            visibleWindow: visible, observationOnly: observationOnly)
         // Match WindowServer's actual visible window for both keyboard and
         // menu completion, rather than relying on remembered AX focus alone.
         guarder.observe("begin", details: ["controllerPID": controllerPID, "targetPID": targetPID,
             "fromControls": fromControls, "matchedWindow": guarder.window != nil,
-            "visibleWindowID": visible.id, "resolution": guarder.targetResolution])
-        if guarder.window == nil { guarder.observe("unresolvedVisibleWindow"); return }
+            "visibleWindowID": visible.id, "resolution": guarder.targetResolution, "observationOnly": observationOnly])
+        if !observationOnly && guarder.window == nil { guarder.observe("unresolvedVisibleWindow"); return }
         current = guarder
         let input: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
             .gesture, .beginGesture, .swipe, .magnify, .rotate, .smartMagnify]
@@ -117,7 +126,7 @@ final class RestorationFocusGuard {
     }
 
     private func preserveOwnedVisibilityChange() {
-        guard let window else { return }
+        guard !observationOnly, let window else { return }
         func nativePermission() -> (permitted: Bool, wasFront: Bool) {
             guard !inputCancelled(), ProcessInfo.processInfo.systemUptime - beganUptime <= 5,
                   Date().timeIntervalSince(beganAt) <= 5,
@@ -269,6 +278,10 @@ final class RestorationFocusGuard {
             lastForegroundPID = foreground.processIdentifier
             observe("foreground", details: ["pid": foreground.processIdentifier])
         }
+        // Quiet completion does not dispatch an effect to correct focus later.
+        // This finite observer is diagnostic only, with no AX calls, activation
+        // or window raising; exact-window acceptance is independently sampled.
+        if observationOnly { return }
         guard policy.shouldPreserve(frontmostPID: foreground.processIdentifier) else { Self.cancel(reason: "unrelatedActivation"); return }
         // Restore only the existing focused window. No launch, unhide, or
         // activateAllWindows: those would bring unrelated windows forward.

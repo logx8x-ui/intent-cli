@@ -32,8 +32,17 @@ final class QuickMarkKeyMonitor {
             if let action { self.onAction?(action) }
         }
     }
+    private var ownsKeyboardInput: Bool {
+        if NSApp.isActive { return true }
+        guard let window = NSApp.keyWindow else { return false }
+        // A SwiftUI popover can own keys on behalf of the nonactivating strip
+        // without sharing its style mask. NSApp.keyWindow is process-local;
+        // require its actual visible key ownership, not application activation.
+        return window.isKeyWindow && window.isVisible
+            && !window.isMiniaturized && window.alphaValue > 0
+    }
     private var editingText: Bool {
-        guard NSApp.isActive, let window = NSApp.keyWindow,
+        guard ownsKeyboardInput, let window = NSApp.keyWindow,
               window.isVisible, window.isKeyWindow, !window.isMiniaturized,
               window.alphaValue > 0, let responder = window.firstResponder else { return false }
         // An ordered-out dashboard may retain its last field editor. Only an
@@ -76,7 +85,7 @@ final class QuickMarkKeyMonitor {
             let opening = input.opensSpotlight
             if let context = owner.spotlightContext?() { owner.spotlight.setOverview(active: context.0, candidates: context.1) }
             if opening && type == .keyDown { owner.cancelPending(); owner.onSpotlightOpening?() }
-            let intentOwnsInput = NSApp.isActive
+            let intentOwnsInput = owner.ownsKeyboardInput
             // Escape is urgent even if Spotlight owns focus. Search text and
             // Return must reach the Spotlight route before overview shortcuts.
             if code == 53, owner.overviewKeyHandler?(code, input.down,

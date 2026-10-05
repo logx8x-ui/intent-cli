@@ -393,7 +393,6 @@ final class QuickSelectionController: ObservableObject {
         return false
     }
     private var stagedModifiersPanel: NSPanel?
-    private var stagedPreviousApp: NSRunningApplication?
     func openModification(_ index: Int) {
         hoverModification(nil)
         guard !model.hasActiveSession, NSApp.modalWindow == nil, modificationOrder.indices.contains(index) else { return }
@@ -402,7 +401,9 @@ final class QuickSelectionController: ObservableObject {
         if section.enabled(in: selection) {
             // Commit a valid edit while its node still exists. SwiftUI may keep
             // the field binding alive briefly while the popover tears down.
-            if NSApp.isActive { NSApp.keyWindow?.makeFirstResponder(nil) }
+            if let keyWindow = NSApp.keyWindow, keyWindow.isVisible, keyWindow.isKeyWindow {
+                keyWindow.makeFirstResponder(nil)
+            }
             if optionsSection == section { closeModification() }
             section.disable(in: &selection)
             combinationNotice = false
@@ -421,10 +422,6 @@ final class QuickSelectionController: ObservableObject {
             guard generation == openingGeneration, hasStagedSelection,
                   !closing, !model.hasActiveSession else { return }
         }
-        if panel?.isVisible != true, let frontmost = NSWorkspace.shared.frontmostApplication,
-           frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-            stagedPreviousApp = frontmost
-        }
         hoverModification(nil)
         if section == .searches || section == .addAsYouGo || section == .stopwatch {
             if section.enabled(in: selection) { section.disable(in: &selection) }
@@ -438,7 +435,9 @@ final class QuickSelectionController: ObservableObject {
         if panel?.isVisible != true {
             showStagedModifiers()
             refreshStagedOutlines()
-            NSApp.activate(ignoringOtherApps: true); stagedModifiersPanel?.makeKeyAndOrderFront(nil)
+            // A key nonactivating panel can edit without taking application
+            // activation away from the exact desktop window being marked.
+            stagedModifiersPanel?.makeKeyAndOrderFront(nil)
         }
         if QuickSelectionOptionsSection.timer.enabled(in: selection), QuickSelectionOptionsSection.checklist.enabled(in: selection),
            !UserDefaults.standard.bool(forKey: "explainedTimerChecklist") {
@@ -463,7 +462,7 @@ final class QuickSelectionController: ObservableObject {
         }
         guard stagedModifiersPanel == nil, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
         let width = min(1050, screen.visibleFrame.width - 56)
-        let notice = SelectionPanel(contentRect: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 46), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let notice = Self.makeStagedModifierPanel(frame: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 46))
         notice.isOpaque = false; notice.backgroundColor = .clear; notice.hidesOnDeactivate = false
         notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         notice.contentView = NSHostingView(rootView: ModificationStrip(controller: self).padding(4).preferredColorScheme(.dark))
@@ -475,13 +474,8 @@ final class QuickSelectionController: ObservableObject {
             // A popover may dismiss after overview has closed. Never recreate
             // its strip here: only a new quick mark or shortcut can show it.
             if selection.apps.isEmpty { hideStagedModifiers() }
-            // SwiftUI can dismiss a popover after its strip was ordered out
-            // for Run/finish. Only the still-visible editor may return focus;
-            // a late dismissal must not resurrect its previous application.
-            if !model.hasActiveSession, stagedModifiersPanel?.isVisible == true, NSApp.isActive {
-                stagedPreviousApp?.activate(options: [.activateIgnoringOtherApps])
-            }
-            stagedPreviousApp = nil
+            // Editing never activates Intent, so dismissal must not activate
+            // an app or choose a sibling window as an attempted focus return.
         }
         refreshStagedOutlines()
     }
@@ -589,29 +583,83 @@ final class QuickSelectionController: ObservableObject {
     }
     func runMarked() {
         if panel?.isVisible == true { runSelection(); return }
-        guard runMarkedTask == nil else { return }
+        guard runMarkedTask == nil, !model.hasActiveSession, openingApps.isEmpty,
+              hasStagedSelection || markTask != nil else { return }
+        guard let origin = WorkspaceWindow.focused(), origin.pid != ProcessInfo.processInfo.processIdentifier else { return }
+        let originalSnapshot = QuickSelection.browsers.contains(origin.bundle)
+            ? BrowserTabSnapshotStore(browserBundleIdentifier: origin.bundle).load(maxAge: 5) : nil
+        guard let startAnchor = Self.markedRunAnchor(windowID: origin.id, pid: origin.pid,
+            bundle: origin.bundle, title: origin.title, frame: origin.frame,
+            nativeWindowCount: WorkspaceWindow.list().filter { $0.bundle == origin.bundle }.count,
+            snapshot: originalSnapshot) else {
+            showMarkRecovery(for: origin.bundle, fresh: false,
+                detail: "Wait for the current tab to finish marking, then run again. Your selections are safe.", offersBrowserSetup: false)
+            return
+        }
         runMarkedTask = Task { [weak self] in
             guard let self else { return }
             defer { self.runMarkedTask = nil }
             await self.markTask?.value
             guard !self.model.hasActiveSession, self.openingApps.isEmpty, self.hasStagedSelection, !self.selection.apps.isEmpty else { return }
             self.refresh()
-            let fresh = await self.freshSnapshots(for: Set(self.selection.tabs.map(\.browser)))
+            var browsers = Set(self.selection.tabs.map(\.browser))
+            if startAnchor.browserTabID != nil { browsers.insert(startAnchor.bundleIdentifier) }
+            let fresh = await self.freshSnapshots(for: browsers)
             guard !Task.isCancelled, !self.model.hasActiveSession, self.panel?.isVisible != true else { return }
             guard fresh else {
-                self.model.errorMessage = "Couldn't refresh the marked tabs. Check Browser Guard and try again."; self.model.showOverlay(); return
+                self.showMarkRecovery(for: origin.bundle, fresh: false,
+                    detail: "Couldn't refresh the marked tabs. Check Browser Guard and try again.", offersBrowserSetup: QuickSelection.browsers.contains(origin.bundle))
+                return
             }
             guard self.panel?.isVisible != true else { return }
+            let currentOrigin = WorkspaceWindow.focused()
+            guard startAnchor.matchesNative(windowID: currentOrigin?.id, pid: currentOrigin?.pid,
+                bundleIdentifier: currentOrigin?.bundle),
+                startAnchor.matchesBrowserSnapshot(self.snapshots.first { $0.browserBundleIdentifier == startAnchor.bundleIdentifier }) else {
+                self.showMarkRecovery(for: origin.bundle, fresh: true,
+                    detail: "Your active window or tab changed while preparing. Run again from the one you want.", offersBrowserSetup: false)
+                return
+            }
             let current = Set(WorkspaceWindow.list(onScreen: false).map(\.id))
             guard self.selection.windowIDsByApp.values.allSatisfy({ $0.isSubset(of: current) }) else {
-                self.model.errorMessage = "A marked window closed. Open ` and review your selection."; self.model.showOverlay(); return
+                self.showMarkRecovery(for: origin.bundle, fresh: true,
+                    detail: "A marked window closed. Open ` and review your selection.", offersBrowserSetup: false)
+                return
             }
             self.prepareRunMetadata()
-            if self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .quickMark) {
+            if self.model.startQuickSelection(Self.markedRunSelection(self.selection), apps: self.apps.map(\.app), snapshots: self.snapshots,
+                onboardingOrigin: .quickMark, startAnchor: startAnchor) {
                 self.workspaceOutlines.stop(); self.hideStagedModifiers()
                 // Keep the draft until FocusLock confirms readiness.
-            } else { self.model.showOverlay() }
+            } else {
+                self.showMarkRecovery(for: origin.bundle, fresh: true,
+                    detail: self.model.errorMessage ?? "The intention couldn't start. Your selections are safe.", offersBrowserSetup: false)
+            }
         }
+    }
+    static func markedRunSelection(_ selection: QuickSelection) -> QuickSelection {
+        // DBT uses the already-open workspace, even after visiting overview or
+        // loading a saved draft. Do not change that draft's later launch policy.
+        var currentSession = selection
+        currentSession.startupAppIDs = []
+        return currentSession
+    }
+    static func markedRunAnchor(windowID: UInt32, pid: Int32, bundle: String, title: String,
+                                frame: CGRect, nativeWindowCount: Int, snapshot: BrowserTabSnapshot?) -> FocusStartAnchor? {
+        guard QuickSelection.browsers.contains(bundle) else {
+            return .init(nativeWindowID: windowID, pid: pid, bundleIdentifier: bundle)
+        }
+        guard let snapshot, snapshot.browserBundleIdentifier == bundle,
+              let session = snapshot.browserSessionID, !session.isEmpty,
+              let browserWindow = BrowserWindowMatching.match(title: title, tabs: snapshot.allTabs ?? snapshot.tabs,
+                nativeWindowCount: nativeWindowCount, frame: frame, isFocused: true) else { return nil }
+        let active = (snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == browserWindow && $0.active }
+        guard active.count == 1, let tab = active.first else { return nil }
+        return .init(nativeWindowID: windowID, pid: pid, bundleIdentifier: bundle,
+            browserWindowID: browserWindow, browserTabID: tab.id, browserSessionID: session)
+    }
+    static func makeStagedModifierPanel(frame: CGRect) -> NSPanel {
+        StagedModifierPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     }
     private var markNoticePanel: NSPanel?
     private var markNoticeDismissal: DispatchWorkItem?
@@ -619,7 +667,7 @@ final class QuickSelectionController: ObservableObject {
         markNoticeDismissal?.cancel(); markNoticeDismissal = nil
         markNoticePanel?.orderOut(nil); markNoticePanel = nil
     }
-    private func showMarkRecovery(for browser: String, fresh: Bool, needsGroupUpdate: Bool = false, detail: String? = nil) {
+    private func showMarkRecovery(for browser: String, fresh: Bool, needsGroupUpdate: Bool = false, detail: String? = nil, offersBrowserSetup: Bool = true) {
         // A failed quick mark must never open the dashboard or a blocking alert.
         let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).heartbeat()
         let connection = QuickMarkRecovery.connection(heartbeat)
@@ -642,7 +690,7 @@ final class QuickSelectionController: ObservableObject {
         let notice = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         notice.isOpaque = false; notice.backgroundColor = .clear; notice.hasShadow = true; notice.hidesOnDeactivate = false
         notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        notice.contentView = NSHostingView(rootView: QuickMarkRecoveryNotice(text: text, needsSetup: needsGroupUpdate || connection != .ready, setup: { [weak self] in
+        notice.contentView = NSHostingView(rootView: QuickMarkRecoveryNotice(text: text, needsSetup: offersBrowserSetup && (needsGroupUpdate || connection != .ready), setup: { [weak self] in
             self?.dismissMarkNotice(); IntentBrowserSetup.open(browser)
         }, overview: { [weak self] in self?.dismissMarkNotice(); self?.toggle() }, close: { [weak self] in self?.dismissMarkNotice() }))
         markNoticePanel = notice; notice.orderFrontRegardless()
@@ -1334,6 +1382,11 @@ final class QuickSelectionController: ObservableObject {
 private final class SelectionPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+}
+
+private final class StagedModifierPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 private struct QuickSelectionView: View {

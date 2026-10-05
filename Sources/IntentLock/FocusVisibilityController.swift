@@ -16,6 +16,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var parking: Bool?
         var bootstrapEffectID: String?
         var nativeCoverage: Bool?
+        // nil decodes old journals with their existing automatic semantics.
+        var restorationPolicy: HiddenWorkspaceRestorationPolicy?
+        var controllerOwnershipID: String?
     }
     private struct WindowIdentity: Hashable {
         var pid: pid_t
@@ -33,6 +36,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private static var accessibilityWindows: [WindowIdentity: AXUIElement] = [:]
     private static var diagnosticEvents: [[String: Any]] = []
     private let spec: FocusSessionSpec
+    private let controllerOwnershipID = UUID().uuidString
     private let visibilityCache: BrowserWindowVisibilityRecordCache?
     private var enforcementPolicy: BrowserWindowEnforcementPolicy?
     /// Main-thread callback. Parking capture receipts are intentionally separate.
@@ -115,9 +119,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
             Self.recoveryGeneration &+= 1
             Self.stopRecoveryWatcher()
             RestorationFocusGuard.cancel()
-            entries = Self.restore()
+            // An anchored DBT start must not replay an old legacy visibility
+            // effect before it has even established its work destination.
+            // Normal quiet-owned entries already carry their durable policy.
+            entries = spec.startupWindowAnchor == nil ? Self.restore() : Self.loadEntries()
             guard spec.hideDistractions && spec.requiresEnforcement, !stopped, timer == nil else {
-                if entries.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) {
+                if spec.startupWindowAnchor == nil, Self.needsRecoveryObservation(entries, parkingOnly: true) {
                     Self.startRecoveryWatcher(generation: Self.recoveryGeneration, parkingOnly: true)
                 }
                 return
@@ -128,7 +135,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             self.timer = timer; timer.resume()
         }
     }
-    public func stop() {
+    public func stop(restorationPolicyOverride: HiddenWorkspaceRestorationPolicy? = nil) {
         onMain {
             guard !stopped else { return }
             enforcementPolicy?.stop()
@@ -137,12 +144,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
             // Capture registrations even when finish beats the next refresh.
             if started, let visibilityCache {
-                entries = Self.captureParking(records: visibilityCache.records(forceRefresh: true), entries: Self.loadEntries())
+                entries = Self.captureParking(records: visibilityCache.records(forceRefresh: true), entries: Self.loadEntries(),
+                    restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)
             }
             stopped = true
             timer?.cancel(); timer = nil
             guard started else { return }
-            entries = Self.beginRecovery()
+            entries = Self.beginRecovery(policy: restorationPolicyOverride ?? spec.hiddenWorkspaceRestorationOnStop,
+                                         controllerOwnershipID: controllerOwnershipID)
         }
     }
     public static func restoreInterruptedSession() {
@@ -154,25 +163,42 @@ public final class FocusVisibilityController: @unchecked Sendable {
         else { DispatchQueue.main.sync(execute: action) }
     }
 
-    @discardableResult private static func beginRecovery() -> [Entry] {
+    @discardableResult private static func beginRecovery(policy: HiddenWorkspaceRestorationPolicy = .automatic,
+                                                        controllerOwnershipID: String? = nil) -> [Entry] {
         recoveryGeneration &+= 1
         stopRecoveryWatcher()
         let generation = recoveryGeneration
-        let saved = loadEntries()
+        var saved = loadEntries()
+        if policy == .onUserReveal || controllerOwnershipID != nil {
+            RestorationFocusGuard.cancel()
+            for index in saved.indices {
+                saved[index].restorationPolicy = (saved[index].restorationPolicy ?? .automatic).atStop(
+                    requested: policy, ownsEntry: controllerOwnershipID != nil && saved[index].controllerOwnershipID == controllerOwnershipID)
+            }
+            // Never fall back to revealing windows when durable deferral could
+            // not be written. Retain ownership; no effect has been dispatched.
+            guard save(saved) else { return saved }
+        }
         var restoringPIDs = Set(saved.map(\.pid))
         // Browser Guard restores parked tabs after the shared rules clear.
         for app in NSWorkspace.shared.runningApplications where
             ["org.mozilla.firefox", "com.google.Chrome"].contains(app.bundleIdentifier ?? "") {
             restoringPIDs.insert(app.processIdentifier)
         }
-        RestorationFocusGuard.begin(restoringPIDs: restoringPIDs)
+        let onlyDeferredOwnership = !saved.isEmpty && saved.allSatisfy {
+            ($0.restorationPolicy ?? .automatic) == .onUserReveal
+        }
+        RestorationFocusGuard.begin(restoringPIDs: restoringPIDs,
+            observationOnly: policy == .onUserReveal || onlyDeferredOwnership)
         // Only bound native ownership can survive finish. Uncaptured holding
         // windows have not been ACKed, so JS has not moved any user tabs there.
-        if !saved.isEmpty { startRecoveryWatcher(generation: generation) }
+        if needsRecoveryObservation(saved) { startRecoveryWatcher(generation: generation) }
         let pending = restore()
         RestorationFocusGuard.preserveCurrent()
-        if !pending.isEmpty { retryRecovery(generation: generation, attempts: 4) }
-        if pending.isEmpty { stopRecoveryWatcher() }
+        if pending.contains(where: { ($0.restorationPolicy ?? .automatic) == .automatic }) {
+            retryRecovery(generation: generation, attempts: 4)
+        }
+        if !needsRecoveryObservation(pending) { stopRecoveryWatcher() }
         return pending
     }
     private static func retryRecovery(generation: Int, attempts: Int) {
@@ -181,9 +207,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
             // unhide() may report false while the visibility request is still in flight.
             // Re-read macOS state before discarding ownership, or retry if it really failed.
             let pending = restore()
-            if !pending.isEmpty && attempts > 1 {
+            if pending.contains(where: { ($0.restorationPolicy ?? .automatic) == .automatic }) && attempts > 1 {
                 retryRecovery(generation: generation, attempts: attempts - 1)
-            } else if pending.isEmpty { stopRecoveryWatcher() }
+            } else if !needsRecoveryObservation(pending) { stopRecoveryWatcher() }
         }
     }
 
@@ -217,7 +243,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         // An older intention's explicit orphan reveal can arrive during a newer
         // one. Only historical parking ownership is released here, never normal
         // windows hidden for this current session.
-        if entries.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) {
+        if spec.startupWindowAnchor == nil, entries.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) {
             entries = Self.restore(parkingOnly: true)
         }
         reconcileBrowserWindows(records: records, windows: windows)
@@ -229,26 +255,58 @@ public final class FocusVisibilityController: @unchecked Sendable {
                   let bundle = app.bundleIdentifier, let launched = app.launchDate else { continue }
             if !spec.permitsApplication(bundle) || initialApps.map({ !$0.contains(bundle) }) == true {
                 guard !app.isHidden else { continue }
-                let entry = Entry(pid: app.processIdentifier, launched: launched, bundle: bundle, window: nil)
-                if !entries.contains(where: { $0.pid == entry.pid && $0.window == nil }) {
-                    entries.append(entry)
-                    guard Self.save(entries) else { entries.removeLast(); continue }
-                }
+                let entry = Entry(pid: app.processIdentifier, launched: launched, bundle: bundle, window: nil,
+                    restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)
+                // A previously deferred app can be explicitly reopened during
+                // this session. A new hide belongs to this controller, so its
+                // failed-start/Safety Stop cleanup can undo that new effect.
+                guard acquireVisibleOwnership(entry) else { continue }
                 guard mayEnforce else { return }
                 _ = app.hide()
             } else {
                 for window in windows where coverageStates[bundle] == nil && window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
                     guard mayEnforce else { return }
-                    guard !entries.contains(where: { $0.pid == window.pid && $0.window == window.id && ($0.bootstrapEffectID != nil || $0.nativeCoverage == true) }) else { continue }
                     guard let element = Self.element(window, launched: launched), Self.boolean(element, kAXMinimizedAttribute).value == false else { continue }
-                    if !entries.contains(where: { $0.pid == window.pid && $0.window == window.id }) {
-                        entries.append(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id))
-                        guard Self.save(entries) else { entries.removeLast(); continue }
-                    }
+                    guard historicalDeferredVisibility(id: window.id, pid: window.pid, launched: launched, isHidden: false) != .unresolved,
+                          !entries.contains(where: { $0.pid == window.pid && $0.window == window.id
+                            && ($0.parking == true || $0.bootstrapEffectID != nil || $0.nativeCoverage == true) }) else { continue }
+                    guard acquireVisibleOwnership(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id,
+                        restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)) else { continue }
                     guard mayEnforce else { return }
                     _ = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
                 }
             }
+        }
+    }
+
+    /// Called only after positive visible-state observation and before a new
+    /// hide/minimize. Never inherit another controller's cleanup responsibility.
+    private func acquireVisibleOwnership(_ entry: Entry) -> Bool {
+        var next = entries
+        if let index = next.firstIndex(where: { $0.pid == entry.pid && $0.launched == entry.launched && $0.window == entry.window }) {
+            next[index] = entry
+        } else { next.append(entry) }
+        guard Self.save(next) else { return false }
+        entries = next
+        return true
+    }
+
+    private enum HistoricalDeferredVisibility: Equatable { case absent, alreadyHidden, retired, unresolved }
+    private func historicalDeferredVisibility(id: UInt32, pid: pid_t, launched: Date,
+                                              isHidden: @autoclosure () -> Bool?) -> HistoricalDeferredVisibility {
+        guard let index = entries.firstIndex(where: { $0.pid == pid && $0.launched == launched && $0.window == id
+            && $0.controllerOwnershipID != controllerOwnershipID && $0.restorationPolicy == .onUserReveal
+            && $0.parking != true && $0.bootstrapEffectID == nil }) else { return .absent }
+        switch HiddenWorkspaceRestorationPolicy.onUserReveal.historicalDeferredVisibility(isHidden: isHidden()) {
+        case .alreadyHidden: return .alreadyHidden
+        case .unresolved: return .unresolved
+        case .retireForCurrentOwnership:
+            // A user-revealed window no longer belongs to the old occurrence.
+            // Persist retirement before the normal new ownership/effect path.
+            var next = entries; next.remove(at: index)
+            guard Self.save(next) else { return .unresolved }
+            entries = next
+            return .retired
         }
     }
     private func refreshBrowserCoverage() {
@@ -414,6 +472,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
         guard inventory.observedStandard.contains(identity) else { return .unresolved }
         let window = WorkspaceWindow(id: identity.windowID, pid: identity.pid, bundle: identity.bundleIdentifier, title: current.title, frame: current.frame)
         guard let element = Self.element(window, launched: launched) else { return .unresolved }
+        switch historicalDeferredVisibility(id: identity.windowID, pid: identity.pid, launched: launched,
+                                             isHidden: Self.boolean(element, kAXMinimizedAttribute).value) {
+        case .alreadyHidden: return .minimized
+        case .unresolved: return .unresolved
+        case .absent, .retired: break
+        }
         if let previous = entries.first(where: { $0.pid == identity.pid && $0.launched == launched && $0.window == identity.windowID }) {
             guard previous.nativeCoverage == true, previous.intentionSessionID == occurrence,
                   previous.parking != true, previous.bootstrapEffectID == nil else { return .unresolved }
@@ -425,7 +489,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
             if self.entries.contains(where: { $0.pid == identity.pid && $0.launched == launched && $0.window == identity.windowID }) { return true }
             var next = self.entries
             next.append(Entry(pid: identity.pid, launched: launched, bundle: identity.bundleIdentifier, window: identity.windowID,
-                intentionSessionID: occurrence, parking: false, nativeCoverage: true))
+                intentionSessionID: occurrence, parking: false, nativeCoverage: true,
+                restorationPolicy: self.spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: self.controllerOwnershipID))
             guard Self.save(next) else { return false }; self.entries = next; return true
         }, dispatch: {
             let result = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
@@ -488,7 +553,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
         for match in resolved where match.isParking {
             guard mayEnforce, let app = NSRunningApplication(processIdentifier: match.candidate.pid),
                   app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.launchDate else { continue }
-            entries = Self.captureParkingMatch(match, launched: launched, entries: entries)
+            entries = Self.captureParkingMatch(match, launched: launched, entries: entries,
+                restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)
         }
         var observations: [BrowserWindowEnforcementPolicy.Observation] = []
         for record in records {
@@ -580,8 +646,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
                                       record: BrowserWindowVisibilityRecord,
                                       claim: BrowserWindowVisibilityWindow, launched: Date,
                                       owned: Bool) -> BrowserWindowEnforcementPolicy.Outcome {
+        let historical = historicalDeferredVisibility(id: id, pid: pid, launched: launched,
+            isHidden: (Self.accessibilityWindows[.init(pid: pid, launched: launched, window: id)]
+                ?? window.flatMap { Self.element($0, launched: launched) }).flatMap { Self.boolean($0, kAXMinimizedAttribute).value })
+        switch historical {
+        case .alreadyHidden: return .verifiedMinimized
+        case .unresolved: return .unresolved(.minimizeNotConfirmed)
+        case .absent, .retired: break
+        }
         guard adoptCoverageOwnership(id: id, pid: pid, launched: launched, record: record, claim: claim) else { return .unresolved(.ownershipNotSaved) }
-        var owned = owned || entries.contains { $0.pid == pid && $0.launched == launched && $0.window == id
+        var owned = (owned && historical != .retired) || entries.contains { $0.pid == pid && $0.launched == launched && $0.window == id
             && $0.browserSessionID == record.browserSessionID && $0.intentionSessionID == record.plan.intentionSessionID && $0.browserWindowID == claim.windowID }
         if let index = entries.firstIndex(where: { $0.pid == pid && $0.launched == launched && $0.window == id && $0.bootstrapEffectID != nil }) {
             let pending = entries[index]
@@ -617,7 +691,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
             entries.append(Entry(pid: pid, launched: launched, bundle: record.browserBundleIdentifier, window: id,
                 browserSessionID: record.browserSessionID, intentionSessionID: record.plan.intentionSessionID,
-                browserWindowID: claim.windowID, parking: false))
+                browserWindowID: claim.windowID, parking: false,
+                restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID))
             guard Self.save(entries) else { entries.removeLast(); return .unresolved(.ownershipNotSaved) }
         }
         guard mayEnforce else { return .unresolved(.minimizeNotConfirmed) }
@@ -650,7 +725,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
             expiresAtUnixMS: Date().timeIntervalSince1970 * 1000 + 2_500, descriptor: claim)
         let entry = Entry(pid: window.pid, launched: launched, bundle: record.browserBundleIdentifier, window: window.id,
             browserSessionID: record.browserSessionID, intentionSessionID: record.plan.intentionSessionID,
-            browserWindowID: claim.windowID, parking: false, bootstrapEffectID: effect.effectID)
+            browserWindowID: claim.windowID, parking: false, bootstrapEffectID: effect.effectID,
+            restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)
         entries.append(entry)
         guard Self.save(entries) else { entries.removeLast(); return false }
         func discardUnpublishedEntry() {
@@ -733,16 +809,19 @@ public final class FocusVisibilityController: @unchecked Sendable {
             .init(id: $0.id, pid: $0.pid, bundle: $0.bundle, title: $0.title, frame: $0.frame)
         })
     }
-    private static func captureParking(records: [BrowserWindowVisibilityRecord], entries: [Entry]) -> [Entry] {
+    private static func captureParking(records: [BrowserWindowVisibilityRecord], entries: [Entry],
+                                       restorationPolicy: HiddenWorkspaceRestorationPolicy, controllerOwnershipID: String) -> [Entry] {
         var result = entries
         for match in matches(records: records, windows: WorkspaceWindow.list(onScreen: false)) where match.isParking {
             guard let app = NSRunningApplication(processIdentifier: match.candidate.pid),
                   app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.launchDate else { continue }
-            result = captureParkingMatch(match, launched: launched, entries: result)
+            result = captureParkingMatch(match, launched: launched, entries: result,
+                restorationPolicy: restorationPolicy, controllerOwnershipID: controllerOwnershipID)
         }
         return result
     }
-    private static func captureParkingMatch(_ match: BrowserWindowVisibilityMatching.Match, launched: Date, entries: [Entry]) -> [Entry] {
+    private static func captureParkingMatch(_ match: BrowserWindowVisibilityMatching.Match, launched: Date, entries: [Entry],
+                                            restorationPolicy: HiddenWorkspaceRestorationPolicy, controllerOwnershipID: String) -> [Entry] {
         guard !match.record.closedParkingWindowIDs.contains(match.window.windowID) else { return entries }
         var result = entries
         if let previous = entries.first(where: { $0.pid == match.candidate.pid && $0.launched == launched && $0.window == match.candidate.id }) {
@@ -757,7 +836,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
             if BrowserWindowVisibilityStore().capturedWindowIDs(for: match.record).contains(match.window.windowID) { return entries }
             result.append(Entry(pid: match.candidate.pid, launched: launched, bundle: match.candidate.bundle,
                 window: match.candidate.id, browserSessionID: match.record.browserSessionID,
-                intentionSessionID: match.record.plan.intentionSessionID, browserWindowID: match.window.windowID, parking: true))
+                intentionSessionID: match.record.plan.intentionSessionID, browserWindowID: match.window.windowID, parking: true,
+                restorationPolicy: restorationPolicy, controllerOwnershipID: controllerOwnershipID))
         }
         // Host ACK is not granted until this native identity is durably owned.
         // A failed receipt write is retried from the retained journal on refresh.
@@ -883,6 +963,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     if before.status == .invalidUIElement { accessibilityWindows.removeValue(forKey: .init(pid: entry.pid, launched: entry.launched, window: id)) }
                     pending.append(entry); continue
                 }
+                guard (entry.restorationPolicy ?? .automatic).action(isHidden: before.value) == .reveal else {
+                    pending.append(entry); continue
+                }
                 if entry.nativeCoverage != nil && entry.parking != true {
                     let restored = BrowserWindowCoverageEffects.restore(ownershipSessionID: entry.intentionSessionID,
                         activeSessionID: activeSession, readMinimized: {
@@ -929,6 +1012,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 // out may also have completed by the time this read succeeds.
                 if boolean(element, kAXMinimizedAttribute).value != false { pending.append(entry) }
             } else if app.isHidden {
+                guard (entry.restorationPolicy ?? .automatic).action(isHidden: true) == .reveal else {
+                    pending.append(entry); continue
+                }
                 _ = app.unhide()
                 RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 if app.isHidden { pending.append(entry) }
@@ -941,6 +1027,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
         accessibilityWindows = accessibilityWindows.filter { identities.contains($0.key) }
         RestorationFocusGuard.preserveCurrent()
         return pending
+    }
+    private static func needsRecoveryObservation(_ entries: [Entry], parkingOnly: Bool = false) -> Bool {
+        entries.contains {
+            (!parkingOnly || $0.parking == true || $0.bootstrapEffectID != nil)
+                && ($0.restorationPolicy ?? .automatic).needsRecoveryObservation(isParking: $0.parking == true)
+        }
     }
     private static func startRecoveryWatcher(generation: Int, parkingOnly: Bool = false) {
         let directory = file.deletingLastPathComponent()
@@ -958,7 +1050,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 guard fingerprint != recoveryFingerprint else { return }
                 recoveryFingerprint = fingerprint
                 let pending = restore(parkingOnly: parkingOnly)
-                if parkingOnly ? !pending.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) : pending.isEmpty { stopRecoveryWatcher() }
+                if !needsRecoveryObservation(pending, parkingOnly: parkingOnly) { stopRecoveryWatcher() }
             }
             recoveryWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
@@ -969,7 +1061,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         recoveryTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { _ in
             guard generation == recoveryGeneration, recoverySource != nil else { return }
             let pending = restore(parkingOnly: parkingOnly)
-            if parkingOnly ? !pending.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) : pending.isEmpty { stopRecoveryWatcher() }
+            if !needsRecoveryObservation(pending, parkingOnly: parkingOnly) { stopRecoveryWatcher() }
         }
     }
     private static func stopRecoveryWatcher() {

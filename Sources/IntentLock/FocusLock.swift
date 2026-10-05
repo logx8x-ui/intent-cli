@@ -7,6 +7,7 @@ public enum FocusLockError: Error, CustomStringConvertible {
     case accessibilityPermissionRequired
     case eventTapUnavailable
     case unableToOpen(String)
+    case quickSelectionStartChanged
     case browserWindowEnforcementFailed(BrowserWindowEnforcementPolicy.Failure)
     case browserWindowCoverageFailed(BrowserWindowCoveragePolicy.Failure)
 
@@ -18,6 +19,8 @@ public enum FocusLockError: Error, CustomStringConvertible {
             return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for Intent, then start the intention again."
         case .unableToOpen(let name):
             return "Intent could not open \(name)."
+        case .quickSelectionStartChanged:
+            return "Your Run window or tab changed while Intent was preparing. Run again from the window you want."
         case .browserWindowCoverageFailed(let failure):
             return failure.message
         case .browserWindowEnforcementFailed(let failure):
@@ -144,6 +147,7 @@ public final class FocusLock {
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
     private var lastPermittedApplication: NSRunningApplication?
+    private var didBecomeReady = false
     private var systemSwitcherGraceUntil: Date = .distantPast
 
     public var onManualFinishRequest: (@Sendable () -> Void)?
@@ -209,7 +213,7 @@ public final class FocusLock {
         cancelPendingFocusActions()
         // Quit can terminate the process before run-loop cleanup executes.
         // Release owned visibility synchronously before returning to AppKit.
-        visibilityController.stop()
+        visibilityController.stop(restorationPolicyOverride: .automatic)
     }
 
     private func cancelPendingFocusActions() {
@@ -234,6 +238,7 @@ public final class FocusLock {
     public func run(onReady: (@Sendable () -> Void)? = nil) throws {
         try throwSafetyFailureIfNeeded()
         guard !isStopped else { return }
+        try validateStartupAnchor()
         if Thread.isMainThread { RestorationFocusGuard.cancel() }
         else { DispatchQueue.main.sync { RestorationFocusGuard.cancel() } }
         returnApplication = NSWorkspace.shared.frontmostApplication
@@ -248,6 +253,7 @@ public final class FocusLock {
             throw FocusLockError.accessibilityPermissionRequired
         }
         guard !isStopped else { return }
+        try validateStartupAnchor()
 
         baselinePids = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
         defer { cleanup() }
@@ -272,7 +278,7 @@ public final class FocusLock {
                     Thread.sleep(forTimeInterval: 0.01)
                 }
             }
-            if !isStopped { onReady?() }
+            if !isStopped { didBecomeReady = true; onReady?() }
             while !isStopped {
                 if !RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2)) {
                     Thread.sleep(forTimeInterval: 0.02)
@@ -296,6 +302,12 @@ public final class FocusLock {
     }
 
     private func runStartupSteps() throws {
+        if spec.startupWindowAnchor != nil {
+            try validateStartupAnchor()
+            // DBT starts in place, never by replaying launches or activating a
+            // fallback. Model validation rejects excluded current resources.
+            return
+        }
         for step in spec.startupSteps {
             guard !isStopped else { return }
             switch step {
@@ -311,6 +323,14 @@ public final class FocusLock {
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.45))
         }
 
+        let currentWindow = spec.preservesCurrentWindowOnStart ? WorkspaceWindow.focused() : nil
+        if spec.shouldPreserveCurrentWindowOnStart(windowID: currentWindow?.id,
+            bundleIdentifier: currentWindow?.bundle, controllerBundleIdentifier: Bundle.main.bundleIdentifier) {
+            // Do not call NSRunningApplication.activate for an already-active
+            // browser: macOS may select a different window in the same process.
+            if let app = NSWorkspace.shared.frontmostApplication { permittedWindowRecovery.remember(app) }
+            return
+        }
         guard !spec.fallbackBundleIdentifier.isEmpty else { return }
 
         let deadline = Date(timeIntervalSinceNow: 6)
@@ -320,6 +340,18 @@ public final class FocusLock {
                 return
             }
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
+    }
+
+    private func validateStartupAnchor() throws {
+        guard let anchor = spec.startupWindowAnchor else { return }
+        guard anchor.isValid else { throw FocusLockError.quickSelectionStartChanged }
+        let current = WorkspaceWindow.focused()
+        guard spec.startupSteps.isEmpty,
+              anchor.matchesNative(windowID: current?.id, pid: current?.pid, bundleIdentifier: current?.bundle),
+              spec.permitsWindow(anchor.nativeWindowID, bundleIdentifier: anchor.bundleIdentifier),
+              anchor.matchesBrowserSnapshot(BrowserTabSnapshotStore(browserBundleIdentifier: anchor.bundleIdentifier).load(maxAge: 5)) else {
+            throw FocusLockError.quickSelectionStartChanged
         }
     }
 
@@ -1244,7 +1276,10 @@ public final class FocusLock {
             self.runLoopSource = nil
         }
 
-        visibilityController.stop()
+        // Errors before readiness are not successful completion. Release this
+        // attempted session's visibility changes; previously deferred windows
+        // remain owned by their earlier occurrence and are not reopened.
+        visibilityController.stop(restorationPolicyOverride: didBecomeReady ? nil : .automatic)
         if !spec.hideDistractions, !didStopForSafety, spec.accessMode == .whitelist, spec.closeSessionResourcesOnFinish {
             closeSessionResources()
         }

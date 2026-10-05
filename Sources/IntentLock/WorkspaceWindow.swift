@@ -260,7 +260,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             }
             // Selection/geometry changes refresh immediately; an unchanged tab strip
             // needs no full accessibility traversal on every animation tick.
-            let key = "\(window.pid):\(window.frame):\(tabs.map { "\($0.id):\($0.index):\($0.title):\($0.active)" }):\(selectedIDs.sorted())"
+            let key = "\(window.pid):\(snapshot.browserSessionID ?? ""): \(window.frame):\(tabs.map { "\($0.id):\($0.index):\($0.title):\($0.active)" }):\(selectedIDs.sorted())"
             if let cached = scanCache[window.id], cached.key == key, Date().timeIntervalSince(cached.at) < 1 {
                 markedRegions[window.id] = cached.regions
                 continue
@@ -270,7 +270,10 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                 continue
             }
             let scan = WorkspaceTabOutline.scan(window: window, tabs: tabs, selected: selectedIDs)
-            let context = "\(window.pid):\(window.frame):\(tabs):\(selectedIDs.sorted())"
+            // Favicon bytes, page URLs and snapshot timestamps do not identify
+            // tab chrome. Reuse the session-pinned layout key so an icon refresh
+            // cannot clear a valid outline during a bounded partial AX read.
+            let context = key
             var continuity = tabContinuity[window.id] ?? TabBlurContinuity()
             let regions = continuity.update(scan.regions, context: context, complete: scan.complete, now: Date())
             tabContinuity[window.id] = continuity

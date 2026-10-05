@@ -5,6 +5,10 @@ import IntentCore
 @MainActor
 enum QuickSelectionInteractionChecks {
     static func run(_ check: (Bool, String) throws -> Void) throws {
+        let modifierPanel = QuickSelectionController.makeStagedModifierPanel(frame: .init(x: 0, y: 0, width: 500, height: 46))
+        try check(modifierPanel.styleMask.contains(.nonactivatingPanel) && modifierPanel.canBecomeKey && !modifierPanel.canBecomeMain,
+            "The real staged editor panel accepts keyboard focus without becoming an activating main window")
+        modifierPanel.close()
         let controller = QuickSelectionController(model: IntentAppModel())
         var canceledController: QuickSelectionController?
         canceledController = QuickSelectionController(model: IntentAppModel(), offerExitPasscode: {
@@ -48,6 +52,14 @@ enum QuickSelectionInteractionChecks {
         try check(controller.selection.restrictionNodes == before, "Invalid modification indices leave the draft untouched")
 
         let browser = "org.mozilla.firefox"
+        var retainedOverview = QuickSelection()
+        retainedOverview.toggleWindow(501, app: "qa.retained")
+        retainedOverview.startupAppIDs = ["qa.retained"]
+        let currentSession = QuickSelectionController.markedRunSelection(retainedOverview)
+        let currentIntention = try currentSession.makeIntention(apps: [.init(name: "QA retained", bundleIdentifier: "qa.retained")], snapshots: [])
+        try check(currentSession.startupAppIDs == [] && currentIntention.dontStartResourceIDs.contains("app:qa.retained")
+            && retainedOverview.startupAppIDs == ["qa.retained"],
+            "Overview to DBT suppresses startup only for this Run, preserving the retained draft's launch policy")
         let tab = BrowserTabItem(id: 31, windowID: 41, index: 0, title: "QA selected", url: "https://example.test", active: true)
         let native = QuickSelectionController.WindowItem(id: 51, appID: "qa.native", title: "QA native",
             sourceFrame: .init(x: 0, y: 0, width: 800, height: 600), preview: nil)
@@ -90,6 +102,17 @@ enum QuickSelectionInteractionChecks {
             sourceFrame: .init(x: 900, y: 0, width: 700, height: 600), preview: nil)
         let unselectedTab = BrowserTabItem(id: 32, windowID: 41, index: 1, title: "Unselected", url: "https://second.test", active: false)
         let otherTab = BrowserTabItem(id: 33, windowID: 42, index: 0, title: sibling.title, url: "https://third.test", active: true)
+        let anchorSnapshot = BrowserTabSnapshot(browserBundleIdentifier: browser, browserSessionID: "qa-picker", tabs: [tab, unselectedTab, otherTab])
+        let anchor = QuickSelectionController.markedRunAnchor(windowID: 61, pid: 700, bundle: browser,
+            title: tab.title, frame: native.sourceFrame, nativeWindowCount: 2, snapshot: anchorSnapshot)
+        try check(anchor?.nativeWindowID == 61 && anchor?.browserWindowID == 41 && anchor?.browserTabID == 31,
+            "DBT submission pins the current native window and active tab, not the first other allowed window")
+        try check(QuickSelectionController.markedRunAnchor(windowID: 61, pid: 700, bundle: browser,
+            title: tab.title, frame: native.sourceFrame, nativeWindowCount: 2, snapshot: nil) == nil,
+            "An unresolved browser start cannot substitute a guessed tab or app fallback")
+        try check(QuickSelectionController.markedRunAnchor(windowID: 51, pid: 800, bundle: "qa.native",
+            title: "QA", frame: native.sourceFrame, nativeWindowCount: 1, snapshot: nil)?.nativeWindowID == 51,
+            "Native DBT starts need no browser metadata or navigation")
         controller.windows = [browserWindow, sibling, native]
         controller.snapshots = [.init(browserBundleIdentifier: browser, browserSessionID: "qa-picker", tabs: [tab, unselectedTab, otherTab])]
         try check(controller.isSelected(browserWindow) && !controller.isSelected(sibling),

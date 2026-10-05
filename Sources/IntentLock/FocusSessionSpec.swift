@@ -32,6 +32,14 @@ public struct FocusSessionSpec {
     public let allowsManualFinish: Bool
     public var closeSessionResourcesOnFinish: Bool
     public var restorePreviousApplicationOnStop: Bool
+    /// GUI completion releases enforcement without reopening hidden windows.
+    /// Legacy CLI specifications retain automatic restoration.
+    public var hiddenWorkspaceRestorationOnStop: HiddenWorkspaceRestorationPolicy = .automatic
+    /// DBT Run adopts the current permitted work window rather than activating
+    /// the first app in the selection. Overview and saved launches keep their
+    /// existing explicit startup destination.
+    public var preservesCurrentWindowOnStart = false
+    public var startupWindowAnchor: FocusStartAnchor?
     public let allowedWebsitesByBrowser: [String: [String]]
 
     public init(
@@ -190,6 +198,9 @@ public struct FocusSessionSpec {
         result.coverageAllowsLaterWindows = coverageAllowsLaterWindows
         result.initialAllowedApps = initialAllowedApps
         result.initialSelectedWindows = initialSelectedWindows
+        result.hiddenWorkspaceRestorationOnStop = hiddenWorkspaceRestorationOnStop
+        result.preservesCurrentWindowOnStart = preservesCurrentWindowOnStart
+        result.startupWindowAnchor = startupWindowAnchor
         return result
     }
 
@@ -200,7 +211,15 @@ public struct FocusSessionSpec {
         var result = self
         result.restorePreviousApplicationOnStop = false
         result.closeSessionResourcesOnFinish = false
+        result.hiddenWorkspaceRestorationOnStop = .onUserReveal
         return result
+    }
+
+    public func shouldPreserveCurrentWindowOnStart(windowID: UInt32?, bundleIdentifier: String?,
+                                                   controllerBundleIdentifier: String?) -> Bool {
+        guard preservesCurrentWindowOnStart, startupSteps.isEmpty,
+              let windowID, let bundleIdentifier, bundleIdentifier != controllerBundleIdentifier else { return false }
+        return permitsWindow(windowID, bundleIdentifier: bundleIdentifier)
     }
 
     public static func workPeriodIdle(

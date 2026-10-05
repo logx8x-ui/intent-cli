@@ -117,6 +117,8 @@ final class IntentAppModel: ObservableObject {
     private var quickSelectionBrowserSessionIDs: [String: String] = [:]
     private var quickSelectionIntentionID: String?
     private var quickSelectionOnboardingOrigin: IntentOnboardingStep?
+    private var quickSelectionPreservesCurrentWindowOnStart = false
+    private var quickSelectionStartAnchor: FocusStartAnchor?
     private var firstIntentionID: String?
     private var quickSelectionMonitor: Task<Void, Never>?
     private static let browserCoverageQueue = DispatchQueue(label: "dev.loganmondi.intent.chrome-coverage-start", qos: .userInitiated)
@@ -153,13 +155,18 @@ final class IntentAppModel: ObservableObject {
         return hasActiveSession
     }
 
-    func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot], onboardingOrigin: IntentOnboardingStep? = nil) -> Bool {
+    func startQuickSelection(_ selection: QuickSelection, apps: [AllowedApp], snapshots: [BrowserTabSnapshot], onboardingOrigin: IntentOnboardingStep? = nil,
+                             startAnchor: FocusStartAnchor? = nil) -> Bool {
         guard !hasActiveSession,
               pendingFriction == nil, pendingEndTimeRequest == nil else {
             errorMessage = "Finish the current intention and save or dismiss its result first."
             return false
         }
         pendingPurposeSessionSave = nil
+        if onboardingOrigin == .quickMark, startAnchor?.isValid != true {
+            errorMessage = "Couldn't confirm the current Run window or tab. Keep it open and try Run again."
+            return false
+        }
         do {
             var intention = try selection.makeIntention(apps: apps, snapshots: snapshots)
             let teachingOrigin = onboarding.isTeaching && (onboardingOrigin == .overview || onboardingOrigin == .quickMark) ? onboardingOrigin : nil
@@ -187,6 +194,8 @@ final class IntentAppModel: ObservableObject {
             errorMessage = nil
             quickSelectionIntentionID = intention.id
             quickSelectionOnboardingOrigin = teachingOrigin
+            quickSelectionPreservesCurrentWindowOnStart = onboardingOrigin == .quickMark
+            quickSelectionStartAnchor = onboardingOrigin == .quickMark ? startAnchor : nil
             quickSelectionWindowIDs = selection.windowIDsByApp
             quickSelectionTabIDs = selection.tabIDsByBrowser
             quickSelectionBrowserSessionIDs = selection.browserSessionIDs
@@ -1661,6 +1670,15 @@ final class IntentAppModel: ObservableObject {
                        chromeCoverageObservation: WorkspaceWindow.CoverageObservation? = nil) {
         defer { releaseWorkPeriodAfterFailedStart() }
         let hidesDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
+        if quickSelectionIntentionID == intention.id, quickSelectionPreservesCurrentWindowOnStart {
+            let current = WorkspaceWindow.focused()
+            guard let anchor = quickSelectionStartAnchor,
+                  anchor.matchesNative(windowID: current?.id, pid: current?.pid, bundleIdentifier: current?.bundle),
+                  anchor.matchesBrowserSnapshot(BrowserTabSnapshotStore(browserBundleIdentifier: anchor.bundleIdentifier).load(maxAge: 5)) else {
+                errorMessage = "Your Run window or tab changed while Intent was preparing. Nothing started; run again from the window you want."
+                return
+            }
+        }
         guard !intention.selectionRequiresTabReselection || quickSelectionIntentionID == intention.id else {
             errorMessage = "This intention used specific windows or tabs. Open ` to review the current workspace before running it again."
             return
@@ -1740,10 +1758,22 @@ final class IntentAppModel: ObservableObject {
             return
         }
 
-        let spec = FocusSessionSpec.make(
+        var spec = FocusSessionSpec.make(
             for: intention,
             finishShortcut: FinishShortcutStore.load().focusShortcut
         ).preservingForegroundOnStop()
+        if quickSelectionIntentionID == intention.id, let anchor = quickSelectionStartAnchor {
+            spec.selectedWindowIDsByApp = intention.addAsYouGo && intention.accessMode == .whitelist ? [:]
+                : quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
+            guard spec.startupSteps.isEmpty, anchor.isPermitted(
+                nativeWindowPermitted: spec.permitsWindow(anchor.nativeWindowID, bundleIdentifier: anchor.bundleIdentifier),
+                accessMode: intention.accessMode, selectedTabIDs: quickSelectionTabIDs?[anchor.bundleIdentifier],
+                browserIsUnrestricted: intention.isLeisure || intention.wholeBrowserBundleIdentifiers.contains(anchor.bundleIdentifier)
+                    || (intention.addAsYouGo && intention.accessMode == .whitelist)) else {
+                errorMessage = "The current window or tab is excluded by this selection. Run from an allowed one, or change your marks."
+                return
+            }
+        }
         let browserGuards = requiredBrowserGuards(for: intention)
         let websitesByBrowser = Dictionary(uniqueKeysWithValues: browserGuards.map { browser in
             let websites = intention.websites(for: browser.bundleIdentifier).map(\.value)
@@ -1762,6 +1792,14 @@ final class IntentAppModel: ObservableObject {
             },
             by: \.0
         ).mapValues { $0.map(\.1) }
+        var initialQuickResources = FocusStartAnchor.StartupResources(
+            appIDs: Set(intention.allowedApps.map(\.bundleIdentifier)).union(alwaysAllowedApps.map(\.bundleIdentifier)),
+            windowIDs: quickSelectionIntentionID == intention.id ? quickSelectionWindowIDs : [:],
+            tabIDs: quickSelectionIntentionID == intention.id ? quickSelectionTabIDs : nil)
+        if quickSelectionIntentionID == intention.id, let anchor = quickSelectionStartAnchor {
+            initialQuickResources = anchor.seedingCurrentResources(initialQuickResources,
+                addAsYouGo: intention.addAsYouGo, accessMode: intention.accessMode, blockedAppIDs: presetIDs)
+        }
         var configuredRules = intention.isLeisure || browserGuards.isEmpty ? nil : ActiveBrowserRules(
             active: true,
             accessMode: intention.accessMode,
@@ -1771,7 +1809,7 @@ final class IntentAppModel: ObservableObject {
             allowedWebsitesByBrowser: websitesByBrowser,
             startupWebsitesByBrowser: startupWebsitesByBrowser,
             startupSessionID: UUID().uuidString,
-            selectedTabIDsByBrowser: quickSelectionIntentionID == intention.id ? quickSelectionTabIDs : nil,
+            selectedTabIDsByBrowser: initialQuickResources.tabIDs,
             selectedBrowserSessionIDsByBrowser: quickSelectionIntentionID == intention.id ? quickSelectionBrowserSessionIDs : nil,
             blockTabSwitching: true,
             blockNavigation: true,
@@ -1804,10 +1842,12 @@ final class IntentAppModel: ObservableObject {
         if quickSelectionIntentionID == intention.id {
             let presetIDs = Set(alwaysBlockedApps.map(\.bundleIdentifier))
             lockSpec.selectedWindowIDsByApp = intention.addAsYouGo && intention.accessMode == .whitelist ? [:] : quickSelectionWindowIDs.filter { !presetIDs.contains($0.key) }
+            lockSpec.preservesCurrentWindowOnStart = quickSelectionPreservesCurrentWindowOnStart
+            lockSpec.startupWindowAnchor = quickSelectionStartAnchor
         }
         if intention.addAsYouGo && intention.accessMode == .whitelist {
-            lockSpec.initialAllowedApps = Set(intention.allowedApps.map(\.bundleIdentifier)).union(alwaysAllowedApps.map(\.bundleIdentifier))
-            lockSpec.initialSelectedWindows = quickSelectionIntentionID == intention.id ? quickSelectionWindowIDs : [:]
+            lockSpec.initialAllowedApps = initialQuickResources.appIDs
+            lockSpec.initialSelectedWindows = initialQuickResources.windowIDs
         }
         lockSpec.browserWindowCoverage = chromeCoverage.map { [$0] } ?? []
         if let chromeCoverageObservation { lockSpec.browserCoverageObservations["com.google.Chrome"] = chromeCoverageObservation }
