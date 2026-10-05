@@ -15,6 +15,7 @@ public struct QuickMarkGesture {
     public var pendingSingleDeadline: TimeInterval? { held ? nil : pendingSingle }
     private var swallowed: Set<Int> = []
     public init() {}
+    public func ownsKeyRelease(_ code: Int) -> Bool { (code == 50 && held) || swallowed.contains(code) }
     public mutating func reset() { self = Self() }
     public mutating func expire(now: TimeInterval) -> Action? {
         guard !held, let deadline = pendingSingle, now >= deadline else { return nil }

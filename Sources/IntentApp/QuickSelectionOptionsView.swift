@@ -8,12 +8,12 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         let stored = UserDefaults.standard.stringArray(forKey: "quickModificationOrder") ?? []
         return SessionModificationOrder.migrated(stored: stored, available: allCases.map(\.rawValue)).compactMap(Self.init(rawValue:))
     }
-    func enable(in selection: inout QuickSelection) {
+    func enable(in selection: inout QuickSelection, defaults: UserDefaults = .standard) {
         guard !enabled(in: selection) else { return }
         switch self {
         case .addAsYouGo: selection.restrictionNodes.append(.init(kind: .addAsYouGo, position: .zero))
         case .stopwatch: selection.restrictionNodes.append(.init(kind: .stopwatch, position: .zero))
-        case .timer: selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: 25, showsRemainingTime: true, locksSessionUntilTimerEnds: true))
+        case .timer: selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: QuickSelectionPreferences.timerDuration(defaults: defaults), showsRemainingTime: true, locksSessionUntilTimerEnds: true))
         case .checklist: selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260)))
         case .searches: selection.restrictionNodes.append(.init(kind: .allowBrowserSearches, position: .init(x: 240, y: 390)))
         case .cooldown: selection.restrictionNodes.append(.init(kind: .coolDown, position: .init(x: 240, y: 390), durationMinutes: 30))
@@ -75,7 +75,15 @@ struct QuickSelectionOptionsView: View {
                             timerModeButton("Set end time", clock: true, index: index)
                         }
                         if selection.restrictionNodes[index].kind == .timer {
-                            HStack { TextField("Minutes", value: Binding(get: { selection.restrictionNodes[index].durationMinutes ?? 25 }, set: { selection.restrictionNodes[index].durationMinutes = min(1440, max(1, $0)) }), format: .number).textFieldStyle(.roundedBorder); Text("minutes").foregroundStyle(.secondary) }
+                            let timerID = selection.restrictionNodes[index].id
+                            HStack {
+                                TextField("Minutes", value: Binding(get: {
+                                    QuickSelectionPreferences.configuredTimerDuration(in: selection, nodeID: timerID)
+                                }, set: {
+                                    QuickSelectionPreferences.editTimerDuration($0, in: &selection, nodeID: timerID)
+                                }), format: .number).textFieldStyle(.roundedBorder)
+                                Text("minutes").foregroundStyle(.secondary)
+                            }
                         } else {
                             HStack { Text("Start:"); Text(startTime, style: .time).foregroundStyle(.secondary) }
                             DatePicker("End:", selection: Binding(get: {

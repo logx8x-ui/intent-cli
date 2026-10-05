@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 spec_dir="$(mktemp -d "${TMPDIR:-/tmp}/intent-quick-input-XXXXXX")"
 swiftc -emit-library -emit-module -module-name IntentCore \
-  Sources/IntentCore/QuickMarkGesture.swift Sources/IntentCore/QuickMarkKeyboardInput.swift \
+  Sources/IntentCore/QuickMarkGesture.swift Sources/IntentCore/QuickMarkKeyboardInput.swift Sources/IntentCore/OverviewSearchGesture.swift \
   -emit-module-path "$spec_dir/IntentCore.swiftmodule" -o "$spec_dir/libIntentCore.dylib"
 swiftc -parse-as-library -I "$spec_dir" -L "$spec_dir" -lIntentCore \
   -Xlinker -rpath -Xlinker "$spec_dir" \

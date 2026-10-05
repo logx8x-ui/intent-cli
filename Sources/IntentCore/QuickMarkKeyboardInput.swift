@@ -55,3 +55,31 @@ extension QuickMarkGesture {
             repeatKey: input.repeatKey, now: now, capsLockHeld: input.capsLockHeld)
     }
 }
+
+/// Shared delivery policy for every normalized event, including physical Caps
+/// flagsChanged. An overview-owned prefix must not be split across two reducers.
+/// Spotlight gets first refusal in the native monitor before entering this route.
+public enum QuickMarkKeyboardRouting {
+    public enum Result {
+        case overview
+        case text
+        case gesture
+    }
+
+    public static func route(_ input: QuickMarkKeyboardInput,
+                             intentOwnsInput: Bool, editingText: Bool,
+                             overviewHandler: (QuickMarkKeyboardInput) -> Bool,
+                             gesture: QuickMarkGesture) -> Result {
+        if intentOwnsInput, overviewHandler(input) {
+            return .overview
+        }
+        // Opening a modifier editor must not steal an already-held prefix.
+        // A new prefix begun inside an actual editor remains ordinary typing.
+        if editingText && !gesture.isHoldingPrefix && !(!input.down && gesture.ownsKeyRelease(input.code)) {
+            return .text
+        }
+        // The callback may run a modal loop or cancel input. Do not hold inout
+        // access to live gesture state across that reentrant UI boundary.
+        return .gesture
+    }
+}

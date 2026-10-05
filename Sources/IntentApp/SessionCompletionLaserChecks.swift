@@ -43,14 +43,7 @@ enum SessionCompletionLaserChecks {
                             (0...1).contains(tail.doubleValue) && tail.doubleValue <= head.doubleValue && head.doubleValue <= 1
                         } && headValues.last?.doubleValue == 1 && tailValues.last?.doubleValue == 1
                     }, "Travelling tails never overtake their heads or wrap; all collapse after the tips meet")
-                    try check(cores.allSatisfy { stroke in
-                        guard let path = stroke.path,
-                              let group = stroke.animation(forKey: "completion") as? CAAnimationGroup,
-                              let head = frames(group, key: "strokeEnd"), let tail = frames(group, key: "strokeStart"),
-                              let headValue = value(head, elapsed: 0.38), let tailValue = value(tail, elapsed: 0.38) else { return false }
-                        let length = CGFloat(headValue - tailValue) * SessionCompletionLight.pathLength(path)
-                        return abs(length - 76) < 0.1
-                    }, "Core tails remain 76 screen points rather than spanning a large fraction of the screen")
+                    try checkBeamProfile(colour: colour, mode: mode, check: check)
                     let meeting = layers.first { $0.name == "laser.meeting" }
                     try check(meeting.map { sameColour($0.backgroundColor, colour.cgColor)
                         && sameColour($0.shadowColor, colour.cgColor) && $0.bounds.width == 2.5 && $0.shadowRadius == 2.5 } == true,
@@ -80,9 +73,41 @@ enum SessionCompletionLaserChecks {
     private static func makeRoot(size: CGSize, colour: NSColor, reducedMotion: Bool) -> CALayer {
         let root = CALayer()
         root.frame = CGRect(origin: .zero, size: size)
-        SessionCompletionLight.installLayers(on: root, size: size, notchLeft: 656, notchRight: 856,
+        SessionCompletionLight.installLayers(on: root, size: size, notchLeft: size.width / 2 - 100, notchRight: size.width / 2 + 100,
             colour: colour, reducedMotion: reducedMotion)
         return root
+    }
+
+    private static func checkBeamProfile(colour: NSColor, mode: IntentionAccessMode,
+                                         check: (Bool, String) throws -> Void) throws {
+        let sizes = [CGSize(width: 1280, height: 800), CGSize(width: 1512, height: 982),
+                     CGSize(width: 3024, height: 1964)]
+        let profiles: [(name: String, length: CGFloat, opacity: Double)] = [
+            ("core", 180, 0.96), ("glow", 220, 0.30), ("tip", 12, 1)
+        ]
+        for size in sizes {
+            let root = makeRoot(size: size, colour: colour, reducedMotion: false)
+            let strokes = (root.sublayers ?? []).compactMap { $0 as? CAShapeLayer }
+            for profile in profiles {
+                let matching = strokes.filter { $0.name?.hasSuffix(".\(profile.name)") == true }
+                try check(matching.count == 2 && matching.allSatisfy { stroke in
+                    guard let path = stroke.path,
+                          let group = stroke.animation(forKey: "completion") as? CAAnimationGroup,
+                          let head = frames(group, key: "strokeEnd"), let tail = frames(group, key: "strokeStart"),
+                          let opacity = frames(group, key: "opacity") else { return false }
+                    // Inspect the real animations at two separated positions:
+                    // the visible beam must remain long and bright while
+                    // travelling, not merely flash once near the notch.
+                    return [0.38, 0.57].allSatisfy { elapsed in
+                        guard let headValue = value(head, elapsed: elapsed),
+                              let tailValue = value(tail, elapsed: elapsed),
+                              let opacityValue = value(opacity, elapsed: elapsed) else { return false }
+                        let length = CGFloat(headValue - tailValue) * SessionCompletionLight.pathLength(path)
+                        return abs(length - profile.length) < 0.1 && abs(opacityValue - profile.opacity) < 0.00001
+                    }
+                }, "\(mode.rawValue) \(profile.name) stays \(Int(profile.length)) screen points at \(profile.opacity) opacity throughout travel on \(Int(size.width))-point displays")
+            }
+        }
     }
 
     private static func sameColour(_ lhs: CGColor?, _ rhs: CGColor) -> Bool {

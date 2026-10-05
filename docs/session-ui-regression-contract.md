@@ -30,6 +30,14 @@ with another delayed activation or an independent copy of session state.
 
 - A latched Caps Lock state does not turn an otherwise plain backtick into a
   different modifier chord. Physical Caps Lock + backtick Run remains distinct.
+- The overview and staged-selection routes both accept physical Caps Run in
+  either key order. Native routing fixtures must include the overview callback,
+  optional empty names, editor transitions and consumed releases, not only the
+  standalone gesture reducer. Never hold inout gesture access across UI callbacks.
+- Explicit non-browser selection dismisses the tab picker, cancels its pending
+  resolution/reload/preview work, and preserves already-selected browser tabs.
+- New timers remember the last explicitly entered valid duration. Opening a
+  saved timer must not change that preference or the saved timer's own meaning.
 - One input gesture produces at most one action. A consumed down event owns its
   corresponding up event even if modifiers change before release. Repeats do
   not toggle repeatedly. Session/context changes cancel pending gestures.
@@ -49,7 +57,7 @@ with another delayed activation or an independent copy of session state.
   across expand/collapse, not only NSHostingView bitmap renders. Cropped-away
   content must not expose invisible Accessibility controls in the other panel.
 - Whitelist/blacklist dots and completion use one resolved dark-mode accent.
-  The completion core is 1 point with bounded short tails, never a white flash
+  The completion core is 1 point with bounded 180-point tails, never a white flash
   or a persistent whole-screen animation timer. Inspect real header/control
   crops as well as the combined preview whenever their geometry changes.
 - The same completion path handles normal timer, end-time, checklist and manual

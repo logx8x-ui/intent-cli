@@ -1144,7 +1144,8 @@ final class IntentAppModel: ObservableObject {
             return nil
         }
         recordUndoSnapshot()
-        let node = RestrictionNode(kind: kind, position: position)
+        let node = RestrictionNode(kind: kind, position: position,
+            durationMinutes: kind == .timer ? QuickSelectionPreferences.timerDuration() : nil)
         intentions[index].restrictionNodes.append(node)
         selectedID = intentionID
         save()

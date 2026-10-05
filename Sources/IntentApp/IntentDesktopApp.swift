@@ -368,9 +368,10 @@ final class IntentRuntime {
                 }
             }
         }
-        hotKeyManager?.overviewKeyHandler = { [weak self] code, down, modified, repeated in
+        hotKeyManager?.overviewKeyHandler = { [weak self] code, down, modified, repeated, capsLockHeld in
             MainActor.assumeIsolated {
-                self?.quickSelectionController.handleOverviewKey(code: code, down: down, modified: modified, repeatKey: repeated) ?? false
+                self?.quickSelectionController.handleOverviewKey(code: code, down: down, modified: modified,
+                    repeatKey: repeated, capsLockHeld: capsLockHeld) ?? false
             }
         }
         quickSelectionController.onOverviewClosed = { [weak self] in self?.hotKeyManager?.cancelSpotlightSelection() }

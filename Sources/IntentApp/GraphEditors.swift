@@ -964,7 +964,7 @@ struct RestrictionEditorMenu: View {
         .onChange(of: node.kind) { kind in
             switch kind {
             case .timer:
-                if node.durationMinutes == nil { node.durationMinutes = 25 }
+                if node.durationMinutes == nil { node.durationMinutes = QuickSelectionPreferences.timerDuration() }
                 if node.locksSessionUntilTimerEnds == nil {
                     node.locksSessionUntilTimerEnds = true
                 }
@@ -1035,7 +1035,11 @@ struct RestrictionEditorMenu: View {
             fieldLabel(title)
             HourMinuteFields(totalMinutes: Binding(
                 get: { max(1, node.durationMinutes ?? defaultMinutes) },
-                set: { node.durationMinutes = max(1, $0) }
+                set: {
+                    let minutes = max(1, $0)
+                    node.durationMinutes = minutes
+                    if node.kind == .timer { QuickSelectionPreferences.recordTimerDuration(minutes) }
+                }
             ))
             Text(detail)
                 .font(.caption)

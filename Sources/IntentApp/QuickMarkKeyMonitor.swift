@@ -3,7 +3,7 @@ import IntentCore
 
 /// Tiny input callback: no AX queries, disk IO or window capture in the tap.
 final class QuickMarkKeyMonitor {
-    var overviewKeyHandler: ((Int, Bool, Bool, Bool) -> Bool)?
+    var overviewKeyHandler: ((Int, Bool, Bool, Bool, Bool) -> Bool)?
     var spotlightContext: (() -> (Bool, [SpotlightApplicationCandidate]))?
     var onSpotlightOpening: (() -> Void)?
     var onAction: ((QuickMarkGesture.Action) -> Void)?
@@ -61,18 +61,6 @@ final class QuickMarkKeyMonitor {
             guard let input = owner.normalizer.normalize(type: type, event: event) else {
                 return Unmanaged.passUnretained(event)
             }
-            if type == .flagsChanged {
-                guard !owner.editingText else { owner.cancelPending(); return Unmanaged.passUnretained(event) }
-                let result = owner.gesture.key(input, now: ProcessInfo.processInfo.systemUptime)
-                if let action = result.action {
-                    let generation = owner.generation
-                    DispatchQueue.main.async { [weak owner] in
-                        guard let owner, owner.generation == generation else { return }
-                        owner.onAction?(action)
-                    }
-                }
-                return result.consume ? nil : Unmanaged.passUnretained(event)
-            }
             let opening = input.opensSpotlight
             if let context = owner.spotlightContext?() { owner.spotlight.setOverview(active: context.0, candidates: context.1) }
             if opening && type == .keyDown { owner.cancelPending(); owner.onSpotlightOpening?() }
@@ -80,7 +68,7 @@ final class QuickMarkKeyMonitor {
             // Escape is urgent even if Spotlight owns focus. Search text and
             // Return must reach the Spotlight route before overview shortcuts.
             if code == 53, owner.overviewKeyHandler?(code, input.down,
-                input.modified, input.repeatKey) == true {
+                input.modified, input.repeatKey, input.capsLockHeld) == true {
                 owner.cancelPending()
                 return intentOwnsInput ? nil : Unmanaged.passUnretained(event)
             }
@@ -91,14 +79,24 @@ final class QuickMarkKeyMonitor {
                 owner.cancelPending()
                 return consume ? nil : Unmanaged.passUnretained(event)
             }
-            if intentOwnsInput, owner.overviewKeyHandler?(code, input.down,
-                input.modified, input.repeatKey) == true {
-                owner.cancelPending(); return nil
+            let result: QuickMarkGesture.Result
+            let routeGeneration = owner.generation
+            switch QuickMarkKeyboardRouting.route(input,
+                intentOwnsInput: intentOwnsInput, editingText: owner.editingText,
+                overviewHandler: { input in
+                    owner.overviewKeyHandler?(input.code, input.down, input.modified,
+                        input.repeatKey, input.capsLockHeld) == true
+                }, gesture: owner.gesture) {
+            case .overview:
+                if owner.generation == routeGeneration { owner.cancelPending() }
+                return nil
+            case .text:
+                if owner.generation == routeGeneration { owner.cancelPending() }
+                return Unmanaged.passUnretained(event)
+            case .gesture:
+                guard owner.generation == routeGeneration else { return Unmanaged.passUnretained(event) }
+                result = owner.gesture.key(input, now: ProcessInfo.processInfo.systemUptime)
             }
-            // Preserve Intent's text editors and marked IME composition. The
-            // physical-key gesture is only active outside those text contexts.
-            if owner.editingText && !owner.gesture.isHoldingPrefix { owner.cancelPending(); return Unmanaged.passUnretained(event) }
-            let result = owner.gesture.key(input, now: ProcessInfo.processInfo.systemUptime)
             if let action = result.action {
                 let generation = owner.generation
                 DispatchQueue.main.async { [weak owner] in

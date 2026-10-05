@@ -15,6 +15,8 @@ enum IntentPersistenceChecks {
             checks += 1
         }
         do {
+            try QuickSelectionPreferenceChecks.run(check)
+            try QuickSelectionInteractionChecks.run(check)
             let model = IntentAppModel()
             let presentation = SessionDismissalProbe()
             model.overlayPresenter = presentation

@@ -96,14 +96,16 @@ final class SessionCompletionLight {
                 continue
             }
 
-            // The tip and two short tails travel together. Their length is in
-            // screen points, not a broad fraction of the display perimeter.
-            // Every component retains the exact mode hue; there is no white core.
+            // A longer, brighter cutting trace stays visible during the quick
+            // sweep without widening the 1-point core. Length is in screen
+            // points, not a broad fraction of the display perimeter. The small
+            // leading tip and faint trailing halo retain the exact mode hue;
+            // there is no white core or full-screen wash.
             let length = pathLength(path)
             let styles: [(name: String, width: CGFloat, tail: CGFloat, opacity: Double, glow: CGFloat)] = [
-                ("glow", 2.2, 112, 0.24, 2.2),
-                ("core", 1, 76, 0.82, 0.8),
-                ("tip", 1.35, 8, 1, 1.3)
+                ("glow", 2.2, 220, 0.30, 2.2),
+                ("core", 1, 180, 0.96, 0.8),
+                ("tip", 1.35, 12, 1, 1.3)
             ]
             for style in styles {
                 let line = makeLine(path: path, colour: colour, name: "laser.\(side).\(style.name)", width: style.width)

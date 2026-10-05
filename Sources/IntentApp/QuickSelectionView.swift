@@ -25,6 +25,7 @@ final class QuickSelectionController: ObservableObject {
     private var spotlightApps: [String: AllowedApp] = [:]
     var onOverviewClosed: (() -> Void)?
     private var overviewInput = OverviewSearchGesture()
+    private var isEditingText: Bool { (NSApp.keyWindow ?? panel)?.firstResponder is NSTextView }
     func prepareForSpotlight() {
         guard panel?.isVisible == true else { return }
         overviewInput = OverviewSearchGesture()
@@ -37,10 +38,10 @@ final class QuickSelectionController: ObservableObject {
         prepareForSpotlight()
         NativeSpotlightKeyboard.open()
     }
-    func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool) -> Bool {
+    func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool, capsLockHeld: Bool = false) -> Bool {
         guard panel?.isVisible == true else { return false }
         let result = overviewInput.key(code: code, down: down, modified: modified, repeated: repeatKey,
-            editing: panel?.firstResponder is NSTextView)
+            editing: isEditingText, capsLockHeld: capsLockHeld)
         switch result.action {
         case .close: cancelImmediately()
         case .clear: cancelImmediately(); clearMarks()
@@ -100,6 +101,7 @@ final class QuickSelectionController: ObservableObject {
         panel?.level = .popUpMenu
         NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
         panel?.makeFirstResponder(nil)
+        dismissBrowserPicker()
         let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent
         let app = AllowedApp(name: name, bundleIdentifier: id)
@@ -191,7 +193,7 @@ final class QuickSelectionController: ObservableObject {
     private func resetSelectionKeepingName() {
         let name = selection.name; selection = QuickSelection(); selection.name = name
     }
-    func toggleSlots() { savedSlotPage = 0; focusedBrowserWindow = nil }
+    func toggleSlots() { savedSlotPage = 0; dismissBrowserPicker() }
     func captureWorkspace() -> SessionWorkspace {
         let native = WorkspaceWindow.list(onScreen: false)
         let windows = selection.windowIDsByApp.flatMap { app, ids in native.filter { $0.bundle == app && ids.contains($0.id) }.map { SessionWorkspace.Window(app: app, title: $0.title) } }
@@ -304,6 +306,7 @@ final class QuickSelectionController: ObservableObject {
     @Published var expandedStack: String?
     @Published private(set) var resolvingBrowserWindow = false
     private var windowResolutionTask: Task<Void, Never>?
+    private var browserReloadTask: Task<Void, Never>?
     private var windowResolutionID = UUID()
     private var confirmedBrowserWindows: [CGWindowID: (session: String, browser: String, id: Int)] = [:]
     @Published var hoveredTab: BrowserTabItem?
@@ -389,22 +392,31 @@ final class QuickSelectionController: ObservableObject {
     private var stagedPreviousApp: NSRunningApplication?
     func openModification(_ index: Int) {
         hoverModification(nil)
-        guard !selection.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard !model.hasActiveSession, modificationOrder.indices.contains(index) else { return }
+        guard !model.hasActiveSession, NSApp.modalWindow == nil, modificationOrder.indices.contains(index) else { return }
         if !hasStagedSelection && panel?.isVisible != true { resetSelectionKeepingName() }
         let section = modificationOrder[index]
         if section.enabled(in: selection) {
+            // Commit a valid edit while its node still exists. SwiftUI may keep
+            // the field binding alive briefly while the popover tears down.
+            if NSApp.isActive { NSApp.keyWindow?.makeFirstResponder(nil) }
+            if optionsSection == section { closeModification() }
             section.disable(in: &selection)
             combinationNotice = false
-            if optionsSection == section { closeModification() }
         } else {
             openModification(section)
         }
     }
     func openModification(_ section: QuickSelectionOptionsSection) {
-        guard !model.hasActiveSession else { return }
+        guard !model.hasActiveSession, NSApp.modalWindow == nil else { return }
+        let openingGeneration = generation
         hasStagedSelection = true
-        if section == .timer || section == .checklist { IntentExitPasscode.offerOnce() }
+        if section == .timer || section == .checklist {
+            offerExitPasscode()
+            // The first-use prompt runs a nested event loop. Escape/clear can
+            // close the selection while it is open; never resurrect that draft.
+            guard generation == openingGeneration, hasStagedSelection,
+                  !closing, !model.hasActiveSession else { return }
+        }
         if panel?.isVisible != true, let frontmost = NSWorkspace.shared.frontmostApplication,
            frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             stagedPreviousApp = frontmost
@@ -649,6 +661,7 @@ final class QuickSelectionController: ObservableObject {
     private(set) var displayFrame = CGRect.zero
     private(set) var topSafeInset: CGFloat = 0
     let model: IntentAppModel
+    private let offerExitPasscode: @MainActor () -> Void
     private var panel: NSPanel?
     private var monitor: Any?
     private var refreshTimer: Timer?
@@ -659,8 +672,9 @@ final class QuickSelectionController: ObservableObject {
     private var wasOverlayVisible = false
     private var generation = UUID()
 
-    init(model: IntentAppModel) {
+    init(model: IntentAppModel, offerExitPasscode: @escaping @MainActor () -> Void = { IntentExitPasscode.offerOnce() }) {
         self.model = model
+        self.offerExitPasscode = offerExitPasscode
         model.quickSelectionDidStart = { [weak self] in
             guard let self else { return }
             self.workspaceOutlines.stop(); self.hideStagedModifiers()
@@ -769,7 +783,7 @@ final class QuickSelectionController: ObservableObject {
             }
             if self.settingsOpen { return event }
             // Phrase/checklist editing must not switch Allow/Block when typing '/'.
-            if self.panel?.firstResponder is NSTextView { return event }
+            if self.isEditingText { return event }
             if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
                 if !event.isARepeat { self.toggleSlots() }; return nil
             }
@@ -823,8 +837,14 @@ final class QuickSelectionController: ObservableObject {
             return BrowserTabSnapshotStore(browserBundleIdentifier: browser).load()
         }
     }
-    func reloadBrowserTabs(_ browser: String) async {
-        _ = await freshSnapshots(for: [browser])
+    func reloadBrowserTabs(_ browser: String) {
+        browserReloadTask?.cancel()
+        let focused = focusedBrowserWindow
+        browserReloadTask = Task { [weak self] in
+            guard let self, !Task.isCancelled, let focused,
+                  self.focusedBrowserWindow == focused else { return }
+            _ = await self.freshSnapshots(for: [browser])
+        }
     }
     // Equal titles and geometry cannot identify a native window. Ask each
     // browser window to focus its existing active tab, then confirm both
@@ -835,7 +855,8 @@ final class QuickSelectionController: ObservableObject {
         windowResolutionID = resolutionID
         let token = generation
         windowResolutionTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, self.windowResolutionID == resolutionID,
+                  self.focusedBrowserWindow == window.id else { return }
             self.resolvingBrowserWindow = true
             defer {
                 if self.generation == token, self.windowResolutionID == resolutionID {
@@ -948,6 +969,9 @@ final class QuickSelectionController: ObservableObject {
     func selectWindow(_ window: WindowItem) {
         guard !closing else { return }
         panel?.makeFirstResponder(nil)
+        // Picker visibility follows the most recent explicit target click,
+        // independently of the browser tabs already selected for the draft.
+        dismissBrowserPicker()
         if let app = apps.first(where: { $0.id == window.appID }), window.id == Self.placeholderID(app),
            spotlightApps[window.appID] != nil && selection.apps.contains(window.appID) {
             selection.toggleApp(window.appID, snapshots: snapshots); return
@@ -962,7 +986,7 @@ final class QuickSelectionController: ObservableObject {
             expandedStack = nil
             guard !browserLists(for: window.appID).isEmpty else {
                 focusedBrowserWindow = window.id
-                Task { await reloadBrowserTabs(window.appID) }
+                reloadBrowserTabs(window.appID)
                 message = unavailableTabsMessage(for: window.appID); return
             }
             explicitBrowserWindow = nil
@@ -987,6 +1011,7 @@ final class QuickSelectionController: ObservableObject {
             && selection.tabs.contains(.init(browser: browser, id: id))
     }
     func selectTab(_ tab: BrowserTabItem, browser: String, extendingRange: Bool) {
+        panel?.makeFirstResponder(nil)
         message = nil
         guard ensureSelectionSession(browser) else { return }
         guard let window = windows.first(where: { $0.id == focusedBrowserWindow }), window.appID == browser else { return }
@@ -995,6 +1020,7 @@ final class QuickSelectionController: ObservableObject {
         if hasStagedSelection { refreshStagedOutlines() }
     }
     func toggleAllFocusedTabs() {
+        panel?.makeFirstResponder(nil)
         guard let window = windows.first(where: { $0.id == focusedBrowserWindow }),
               let id = displayedBrowserWindowID(for: window) else { return }
         guard ensureSelectionSession(window.appID) else { return }
@@ -1002,10 +1028,20 @@ final class QuickSelectionController: ObservableObject {
     }
     func selectApp(_ app: AppItem) {
         panel?.makeFirstResponder(nil)
+        dismissBrowserPicker()
         if app.app.isBrowser && selection.accessMode == .whitelist {
             message = "Select website tabs above a Chrome or Firefox window."; return
         }
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
+    }
+    func dismissBrowserPicker() {
+        browserReloadTask?.cancel(); browserReloadTask = nil
+        windowResolutionID = UUID()
+        windowResolutionTask?.cancel(); windowResolutionTask = nil
+        resolvingBrowserWindow = false
+        hoverTask?.cancel(); hoverTask = nil
+        focusedBrowserWindow = nil; explicitBrowserWindow = nil
+        hoveredTab = nil; tabPreview = nil; tabPreviewError = nil; tabPreviewLoading = false
     }
     func runSelection() {
         guard !closing, !loading, openingApps.isEmpty, !selection.apps.isEmpty else { return }
@@ -1051,6 +1087,7 @@ final class QuickSelectionController: ObservableObject {
         onOverviewClosed?()
         savedRunTask?.cancel(); savedRunTask = nil
         settingsOpen = false; saveFlight = nil
+        dismissBrowserPicker()
         overviewInput = OverviewSearchGesture()
         expandedStack = nil
         hideStagedModifiers()
@@ -1435,7 +1472,7 @@ private struct QuickSelectionView: View {
                     for id in ids where controller.selection.apps.contains(id) && controller.selection.windowIDsByApp[id] == nil {
                         controller.selection.toggleApp(id, snapshots: controller.snapshots)
                     }
-                    if let focused, ids.contains(focused.appID) { controller.focusedBrowserWindow = nil }
+                    if let focused, ids.contains(focused.appID) { controller.dismissBrowserPicker() }
                 }
         }.ignoresSafeArea().onExitCommand { controller.cancelImmediately() }
     }
@@ -1497,7 +1534,7 @@ private struct QuickSelectionView: View {
                 if browser {
                     Button {
                         controller.explicitBrowserWindow = nil
-                        if controller.focusedBrowserWindow == window.id { controller.focusedBrowserWindow = nil }
+                        if controller.focusedBrowserWindow == window.id { controller.dismissBrowserPicker() }
                         else { controller.selectWindow(window) }
                     } label: {
                         Image(systemName: "list.bullet").font(.system(size: 11, weight: .semibold))
@@ -1524,12 +1561,12 @@ private struct QuickSelectionView: View {
                 HStack {
                     Text(controller.apps.first { $0.id == window.appID }?.app.name ?? "Browser tabs").font(.headline)
                     Spacer()
-                    Button { controller.focusedBrowserWindow = nil; controller.hoveredTab = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Close tabs")
+                    Button { controller.dismissBrowserPicker() } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Close tabs")
                 }
                 if controller.tabs(for: window).isEmpty {
                     Label(controller.resolvingBrowserWindow ? "Finding this window’s tabs…" : controller.unavailableTabsMessage(for: window.appID), systemImage: "puzzlepiece.extension")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Refresh tabs") { Task { await controller.reloadBrowserTabs(window.appID) } }
+                    Button("Refresh tabs") { controller.reloadBrowserTabs(window.appID) }
                         .buttonStyle(.bordered)
                 }
                 Toggle(isOn: Binding(get: {
