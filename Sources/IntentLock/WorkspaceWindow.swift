@@ -11,7 +11,10 @@ public struct WorkspaceWindow {
     public let frame: CGRect
     public static func list(onScreen: Bool = true) -> [WorkspaceWindow] {
         let flags: CGWindowListOption = onScreen ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements]
-        return (CGWindowListCopyWindowInfo(flags, kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { item in
+        return list(records: CGWindowListCopyWindowInfo(flags, kCGNullWindowID) as? [[String: Any]] ?? [])
+    }
+    static func list(records: [[String: Any]]) -> [WorkspaceWindow] {
+        records.compactMap { item in
             guard item[kCGWindowLayer as String] as? Int == 0,
                   let id = item[kCGWindowNumber as String] as? UInt32,
                   let pid = item[kCGWindowOwnerPID as String] as? pid_t,
@@ -21,6 +24,89 @@ public struct WorkspaceWindow {
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), frame.width > 100, frame.height > 80 else { return nil }
             return .init(id: id, pid: pid, bundle: bundle, title: item[kCGWindowName as String] as? String ?? "", frame: frame)
         }
+    }
+
+    /// Positive AX standard windows only: CG also contains Chrome auxiliary
+    /// backing surfaces. Unreported AX-absent windows are outside this narrowly
+    /// observable cohort; the browser bridge still owns all reported windows.
+    public struct CoverageObservation: @unchecked Sendable {
+        public let inventory: BrowserWindowCoveragePolicy.Inventory
+        public let continuousIdentities: Set<BrowserWindowCoveragePolicy.NativeIdentity>
+        public let observedAt: TimeInterval
+        public let sampledAt: TimeInterval
+        fileprivate let anchors: [BrowserWindowCoveragePolicy.NativeIdentity: AXUIElement]
+        fileprivate init(inventory: BrowserWindowCoveragePolicy.Inventory,
+                         continuousIdentities: Set<BrowserWindowCoveragePolicy.NativeIdentity>, sampledAt: TimeInterval,
+                         anchors: [BrowserWindowCoveragePolicy.NativeIdentity: AXUIElement]) {
+            self.inventory = inventory; self.continuousIdentities = continuousIdentities
+            self.anchors = anchors; self.sampledAt = sampledAt; observedAt = ProcessInfo.processInfo.systemUptime
+        }
+        func element(for identity: BrowserWindowCoveragePolicy.NativeIdentity) -> AXUIElement? { anchors[identity] }
+        var bindings: [(BrowserWindowCoveragePolicy.NativeIdentity, AXUIElement)] { anchors.map { ($0.key, $0.value) } }
+    }
+    public static func browserCoverageInventory(bundleIdentifier: String, deadline: TimeInterval? = nil) -> BrowserWindowCoveragePolicy.Inventory? {
+        browserCoverageObservation(bundleIdentifier: bundleIdentifier, deadline: deadline)?.inventory
+    }
+    public static func browserCoverageObservation(bundleIdentifier: String, deadline: TimeInterval? = nil,
+                                                 prior: CoverageObservation? = nil) -> CoverageObservation? {
+        let sampledAt = ProcessInfo.processInfo.systemUptime
+        return browserCoverageObservation(bundleIdentifier: bundleIdentifier,
+            rows: CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+            sampledAt: sampledAt, deadline: deadline, prior: prior)
+    }
+    private static func browserCoverageObservation(bundleIdentifier: String, rows: [[String: Any]]?, sampledAt: TimeInterval,
+                                           deadline: TimeInterval? = nil, prior: CoverageObservation? = nil) -> CoverageObservation? {
+        func hasTime() -> Bool { deadline.map { ProcessInfo.processInfo.systemUptime < $0 } ?? true }
+        guard hasTime(), AXIsProcessTrusted(), let rows else { return nil }
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleIdentifier && !$0.isTerminated }
+        var native: [BrowserWindowCoveragePolicy.NativeWindow] = []
+        var standard: [BrowserWindowCoveragePolicy.StandardWindow] = []
+        var standardElements: [AXUIElement] = []
+        for app in apps {
+            guard hasTime(), let launched = app.launchDate else { return nil }
+            let proof = BrowserProcessIdentity(pid: app.processIdentifier, launched: launched.timeIntervalSinceReferenceDate)
+            for row in rows where row[kCGWindowOwnerPID as String] as? pid_t == app.processIdentifier
+                && row[kCGWindowLayer as String] as? Int == 0 {
+                guard hasTime(), let id = row[kCGWindowNumber as String] as? UInt32,
+                      let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                      let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), BrowserWindowCoveragePolicy.validFrame(frame) else { return nil }
+                native.append(.init(identity: .init(bundleIdentifier: bundleIdentifier, pid: proof.pid, launched: proof.launched, windowID: id),
+                    title: row[kCGWindowName as String] as? String ?? "", frame: frame))
+            }
+            func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+                guard hasTime() else { return nil }
+                AXUIElementSetMessagingTimeout(element, 0.025)
+                var result: CFTypeRef?
+                return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
+            }
+            guard let elements = attribute(AXUIElementCreateApplication(proof.pid), kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+            for element in elements {
+                guard hasTime(), let role = attribute(element, kAXRoleAttribute) as? String,
+                      let subrole = attribute(element, kAXSubroleAttribute) as? String else { return nil }
+                guard role == kAXWindowRole, subrole == kAXStandardWindowSubrole else { continue }
+                var elementPID: pid_t = 0
+                guard AXUIElementGetPid(element, &elementPID) == .success, elementPID == proof.pid,
+                      attribute(element, kAXMinimizedAttribute) as? Bool != nil,
+                      let title = attribute(element, kAXTitleAttribute) as? String,
+                      let position = attribute(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
+                      let size = attribute(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+                var point = CGPoint.zero, dimensions = CGSize.zero
+                guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
+                      AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return nil }
+                standardElements.append(element)
+                standard.append(.init(bundleIdentifier: bundleIdentifier, processIdentity: proof, title: title,
+                    frame: CGRect(origin: point, size: dimensions)))
+            }
+        }
+        // CFEqual compares the same live accessible object, not its title or
+        // frame. Only packets created by a previous successful bidirectional
+        // match may anchor a row; the general AX cache is not this authority.
+        guard hasTime(), let pinned = BrowserWindowCoveragePolicy.continuingAnchors(native: native, standard: standard,
+            previous: prior?.anchors ?? [:], current: standardElements, equal: { CFEqual($0, $1) }) else { return nil }
+        guard hasTime(), let identities = BrowserWindowCoveragePolicy.standardIdentityBindings(native: native, standard: standard, anchors: pinned) else { return nil }
+        let anchors = Dictionary(uniqueKeysWithValues: zip(identities, standardElements))
+        return .init(inventory: .init(windows: native, observedStandard: Set(identities)),
+            continuousIdentities: Set(pinned.values), sampledAt: sampledAt, anchors: anchors)
     }
 
     /// A lifetime probe, not a presentation query. Restoration can temporarily

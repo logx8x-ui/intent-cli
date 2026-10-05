@@ -15,6 +15,9 @@ public enum BrowserProfileSnapshots {
     public static func partition(_ base: URL, session: String) -> URL {
         base.deletingPathExtension().appendingPathExtension("profile-\(component(session)).json")
     }
+    public static func coveragePartition(_ base: URL, session: String) -> URL {
+        base.deletingPathExtension().appendingPathExtension("coverage-profile-\(component(session)).json")
+    }
     public static func sessions(base: URL, now: Date = Date()) -> [BrowserTabSnapshot] {
         let prefix = base.deletingPathExtension().lastPathComponent + ".profile-"
         let files = (try? FileManager.default.contentsOfDirectory(at: base.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []
@@ -26,6 +29,76 @@ public enum BrowserProfileSnapshots {
             return snapshot
         }.sorted { ($0.browserSessionID ?? "") < ($1.browserSessionID ?? "") }
     }
+    /// Coverage must not borrow heartbeat freshness or another discovery reply.
+    /// Returns immutable correlated candidates. Callers must revalidate with
+    /// isCoverageSnapshotCurrent AFTER their post-reply native observation;
+    /// this lets contradicted candidates trigger a bounded fresh query.
+    public static func coverageSnapshots(base: URL, requestID: String, now: Date = Date()) -> [BrowserTabSnapshot] {
+        guard !requestID.isEmpty, requestID.utf8.count <= 256 else { return [] }
+        return sessions(base: base, now: now).compactMap { current in
+            guard let profile = current.browserSessionID,
+                  let data = try? Data(contentsOf: coveragePartition(base, session: profile)),
+                  let snapshot = try? JSONDecoder().decode(BrowserTabSnapshot.self, from: data),
+                  snapshot.snapshotRequestIDs?.contains(requestID) == true,
+                  validCoverageSnapshot(snapshot, current: current, now: now, checkPositiveChanges: false) else { return nil }
+            return snapshot
+        }
+    }
+    /// Recheck the immutable reply AFTER native observation. A newer sidecar
+    /// cannot replace the latched reply: its query may have begun after that scan.
+    public static func isCoverageSnapshotCurrent(_ snapshot: BrowserTabSnapshot, base: URL, now: Date = Date()) -> Bool {
+        guard let current = sessions(base: base, now: now).first(where: { $0.browserSessionID == snapshot.browserSessionID }) else { return false }
+        return validCoverageSnapshot(snapshot, current: current, now: now)
+    }
+    private static func validCoverageSnapshot(_ snapshot: BrowserTabSnapshot, current: BrowserTabSnapshot, now: Date,
+                                              checkPositiveChanges: Bool = true) -> Bool {
+        guard let profile = snapshot.browserSessionID, !profile.isEmpty, current.browserSessionID == profile,
+              snapshot.browserBundleIdentifier == current.browserBundleIdentifier,
+              let proof = snapshot.browserProcessIdentity, proof.isValid, proof == current.browserProcessIdentity,
+              let requests = snapshot.snapshotRequestIDs, !requests.isEmpty, requests.count <= 16,
+              let complete = snapshot.allTabs, snapshot.completeWindowInventory == true,
+              snapshot.guardEnabled == true, current.guardEnabled == true,
+              snapshot.guardCapabilities?.contains(BrowserGuardCapability.nativeWindowVisibility.rawValue) == true,
+              current.guardCapabilities?.contains(BrowserGuardCapability.nativeWindowVisibility.rawValue) == true else { return false }
+        let age = now.timeIntervalSince(snapshot.updatedAt)
+        guard age >= -0.25 && age <= 3 else { return false }
+        // Ordinary snapshots do not certify completeness. Positive changed
+        // rows can invalidate an older proof, but absent/idle rows prove nothing.
+        guard checkPositiveChanges, current.updatedAt >= snapshot.updatedAt else { return true }
+        guard Set(complete.map(\.id)).count == complete.count else { return false }
+        let previous = Dictionary(uniqueKeysWithValues: complete.map { ($0.id, $0) })
+        let positive = current.allTabs ?? current.tabs
+        guard Set(positive.map(\.id)).count == positive.count else { return false }
+        return positive.allSatisfy { row in
+            guard let before = previous[row.id], row.windowID == before.windowID, row.active == before.active else { return false }
+            if row.active && row.title != before.title { return false }
+            if let frame = row.windowFrame, frame != before.windowFrame { return false }
+            return true
+        }
+    }
+
+    /// Resolve selected IDs using the same one-profile/composite representation
+    /// shown to the user. A partial profile reply cannot reinterpret those IDs.
+    public static func selectedCoverageWindows(snapshots: [BrowserTabSnapshot], browser: String,
+                                              expectedSession: String, selectedTabIDs: [Int]) -> Set<BrowserWindowCoveragePolicy.ReportedIdentity>? {
+        guard !selectedTabIDs.isEmpty, Set(selectedTabIDs).count == selectedTabIDs.count,
+              nonce(snapshots) == expectedSession,
+              Set(snapshots.compactMap(\.browserSessionID)).count == snapshots.count,
+              snapshots.allSatisfy({ $0.browserBundleIdentifier == browser && $0.allTabs != nil }) else { return nil }
+        var rows: [Int: BrowserWindowCoveragePolicy.ReportedIdentity] = [:]
+        for snapshot in snapshots {
+            guard let profile = snapshot.browserSessionID, !profile.isEmpty else { return nil }
+            for tab in snapshot.allTabs ?? [] {
+                let id = snapshots.count > 1 ? compositeID(session: profile, id: tab.id) : tab.id
+                guard tab.id >= 0, tab.windowID >= 0, rows[id] == nil else { return nil }
+                rows[id] = .init(bundleIdentifier: browser, browserSessionID: profile, windowID: tab.windowID)
+            }
+        }
+        let selected = selectedTabIDs.compactMap { rows[$0] }
+        guard selected.count == selectedTabIDs.count else { return nil }
+        return Set(selected)
+    }
+
     public static func nonce(_ snapshots: [BrowserTabSnapshot]) -> String? {
         let sessions = snapshots.compactMap(\.browserSessionID).sorted()
         if sessions.count == 1 { return sessions.first }

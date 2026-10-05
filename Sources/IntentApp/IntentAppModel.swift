@@ -119,6 +119,18 @@ final class IntentAppModel: ObservableObject {
     private var quickSelectionOnboardingOrigin: IntentOnboardingStep?
     private var firstIntentionID: String?
     private var quickSelectionMonitor: Task<Void, Never>?
+    private static let browserCoverageQueue = DispatchQueue(label: "dev.loganmondi.intent.chrome-coverage-start", qos: .userInitiated)
+    private var browserCoverageStartTask: Task<Void, Never>?
+    private var browserCoverageStartID: UUID?
+    private var browserCoverageIntentionID: String?
+    var isPreparingBrowserCoverage: Bool { browserCoverageStartID != nil }
+
+    /// Reopening selection or cancelling startup must invalidate the pending
+    /// discovery before its asynchronous response can start an intention.
+    func cancelBrowserCoverageStart() {
+        browserCoverageStartID = nil; browserCoverageIntentionID = nil
+        browserCoverageStartTask?.cancel(); browserCoverageStartTask = nil
+    }
 
     /// Run an unsaved first intention and offer the usual save sheet only after completion.
     func startFirstIntention(_ intention: Intention) -> Bool {
@@ -182,7 +194,7 @@ final class IntentAppModel: ObservableObject {
             purposeStatedPrompt = intention.name
             // Session presets are applied centrally by requestStart for both selection modes.
             requestStart(intention)
-            let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil || pendingZeroDriftStart != nil
+            let accepted = hasActiveSession || pendingFriction != nil || pendingEndTimeRequest != nil || pendingZeroDriftStart != nil || browserCoverageStartID != nil
             if !accepted {
                 quickSelectionIntentionID = nil
                 quickSelectionOnboardingOrigin = nil
@@ -313,7 +325,7 @@ final class IntentAppModel: ObservableObject {
         if !persistJournal() { journal.slotOrder = old }
     }
     private func releaseWorkPeriodAfterFailedStart() {
-        if isZeroDriftActive, !hasActiveSession, pendingFriction == nil, pendingEndTimeRequest == nil, pendingZeroDriftStart == nil {
+        if isZeroDriftActive, !hasActiveSession, pendingFriction == nil, pendingEndTimeRequest == nil, pendingZeroDriftStart == nil, browserCoverageStartID == nil {
             let failure = errorMessage
             emergencyStop(showMessage: false); workPhase = .recovery
             errorMessage = failure
@@ -344,6 +356,7 @@ final class IntentAppModel: ObservableObject {
         }
     }
     private func finishWorkPeriod() {
+        cancelBrowserCoverageStart()
         zeroDriftEndsAt = nil; breakEndsAt = nil; workPhase = .inactive
         zeroDriftLimitTask?.cancel(); zeroDriftLimitTask = nil; pendingZeroDriftStart = nil
         try? zeroDriftStore.clear()
@@ -1202,6 +1215,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func requestStart(_ requestedIntention: Intention) {
+        cancelBrowserCoverageStart()
         defer { releaseWorkPeriodAfterFailedStart() }
         if requestedIntention.id != quickSelectionIntentionID { pendingResume = nil; pendingWorkspace = nil }
         guard !requestedIntention.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1320,6 +1334,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func cancelFriction() {
+        cancelBrowserCoverageStart()
         clearPendingPurposeStart()
         pendingFriction = nil
         pendingStartIntention = nil
@@ -1343,6 +1358,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func cancelEndTimeSelection() {
+        cancelBrowserCoverageStart()
         clearPendingPurposeStart()
         pendingEndTimeRequest = nil
         pendingFriction = nil
@@ -1365,7 +1381,11 @@ final class IntentAppModel: ObservableObject {
     }
 
     func presentEnforcementFailure(occurrenceID: UUID, error: FocusLockError) {
-        guard !hasActiveSession, case .browserWindowEnforcementFailed = error else { return }
+        guard !hasActiveSession else { return }
+        switch error {
+        case .browserWindowEnforcementFailed, .browserWindowCoverageFailed: break
+        default: return
+        }
         dismissSessionPresentation()
         if errorMessage != error.description { errorMessage = error.description }
         overlayPresenter?.showSessionFailure(occurrenceID: occurrenceID, message: error.description)
@@ -1394,6 +1414,7 @@ final class IntentAppModel: ObservableObject {
 
     func endActiveSession() { finishActiveSession(afterEnd: nil) }
     private func finishActiveSession(afterEnd: (() -> Void)?) {
+        cancelBrowserCoverageStart()
         guard hasActiveSession, !finishPromptOpen else { return }
         sessionSwitchWarning = nil
         guard !activeSessionCanFinishManually else { activeLock?.stop(); afterEnd?(); return }
@@ -1481,6 +1502,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func showOverlay(animated: Bool = true) {
+        cancelBrowserCoverageStart()
         overlayPresentationID = UUID()
         overlayPresenter?.showOverlay(animated: animated)
     }
@@ -1495,6 +1517,7 @@ final class IntentAppModel: ObservableObject {
     }
 
     func toggleOverlay() {
+        cancelBrowserCoverageStart()
         if isZeroDriftActive, !hasActiveSession {
             showOverlay()
             return
@@ -1533,7 +1556,7 @@ final class IntentAppModel: ObservableObject {
         pendingRuntimeEndDate = nil
         start(intention, runtimeEndDate: runtimeEndDate)
         if quickSelectionIntentionID == intention.id, !hasActiveSession,
-           pendingZeroDriftStart?.intention.id != intention.id {
+           pendingZeroDriftStart?.intention.id != intention.id, browserCoverageIntentionID != intention.id {
             quickSelectionIntentionID = nil
             quickSelectionOnboardingOrigin = nil
             quickSelectionTabIDs = nil
@@ -1543,7 +1566,98 @@ final class IntentAppModel: ObservableObject {
         }
     }
 
-    private func start(_ intention: Intention, runtimeEndDate: Date? = nil) {
+    private func prepareChromeCoverageStart(_ intention: Intention, runtimeEndDate: Date?) {
+        let browser = "com.google.Chrome"
+        guard let selected = quickSelectionTabIDs?[browser], !selected.isEmpty,
+              let expected = quickSelectionBrowserSessionIDs[browser] else { return }
+        cancelBrowserCoverageStart()
+        let token = UUID()
+        browserCoverageStartID = token; browserCoverageIntentionID = intention.id
+        browserCoverageStartTask = Task { [weak self] in
+            let deadline = ProcessInfo.processInfo.systemUptime + 2.5
+            guard let self else { return }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && self.browserCoverageStartID == token && !self.hasActiveSession
+                    && self.quickSelectionIntentionID == intention.id
+                    && self.quickSelectionBrowserSessionIDs[browser] == expected
+                    && self.quickSelectionTabIDs?[browser] == selected
+            }
+            @MainActor func fail() {
+                guard isCurrent() else { return }
+                self.cancelBrowserCoverageStart()
+                self.errorMessage = "Could not confirm Chrome’s current windows. Reload Intent Browser Guard in Chrome and choose your tabs again. This intention has not started."
+                self.releaseWorkPeriodAfterFailedStart()
+                self.showOverlay(animated: false)
+            }
+            // Observe the live native identities BEFORE asking any profile for
+            // its full inventory. An absence reply cannot speak for a window
+            // that was born after that profile's query.
+            guard isCurrent() else { return }
+            let initialObservation: WorkspaceWindow.CoverageObservation? = await withCheckedContinuation { continuation in
+                Self.browserCoverageQueue.async {
+                    continuation.resume(returning: WorkspaceWindow.browserCoverageObservation(
+                        bundleIdentifier: browser, deadline: deadline))
+                }
+            }
+            guard isCurrent() else { return }
+            guard ProcessInfo.processInfo.systemUptime < deadline, let firstObservation = initialObservation else { fail(); return }
+            var before = firstObservation
+            var command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
+            do { try BrowserTabCommandStore(browserBundleIdentifier: browser).write(command) }
+            catch { fail(); return }
+            while isCurrent(), ProcessInfo.processInfo.systemUptime < deadline {
+                let snapshots = BrowserProfileSnapshots.coverageSnapshots(
+                    base: BrowserTabSnapshotStore.fileURL(for: browser), requestID: command.id)
+                if let required = BrowserProfileSnapshots.selectedCoverageWindows(
+                    snapshots: snapshots, browser: browser, expectedSession: expected, selectedTabIDs: selected),
+                   let reports = BrowserWindowCoveragePolicy.reportedWindows(snapshots: snapshots) {
+                    // This second sample starts only AFTER the complete reply
+                    // was received. CFEqual continuity brackets the query.
+                    let priorObservation = before
+                    let after: WorkspaceWindow.CoverageObservation? = await withCheckedContinuation { continuation in
+                        Self.browserCoverageQueue.async {
+                            continuation.resume(returning: WorkspaceWindow.browserCoverageObservation(
+                                bundleIdentifier: browser, deadline: deadline, prior: priorObservation))
+                        }
+                    }
+                    guard isCurrent() else { return }
+                    if !snapshots.allSatisfy({ BrowserProfileSnapshots.isCoverageSnapshotCurrent($0,
+                        base: BrowserTabSnapshotStore.fileURL(for: browser)) }) {
+                        // A real newer update contradicted the latched reply.
+                        // Retry from this native observation without extending
+                        // the original deadline or borrowing a later receipt.
+                        guard let after, ProcessInfo.processInfo.systemUptime < deadline else { fail(); return }
+                        before = after
+                        command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
+                        do { try BrowserTabCommandStore(browserBundleIdentifier: browser).write(command) }
+                        catch { fail(); return }
+                        continue
+                    }
+                    if ProcessInfo.processInfo.systemUptime < deadline, let after,
+                       case .complete(let coverage) = BrowserWindowCoveragePolicy.evaluate(browserBundleIdentifier: browser,
+                            native: after.inventory.windows, observedStandard: after.inventory.observedStandard,
+                            reported: reports, requiredSelected: required,
+                            knownProfiles: Set(snapshots.compactMap(\.browserSessionID)),
+                            continuousIdentities: after.continuousIdentities,
+                            witnessedBeforeSnapshot: before.inventory.observedStandard.intersection(after.continuousIdentities)) {
+                        // No await between the final generation check and the
+                        // normal start; Finish/replacement cannot race handoff.
+                        self.browserCoverageStartID = nil; self.browserCoverageIntentionID = nil
+                        self.browserCoverageStartTask = nil
+                        self.start(intention, runtimeEndDate: runtimeEndDate, chromeCoverage: coverage,
+                                   chromeCoverageObservation: after)
+                        if !self.hasActiveSession { self.showOverlay(animated: false) }
+                        return
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 75_000_000)
+            }
+            fail()
+        }
+    }
+
+    private func start(_ intention: Intention, runtimeEndDate: Date? = nil, chromeCoverage: BrowserWindowCoveragePolicy.Coverage? = nil,
+                       chromeCoverageObservation: WorkspaceWindow.CoverageObservation? = nil) {
         defer { releaseWorkPeriodAfterFailedStart() }
         let hidesDistractions = UserDefaults.standard.string(forKey: "distractionAppearance") != "blur"
         guard !intention.selectionRequiresTabReselection || quickSelectionIntentionID == intention.id else {
@@ -1610,6 +1724,19 @@ final class IntentAppModel: ObservableObject {
                 errorMessage = "Intent Browser Guard is turned off in \(browser.name). Open its toolbar popup and switch it on, then start this intention again."
                 return
             }
+        }
+
+        // Chrome APIs only enumerate the connected profile. Before publishing
+        // active rules, map a fresh full profile inventory and freeze the other
+        // positively observed AX standard windows for native ownership.
+        if hidesDistractions, intention.accessMode == .whitelist,
+           quickSelectionIntentionID == intention.id,
+           !(quickSelectionTabIDs?["com.google.Chrome"] ?? []).isEmpty,
+           !intention.wholeBrowserBundleIdentifiers.contains("com.google.Chrome"),
+           requiredBrowserGuards(for: intention).contains(where: { $0.bundleIdentifier == "com.google.Chrome" }),
+           chromeCoverage == nil {
+            prepareChromeCoverageStart(intention, runtimeEndDate: runtimeEndDate)
+            return
         }
 
         let spec = FocusSessionSpec.make(
@@ -1681,6 +1808,9 @@ final class IntentAppModel: ObservableObject {
             lockSpec.initialAllowedApps = Set(intention.allowedApps.map(\.bundleIdentifier)).union(alwaysAllowedApps.map(\.bundleIdentifier))
             lockSpec.initialSelectedWindows = quickSelectionIntentionID == intention.id ? quickSelectionWindowIDs : [:]
         }
+        lockSpec.browserWindowCoverage = chromeCoverage.map { [$0] } ?? []
+        if let chromeCoverageObservation { lockSpec.browserCoverageObservations["com.google.Chrome"] = chromeCoverageObservation }
+        lockSpec.coverageAllowsLaterWindows = intention.addAsYouGo
         lockSpec.hideDistractions = hidesDistractions
         lockSpec.nativeWindowVisibilitySessionID = rules?.nativeWindowVisibility == true ? rules?.startupSessionID : nil
         // Finishing should leave the user where they are, not reactivate the
@@ -1828,10 +1958,11 @@ final class IntentAppModel: ObservableObject {
                 failureMessage = nil
                 enforcementFailure = nil
             } catch let error as FocusLockError {
-                if case .browserWindowEnforcementFailed = error {
+                switch error {
+                case .browserWindowEnforcementFailed, .browserWindowCoverageFailed:
                     failureMessage = error.description
                     enforcementFailure = error
-                } else {
+                default:
                     failureMessage = "Could not start session: \(error)"
                     enforcementFailure = nil
                 }

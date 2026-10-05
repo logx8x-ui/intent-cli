@@ -57,6 +57,53 @@ enum IntentPersistenceChecks {
             model.emergencyStop()
             try check(!presentation.events.contains("show"), "Safety stop stores its reason without opening a new screen")
             model.overlayPresenter = nil
+            // Enter the real asynchronous preflight using only isolated bridge
+            // fixtures. Each task is canceled synchronously before its first
+            // actor turn, so it must never enumerate the real desktop or construct a FocusLock.
+            let coverageModel = IntentAppModel()
+            let chrome = "com.google.Chrome", chromeSession = "qa-coverage-start"
+            let oldAppearance = UserDefaults.standard.object(forKey: "distractionAppearance")
+            UserDefaults.standard.set("hide", forKey: "distractionAppearance")
+            defer {
+                if let oldAppearance { UserDefaults.standard.set(oldAppearance, forKey: "distractionAppearance") }
+                else { UserDefaults.standard.removeObject(forKey: "distractionAppearance") }
+                coverageModel.cancelBrowserCoverageStart()
+            }
+            try BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: chrome)).write(
+                capabilities: [BrowserGuardCapability.quickSelection, .tabSessionIdentity, .singleStartupLaunch, .nativeWindowVisibility].map(\.rawValue))
+            try BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: chrome)).write(enabled: true)
+            let chromeSnapshot = BrowserTabSnapshot(browserBundleIdentifier: chrome, browserSessionID: chromeSession,
+                tabs: [.init(id: 101, windowID: 201, index: 0, title: "QA", url: "https://example.test", active: true)])
+            try JSONEncoder().encode(chromeSnapshot).write(to: BrowserTabSnapshotStore.fileURL(for: chrome), options: .atomic)
+            var chromeSelection = QuickSelection()
+            chromeSelection.toggleTab(.init(browser: chrome, id: 101), browserSessionID: chromeSession)
+            let chromeApp = AllowedApp(name: "Chrome", bundleIdentifier: chrome)
+            for cancel in [
+                { coverageModel.endActiveSession() },
+                { coverageModel.cancelFriction() },
+                { coverageModel.cancelEndTimeSelection() },
+                { coverageModel.cancelBrowserCoverageStart() },
+                { coverageModel.showOverlay(animated: false) },
+                { coverageModel.toggleOverlay() },
+                { coverageModel.emergencyStop(showMessage: false) }
+            ] {
+                try check(coverageModel.startQuickSelection(chromeSelection, apps: [chromeApp], snapshots: [chromeSnapshot]),
+                    "Selected Chrome tabs accept asynchronous coverage preparation")
+                try check(coverageModel.isPreparingBrowserCoverage && !coverageModel.hasActiveSession,
+                    "Chrome preparation does not claim a running intention before coverage")
+                try check((try? JSONDecoder().decode(ActiveBrowserRules.self, from: Data(contentsOf: ActiveBrowserRulesStore.defaultFileURL())))?.active != true,
+                    "No browser restriction is published while discovery is pending")
+                cancel()
+                try check(!coverageModel.isPreparingBrowserCoverage && !coverageModel.hasActiveSession,
+                    "Finish/cancel/reopen prevents a delayed coverage reply from starting the old draft")
+            }
+            try check(coverageModel.startQuickSelection(chromeSelection, apps: [chromeApp], snapshots: [chromeSnapshot]),
+                "Coverage can prepare again after cancellation")
+            var replacement = try chromeSelection.makeIntention(apps: [chromeApp], snapshots: [chromeSnapshot])
+            replacement.name = ""
+            coverageModel.requestStart(replacement)
+            try check(!coverageModel.isPreparingBrowserCoverage && !coverageModel.hasActiveSession,
+                "Even a rejected replacement cancels the old asynchronous start")
             let app = AllowedApp(name: "Calculator", bundleIdentifier: "com.apple.calculator")
             var selection = QuickSelection(); selection.apps = [app.bundleIdentifier]
             let unnamed = try selection.makeIntention(apps: [app], snapshots: [])

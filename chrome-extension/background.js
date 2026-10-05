@@ -296,12 +296,26 @@ let deferredSnapshotDiscovery = false;
 let deferredSnapshotFlight = null;
 let publishedSnapshotGeneration = -1;
 let publishedSnapshotDiscovery = false;
+// Explicit discovery requests share one post-preview inventory; retain each bounded receipt.
+const pendingSnapshotRequestIDs = new Set();
+let snapshotDiscoveryRetryTimer = null;
+let snapshotDiscoveryRetryDeadline = 0;
+let snapshotDiscoveryRetries = 0;
+function scheduleDiscoveryRetry() {
+  if (snapshotDiscoveryRetryTimer !== null || !pendingSnapshotRequestIDs.size
+      || Date.now() >= snapshotDiscoveryRetryDeadline || snapshotDiscoveryRetries >= 20) return;
+  snapshotDiscoveryRetries += 1;
+  snapshotDiscoveryRetryTimer = setTimeout(() => {
+    snapshotDiscoveryRetryTimer = null;
+    if (pendingSnapshotRequestIDs.size && Date.now() < snapshotDiscoveryRetryDeadline) publishTabSnapshot(true, true);
+  }, 100);
+}
 
 function deferSnapshotForPreview(discovery, overlapping = false) {
   // A fresh post-preview reply already satisfies older overlapping requests.
-  if (overlapping && !previewBusy && publishedSnapshotGeneration === previewGeneration
+  if (pendingSnapshotRequestIDs.size === 0 && overlapping && !previewBusy && publishedSnapshotGeneration === previewGeneration
       && (!discovery || publishedSnapshotDiscovery)) return;
-  if (!previewBusy && deferredSnapshotFlight?.generation === previewGeneration
+  if (pendingSnapshotRequestIDs.size === 0 && !previewBusy && deferredSnapshotFlight?.generation === previewGeneration
       && (!discovery || deferredSnapshotFlight.discovery)) return;
   deferredSnapshotPending = true;
   deferredSnapshotDiscovery ||= discovery;
@@ -385,6 +399,14 @@ async function captureTabPreview(message) {
 async function handleRequestedTab(message) {
   // Discovery is how Intent learns the current browser lifetime in the first place.
   if (message.action === "snapshot") {
+    if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 256) {
+      if (!pendingSnapshotRequestIDs.has(message.id)) {
+        snapshotDiscoveryRetryDeadline = Date.now() + 2200;
+        snapshotDiscoveryRetries = 0;
+      }
+      pendingSnapshotRequestIDs.add(message.id);
+      while (pendingSnapshotRequestIDs.size > 16) pendingSnapshotRequestIDs.delete(pendingSnapshotRequestIDs.values().next().value);
+    }
     await publishTabSnapshot(true, true);
     return;
   }
@@ -419,15 +441,43 @@ async function handleRequestedTab(message) {
 }
 
 function scheduleTabSnapshot(force = false) {
-  if (!rules.active && !force) return;
+  if (!rules.active && !force && !pendingSnapshotRequestIDs.size) return;
   snapshotForcePending ||= force;
   if (snapshotTimer) return;
   snapshotTimer = setTimeout(() => {
     snapshotTimer = null;
     const shouldForce = snapshotForcePending;
     snapshotForcePending = false;
-    publishTabSnapshot(shouldForce);
+    const discovery = pendingSnapshotRequestIDs.size > 0;
+    publishTabSnapshot(shouldForce || discovery, discovery);
   }, TAB_SNAPSHOT_DEBOUNCE_MS);
+}
+
+// A correlated discovery can prove profile absence only from one successful,
+// populated enumeration. Independent tab/window reads can straddle a new window.
+function completeDiscoveryWindows(windows) {
+  if (!Array.isArray(windows)) return false;
+  const windowIDs = new Set(), tabIDs = new Set();
+  for (const window of windows) {
+    if (!window || !Number.isSafeInteger(window.id) || window.id < 0 || windowIDs.has(window.id)
+        || !["normal", "popup"].includes(window.type)
+        || ![window.left, window.top, window.width, window.height].every(Number.isFinite)
+        || window.width <= 0 || window.height <= 0 || window.width > 100_000 || window.height > 100_000
+        || Math.abs(window.left) > 100_000 || Math.abs(window.top) > 100_000
+        || !Array.isArray(window.tabs) || !window.tabs.length) return false;
+    windowIDs.add(window.id);
+    let active = 0;
+    const indices = new Set();
+    for (const tab of window.tabs) {
+      if (!tab || !Number.isSafeInteger(tab.id) || tab.id < 0 || tabIDs.has(tab.id)
+          || tab.windowId !== window.id || !Number.isInteger(tab.index) || tab.index < 0
+          || indices.has(tab.index) || typeof tab.active !== "boolean") return false;
+      indices.add(tab.index); tabIDs.add(tab.id);
+      if (tab.active) active += 1;
+    }
+    if (active !== 1 || !window.tabs.every(tab => tab.index < window.tabs.length)) return false;
+  }
+  return true;
 }
 
 async function publishTabSnapshot(force = false, discovery = false) {
@@ -436,11 +486,19 @@ async function publishTabSnapshot(force = false, discovery = false) {
   if (!nativePort) return;
   if (previewBusy) { deferSnapshotForPreview(discovery); return; }
   const generation = previewGeneration;
-  const tabs = rules.active || discovery ? await chrome.tabs.query({}) : [];
-  // Window identity is supplied by the browser; bounds disambiguate equal titles
-  // when matching these IDs to macOS WindowServer preview windows.
-  const windows = tabs.length && chrome.windows?.getAll
-    ? await chrome.windows.getAll({ populate: false, windowTypes: ["normal", "popup"] }).catch(() => []) : [];
+  const snapshotRequestIDs = discovery ? [...pendingSnapshotRequestIDs] : [];
+  let windows, tabs;
+  if (discovery) {
+    windows = await chrome.windows?.getAll({ populate: true, windowTypes: ["normal", "popup"] }).catch(() => null);
+    // Retain pending request IDs on failures and zero-tab transition windows.
+    // Neither an empty substitute nor a filtered snapshot certifies absence.
+    if (!completeDiscoveryWindows(windows)) { scheduleDiscoveryRetry(); return; }
+    tabs = windows.flatMap(window => window.tabs);
+  } else {
+    tabs = rules.active ? await chrome.tabs.query({}) : [];
+    windows = tabs.length && chrome.windows?.getAll
+      ? await chrome.windows.getAll({ populate: false, windowTypes: ["normal", "popup"] }).catch(() => []) : [];
+  }
   // Even if capture finished during an API await, its temporary active/native
   // highlighted state must never be published as a user's fresh selection.
   if (previewBusy || generation !== previewGeneration) {
@@ -482,11 +540,17 @@ async function publishTabSnapshot(force = false, discovery = false) {
     type: "tabsSnapshot",
     browserSessionID,
     tabs: snapshotTabs,
-    allTabs: allSnapshotTabs
+    allTabs: allSnapshotTabs,
+    snapshotRequestIDs,
+    completeWindowInventory: discovery && snapshotRequestIDs.length > 0
   })) {
+    for (const id of snapshotRequestIDs) pendingSnapshotRequestIDs.delete(id);
+    if (!pendingSnapshotRequestIDs.size && snapshotDiscoveryRetryTimer !== null) {
+      clearTimeout(snapshotDiscoveryRetryTimer); snapshotDiscoveryRetryTimer = null;
+    }
     publishedSnapshotGeneration = generation;
     publishedSnapshotDiscovery = discovery;
-  }
+  } else if (discovery) scheduleDiscoveryRetry();
 }
 
 function effectiveRules(nativeRules) {

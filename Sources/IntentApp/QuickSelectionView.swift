@@ -685,6 +685,7 @@ final class QuickSelectionController: ObservableObject {
     var isSelectionSurfaceVisible: Bool { panel?.isVisible == true }
     private var overviewOpenTask: Task<Void, Never>?
     func toggle() {
+        model.cancelBrowserCoverageStart()
         // Finish a pending mark before presenting a surface that changes focus.
         if markTask != nil, panel?.isVisible != true {
             guard overviewOpenTask == nil else { return }

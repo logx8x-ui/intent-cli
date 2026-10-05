@@ -6,6 +6,9 @@ public struct FocusSessionSpec {
     /// The exact shared-rule occurrence whose browser visibility plans this
     /// native lock may own. Nil keeps legacy/CLI sessions out of the bridge.
     public var nativeWindowVisibilitySessionID: String?
+    public var browserWindowCoverage: [BrowserWindowCoveragePolicy.Coverage] = []
+    public var browserCoverageObservations: [String: WorkspaceWindow.CoverageObservation] = [:]
+    public var coverageAllowsLaterWindows = false
     public var initialAllowedApps: Set<String>?
     public var initialSelectedWindows: [String: Set<UInt32>] = [:]
     public var selectedWindowIDsByApp: [String: Set<UInt32>] = [:]
@@ -182,6 +185,9 @@ public struct FocusSessionSpec {
         )
         result.hideDistractions = hideDistractions
         result.nativeWindowVisibilitySessionID = nativeWindowVisibilitySessionID
+        result.browserWindowCoverage = browserWindowCoverage
+        result.browserCoverageObservations = browserCoverageObservations
+        result.coverageAllowsLaterWindows = coverageAllowsLaterWindows
         result.initialAllowedApps = initialAllowedApps
         result.initialSelectedWindows = initialSelectedWindows
         return result

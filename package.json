@@ -10,7 +10,7 @@
     "test:firefox": "node scripts/test-firefox-rules.cjs && node scripts/test-firefox-background.cjs && python3 scripts/test-firefox-installation.py",
     "test:chrome": "node scripts/test-chrome-rules.cjs && node scripts/test-chrome-background.cjs",
     "test:extensions": "npm run test:firefox && npm run test:chrome && node scripts/test-browser-idle-work.cjs && node scripts/test-browser-popup.cjs && node scripts/test-tab-visibility.cjs && node scripts/test-native-window-visibility.cjs && node scripts/test-parking-closure.cjs && node scripts/test-firefox-minimize-bootstrap.cjs && node scripts/test-website-features.cjs",
-    "test:native-host": "swift build -c release --product IntentNativeHost && node scripts/test-native-host.cjs && node scripts/test-native-host-window-visibility.cjs && node scripts/test-native-host-performance.cjs && node scripts/test-native-host-snapshot-refresh.cjs && node scripts/test-native-profiles.cjs",
+    "test:native-host": "swift build -c release --product IntentNativeHost && node scripts/test-native-host.cjs && node scripts/test-native-host-window-visibility.cjs && node scripts/test-native-host-performance.cjs && node scripts/test-native-host-snapshot-refresh.cjs && node scripts/test-native-chrome-coverage-snapshot.cjs && node scripts/test-native-profiles.cjs",
     "test:ai": "npm --prefix services/intent-ai test",
     "test:release-readiness": "node scripts/test-release-readiness.cjs",
     "ai:dev": "npm --prefix services/intent-ai run dev",

@@ -6,7 +6,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const source = fs.readFileSync(path.join(root, "chrome-extension/background.js"), "utf8");
+const source = fs.readFileSync(process.env.INTENT_CHROME_BACKGROUND_TEST_SOURCE || path.join(root, "chrome-extension/background.js"), "utf8");
 const helpers = require(path.join(root, "chrome-extension/rule-helpers.js"));
 
 function event() {
@@ -37,6 +37,8 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const highlightUpdates = [];
   let interruptReturnWithTab = null;
   const intervals = [];
+  const discoveryRetryTimers = new Map();
+  let retryTimerID = 0;
   let dynamicRules = [];
   let sessionRules = [];
 
@@ -169,10 +171,14 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       sendMessage: async () => options.rejectWebsiteGuard ? {} : ({websiteFeatures:true})
     },
     windows: {
-      getAll: async () => {
-        const pending = options.beforeWindowQuery?.();
+      getAll: async (query) => {
+        const pending = options.beforeWindowQuery?.(query);
         if (pending) await pending;
-        return [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({ id, left: id * 20, top: 50, width: 900, height: 700, focused: id === 1 }));
+        const windows = [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({
+          id, type: "normal", left: id * 20, top: 50, width: 900, height: 700, focused: id === 1,
+          ...(query.populate ? {tabs: Array.from(tabs.values()).filter(tab => tab.windowId === id).map(tab => ({...tab}))} : {})
+        }));
+        return options.onWindowQuery ? options.onWindowQuery(query, windows) : windows;
       },
       onFocusChanged: windowFocus,
       update: async (id, patch) => {
@@ -205,13 +211,14 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       return intervals.length;
     },
     setTimeout: (callback, delay) => {
+      if (delay === 100) { const id = ++retryTimerID; discoveryRetryTimers.set(id, callback); return id; }
       if (delay === 180 && options.onPreviewDelay) options.onPreviewDelay(tabs, { highlight: setHighlighted });
       if (delay === 180 && options.previewDelayGate) {
         Promise.resolve(options.previewDelayGate).then(callback); return 0;
       }
       Promise.resolve().then(callback); return 0;
     },
-    clearTimeout: () => {}
+    clearTimeout: id => discoveryRetryTimers.delete(id)
   };
   vm.runInNewContext(source, context, { filename: "chrome-extension/background.js" });
 
@@ -224,6 +231,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     get dynamicRules() { return dynamicRules; },
     get sessionRules() { return sessionRules; },
     settle,
+    discoveryRetryCount: () => discoveryRetryTimers.size,
+    async retryDiscovery() {
+      const next = discoveryRetryTimers.entries().next().value;
+      if (next) { discoveryRetryTimers.delete(next[0]); await next[1](); await settle(); }
+    },
     async applyRules(next) {
       if (Array.isArray(next.selectedTabIDs) && next.selectedBrowserSessionID === undefined) {
         next = {...next, selectedBrowserSessionID: vm.runInNewContext("browserSessionID", context)};
@@ -593,6 +605,69 @@ async function run() {
   assert.equal(metadata.tabs[4].groupID, 9);
   assert.equal(metadata.tabs[4].pinned && metadata.tabs[4].discarded, true);
   assert.equal(metadata.tabs[0].windowFrame.left, 20, "Window geometry identifies same-title browser windows");
+  await discovery.command({action: "snapshot", id: "coverage-discovery-one", tabID: -1, windowID: -1});
+  const requestedDiscovery = discovery.nativeMessages.filter(message=>message.type === "tabsSnapshot").at(-1);
+  assert.deepEqual(Array.from(requestedDiscovery.snapshotRequestIDs || []), ["coverage-discovery-one"],
+    "A coverage snapshot echoes only the explicit request whose inventory it queried");
+  assert.equal(requestedDiscovery.completeWindowInventory, true, "Only explicit coherent windows enumeration earns completeness");
+  for (const [name, corrupt] of [
+    ["read rejects", () => { throw new Error("windows unavailable"); }],
+    ["malformed result", () => null],
+    ["zero-tab transition", windows => [{...windows[0], tabs: []}]],
+    ["duplicate window ID", windows => [windows[0], windows[0]]],
+    ["duplicate tab ID", windows => [{...windows[0], tabs: [windows[0].tabs[0], windows[0].tabs[0]]}]],
+    ["wrong membership", windows => [{...windows[0], tabs: [{...windows[0].tabs[0], windowId: 999}]}]],
+    ["missing active tab", windows => [{...windows[0], tabs: windows[0].tabs.map(tab => ({...tab, active:false}))}]],
+    ["multiple active tabs", windows => [{...windows[0], tabs: windows[0].tabs.map(tab => ({...tab, active:true}))}]],
+    ["invalid bounds", windows => [{...windows[0], width: 0}]],
+    ["unknown window type", windows => [{...windows[0], type:"devtools"}]],
+    ["missing tab index", windows => [{...windows[0], tabs: [{...windows[0].tabs[0], index:undefined}]}]]
+  ]) {
+    let broken = true;
+    const incomplete = createHarness({active:false}, mixedTabs, {
+      onWindowQuery(query, windows) { return broken && query.populate ? corrupt(windows) : windows; }
+    });
+    await incomplete.settle();
+    const id = "coverage-invalid-" + name;
+    await incomplete.command({action:"snapshot", id, tabID:-1, windowID:-1});
+    assert.equal(incomplete.nativeMessages.some(message => message.snapshotRequestIDs?.includes(id)), false,
+      name + " cannot certify absence of a profile's windows");
+    broken = false;
+    await incomplete.snapshot();
+    const recovered = incomplete.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
+    assert.equal(recovered.snapshotRequestIDs?.includes(id), true, name + " retains request for a successful retry");
+    assert.equal(recovered.completeWindowInventory, true);
+  }
+  for (const trigger of ["timer", "event"]) {
+    let transitioning = true;
+    const transition = createHarness({active:false}, mixedTabs, {
+      onWindowQuery(query, windows) { return transitioning && query.populate ? [{...windows[0], tabs:[]}] : windows; }
+    });
+    await transition.settle();
+    await transition.command({action:"snapshot",id:"transition-"+trigger,tabID:-1,windowID:-1});
+    assert.equal(transition.discoveryRetryCount(),1,"An incomplete response schedules a bounded retry");
+    transitioning = false;
+    if (trigger === "timer") await transition.retryDiscovery();
+    else await transition.complete(1);
+    assert.ok(transition.nativeMessages.some(message => message.snapshotRequestIDs?.includes("transition-"+trigger)
+      && message.completeWindowInventory === true),"A settled window automatically supplies the correlated reply via "+trigger);
+    assert.equal(transition.discoveryRetryCount(),0,"Success cancels the pending discovery retry");
+  }
+  const unavailable = createHarness({active:false}, mixedTabs, {onWindowQuery() { throw new Error("still unavailable"); }});
+  await unavailable.settle();
+  await unavailable.command({action:"snapshot",id:"bounded-retry",tabID:-1,windowID:-1});
+  for (let attempt=0; attempt<24; attempt++) await unavailable.retryDiscovery();
+  assert.equal(unavailable.discoveryRetryCount(),0,"Unresponsive discovery cannot create a permanent retry loop");
+  const emptyProfile = createHarness({active:false}, []);
+  await emptyProfile.settle();
+  await emptyProfile.command({action:"snapshot",id:"coverage-empty-profile",tabID:-1,windowID:-1});
+  const emptyResponse = emptyProfile.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
+  assert.equal(emptyResponse.completeWindowInventory,true,"Successful empty windows inventory is different from failed enumeration");
+  assert.equal(emptyResponse.allTabs.length,0);
+  const afterRequestedDiscovery = await discovery.snapshot();
+  assert.deepEqual(Array.from(afterRequestedDiscovery.snapshotRequestIDs || []), [],
+    "An unrelated later snapshot must not inherit an earlier request's freshness proof");
+
   assert.equal(metadata.tabs[0].windowFocused, true, "Browser focus disambiguates overlapping windows");
   assert.ok(metadata.browserSessionID, "Every snapshot carries a browser-session identity");
   assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1] }).active, false, "Missing identity cannot authorize a potentially reused tab ID");
@@ -798,37 +873,36 @@ async function run() {
       browserSessionID: delayedPreview.browserSessionID() });
     await delayedPreview.settle();
     await Promise.all([delayedPreview.snapshot(), delayedPreview.snapshot(), delayedPreview.snapshot()]);
+    await delayedPreview.command({action: "snapshot", id: "coverage-preview-one", tabID: -1, windowID: -1});
+    await delayedPreview.command({action: "snapshot", id: "coverage-preview-two", tabID: -1, windowID: -1});
     assert.equal(snapshotMessages(delayedPreview).length, before, "Discovery while preview is busy cannot publish a temporary native group");
     captureGate.resolve();
     await capture;
     await delayedPreview.settle();
     const replies = snapshotMessages(delayedPreview).slice(before);
     assert.equal(replies.length, 1, "Pending discovery is coalesced into one fresh reply after every preview outcome");
+    assert.deepEqual(Array.from(replies[0].snapshotRequestIDs || []).sort(), ["coverage-preview-one", "coverage-preview-two"],
+      "Coverage request IDs survive preview deferral and coalesce without borrowing the temporary window state");
     const expected = outcome === "user-interference" ? [52, 54] : [51, 53];
     assert.deepEqual(Array.from(replies[0].allTabs.filter(tab => tab.windowID === 3 && tab.highlighted), tab => tab.id), expected,
       "Post-preview discovery reports the restored group or the user's newer choice, including capture failure");
   }
 
   for (const alsoRequestWhileBusy of [false, true]) {
-    const oldQueryGate = deferred();
     const oldWindowGate = deferred();
     const overlappingCaptureGate = deferred();
     let armOldQuery = false;
-    let oldQueryPaused = false;
     let oldWindowPaused = false;
     const overlappingDiscovery = groupPreview({
       previewDelayGate: overlappingCaptureGate.promise,
-      beforeTabQuery(query) {
-        if (armOldQuery && query.windowId == null && !oldQueryPaused) {
-          oldQueryPaused = true;
-          return oldQueryGate.promise;
-        }
-      },
-      beforeWindowQuery() {
-        if (oldQueryPaused && !oldWindowPaused) {
+      onWindowQuery(query, windows) {
+        if (armOldQuery && query.populate && !oldWindowPaused) {
           oldWindowPaused = true;
-          return oldWindowGate.promise;
+          // A populated snapshot result may be delivered after preview begins
+          // and ends. Keep the captured metadata stale until explicitly released.
+          return oldWindowGate.promise.then(() => windows);
         }
+        return windows;
       }
     });
     await overlappingDiscovery.settle();
@@ -839,9 +913,7 @@ async function run() {
     const overlappingCapture = overlappingDiscovery.command({ id: "overlapping-discovery", action: "preview", tabID: 52, windowID: 3,
       browserSessionID: overlappingDiscovery.browserSessionID() });
     await overlappingDiscovery.settle();
-    oldQueryGate.resolve(); // The old tab query now reads the preview's temporary group.
-    await overlappingDiscovery.settle();
-    assert.equal(oldWindowPaused, true, "The overlapping snapshot holds temporary tab metadata across another async API call");
+    assert.equal(oldWindowPaused, true, "An older populated windows response remains pending across preview capture");
     if (alsoRequestWhileBusy) await overlappingDiscovery.snapshot(); // Optional separate request coalesces until restoration.
     overlappingCaptureGate.resolve();
     await overlappingCapture;

@@ -15,6 +15,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var browserWindowID: Int?
         var parking: Bool?
         var bootstrapEffectID: String?
+        var nativeCoverage: Bool?
     }
     private struct WindowIdentity: Hashable {
         var pid: pid_t
@@ -35,6 +36,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private let visibilityCache: BrowserWindowVisibilityRecordCache?
     private var enforcementPolicy: BrowserWindowEnforcementPolicy?
     /// Main-thread callback. Parking capture receipts are intentionally separate.
+    public var onCoverageFailure: ((BrowserWindowCoveragePolicy.Failure) -> Void)?
     public var onEnforcementFailure: ((BrowserWindowEnforcementPolicy.Failure) -> Void)?
     /// The lock's thread-safe stop gate also fences a main-thread AX pass while
     /// another thread is waiting for synchronous visibility cleanup.
@@ -48,8 +50,55 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var stopped = false
     private var started = false
     private var initialVisibilityApplied = false
+    private struct CoverageRequest {
+        var id: String
+        var began: TimeInterval
+        var targets: Set<BrowserWindowCoveragePolicy.NativeIdentity>
+        var witnessed: Set<BrowserWindowCoveragePolicy.NativeIdentity>
+        var snapshots: [BrowserTabSnapshot]?
+        var receiptAt: TimeInterval?
+        var reported: Set<BrowserWindowCoveragePolicy.ReportedIdentity>
+        var expectedProfiles: Set<String>
+    }
+    private final class CoverageState {
+        var known: Set<BrowserWindowCoveragePolicy.NativeIdentity>
+        var profiles: Set<String>
+        var coverage: BrowserWindowCoveragePolicy.Coverage
+        var observation: WorkspaceWindow.CoverageObservation?
+        var cohort: BrowserWindowCoverageCohort
+        var request: CoverageRequest?
+        var inventoryFailureSince: TimeInterval?
+        var pendingReported: Set<BrowserWindowCoveragePolicy.ReportedIdentity> = []
+        init(_ coverage: BrowserWindowCoveragePolicy.Coverage, observation: WorkspaceWindow.CoverageObservation?, allowsLater: Bool) {
+            self.coverage = coverage; self.observation = observation
+            known = coverage.observableIdentities; profiles = coverage.knownProfiles
+            cohort = .init(windows: coverage.unreported, allowsLaterWindows: allowsLater)
+        }
+    }
+    private var coverageStates: [String: CoverageState] = [:]
+    private static let coverageQueue = DispatchQueue(label: "intent.browser-coverage", qos: .userInitiated)
+    private var coverageSweepInFlight = false
+    private var coverageSweepGeneration = 0
+    private struct CoverageSample {
+        var browser: String
+        var observation: WorkspaceWindow.CoverageObservation?
+    }
+    private let coverageReadyLock = NSLock()
+    private var initialCoverageReady = true
+    public var isInitialCoverageReady: Bool {
+        coverageReadyLock.lock(); defer { coverageReadyLock.unlock() }; return initialCoverageReady
+    }
+    private func updateCoverageReady() {
+        coverageReadyLock.lock()
+        initialCoverageReady = coverageStates.values.allSatisfy { $0.cohort.initialResolved }
+        coverageReadyLock.unlock()
+    }
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        for coverage in spec.browserWindowCoverage where spec.hideDistractions && spec.requiresEnforcement {
+            coverageStates[coverage.browserBundleIdentifier] = CoverageState(coverage, observation: spec.browserCoverageObservations[coverage.browserBundleIdentifier], allowsLater: spec.coverageAllowsLaterWindows)
+        }
+        initialCoverageReady = coverageStates.values.allSatisfy { $0.cohort.initialResolved }
         visibilityCache = spec.nativeWindowVisibilitySessionID.map {
             BrowserWindowVisibilityRecordCache(intentionSessionID: $0)
         }
@@ -142,14 +191,15 @@ public final class FocusVisibilityController: @unchecked Sendable {
         guard mayEnforce else { return }
         let initialApps = initialVisibilityApplied ? nil : spec.initialAllowedApps
         defer { initialVisibilityApplied = true }
-        let windows = WorkspaceWindow.list(onScreen: false)
+        let serverRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        let windows = WorkspaceWindow.list(records: serverRows ?? [])
         // The presentation list can omit a still-live minimized window. Retain
         // its exact AX binding unless the unfiltered lifetime probe proves loss.
         let missingCached = Self.accessibilityWindows.keys.filter { identity in
             !windows.contains { $0.id == identity.window && $0.pid == identity.pid }
         }
         if !missingCached.isEmpty {
-            let inventory = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+            let inventory = serverRows
             Self.accessibilityWindows = Self.accessibilityWindows.filter { identity, _ in
                 guard missingCached.contains(identity), let inventory else { return true }
                 return inventory.contains { $0[kCGWindowNumber as String] as? UInt32 == identity.window
@@ -171,6 +221,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             entries = Self.restore(parkingOnly: true)
         }
         reconcileBrowserWindows(records: records, windows: windows)
+        refreshBrowserCoverage()
         guard mayEnforce else { return }
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard mayEnforce else { return }
@@ -186,9 +237,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 guard mayEnforce else { return }
                 _ = app.hide()
             } else {
-                for window in windows where window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
+                for window in windows where coverageStates[bundle] == nil && window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
                     guard mayEnforce else { return }
-                    guard !entries.contains(where: { $0.pid == window.pid && $0.window == window.id && $0.bootstrapEffectID != nil }) else { continue }
+                    guard !entries.contains(where: { $0.pid == window.pid && $0.window == window.id && ($0.bootstrapEffectID != nil || $0.nativeCoverage == true) }) else { continue }
                     guard let element = Self.element(window, launched: launched), Self.boolean(element, kAXMinimizedAttribute).value == false else { continue }
                     if !entries.contains(where: { $0.pid == window.pid && $0.window == window.id }) {
                         entries.append(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id))
@@ -200,7 +251,237 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
         }
     }
+    private func refreshBrowserCoverage() {
+        guard !coverageStates.isEmpty, coverageIsCurrent() else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let active = coverageStates.filter { !spec.coverageAllowsLaterWindows || !$0.value.cohort.initialResolved
+            || !$0.value.pendingReported.isEmpty || $0.value.request != nil }
+        for (browser, state) in active {
+            if let failure = state.cohort.expiredFailure(now: now) { onCoverageFailure?(failure); return }
+            if let request = state.request, now - request.began >= 3 {
+                onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
+            }
+            if let began = state.inventoryFailureSince, now - began >= 3 {
+                onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)); return
+            }
+            if let request = state.request, request.snapshots == nil {
+                let snapshots = BrowserProfileSnapshots.coverageSnapshots(base: BrowserTabSnapshotStore.fileURL(for: browser), requestID: request.id)
+                let profiles = Set(snapshots.compactMap(\.browserSessionID))
+                if request.expectedProfiles.isSubset(of: profiles), !snapshots.isEmpty,
+                   BrowserWindowCoveragePolicy.reportedWindows(snapshots: snapshots) != nil {
+                    state.request?.snapshots = snapshots
+                    state.request?.receiptAt = ProcessInfo.processInfo.systemUptime
+                }
+            }
+        }
+        guard !active.isEmpty, !coverageSweepInFlight else { return }
+        for state in active.values { state.cohort.beginPendingObservation(now: now) }
+        coverageSweepInFlight = true; coverageSweepGeneration &+= 1
+        let generation = coverageSweepGeneration, browsers = Array(active.keys), deadline = now + 2.5
+        let previous = active.compactMapValues(\.observation)
+        Self.coverageQueue.async { [weak self] in
+            var samples: [CoverageSample] = []
+            for browser in browsers {
+                let observation = WorkspaceWindow.browserCoverageObservation(bundleIdentifier: browser,
+                    deadline: deadline, prior: previous[browser])
+                samples.append(.init(browser: browser, observation: observation))
+            }
+            let completedSamples = samples
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.coverageSweepGeneration else { return }
+                self.coverageSweepInFlight = false
+                guard self.coverageIsCurrent() else { return }
+                for sample in completedSamples {
+                    guard self.coverageIsCurrent() else { return }
+                    let observation = ProcessInfo.processInfo.systemUptime < deadline ? sample.observation : nil
+                    if let observation {
+                        for (identity, element) in observation.bindings {
+                            Self.accessibilityWindows[.init(pid: identity.pid,
+                                launched: Date(timeIntervalSinceReferenceDate: identity.launched), window: identity.windowID)] = element
+                        }
+                    }
+                    self.applyBrowserCoverage(browser: sample.browser, observation: observation, began: now)
+                }
+                self.updateCoverageReady()
+            }
+        }
+    }
+    private func coverageIsCurrent() -> Bool {
+        guard mayEnforce, let occurrence = spec.nativeWindowVisibilitySessionID,
+              let rules = Self.currentRules() else { return false }
+        return rules.active && rules.isFresh() && rules.startupSessionID == occurrence
+    }
+    private func applyBrowserCoverage(browser: String, observation: WorkspaceWindow.CoverageObservation?, began: TimeInterval) {
+        guard coverageIsCurrent(), let occurrence = spec.nativeWindowVisibilitySessionID, let state = coverageStates[browser] else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let observation else {
+            for target in state.cohort.targets {
+                _ = state.cohort.observe(target.identity, outcome: .unresolved, now: began)
+                if let failure = state.cohort.observe(target.identity, outcome: .unresolved, now: now) {
+                    onCoverageFailure?(failure); return
+                }
+            }
+            let firstFailure = state.inventoryFailureSince ?? began; state.inventoryFailureSince = firstFailure
+            if now - firstFailure >= 3 { onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)) }
+            return
+        }
+        if let failure = state.cohort.expiredFailure(now: now) { onCoverageFailure?(failure); return }
+        let inventory = observation.inventory
+        state.observation = observation
+        state.coverage = state.coverage.retainingContinuous(observation.continuousIdentities)
+        state.request?.witnessed.formIntersection(observation.continuousIdentities)
+        state.inventoryFailureSince = nil
+        if !spec.coverageAllowsLaterWindows || !state.pendingReported.isEmpty || state.request != nil {
+            let current = Set(inventory.windows.map(\.identity))
+            state.known.formIntersection(current)
+            let unknown = inventory.observedStandard.subtracting(state.known)
+            if state.request == nil, BrowserWindowCoveragePolicy.needsDiscovery(native: unknown, reported: state.pendingReported) {
+                let command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
+                state.request = .init(id: command.id, began: now, targets: unknown, witnessed: inventory.observedStandard,
+                    reported: state.pendingReported, expectedProfiles: state.profiles.union(state.pendingReported.map(\.browserSessionID)))
+                // Exactly one discovery request per newly observed cohort;
+                // a failed send is pending until its bounded deadline.
+                try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(command)
+            }
+            if let request = state.request, let snapshots = request.snapshots,
+               let receiptAt = request.receiptAt, BrowserWindowCoveragePolicy.isPostReceiptObservation(receiptAt: receiptAt,
+                    sampledAt: observation.sampledAt, now: now, deadline: request.began + 3) {
+                if now - request.began >= 3 {
+                    onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
+                }
+                let profiles = Set(snapshots.compactMap(\.browserSessionID))
+                let base = BrowserTabSnapshotStore.fileURL(for: browser)
+                if !snapshots.allSatisfy({ BrowserProfileSnapshots.isCoverageSnapshotCurrent($0, base: base) }) {
+                    // The latched receipt became contradicted while AX was
+                    // sampled. Start a new query AFTER this observation; never
+                    // substitute a newer sidecar under an older native scan.
+                    let command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
+                    var retry = request
+                    retry.id = command.id; retry.snapshots = nil; retry.receiptAt = nil
+                    retry.witnessed = inventory.observedStandard
+                    retry.expectedProfiles = state.profiles.union(state.pendingReported.map(\.browserSessionID))
+                    state.request = retry
+                    try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(command)
+                } else if request.expectedProfiles.isSubset(of: profiles), let reports = BrowserWindowCoveragePolicy.reportedWindows(snapshots: snapshots),
+                   case .complete(let coverage) = BrowserWindowCoveragePolicy.evaluate(browserBundleIdentifier: browser,
+                        native: inventory.windows, observedStandard: inventory.observedStandard, reported: reports, knownProfiles: profiles,
+                        priorCoverage: state.coverage, continuousIdentities: observation.continuousIdentities,
+                        witnessedBeforeSnapshot: request.witnessed) {
+                    let disappeared = request.targets.subtracting(current)
+                    let resolved = coverage.observableIdentities.union(disappeared)
+                    if request.targets.isSubset(of: resolved),
+                       request.reported.intersection(state.pendingReported).isSubset(of: Set(coverage.matches.keys)) {
+                        for target in coverage.unreported where request.targets.contains(target.identity) {
+                            state.cohort.enroll(target)
+                            _ = state.cohort.observe(target.identity, outcome: .unresolved, now: request.began)
+                        }
+                        state.known.formUnion(request.targets.subtracting(disappeared)); state.known.formUnion(coverage.matches.values)
+                        state.profiles = profiles; state.coverage = coverage; state.request = nil
+                        state.pendingReported.subtract(coverage.matches.keys)
+                    }
+                }
+                if state.request != nil && now - request.began >= 3 {
+                    onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
+                }
+            }
+        }
+        for target in state.cohort.targets {
+            guard mayEnforce else { return }
+            // Ownership transferred to an exact current browser claim remains
+            // the same journal entry, now verified by the browser bridge.
+            if entries.contains(where: { $0.pid == target.identity.pid && $0.launched.timeIntervalSinceReferenceDate == target.identity.launched
+                && $0.window == target.identity.windowID && $0.intentionSessionID == occurrence
+                && $0.browserSessionID != nil && $0.nativeCoverage != true && $0.parking == false }) {
+                state.cohort.release(target.identity); continue
+            }
+            let outcome = minimizeCoverageWindow(target.identity, inventory: inventory, occurrence: occurrence)
+            if let failure = state.cohort.observe(target.identity, outcome: outcome, now: now) {
+                guard mayEnforce else { return }; onCoverageFailure?(failure); return
+            }
+        }
+    }
+
+    private func minimizeCoverageWindow(_ identity: BrowserWindowCoveragePolicy.NativeIdentity,
+                                       inventory: BrowserWindowCoveragePolicy.Inventory,
+                                       occurrence: String) -> BrowserWindowCoverageCohort.Outcome {
+        guard mayEnforce else { return .unresolved }
+        if kill(identity.pid, 0) == -1 { return errno == ESRCH ? .closed : .unresolved }
+        guard let app = NSRunningApplication(processIdentifier: identity.pid), let launched = app.launchDate else { return .unresolved }
+        if launched.timeIntervalSinceReferenceDate != identity.launched || app.bundleIdentifier != identity.bundleIdentifier { return .closed }
+        guard let current = inventory.windows.first(where: { $0.identity == identity }) else {
+            return WorkspaceWindow.exists(id: identity.windowID, pid: identity.pid) == false ? .closed : .unresolved
+        }
+        guard inventory.observedStandard.contains(identity) else { return .unresolved }
+        let window = WorkspaceWindow(id: identity.windowID, pid: identity.pid, bundle: identity.bundleIdentifier, title: current.title, frame: current.frame)
+        guard let element = Self.element(window, launched: launched) else { return .unresolved }
+        if let previous = entries.first(where: { $0.pid == identity.pid && $0.launched == launched && $0.window == identity.windowID }) {
+            guard previous.nativeCoverage == true, previous.intentionSessionID == occurrence,
+                  previous.parking != true, previous.bootstrapEffectID == nil else { return .unresolved }
+        }
+        return BrowserWindowCoverageEffects.minimize(isCurrent: {
+            guard self.mayEnforce, let current = Self.currentRules() else { return false }
+            return current.active && current.isFresh() && current.startupSessionID == occurrence
+        }, readMinimized: { Self.boolean(element, kAXMinimizedAttribute).value }, saveOwnership: {
+            if self.entries.contains(where: { $0.pid == identity.pid && $0.launched == launched && $0.window == identity.windowID }) { return true }
+            var next = self.entries
+            next.append(Entry(pid: identity.pid, launched: launched, bundle: identity.bundleIdentifier, window: identity.windowID,
+                intentionSessionID: occurrence, parking: false, nativeCoverage: true))
+            guard Self.save(next) else { return false }; self.entries = next; return true
+        }, dispatch: {
+            let result = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            Self.observe("coverageMinimize", pid: identity.pid, window: identity.windowID, status: result)
+        })
+    }
+
+    private func adoptCoverageOwnership(id: UInt32, pid: pid_t, launched: Date,
+                                        record: BrowserWindowVisibilityRecord, claim: BrowserWindowVisibilityWindow) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.pid == pid && $0.launched == launched && $0.window == id && $0.nativeCoverage == true }) else { return true }
+        let previous = entries[index]
+        guard let occurrence = previous.intentionSessionID, previous.parking != true, previous.bootstrapEffectID == nil,
+              let proof = record.browserProcessIdentity else { return false }
+        let ownedIdentity = BrowserWindowCoveragePolicy.NativeIdentity(bundleIdentifier: previous.bundle, pid: previous.pid,
+            launched: previous.launched.timeIntervalSinceReferenceDate, windowID: id)
+        return BrowserWindowCoverageEffects.transfer(.init(native: ownedIdentity, intentionSessionID: occurrence),
+            native: .init(bundleIdentifier: record.browserBundleIdentifier, pid: proof.pid, launched: proof.launched, windowID: id),
+            intentionSessionID: record.plan.intentionSessionID, browserSessionID: record.browserSessionID, browserWindowID: claim.windowID,
+            isCurrent: {
+                guard self.mayEnforce, Self.isFreshClaim(record, pid: pid, launched: launched), let current = Self.currentRules() else { return false }
+                return current.active && current.isFresh() && current.startupSessionID == record.plan.intentionSessionID
+            }, persist: { updated in
+                var next = self.entries
+                next[index].browserSessionID = updated.browserSessionID; next[index].browserWindowID = updated.browserWindowID
+                next[index].nativeCoverage = updated.isNativeCoverage
+                guard Self.save(next) else { return false }; self.entries = next; return true
+            })
+    }
+
+    /// A profile-local browser ID may use its earlier uniquely proven mapping
+    /// only while the coverage packet still owns the exact live AX binding.
+    private func coverageBinding(record: BrowserWindowVisibilityRecord, claim: BrowserWindowVisibilityWindow) -> UInt32? {
+        guard record.plan.intentionSessionID == spec.nativeWindowVisibilitySessionID,
+              let state = coverageStates[record.browserBundleIdentifier], let observation = state.observation,
+              let identity = state.coverage.matches[.init(bundleIdentifier: record.browserBundleIdentifier,
+                  browserSessionID: record.browserSessionID, windowID: claim.windowID)],
+              let proof = record.browserProcessIdentity, identity.pid == proof.pid, identity.launched == proof.launched,
+              observation.inventory.observedStandard.contains(identity), let element = observation.element(for: identity),
+              Self.isFreshClaim(record, pid: identity.pid, launched: Date(timeIntervalSinceReferenceDate: identity.launched)),
+              Self.liveProcessIdentity(record) == proof,
+              WorkspaceWindow.exists(id: identity.windowID, pid: identity.pid) == true else { return nil }
+        Self.accessibilityWindows[.init(pid: identity.pid, launched: Date(timeIntervalSinceReferenceDate: identity.launched), window: identity.windowID)] = element
+        return identity.windowID
+    }
+
     private func reconcileBrowserWindows(records: [BrowserWindowVisibilityRecord], windows: [WorkspaceWindow]) {
+        // A newly connected profile can report an already-observed native-only
+        // window. Its native ID is not new, but its report identity still needs
+        // the same bounded, correlated discovery before normal enforcement.
+        for (browser, state) in coverageStates {
+            state.pendingReported = Set(records.filter { $0.browserBundleIdentifier == browser }.flatMap { record in
+                record.plan.windows.filter { !record.closedParkingWindowIDs.contains($0.windowID) }.map {
+                    BrowserWindowCoveragePolicy.ReportedIdentity(bundleIdentifier: browser, browserSessionID: record.browserSessionID, windowID: $0.windowID)
+                }
+            }).filter { state.coverage.matches[$0] == nil && !state.coverage.invalidatedMatches.contains($0) }
+        }
         // Registration ACK has a short deadline. Bind holding windows before
         // potentially slow AX calls into unrelated blocked browser windows.
         let resolved = Self.matches(records: records, windows: windows).sorted { $0.isParking && !$1.isParking }
@@ -230,7 +511,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
                             && $0.record.browserSessionID == record.browserSessionID
                             && $0.window.windowID == claim.windowID
                     }
-                    let id = owned?.window ?? matched?.candidate.id
+                    let fallback = matched.flatMap { match -> UInt32? in
+                        guard let state = coverageStates[record.browserBundleIdentifier] else { return match.candidate.id }
+                        let identity = BrowserWindowCoveragePolicy.ReportedIdentity(bundleIdentifier: record.browserBundleIdentifier,
+                            browserSessionID: record.browserSessionID, windowID: claim.windowID)
+                        let candidate = BrowserWindowCoveragePolicy.NativeIdentity(bundleIdentifier: match.candidate.bundle,
+                            pid: match.candidate.pid, launched: liveIdentity.launched, windowID: match.candidate.id)
+                        return BrowserWindowCoveragePolicy.permitsReportedCandidate(identity, candidate: candidate,
+                            coverage: state.coverage) ? candidate.windowID : nil
+                    }
+                    let id = owned?.window ?? coverageBinding(record: record, claim: claim) ?? fallback
                     if let id = owned?.window, WorkspaceWindow.exists(id: id, pid: liveIdentity.pid) == false {
                         outcome = .noLongerExists
                     } else if let id {
@@ -290,7 +580,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
                                       record: BrowserWindowVisibilityRecord,
                                       claim: BrowserWindowVisibilityWindow, launched: Date,
                                       owned: Bool) -> BrowserWindowEnforcementPolicy.Outcome {
-        var owned = owned
+        guard adoptCoverageOwnership(id: id, pid: pid, launched: launched, record: record, claim: claim) else { return .unresolved(.ownershipNotSaved) }
+        var owned = owned || entries.contains { $0.pid == pid && $0.launched == launched && $0.window == id
+            && $0.browserSessionID == record.browserSessionID && $0.intentionSessionID == record.plan.intentionSessionID && $0.browserWindowID == claim.windowID }
         if let index = entries.firstIndex(where: { $0.pid == pid && $0.launched == launched && $0.window == id && $0.bootstrapEffectID != nil }) {
             let pending = entries[index]
             guard pending.intentionSessionID == record.plan.intentionSessionID,
@@ -583,12 +875,26 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 if before.value == false { continue }
                 // A late settled effect cannot reveal under a newer policy.
                 // The colliding new claim remains unresolved and safety-stops.
-                if entry.bootstrapEffectID != nil, let activeSession, activeSession != entry.intentionSessionID {
+                if (entry.bootstrapEffectID != nil || entry.nativeCoverage != nil),
+                   !BrowserWindowCoverageEffects.mayRestore(ownershipSessionID: entry.intentionSessionID, activeSessionID: activeSession) {
                     pending.append(entry); continue
                 }
                 guard before.value == true else {
                     if before.status == .invalidUIElement { accessibilityWindows.removeValue(forKey: .init(pid: entry.pid, launched: entry.launched, window: id)) }
                     pending.append(entry); continue
+                }
+                if entry.nativeCoverage != nil && entry.parking != true {
+                    let restored = BrowserWindowCoverageEffects.restore(ownershipSessionID: entry.intentionSessionID,
+                        activeSessionID: activeSession, readMinimized: {
+                        boolean(element, kAXMinimizedAttribute).value
+                    }, dispatch: {
+                        let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                        observe("restore", pid: entry.pid, window: id, status: status)
+                        RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
+                    })
+                    if !restored { pending.append(entry) }
+                    RestorationFocusGuard.preserveCurrent()
+                    continue
                 }
                 let status: AXError
                 if entry.parking == true {

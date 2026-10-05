@@ -72,19 +72,35 @@ public struct BrowserTabSnapshot: Codable, Equatable {
     public var tabs: [BrowserTabItem]
     public var allTabs: [BrowserTabItem]?
     public var updatedAt: Date
+    /// Set by the verified native host for a completed explicit discovery reply.
+    public var browserProcessIdentity: BrowserProcessIdentity?
+    public var snapshotRequestIDs: [String]?
+    public var completeWindowInventory: Bool?
+    public var guardEnabled: Bool?
+    public var guardCapabilities: [String]?
 
     public init(
         browserBundleIdentifier: String,
         browserSessionID: String? = nil,
         tabs: [BrowserTabItem],
         updatedAt: Date = Date(),
-        allTabs: [BrowserTabItem]? = nil
+        allTabs: [BrowserTabItem]? = nil,
+        browserProcessIdentity: BrowserProcessIdentity? = nil,
+        snapshotRequestIDs: [String]? = nil,
+        completeWindowInventory: Bool? = nil,
+        guardEnabled: Bool? = nil,
+        guardCapabilities: [String]? = nil
     ) {
         self.browserBundleIdentifier = browserBundleIdentifier
         self.browserSessionID = browserSessionID
         self.tabs = tabs
         self.allTabs = allTabs
         self.updatedAt = updatedAt
+        self.browserProcessIdentity = browserProcessIdentity
+        self.snapshotRequestIDs = snapshotRequestIDs
+        self.completeWindowInventory = completeWindowInventory
+        self.guardEnabled = guardEnabled
+        self.guardCapabilities = guardCapabilities
     }
 }
 

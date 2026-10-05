@@ -70,6 +70,8 @@ struct HostRequest: Codable {
     var minimizeBootstrapResult: HostMinimizeBootstrapResult?
     var tabs: [HostTab]?
     var allTabs: [HostTab]?
+    var snapshotRequestIDs: [String]?
+    var completeWindowInventory: Bool?
     var url: String?
     var title: String?
 }
@@ -197,7 +199,7 @@ struct HostResponse: Codable {
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
-    var bundledExtensionVersion: String = "0.2.32"
+    var bundledExtensionVersion: String = "0.2.34"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
@@ -344,6 +346,7 @@ private final class HostRuntime {
     private var lastMessageReceivedAt: Date?
     private var lastSnapshotTabs: [BrowserTabItem]?
     private var requestedSnapshotRefresh = false
+    private var issuedSnapshotRequests: [String: Date] = [:]
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
     private var directoryRefreshWorkItem: DispatchWorkItem?
@@ -507,7 +510,7 @@ private final class HostRuntime {
                 }
             case "tabsSnapshot":
                 if let tabs = request.tabs {
-                    persistSnapshot(tabs, allTabs: request.allTabs, browserSessionID: request.browserSessionID, browserBundleIdentifier: browser)
+                    persistSnapshot(tabs, allTabs: request.allTabs, browserSessionID: request.browserSessionID, browserBundleIdentifier: browser, snapshotRequestIDs: request.snapshotRequestIDs, completeWindowInventory: request.completeWindowInventory)
                 }
             case "recordWebsiteVisit":
                 if let url = request.url {
@@ -831,7 +834,14 @@ private final class HostRuntime {
 
     private var lastSnapshotSessionID: String?
     private var lastSnapshotAllTabs: [BrowserTabItem]?
-    private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserSessionID: String?, browserBundleIdentifier: String) {
+    private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserSessionID: String?, browserBundleIdentifier: String,
+                                 snapshotRequestIDs: [String]?, completeWindowInventory: Bool?) {
+        let now = Date()
+        issuedSnapshotRequests = issuedSnapshotRequests.filter { now.timeIntervalSince($0.value) <= 3 }
+        let proof = self.browserBundleIdentifier == browserBundleIdentifier && self.profileSessionID == browserSessionID
+            ? currentBrowserProcessIdentity : nil
+        let answered = (snapshotRequestIDs ?? []).count <= 16 && allTabs != nil && proof != nil && completeWindowInventory == true
+            ? Array(Set((snapshotRequestIDs ?? []).filter { issuedSnapshotRequests[$0] != nil })).sorted() : []
         let items = tabs.map {
             BrowserTabItem(
                 id: $0.id,
@@ -846,17 +856,27 @@ private final class HostRuntime {
         let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID) }
         // Explicit discovery is also a freshness acknowledgment. Preserve idle
         // deduplication, but refresh the timestamp even if requested tabs did not change.
-        guard requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID else { return }
+        guard !answered.isEmpty || requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
             browserSessionID: browserSessionID,
             tabs: items,
-            allTabs: allItems
+            allTabs: allItems,
+            browserProcessIdentity: proof,
+            snapshotRequestIDs: answered.isEmpty ? nil : answered,
+            completeWindowInventory: answered.isEmpty ? nil : true,
+            guardEnabled: guardEnabled,
+            guardCapabilities: extensionCapabilities
         )
         let store = BrowserTabSnapshotStore(fileURL: paths.snapshot(for: browserBundleIdentifier))
         if (try? store.write(snapshot)) != nil {
             if let session = browserSessionID {
                 try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.partition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
+                // Keep the exact correlated response separate from ordinary
+                // active-tab refreshes, which may arrive before the app polls.
+                if !answered.isEmpty {
+                    try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.coveragePartition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
+                }
                 maybeWriteHeartbeat(force: true)
             }
             requestedSnapshotRefresh = false
@@ -1013,7 +1033,13 @@ private final class HostRuntime {
         response.minimizeBootstrapResultReceipt = minimizeBootstrapResultReceipt
         if (try? writeMessage(response)) != nil {
             lastPushedOffers = offers; lastPushedEnforcement = enforcement
-            if tabCommand?.action == .snapshot { requestedSnapshotRefresh = true }
+            if let command = tabCommand, command.action == .snapshot {
+                requestedSnapshotRefresh = true
+                issuedSnapshotRequests = issuedSnapshotRequests.filter { Date().timeIntervalSince($0.value) <= 3 }
+                issuedSnapshotRequests[command.id] = Date()
+                if issuedSnapshotRequests.count > 16,
+                   let oldest = issuedSnapshotRequests.min(by: { $0.value < $1.value })?.key { issuedSnapshotRequests.removeValue(forKey: oldest) }
+            }
             metrics.sentMessages += 1
             if tabCommand != nil {
                 metrics.commandPushes += 1

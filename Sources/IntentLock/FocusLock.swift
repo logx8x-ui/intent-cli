@@ -8,6 +8,7 @@ public enum FocusLockError: Error, CustomStringConvertible {
     case eventTapUnavailable
     case unableToOpen(String)
     case browserWindowEnforcementFailed(BrowserWindowEnforcementPolicy.Failure)
+    case browserWindowCoverageFailed(BrowserWindowCoveragePolicy.Failure)
 
     public var description: String {
         switch self {
@@ -17,6 +18,8 @@ public enum FocusLockError: Error, CustomStringConvertible {
             return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for Intent, then start the intention again."
         case .unableToOpen(let name):
             return "Intent could not open \(name)."
+        case .browserWindowCoverageFailed(let failure):
+            return failure.message
         case .browserWindowEnforcementFailed(let failure):
             return failure.message
         }
@@ -156,6 +159,9 @@ public final class FocusLock {
         visibilityController.onEnforcementFailure = { [weak self] failure in
             self?.stopForSafety(failure: .browserWindowEnforcementFailed(failure))
         }
+        visibilityController.onCoverageFailure = { [weak self] failure in
+            self?.stopForSafety(failure: .browserWindowCoverageFailed(failure))
+        }
         visibilityController.enforcementIsCurrent = { [weak self] in self?.isStopRequested == false }
     }
 
@@ -261,6 +267,11 @@ public final class FocusLock {
 
         do {
             try runStartupSteps()
+            while !isStopped && !visibilityController.isInitialCoverageReady {
+                if !RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05)) {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+            }
             if !isStopped { onReady?() }
             while !isStopped {
                 if !RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2)) {
