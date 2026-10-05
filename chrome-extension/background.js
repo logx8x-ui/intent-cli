@@ -1,4 +1,4 @@
-importScripts("rule-helpers.js", "tab-visibility.js", "native-window-visibility.js", "website-features.js");
+importScripts("rule-helpers.js", "tab-visibility.js", "native-window-visibility.js", "website-features.js", "tab-creation.js");
 
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
@@ -29,11 +29,13 @@ async function ensureBrowserSessionIdentity() {
 }
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
+let hostSupportsTabCreation = false;
+let creationRulesActive = true;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
 let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
-  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeVisibility && chrome.storage.session
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsTabCreation && chrome.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && chrome.storage.session
     && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
     ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
@@ -45,6 +47,11 @@ const nativeWindowVisibility = typeof IntentNativeWindowVisibility !== "undefine
   ? new IntentNativeWindowVisibility(chrome, postNative, () => browserSessionID) : null;
 const tabVisibility = typeof IntentTabVisibility !== "undefined" ? new IntentTabVisibility(chrome, false, nativeWindowVisibility) : null;
 let rules = inactiveRules();
+const tabCreation = typeof IntentTabCreation !== "undefined" ? new IntentTabCreation(chrome, {
+  session: () => browserSessionID, active: () => creationRulesActive || rules.active,
+  enabled: () => guardEnabled && hostSupportsTabCreation && nativeConnectionConfirmed && Boolean(nativePort), firefox: false, send: postNative,
+  snapshot: () => publishTabSnapshot(true, true)
+}) : null;
 let guardEnabled = true;
 let initialized = false;
 let nativePort = null;
@@ -156,6 +163,8 @@ function connectNativeHost() {
       const visibilityWasReady = Boolean(nativeWindowVisibility?.identity());
       nativeWindowVisibility?.receive(message);
       nativeConnectionConfirmed = true;
+      creationRulesActive = message?.tabCreationAllowed !== true;
+      hostSupportsTabCreation = message?.hostCapabilities?.includes("background-tab-create-host-v1") === true;
       reconnectDelayMs = RECONNECT_MS;
       if (message?.active !== true && message?.bundledExtensionVersion && message.bundledExtensionVersion !== chrome.runtime.getManifest().version) {
         const version = message.bundledExtensionVersion;
@@ -397,6 +406,9 @@ async function captureTabPreview(message) {
 }
 
 async function handleRequestedTab(message) {
+  if (message.action === "create" || message.action === "cancelCreate") {
+    await tabCreation?.handle(message); return;
+  }
   // Discovery is how Intent learns the current browser lifetime in the first place.
   if (message.action === "snapshot") {
     if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 256) {

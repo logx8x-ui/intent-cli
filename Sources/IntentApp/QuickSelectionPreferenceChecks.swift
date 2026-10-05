@@ -118,5 +118,106 @@ enum QuickSelectionPreferenceChecks {
         defaults.set("invalid duration", forKey: QuickSelectionPreferences.timerDurationKey)
         try check(QuickSelectionPreferences.timerDuration(defaults: defaults) == 25,
                   "An invalid stored duration safely falls back to the initial default")
+
+        var fieldDraft = QuickSelection()
+        QuickSelectionOptionsSection.timer.enable(in: &fieldDraft, defaults: defaults)
+        let timerID = fieldDraft.restrictionNodes[0].id
+        var durationText = QuickSelectionDurationDraft(totalMinutes: 25)
+        // The actual text-binding setter saves every valid edit, without Return,
+        // dismissal, or a change of focus being necessary for persistence.
+        let minuteText = Binding<String>(get: { durationText.minutes }, set: {
+            durationText.minutes = $0
+            QuickSelectionPreferences.editDurationDraft(durationText, in: &fieldDraft, nodeID: timerID,
+                                                        section: .timer, defaults: defaults)
+        })
+        minuteText.wrappedValue = "2"
+        try check(fieldDraft.restrictionNodes[0].durationMinutes == 2
+                  && QuickSelectionPreferences.timerDuration(defaults: reloadedDefaults) == 2,
+                  "Typing two minutes immediately persists two without requiring Return or focus loss")
+        for invalid in ["", " ", "-1", "1.5", "60", "99999999999999999999999999", "abc"] {
+            minuteText.wrappedValue = invalid
+            try check(fieldDraft.restrictionNodes[0].durationMinutes == 2
+                      && QuickSelectionPreferences.timerDuration(defaults: defaults) == 2,
+                      "Incomplete or invalid duration text cannot overwrite the last valid edit: \(invalid)")
+        }
+        durationText.hours = "1"; minuteText.wrappedValue = "5"
+        try check(fieldDraft.restrictionNodes[0].durationMinutes == 65,
+                  "Hour and minute fields combine into the configured timer duration")
+        durationText.hours = "24"; minuteText.wrappedValue = "0"
+        try check(fieldDraft.restrictionNodes[0].durationMinutes == 1440,
+                  "The duration editor supports an exact 24-hour duration")
+        minuteText.wrappedValue = "1"
+        try check(fieldDraft.restrictionNodes[0].durationMinutes == 1440,
+                  "A duration longer than 24 hours stays an uncommitted edit")
+        durationText.hours = "0"; minuteText.wrappedValue = "0"
+        try check(fieldDraft.restrictionNodes[0].durationMinutes == 1440,
+                  "An intermediate zero duration never silently turns into a different timer")
+        minuteText.wrappedValue = "2"
+        fieldDraft.restrictionNodes[0].kind = .endTime
+        minuteText.wrappedValue = "3"
+        try check(fieldDraft.restrictionNodes[0].durationMinutes == 2
+                  && QuickSelectionPreferences.timerDuration(defaults: defaults) == 2,
+                  "A late compact-duration edit cannot alter an end-time node or global default")
+
+        let cooldownID = cooldown.restrictionNodes[0].id
+        QuickSelectionPreferences.editDurationDraft(.init(totalMinutes: 92), in: &cooldown,
+                                                   nodeID: cooldownID, section: .cooldown, defaults: defaults)
+        var freshCooldown = QuickSelection()
+        QuickSelectionOptionsSection.cooldown.enable(in: &freshCooldown, defaults: reloadedDefaults)
+        try check(freshCooldown.restrictionNodes[0].durationMinutes == 92
+                  && QuickSelectionPreferences.timerDuration(defaults: defaults) == 2,
+                  "Cooldown edits persist for the next draft without changing timer defaults")
+        var savedCooldown = QuickSelection()
+        savedCooldown.restrictionNodes = [.init(kind: .coolDown, position: .zero, durationMinutes: 7)]
+        QuickSelectionOptionsSection.cooldown.enable(in: &savedCooldown, defaults: defaults)
+        try check(savedCooldown.restrictionNodes[0].durationMinutes == 7
+                  && QuickSelectionPreferences.cooldownDuration(defaults: defaults) == 92,
+                  "A saved intention retains its own cooldown without overwriting the quick default")
+        cooldown.restrictionNodes.removeAll()
+        cooldown.restrictionNodes.append(.init(kind: .coolDown, position: .zero, durationMinutes: 4))
+        QuickSelectionPreferences.editDurationDraft(.init(totalMinutes: 18), in: &cooldown,
+                                                   nodeID: cooldownID, section: .cooldown, defaults: defaults)
+        try check(cooldown.restrictionNodes[0].durationMinutes == 4
+                  && QuickSelectionPreferences.cooldownDuration(defaults: defaults) == 92,
+                  "A stale cooldown field cannot write into a replacement node")
+
+        var checklist = QuickSelection()
+        QuickSelectionOptionsSection.checklist.enable(in: &checklist, defaults: defaults)
+        QuickSelectionOptionsSection.checklist.dismissEditor(in: &checklist)
+        try check(!QuickSelectionOptionsSection.checklist.enabled(in: checklist),
+                  "Dismissing an untouched checklist removes its provisional activation")
+        QuickSelectionOptionsSection.checklist.enable(in: &checklist, defaults: defaults)
+        let checklistID = checklist.frictionNodes[0].id
+        QuickSelectionChecklistEditing.edit(" \n ", row: 0, in: &checklist, nodeID: checklistID)
+        QuickSelectionOptionsSection.checklist.dismissEditor(in: &checklist)
+        try check(!QuickSelectionOptionsSection.checklist.enabled(in: checklist),
+                  "Whitespace-only checklist lines do not keep the modifier active")
+        QuickSelectionOptionsSection.checklist.enable(in: &checklist, defaults: defaults)
+        let writtenID = checklist.frictionNodes[0].id
+        QuickSelectionChecklistEditing.edit("Write the first draft", row: 1, in: &checklist, nodeID: writtenID)
+        QuickSelectionOptionsSection.checklist.dismissEditor(in: &checklist)
+        QuickSelectionOptionsSection.checklist.enable(in: &checklist, defaults: defaults)
+        try check(QuickSelectionOptionsSection.checklist.enabled(in: checklist)
+                  && QuickSelectionChecklistEditing.tasks(in: checklist, nodeID: writtenID) == ["", "Write the first draft"],
+                  "Typing on a plain line keeps the checklist active and reopening preserves its text")
+        QuickSelectionChecklistEditing.appendRow(in: &checklist, nodeID: writtenID)
+        QuickSelectionChecklistEditing.edit("Review", row: 3, in: &checklist, nodeID: writtenID)
+        try check(QuickSelectionChecklistEditing.tasks(in: checklist, nodeID: writtenID) == ["", "Write the first draft", "", "Review"],
+                  "The plus control adds another editable line after the three visible starter lines")
+        checklist.apps = ["qa.checklist"]
+        let savedChecklist = try checklist.makeIntention(apps: [.init(name: "Checklist QA", bundleIdentifier: "qa.checklist")], snapshots: [])
+        var restoredChecklist = QuickSelection()
+        restoredChecklist.applySessionConfiguration(savedChecklist)
+        try check(QuickSelectionOptionsSection.checklist.enabled(in: restoredChecklist)
+                  && restoredChecklist.frictionNodes.contains { if case .taskChecklist(let tasks) = $0.friction { return tasks == ["Write the first draft", "Review"] }; return false },
+                  "Saving and reloading an intention explicitly preserves its checklist contents")
+        var newChecklist = QuickSelection()
+        QuickSelectionOptionsSection.checklist.enable(in: &newChecklist, defaults: defaults)
+        try check(newChecklist.frictionNodes.allSatisfy { if case .taskChecklist(let tasks) = $0.friction { return tasks.allSatisfy(\.isEmpty) }; return true },
+                  "A new unsaved session begins with blank checklist lines rather than the last session's tasks")
+        QuickSelectionOptionsSection.checklist.disable(in: &checklist)
+        QuickSelectionChecklistEditing.edit("Stale", row: 0, in: &checklist, nodeID: writtenID)
+        try check(checklist.frictionNodes.isEmpty,
+                  "Removing a checklist from its editor cannot be undone by a stale text-field callback")
     }
 }

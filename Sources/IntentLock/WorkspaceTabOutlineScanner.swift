@@ -22,6 +22,34 @@ public struct WorkspaceTabOutlineReader<Element> {
 }
 
 public enum WorkspaceTabOutlineScanner {
+    /// Firefox may omit its current standard window from AXWindows while still
+    /// exposing that exact object through AXFocusedWindow/AXMainWindow. Union
+    /// those roots before matching; a minimized sibling with the same saved
+    /// frame must never stand in for the requested visible window.
+    public static func windowRoot<Element>(listed: [Element], focused: Element?, main: Element?,
+                                           targetFrame: CGRect, targetTitle: String,
+                                           reader: WorkspaceTabOutlineReader<Element>,
+                                           isMinimized: (Element) -> Bool) -> Element? {
+        var unique: [Element] = []
+        for element in listed + [focused, main].compactMap({ $0 }) {
+            guard reader.hasTime() else { return nil }
+            if !unique.contains(where: { reader.equal($0, element) }) { unique.append(element) }
+        }
+        let geometryMatches = unique.filter { element in
+            guard reader.hasTime(), !isMinimized(element), reader.text(element, "AXRole") == "AXWindow",
+                  let rect = reader.frame(element) else { return false }
+            return abs(rect.minX - targetFrame.minX) < 3 && abs(rect.minY - targetFrame.minY) < 3
+                && abs(rect.width - targetFrame.width) < 3 && abs(rect.height - targetFrame.height) < 3
+        }
+        // CG and AX titles can change on different ticks after navigation. Keep
+        // the existing unique-geometry match, but never guess between overlaps.
+        let matches = geometryMatches.count == 1 ? geometryMatches : geometryMatches.filter {
+            BrowserWindowMatching.sameWindowTitle(reader.text($0, "AXTitle") ?? "", targetTitle)
+        }
+        guard reader.hasTime(), matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
     private struct Sidebar {
         var bounds: CGRect
         var exactRows = false

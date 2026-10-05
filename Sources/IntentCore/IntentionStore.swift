@@ -261,6 +261,7 @@ public enum BrowserGuardCapability: String, Codable, Equatable {
     case quickSelection = "quick-selection-tabs-v1"
     case blacklistSelection = "blacklist-selection-tabs-v1"
     case tabPreview = "tab-preview-v1"
+    case backgroundTabCreation = "background-tab-create-v1"
     case nativeTabGroups = "native-tab-groups-v1"
     case tabSessionIdentity = "tab-session-identity-v1"
     case nativeWindowVisibility = "native-window-visibility-v1"

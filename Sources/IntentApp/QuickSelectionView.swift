@@ -27,12 +27,14 @@ final class QuickSelectionController: ObservableObject {
     private var overviewInput = OverviewSearchGesture()
     private var overviewNormalizer = QuickMarkKeyboardNormalizer()
     var ownsOverviewPrefixInput: Bool { panel?.isVisible == true && overviewInput.isHoldingPrefix }
-    private var isEditingText: Bool { (NSApp.keyWindow ?? panel)?.firstResponder is NSTextView }
+    // WebKit's page responder is not an NSTextView. Treat the finder as an
+    // editing surface so digits, Return, X and Space cannot trigger the overview.
+    private var isEditingText: Bool { websiteFinder != nil || (NSApp.keyWindow ?? panel)?.firstResponder is NSTextView }
     func prepareForSpotlight() {
         guard panel?.isVisible == true else { return }
         overviewInput = OverviewSearchGesture()
         overviewNormalizer = QuickMarkKeyboardNormalizer()
-        optionsSection = nil; settingsOpen = false
+        closeModification(); settingsOpen = false
         // System hotkeys are handled before AppKit local event monitors. Lower
         // the panel from the global tap, before Spotlight's window is presented.
         panel?.level = .normal
@@ -44,7 +46,7 @@ final class QuickSelectionController: ObservableObject {
     func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool, capsLockHeld: Bool = false) -> Bool {
         guard panel?.isVisible == true else { return false }
         let result = overviewInput.key(code: code, down: down, modified: modified, repeated: repeatKey,
-            editing: isEditingText, capsLockHeld: capsLockHeld)
+            editing: isEditingText, capsLockHeld: capsLockHeld, browserPickerAvailable: currentWebsiteFinderTarget != nil)
         switch result.action {
         case .close: cancelImmediately()
         case .clear: clearMarks(); cancelImmediately()
@@ -52,6 +54,7 @@ final class QuickSelectionController: ObservableObject {
         case .mode: toggleAccessMode()
         case .run: runSelection()
         case .savedSlot(let index): if !settingsOpen && optionsSection == nil { runSavedSlot(index) }
+        case .websiteFinder: openWebsiteFinder()
         case nil: break
         }
         return result.consume
@@ -71,12 +74,10 @@ final class QuickSelectionController: ObservableObject {
         overviewNormalizer = QuickMarkKeyboardNormalizer()
         if NSApp.modalWindow != nil { NSApp.abortModal() }
         if let sheet = panel?.attachedSheet { panel?.endSheet(sheet); sheet.orderOut(nil) }
-        overviewOpenTask?.cancel(); overviewOpenTask = nil
         markTask?.cancel(); markTask = nil; markGeneration = UUID()
-        hasStagedSelection = selection.hasDraftConfiguration
         let previous = previousApp
+        clearMarks()
         close()
-        restoreStagedPresentation()
         if previous?.bundleIdentifier != Bundle.main.bundleIdentifier { previous?.activate(options: []) }
     }
     private func preserveAddedAppIcons(in items: [WindowItem]) -> [WindowItem] {
@@ -149,6 +150,7 @@ final class QuickSelectionController: ObservableObject {
     }
     @Published var saveFlight: SaveFlight?
     private var resumeRecord: IntentSessionRecord?
+    private var preparedOverviewPending = false
     var visibleSavedSlots: [Intention] {
         let slots = model.savedSlots
         let page = min(savedSlotPage, max(0, (slots.count - 1) / max(1, savedSlotCapacity)))
@@ -273,6 +275,7 @@ final class QuickSelectionController: ObservableObject {
         refresh()
         windows = preserveAddedAppIcons(in: windows)
         hasStagedSelection = true; resumeRecord = resume
+        preparedOverviewPending = panel?.isVisible != true
         message = missing == 0
             ? (draft.apps.isEmpty ? (draft.accessMode == .blacklist ? "This saved intention has no blocked apps or tabs. Choose what to block, then run and save it again." : "These apps are already covered by your defaults. Choose an additional app or tab.") : "Ready when you are. Review your workspace, then Return.")
             : "\(missing) items need choosing again. Review your apps and tabs before running."
@@ -317,6 +320,10 @@ final class QuickSelectionController: ObservableObject {
     @Published var tabPreview: NSImage?
     @Published var tabPreviewError: String?
     @Published var tabPreviewLoading = false
+    @Published private(set) var websiteFinder: WebsiteFinderController?
+    @Published private(set) var creatingWebsiteTab = false
+    private var websiteCreationTask: Task<Void, Never>?
+    private var websiteCreationID = UUID()
     private let workspaceOutlines = WorkspaceOutlineController()
     private var hasStagedSelection = false
     private var onboardingSelectionScope: (selection: QuickSelection, staged: Bool)?
@@ -397,22 +404,27 @@ final class QuickSelectionController: ObservableObject {
         hoverModification(nil)
         guard !model.hasActiveSession, NSApp.modalWindow == nil, modificationOrder.indices.contains(index) else { return }
         if !hasStagedSelection && panel?.isVisible != true { resetSelectionKeepingName() }
-        let section = modificationOrder[index]
-        if section.enabled(in: selection) {
-            // Commit a valid edit while its node still exists. SwiftUI may keep
-            // the field binding alive briefly while the popover tears down.
-            if let keyWindow = NSApp.keyWindow, keyWindow.isVisible, keyWindow.isKeyWindow {
-                keyWindow.makeFirstResponder(nil)
-            }
-            if optionsSection == section { closeModification() }
-            section.disable(in: &selection)
-            combinationNotice = false
-        } else {
-            openModification(section)
-        }
+        openModification(modificationOrder[index])
     }
     func openModification(_ section: QuickSelectionOptionsSection) {
         guard !model.hasActiveSession, NSApp.modalWindow == nil else { return }
+        if section == .checklist { editModification(section); return }
+        closeModification()
+        if section.enabled(in: selection) {
+            section.disable(in: &selection)
+            combinationNotice = false
+            refreshStagedOutlines()
+            if panel?.isVisible != true { showStagedModifiers() }
+            return
+        }
+        enableModification(section, showEditor: false)
+    }
+    func editModification(_ section: QuickSelectionOptionsSection) {
+        guard !model.hasActiveSession, NSApp.modalWindow == nil else { return }
+        if optionsSection != section { closeModification() }
+        enableModification(section, showEditor: true)
+    }
+    private func enableModification(_ section: QuickSelectionOptionsSection, showEditor: Bool) {
         let openingGeneration = generation
         hasStagedSelection = true
         if section == .timer || section == .checklist {
@@ -423,21 +435,14 @@ final class QuickSelectionController: ObservableObject {
                   !closing, !model.hasActiveSession else { return }
         }
         hoverModification(nil)
-        if section == .searches || section == .addAsYouGo || section == .stopwatch {
-            if section.enabled(in: selection) { section.disable(in: &selection) }
-            else { section.enable(in: &selection) }
-            optionsSection = nil
-            if panel?.isVisible != true { showStagedModifiers() }
-            return
-        }
         section.enable(in: &selection)
-        optionsSection = section
+        optionsSection = showEditor ? section : nil
         if panel?.isVisible != true {
             showStagedModifiers()
             refreshStagedOutlines()
             // A key nonactivating panel can edit without taking application
             // activation away from the exact desktop window being marked.
-            stagedModifiersPanel?.makeKeyAndOrderFront(nil)
+            if showEditor { stagedModifiersPanel?.makeKeyAndOrderFront(nil) }
         }
         if QuickSelectionOptionsSection.timer.enabled(in: selection), QuickSelectionOptionsSection.checklist.enabled(in: selection),
            !UserDefaults.standard.bool(forKey: "explainedTimerChecklist") {
@@ -462,14 +467,23 @@ final class QuickSelectionController: ObservableObject {
         }
         guard stagedModifiersPanel == nil, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
         let width = min(1050, screen.visibleFrame.width - 56)
-        let notice = Self.makeStagedModifierPanel(frame: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 46))
+        let notice = Self.makeStagedModifierPanel(frame: CGRect(x: screen.visibleFrame.midX - width / 2, y: screen.visibleFrame.minY + 18, width: width, height: 70))
         notice.isOpaque = false; notice.backgroundColor = .clear; notice.hidesOnDeactivate = false
         notice.level = .floating; notice.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         notice.contentView = NSHostingView(rootView: ModificationStrip(controller: self).padding(4).preferredColorScheme(.dark))
         stagedModifiersPanel = notice; notice.orderFrontRegardless()
     }
     func closeModification() {
+        let section = optionsSection
+        // Clear ownership before resigning first responder: AppKit may deliver
+        // the popover-dismiss callback synchronously during that transition.
         optionsSection = nil
+        if let section {
+            if let keyWindow = NSApp.keyWindow, keyWindow.isVisible, keyWindow.isKeyWindow {
+                keyWindow.makeFirstResponder(nil)
+            }
+            section.dismissEditor(in: &selection)
+        }
         if panel?.isVisible != true {
             // A popover may dismiss after overview has closed. Never recreate
             // its strip here: only a new quick mark or shortcut can show it.
@@ -481,7 +495,9 @@ final class QuickSelectionController: ObservableObject {
     }
     private func hideStagedModifiers() {
         hoverModification(nil)
+        let section = optionsSection
         optionsSection = nil
+        section?.dismissEditor(in: &selection)
         let previousPanel = stagedModifiersPanel
         stagedModifiersPanel = nil
         previousPanel?.orderOut(nil)
@@ -513,13 +529,6 @@ final class QuickSelectionController: ObservableObject {
             return
         }
         workspaceOutlines.update(selection, preserveBehindIntentPanels: optionsSection != nil)
-    }
-    private func restoreStagedPresentation() {
-        guard hasStagedSelection, !selection.apps.isEmpty,
-              !model.hasActiveSession, panel?.isVisible != true else { return }
-        if let presentStagedSelection { presentStagedSelection(selection); return }
-        refreshStagedOutlines()
-        showStagedModifiers()
     }
     func markForeground(wholeWindow: Bool = false, fromShortcut: Bool = false) {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
@@ -585,6 +594,7 @@ final class QuickSelectionController: ObservableObject {
         if panel?.isVisible == true { runSelection(); return }
         guard runMarkedTask == nil, !model.hasActiveSession, openingApps.isEmpty,
               hasStagedSelection || markTask != nil else { return }
+        closeModification()
         guard let origin = WorkspaceWindow.focused(), origin.pid != ProcessInfo.processInfo.processIdentifier else { return }
         let originalSnapshot = QuickSelection.browsers.contains(origin.bundle)
             ? BrowserTabSnapshotStore(browserBundleIdentifier: origin.bundle).load(maxAge: 5) : nil
@@ -704,11 +714,10 @@ final class QuickSelectionController: ObservableObject {
         hideStagedModifiers()
         markGeneration = UUID()
         markTask?.cancel(); markTask = nil
-        overviewOpenTask?.cancel(); overviewOpenTask = nil
         runMarkedTask?.cancel()
         SpotlightAppPreparation.shared.release(); openingApps = []; spotlightApps = [:]
-        selection.clearTargets()
-        selection.name = ""; selection.sourceIntentionID = nil; resumeRecord = nil
+        selection = QuickSelection()
+        resumeRecord = nil; preparedOverviewPending = false
         hasStagedSelection = false
         workspaceOutlines.stop()
     }
@@ -723,7 +732,6 @@ final class QuickSelectionController: ObservableObject {
     private(set) var topSafeInset: CGFloat = 0
     let model: IntentAppModel
     private let offerExitPasscode: @MainActor () -> Void
-    private let presentStagedSelection: (@MainActor (QuickSelection) -> Void)?
     private var panel: NSPanel?
     private var monitor: Any?
     private var refreshTimer: Timer?
@@ -731,20 +739,17 @@ final class QuickSelectionController: ObservableObject {
     private var previewRetry = 0
     private var previewTask: Task<Void, Never>?
     private var previousApp: NSRunningApplication?
-    private var wasOverlayVisible = false
     private var generation = UUID()
 
-    init(model: IntentAppModel, offerExitPasscode: @escaping @MainActor () -> Void = { IntentExitPasscode.offerOnce() },
-         presentStagedSelection: (@MainActor (QuickSelection) -> Void)? = nil) {
+    init(model: IntentAppModel, offerExitPasscode: @escaping @MainActor () -> Void = { IntentExitPasscode.offerOnce() }) {
         self.model = model
         self.offerExitPasscode = offerExitPasscode
-        self.presentStagedSelection = presentStagedSelection
         model.quickSelectionDidStart = { [weak self] in
             guard let self else { return }
             self.workspaceOutlines.stop(); self.hideStagedModifiers()
             SpotlightAppPreparation.shared.didStart(); self.spotlightApps = [:]; self.openingApps = []
             self.hasStagedSelection = false
-            self.selection = QuickSelection(); self.resumeRecord = nil
+            self.selection = QuickSelection(); self.resumeRecord = nil; self.preparedOverviewPending = false
         }
         model.restoreInterruptedWorkspace = { [weak self] intention, workspace in
             self?.prepare(intention, workspace: workspace)
@@ -761,26 +766,15 @@ final class QuickSelectionController: ObservableObject {
         return apps.filter { app in !windows.contains { $0.appID == app.id } }
     }
     var isSelectionSurfaceVisible: Bool { panel?.isVisible == true }
-    private var overviewOpenTask: Task<Void, Never>?
+    var isStagedModifierSurfaceVisible: Bool { stagedModifiersPanel?.isVisible == true }
+    func prepareOverviewEntry() {
+        // An explicit saved/resume action loads its own configuration. A normal
+        // SBT entry is a fresh mode, not a continuation of DBT marks or editors.
+        if preparedOverviewPending { preparedOverviewPending = false; return }
+        clearMarks()
+    }
     func toggle() {
         model.cancelBrowserCoverageStart()
-        // Finish a pending mark before presenting a surface that changes focus.
-        if markTask != nil, panel?.isVisible != true {
-            guard overviewOpenTask == nil else { return }
-            overviewOpenTask = Task { [weak self] in
-                guard let self else { return }
-                while let pending = self.markTask {
-                    let sequence = self.markSequence
-                    await pending.value
-                    guard !Task.isCancelled else { return }
-                    if self.markSequence == sequence { break }
-                }
-                self.overviewOpenTask = nil
-                self.markTask = nil
-                self.toggle()
-            }
-            return
-        }
         if panel?.isVisible == true { cancel(); return }
         guard !model.hasActiveSession,
               model.pendingFriction == nil,
@@ -800,14 +794,13 @@ final class QuickSelectionController: ObservableObject {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?" + (screenMissing ? "Privacy_ScreenCapture" : "Privacy_Accessibility"))!)
             return
         }
-        if !hasStagedSelection { selection = QuickSelection(); resumeRecord = nil }
+        prepareOverviewEntry()
         if onboarding.isTeaching, !onboarding.purposeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { selection.name = onboarding.purposeName }
         model.pendingPurposeSessionSave = nil
         workspaceOutlines.stop()
         hideStagedModifiers()
         optionsSection = nil; message = nil; expanded = false; closing = false; windows = []; focusedBrowserWindow = nil
         previousApp = NSWorkspace.shared.frontmostApplication
-        wasOverlayVisible = model.overlayPresenter?.isOverlayVisible == true
         refresh(); generation = UUID(); previewRetry = 0
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
         // Capture coordinates are top-left; AppKit screens are bottom-left.
@@ -1102,6 +1095,7 @@ final class QuickSelectionController: ObservableObject {
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
     }
     func dismissBrowserPicker() {
+        closeWebsiteFinder()
         browserReloadTask?.cancel(); browserReloadTask = nil
         windowResolutionID = UUID()
         windowResolutionTask?.cancel(); windowResolutionTask = nil
@@ -1110,8 +1104,87 @@ final class QuickSelectionController: ObservableObject {
         focusedBrowserWindow = nil; explicitBrowserWindow = nil
         hoveredTab = nil; tabPreview = nil; tabPreviewError = nil; tabPreviewLoading = false
     }
+    var currentWebsiteFinderTarget: WebsiteFinderTarget? {
+        guard !model.hasActiveSession, !closing, panel?.isVisible == true,
+              let window = windows.first(where: { $0.id == focusedBrowserWindow }),
+              let windowID = displayedBrowserWindowID(for: window),
+              let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == window.appID }),
+              let session = snapshot.browserSessionID else { return nil }
+        let tabs = (snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == windowID }
+        let previousAnchor = websiteFinder?.target.anchorTabID
+        guard let anchor = tabs.first(where: { $0.id == previousAnchor }) ?? tabs.first(where: \.active) ?? tabs.first else { return nil }
+        let target = WebsiteFinderTarget(browserBundleIdentifier: window.appID, browserSessionID: session,
+            browserWindowID: windowID, anchorTabID: anchor.id, overviewGeneration: generation)
+        return target.isValid ? target : nil
+    }
+    func openWebsiteFinder() {
+        guard websiteFinder == nil, !creatingWebsiteTab, let target = currentWebsiteFinderTarget else { return }
+        // Resolution may have started before a fresh snapshot made identity
+        // available. Its delayed activation must not run behind this editor.
+        windowResolutionID = UUID()
+        windowResolutionTask?.cancel(); windowResolutionTask = nil
+        resolvingBrowserWindow = false
+        closeModification()
+        hoverTask?.cancel(); hoverTask = nil
+        tabPreviewLoading = false
+        message = nil
+        websiteFinder = WebsiteFinderController(target: target, currentTarget: { [weak self] in
+            self?.currentWebsiteFinderTarget
+        }, onCapture: { [weak self] target, url in
+            self?.createWebsiteTab(target: target, url: url)
+        })
+    }
+    func closeWebsiteFinder() {
+        websiteCreationID = UUID()
+        websiteCreationTask?.cancel(); websiteCreationTask = nil
+        creatingWebsiteTab = false
+        websiteFinder?.cancel(); websiteFinder = nil
+    }
+    private func createWebsiteTab(target: WebsiteFinderTarget, url: URL) {
+        guard !creatingWebsiteTab, currentWebsiteFinderTarget == target else { return }
+        creatingWebsiteTab = true
+        let requestID = UUID(); websiteCreationID = requestID
+        websiteCreationTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.websiteCreationID == requestID {
+                    self.creatingWebsiteTab = false; self.websiteCreationTask = nil
+                }
+            }
+            do {
+                let tab = try await BrowserTabCreationService.create(target: target, url: url, isCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.websiteCreationID == requestID && self.currentWebsiteFinderTarget == target
+                })
+                guard !Task.isCancelled, self.websiteCreationID == requestID,
+                      self.currentWebsiteFinderTarget == target else { return }
+                guard await self.freshSnapshots(for: [target.browserBundleIdentifier]),
+                      !Task.isCancelled, self.websiteCreationID == requestID,
+                      self.currentWebsiteFinderTarget == target,
+                      let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == target.browserBundleIdentifier }),
+                      snapshot.browserSessionID == target.browserSessionID,
+                      let created = (snapshot.allTabs ?? snapshot.tabs).first(where: { $0.id == tab.id && $0.windowID == target.browserWindowID }) else {
+                    self.message = "The background tab was created, but its fresh tab list is still unavailable. Refresh tabs to select it."
+                    self.closeWebsiteFinder()
+                    return
+                }
+                // Select only the receipt's real tab in the original profile.
+                // Never retry creation, activate the browser, or substitute IDs.
+                if !self.isTabSelected(created.id, browser: target.browserBundleIdentifier) {
+                    self.selectTab(created, browser: target.browserBundleIdentifier, extendingRange: false)
+                }
+                self.closeWebsiteFinder()
+            } catch {
+                guard !Task.isCancelled, self.websiteCreationID == requestID,
+                      self.currentWebsiteFinderTarget == target else { return }
+                self.message = error.localizedDescription
+                self.closeWebsiteFinder()
+            }
+        }
+    }
     func runSelection() {
-        guard !closing, !loading, openingApps.isEmpty, !selection.apps.isEmpty else { return }
+        guard !closing, !loading, !creatingWebsiteTab, openingApps.isEmpty, !selection.apps.isEmpty else { return }
+        closeModification()
         refresh()
         for (key, policy) in selection.websiteFeaturePolicies ?? [:] {
             guard let site = FocusWebsite(rawValue: key), policy.isValid(for: site) else {
@@ -1120,10 +1193,10 @@ final class QuickSelectionController: ObservableObject {
         }
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
-        dismissAnimated(start: true)
+        dismissForRun()
     }
     func cancel() { cancelImmediately() }
-    private func dismissAnimated(start: Bool) {
+    private func dismissForRun() {
         closing = true
         let token = generation
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -1131,23 +1204,16 @@ final class QuickSelectionController: ObservableObject {
         Task { [weak self] in
             if !reduced { try? await Task.sleep(nanoseconds: 240_000_000) }
             guard let self, self.generation == token else { return }
-            if start {
-                self.refresh()
-                self.prepareRunMetadata()
-                guard self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .overview) else {
-                    self.message = self.model.errorMessage; self.closing = false
-                    withAnimation(.easeOut(duration: 0.2)) { self.expanded = true }; return
-                }
-                self.workspaceOutlines.stop()
-                // Readiness, rather than accepting an asynchronous start, clears the draft.
-                self.close()
-                if self.model.pendingFriction != nil || self.model.pendingEndTimeRequest != nil { self.model.showOverlay() }
-            } else {
-                self.hasStagedSelection = self.selection.hasDraftConfiguration
-                self.close()
-                self.restoreStagedPresentation()
-                if self.wasOverlayVisible { self.model.showOverlay() } else { self.previousApp?.activate(options: []) }
+            self.refresh()
+            self.prepareRunMetadata()
+            guard self.model.startQuickSelection(self.selection, apps: self.apps.map(\.app), snapshots: self.snapshots, onboardingOrigin: .overview) else {
+                self.message = self.model.errorMessage; self.closing = false
+                withAnimation(.easeOut(duration: 0.2)) { self.expanded = true }; return
             }
+            self.workspaceOutlines.stop()
+            // Readiness, rather than accepting an asynchronous start, clears the draft.
+            self.close()
+            if self.model.pendingFriction != nil || self.model.pendingEndTimeRequest != nil { self.model.showOverlay() }
         }
     }
     private func close() {
@@ -1183,6 +1249,7 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func hoverTab(_ tab: BrowserTabItem, browser: String, entered: Bool) {
+        guard websiteFinder == nil else { return }
         hoverTask?.cancel(); hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
         guard entered else { return }
         let expectedBrowserSessionID = snapshots.first(where: { $0.browserBundleIdentifier == browser })?.browserSessionID
@@ -1634,6 +1701,10 @@ private struct QuickSelectionView: View {
                 HStack {
                     Text(controller.apps.first { $0.id == window.appID }?.app.name ?? "Browser tabs").font(.headline)
                     Spacer()
+                    Button { controller.openWebsiteFinder() } label: {
+                        Image(systemName: "plus"); Text("T").font(.caption.monospaced())
+                    }.buttonStyle(.plain).accessibilityLabel("Add a website, T")
+                        .disabled(controller.currentWebsiteFinderTarget == nil || controller.creatingWebsiteTab)
                     Button { controller.dismissBrowserPicker() } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Close tabs")
                 }
                 if controller.tabs(for: window).isEmpty {
@@ -1689,7 +1760,18 @@ private struct QuickSelectionView: View {
                 Divider()
                 ZStack {
                     RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.12))
-                    if let image = controller.tabPreview { Image(nsImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 10)) }
+                    if let finder = controller.websiteFinder {
+                        WebsiteFinderView(controller: finder, onClose: controller.closeWebsiteFinder)
+                            .overlay {
+                                if controller.creatingWebsiteTab {
+                                    ZStack {
+                                        Color.black.opacity(0.7)
+                                        ProgressView("Adding background tab…")
+                                    }.clipShape(RoundedRectangle(cornerRadius: 16))
+                                }
+                            }
+                    }
+                    else if let image = controller.tabPreview { Image(nsImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 10)) }
                     else if controller.tabPreviewLoading { ProgressView("Loading preview…") }
                     else {
                         VStack(spacing: 8) {
@@ -1734,20 +1816,32 @@ private struct ModificationStrip: View {
     @State private var dragOffset: CGFloat = 0
     var body: some View {
         GeometryReader { geometry in
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             ForEach(Array(controller.modificationOrder.enumerated()), id: \.element) { index, section in
                 let enabled = section.enabled(in: controller.selection)
-                Button { controller.openModification(section) } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: section.icon)
-                        Text(section.rawValue).lineLimit(1).minimumScaleFactor(0.8)
-                        Text("` + \(index + 1)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                        if enabled { Circle().fill(accent).frame(width: 5, height: 5) }
-                    }.font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .overlay(Capsule().stroke(enabled ? accent.opacity(0.8) : .white.opacity(0.2)))
-                }.buttonStyle(.plain)
-                    .accessibilityLabel("\(section.rawValue), \(enabled ? "on" : "off"), backtick plus \(index + 1)")
+                VStack(spacing: 0) {
+                    Button { controller.openModification(section) } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: section.icon)
+                            Text(section.rawValue).lineLimit(1).minimumScaleFactor(0.8)
+                            Text("` + \(index + 1)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                            if enabled { Circle().fill(accent).frame(width: 5, height: 5) }
+                        }.font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(enabled ? accent.opacity(0.8) : .white.opacity(0.2)))
+                    }.buttonStyle(.plain)
+                        .accessibilityLabel("\(section.rawValue), \(enabled ? "on" : "off"), backtick plus \(index + 1)")
+                    if let duration = section.durationSummary(in: controller.selection) {
+                        Rectangle().fill(.white.opacity(0.20)).frame(width: 1, height: 3)
+                        Button { controller.editModification(section) } label: {
+                            Text(duration).font(.system(size: 11, weight: .medium, design: .rounded)).monospacedDigit()
+                                .padding(.horizontal, 13).frame(height: 20)
+                                .background(Color(white: 0.10), in: Capsule())
+                                .overlay(Capsule().stroke(.white.opacity(0.18)))
+                        }.buttonStyle(.plain)
+                            .accessibilityLabel("Edit \(section.rawValue.lowercased()), \(duration)")
+                    } else { Color.clear.frame(height: 23).allowsHitTesting(false) }
+                }.frame(maxWidth: .infinity)
                     .onHover { controller.hoverModification($0 ? section : nil) }
                     .onDisappear { controller.hoverModification(nil) }
                     .offset(x: dragged == section ? dragOffset : 0).zIndex(dragged == section ? 1 : 0)
@@ -1759,22 +1853,11 @@ private struct ModificationStrip: View {
                             controller.swapModification(section.rawValue, with: controller.modificationOrder[destination])
                             dragged = nil; dragOffset = 0
                         })
-                    .popover(isPresented: Binding(get: { controller.optionsSection == section }, set: { if !$0, controller.optionsSection == section { controller.closeModification() } }), arrowEdge: .bottom) {
-                        VStack(spacing: 0) {
-                            if controller.combinationNotice {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Label("Timer + Checklist", systemImage: "info.circle").font(.headline)
-                                    Text("Whichever finishes first ends your intention: all tasks checked or time up. Normal finish is disabled; Safety Stop remains available.").font(.caption).fixedSize(horizontal: false, vertical: true)
-                                    Button("Got it") { controller.acknowledgeCombination() }.buttonStyle(.bordered)
-                                }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(Color.green.opacity(0.08))
-                                Divider()
-                            }
-                            QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.closeModification() }
-                                .frame(height: section == .checklist ? 260 : (section == .cooldown ? 156 : 224))
-                        }.frame(width: 300)
+                    .popover(isPresented: Binding(get: { controller.optionsSection == section }, set: { if !$0, controller.optionsSection == section { controller.closeModification() } }), arrowEdge: .top) {
+                        QuickSelectionOptionsView(selection: $controller.selection, section: section) { controller.closeModification() }
                     }
             }
         }
-        }.frame(height: 36)
+        }.frame(height: 60)
     }
 }

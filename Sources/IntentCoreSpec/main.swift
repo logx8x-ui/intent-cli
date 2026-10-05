@@ -30,6 +30,7 @@ do {
     try runRestorationFocusSpecs()
     try runHabitSessionSpecs()
     try runQuickGestureRegressionSpecs()
+    try runWebsiteFinderSpecs()
     try runTabSelectionSpecs()
     try runSessionRuntimeSpecs()
     try runSessionNotchLayoutSpecs()

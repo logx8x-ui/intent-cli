@@ -16,7 +16,7 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         case .timer: selection.restrictionNodes.append(.init(kind: .timer, position: .init(x: 240, y: 260), durationMinutes: QuickSelectionPreferences.timerDuration(defaults: defaults), showsRemainingTime: true, locksSessionUntilTimerEnds: true))
         case .checklist: selection.frictionNodes.append(.init(friction: .taskChecklist([""]), position: .init(x: -240, y: 260)))
         case .searches: selection.restrictionNodes.append(.init(kind: .allowBrowserSearches, position: .init(x: 240, y: 390)))
-        case .cooldown: selection.restrictionNodes.append(.init(kind: .coolDown, position: .init(x: 240, y: 390), durationMinutes: 30))
+        case .cooldown: selection.restrictionNodes.append(.init(kind: .coolDown, position: .init(x: 240, y: 390), durationMinutes: QuickSelectionPreferences.cooldownDuration(defaults: defaults)))
         }
     }
     func disable(in selection: inout QuickSelection) {
@@ -28,6 +28,23 @@ enum QuickSelectionOptionsSection: String, CaseIterable {
         case .searches: selection.restrictionNodes.removeAll { $0.kind == .allowBrowserSearches }
         case .cooldown: selection.restrictionNodes.removeAll { $0.kind == .coolDown }
         }
+    }
+    func dismissEditor(in selection: inout QuickSelection) {
+        if self == .checklist { QuickSelectionChecklistEditing.dismiss(in: &selection) }
+    }
+
+    func durationSummary(in selection: QuickSelection) -> String? {
+        guard self == .timer || self == .cooldown else { return nil }
+        guard let node = selection.restrictionNodes.first(where: {
+            self == .cooldown ? $0.kind == .coolDown : ($0.kind == .timer || $0.kind == .endTime)
+        }) else { return nil }
+        if node.kind == .endTime {
+            let date = Calendar.current.date(bySettingHour: node.endTimeHour ?? 17,
+                                             minute: node.endTimeMinute ?? 0, second: 0, of: Date()) ?? Date()
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        let minutes = node.durationMinutes ?? (self == .cooldown ? QuickSelectionPreferences.initialCooldownDuration : QuickSelectionPreferences.initialTimerDuration)
+        return minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
     }
     var icon: String {
         switch self { case .addAsYouGo: return "plus.app"; case .stopwatch: return "stopwatch"; case .timer: return "timer"; case .checklist: return "checklist"; case .searches: return "magnifyingglass"; case .cooldown: return "hourglass" }
@@ -58,91 +75,138 @@ struct QuickSelectionOptionsView: View {
     @Binding var selection: QuickSelection
     let section: QuickSelectionOptionsSection
     let close: () -> Void
-    @State private var startTime = Date()
-    private var timerIndex: Int? { selection.restrictionNodes.firstIndex { $0.kind == .timer || $0.kind == .endTime } }
-    private var checklistIndex: Int? { selection.frictionNodes.firstIndex { if case .taskChecklist = $0.friction { return true }; return false } }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack { Text(section.rawValue).font(.system(size: 15, weight: .semibold)); Spacer(); Button("Done", action: close).buttonStyle(.plain) }
-            Text(section.hint).font(.system(size: 12)).foregroundStyle(.secondary)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if section == .timer {
-                    if let index = timerIndex {
-                        Text("Finish when time is up; use your exit passcode to finish early.").font(.caption).foregroundStyle(.secondary)
-                        HStack(spacing: 8) {
-                            timerModeButton("Duration", clock: false, index: index)
-                            timerModeButton("Set end time", clock: true, index: index)
-                        }
-                        if selection.restrictionNodes[index].kind == .timer {
-                            let timerID = selection.restrictionNodes[index].id
-                            HStack {
-                                TextField("Minutes", value: Binding(get: {
-                                    QuickSelectionPreferences.configuredTimerDuration(in: selection, nodeID: timerID)
-                                }, set: {
-                                    QuickSelectionPreferences.editTimerDuration($0, in: &selection, nodeID: timerID)
-                                }), format: .number).textFieldStyle(.roundedBorder)
-                                Text("minutes").foregroundStyle(.secondary)
-                            }
-                        } else {
-                            HStack { Text("Start:"); Text(startTime, style: .time).foregroundStyle(.secondary) }
-                            DatePicker("End:", selection: Binding(get: {
-                                Calendar.current.date(bySettingHour: selection.restrictionNodes[index].endTimeHour ?? 17, minute: selection.restrictionNodes[index].endTimeMinute ?? 0, second: 0, of: Date()) ?? Date()
-                            }, set: { setEnd($0, index: index) }), displayedComponents: .hourAndMinute).datePickerStyle(.field)
-                            Text("An earlier end time means tomorrow.").font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    }
-                    if section == .checklist {
-                    if let index = checklistIndex {
-                        Text("The last checked task finishes the intention. Your exit passcode lets you stop early.").font(.caption).foregroundStyle(.secondary)
-                        if case .taskChecklist(let tasks) = selection.frictionNodes[index].friction {
-                            ForEach(tasks.indices, id: \.self) { taskIndex in
-                                HStack {
-                                    Image(systemName: "square").foregroundStyle(.secondary)
-                                    TextField("Your task", text: Binding(get: {
-                                        guard case .taskChecklist(let current) = selection.frictionNodes[index].friction, current.indices.contains(taskIndex) else { return "" }
-                                        return current[taskIndex]
-                                    }, set: { text in
-                                        guard case .taskChecklist(var current) = selection.frictionNodes[index].friction, current.indices.contains(taskIndex) else { return }
-                                        current[taskIndex] = text; selection.frictionNodes[index].friction = .taskChecklist(current)
-                                    })).textFieldStyle(.roundedBorder)
-                                    Button { var current = tasks; current.remove(at: taskIndex); selection.frictionNodes[index].friction = .taskChecklist(current) } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain)
-                                }
-                            }
-                            Button("Add task", systemImage: "plus") { selection.frictionNodes[index].friction = .taskChecklist(tasks + [""]) }.buttonStyle(.plain)
-                        }
-                    }
-                    }
-                    if section == .cooldown {
-                    if let index = selection.restrictionNodes.firstIndex(where: { $0.kind == .coolDown }) {
-                        HStack { TextField("Minutes", value: Binding(get: { selection.restrictionNodes[index].durationMinutes ?? 30 }, set: { selection.restrictionNodes[index].durationMinutes = min(1440, max(1, $0)) }), format: .number).textFieldStyle(.roundedBorder); Text("minutes") }
-                    }
-                    }
-                }.padding(2)
+        Group {
+            if section == .checklist,
+               let node = selection.frictionNodes.first(where: { if case .taskChecklist = $0.friction { return true }; return false }) {
+                checklistEditor(nodeID: node.id)
+            } else if section == .timer || section == .cooldown,
+                      let node = selection.restrictionNodes.first(where: {
+                section == .cooldown ? $0.kind == .coolDown : ($0.kind == .timer || $0.kind == .endTime)
+            }) {
+                durationEditor(node: node)
             }
-            Button("Remove \(section.rawValue.lowercased())") {
-                section.disable(in: &selection); close()
-            }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
-        }.padding(14).tint(.green)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.16)))
-    }
-    private func timerModeButton(_ title: String, clock: Bool, index: Int) -> some View {
-        let selected = (selection.restrictionNodes[index].kind == .endTime) == clock
-        return Button {
-            selection.restrictionNodes[index].kind = clock ? .endTime : .timer
-            selection.restrictionNodes[index].usesPresetEndTime = clock
-            if clock && selection.restrictionNodes[index].endTimeHour == nil { setEnd(Date().addingTimeInterval(1500), index: index) }
-        } label: {
-            Text(title).font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 8)
-                .background(selected ? Color.green.opacity(0.25) : Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Color.green : Color.white.opacity(0.15)))
-        }.buttonStyle(.plain).accessibilityLabel("\(title), \(selected ? "selected" : "not selected")")
+        }.padding(12).tint(selection.accessMode == .blacklist ? .red : .green)
+            .background(Color(white: 0.10), in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.12)))
     }
 
-    private func setEnd(_ date: Date, index: Int) {
+    private func durationEditor(node: RestrictionNode) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                if section == .timer {
+                    timerModeButton(clock: false, nodeID: node.id)
+                    timerModeButton(clock: true, nodeID: node.id)
+                } else {
+                    Image(systemName: "hourglass").foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button(action: close) { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Close \(section.rawValue.lowercased()) editor")
+            }
+            if node.kind == .endTime {
+                DatePicker("End time", selection: endTimeBinding(nodeID: node.id), displayedComponents: .hourAndMinute)
+                    .labelsHidden().datePickerStyle(.field)
+                    .help("An earlier end time means tomorrow.")
+            } else {
+                QuickSelectionDurationFields(selection: $selection, nodeID: node.id, section: section,
+                                             initialMinutes: QuickSelectionPreferences.configuredDuration(in: selection, nodeID: node.id, section: section))
+                    .id(node.id + section.rawValue)
+            }
+        }.frame(width: 182)
+    }
+
+    private func checklistEditor(nodeID: String) -> some View {
+        let lineCount = max(3, QuickSelectionChecklistEditing.tasks(in: selection, nodeID: nodeID).count)
+        return VStack(spacing: 8) {
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(0..<lineCount, id: \.self) { row in
+                        TextField("", text: Binding(get: {
+                            let current = QuickSelectionChecklistEditing.tasks(in: selection, nodeID: nodeID)
+                            return current.indices.contains(row) ? current[row] : ""
+                        }, set: { QuickSelectionChecklistEditing.edit($0, row: row, in: &selection, nodeID: nodeID) }))
+                            .textFieldStyle(.plain).font(.system(size: 13)).padding(.horizontal, 3).frame(height: 30)
+                            .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.16)).frame(height: 1) }
+                            .accessibilityLabel("Checklist line \(row + 1)")
+                    }
+                }
+            }.frame(height: min(158, CGFloat(lineCount) * 32))
+            HStack {
+                Button { QuickSelectionChecklistEditing.appendRow(in: &selection, nodeID: nodeID) } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("Add checklist line")
+                Spacer()
+                Button { section.disable(in: &selection); close() } label: { Image(systemName: "trash") }
+                    .accessibilityLabel("Remove checklist")
+            }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 3)
+        }.frame(width: 252)
+    }
+
+    private func timerModeButton(clock: Bool, nodeID: String) -> some View {
+        let selected = selection.restrictionNodes.first(where: { $0.id == nodeID }).map { ($0.kind == .endTime) == clock } ?? false
+        return Button {
+            guard let index = selection.restrictionNodes.firstIndex(where: { $0.id == nodeID && ($0.kind == .timer || $0.kind == .endTime) }) else { return }
+            selection.restrictionNodes[index].kind = clock ? .endTime : .timer
+            selection.restrictionNodes[index].usesPresetEndTime = clock
+            if clock && selection.restrictionNodes[index].endTimeHour == nil {
+                let minutes = QuickSelectionPreferences.configuredTimerDuration(selection.restrictionNodes[index])
+                setEnd(Date().addingTimeInterval(TimeInterval(minutes) * 60), nodeID: nodeID)
+            }
+        } label: {
+            Image(systemName: clock ? "clock" : "timer").font(.system(size: 12)).frame(width: 26, height: 22)
+                .background(selected ? Color.white.opacity(0.13) : .clear, in: Capsule())
+        }.buttonStyle(.plain).foregroundStyle(selected ? .primary : .secondary)
+            .accessibilityLabel("\(clock ? "Set end time" : "Duration"), \(selected ? "selected" : "not selected")")
+            .help(clock ? "Set end time" : "Duration")
+    }
+
+    private func endTimeBinding(nodeID: String) -> Binding<Date> {
+        Binding(get: {
+            let node = selection.restrictionNodes.first { $0.id == nodeID && $0.kind == .endTime }
+            return Calendar.current.date(bySettingHour: node?.endTimeHour ?? 17, minute: node?.endTimeMinute ?? 0, second: 0, of: Date()) ?? Date()
+        }, set: { setEnd($0, nodeID: nodeID) })
+    }
+
+    private func setEnd(_ date: Date, nodeID: String) {
+        guard let index = selection.restrictionNodes.firstIndex(where: { $0.id == nodeID && $0.kind == .endTime }) else { return }
         selection.restrictionNodes[index].endTimeHour = Calendar.current.component(.hour, from: date)
         selection.restrictionNodes[index].endTimeMinute = Calendar.current.component(.minute, from: date)
+    }
+}
+
+private struct QuickSelectionDurationFields: View {
+    @Binding var selection: QuickSelection
+    let nodeID: String
+    let section: QuickSelectionOptionsSection
+    @State private var draft: QuickSelectionDurationDraft
+    @FocusState private var focus: Component?
+    private enum Component: Hashable { case hours, minutes }
+
+    init(selection: Binding<QuickSelection>, nodeID: String, section: QuickSelectionOptionsSection, initialMinutes: Int) {
+        _selection = selection; self.nodeID = nodeID; self.section = section
+        _draft = State(initialValue: .init(totalMinutes: initialMinutes))
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            field(.hours, label: "Hours")
+            Text("h").foregroundStyle(.secondary)
+            field(.minutes, label: "Minutes")
+            Text("m").foregroundStyle(.secondary)
+        }.font(.system(size: 14, weight: .medium, design: .rounded)).monospacedDigit()
+            .onChange(of: focus) { value in
+                if value == nil {
+                    draft = .init(totalMinutes: QuickSelectionPreferences.configuredDuration(in: selection, nodeID: nodeID, section: section))
+                }
+            }
+    }
+
+    private func field(_ component: Component, label: String) -> some View {
+        TextField("", text: Binding(get: { component == .hours ? draft.hours : draft.minutes }, set: { text in
+            if component == .hours { draft.hours = text } else { draft.minutes = text }
+            QuickSelectionPreferences.editDurationDraft(draft, in: &selection, nodeID: nodeID, section: section)
+        })).textFieldStyle(.plain).multilineTextAlignment(.center).frame(width: 39, height: 29)
+            .background(.white.opacity(0.06), in: Capsule()).focused($focus, equals: component)
+            .accessibilityLabel("\(section.rawValue) \(label.lowercased())")
     }
 }

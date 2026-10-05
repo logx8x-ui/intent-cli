@@ -16,6 +16,7 @@ enum SessionNotchChecks {
         }
         do {
             let before = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            try QuickSelectionModifierRenderChecks.run(check: check)
             let frame = CGRect(x: 0, y: 0, width: 1512, height: 982)
             let left = CGRect(x: 0, y: 950, width: 656, height: 32)
             let right = CGRect(x: 856, y: 950, width: 656, height: 32)

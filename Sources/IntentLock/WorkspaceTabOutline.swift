@@ -33,21 +33,17 @@ enum WorkspaceTabOutline {
         }
         let app = AXUIElementCreateApplication(window.pid)
         let windows = value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-        let geometryMatches = windows.filter { element in
-            guard let rect = frame(element) else { return false }
-            return abs(rect.minX - window.frame.minX) < 3 && abs(rect.minY - window.frame.minY) < 3
-                && abs(rect.width - window.frame.width) < 3 && abs(rect.height - window.frame.height) < 3
+        func windowElement(_ key: String) -> AXUIElement? {
+            guard let result = value(app, key), CFGetTypeID(result) == AXUIElementGetTypeID() else { return nil }
+            return unsafeBitCast(result, to: AXUIElement.self)
         }
-        // CGWindow and AX titles can update on different ticks after navigation.
-        // A unique geometry match identifies the same native window without a
-        // title race. When windows overlap, keep the title disambiguation.
-        let matchingWindows = geometryMatches.count == 1 ? geometryMatches : geometryMatches.filter {
-            BrowserWindowMatching.sameWindowTitle(text($0, kAXTitleAttribute) ?? "", window.title)
-        }
-        guard matchingWindows.count == 1, let root = matchingWindows.first else { return ([], false) }
-        return WorkspaceTabOutlineScanner.scan(root: root, browser: window.bundle, tabs: tabs, selected: selected,
-            reader: WorkspaceTabOutlineReader(text: text, children: children, frame: frame,
-                key: { Int(CFHash($0)) }, equal: { CFEqual($0, $1) },
-                hasTime: { Date() < deadline }, readsComplete: { readsComplete }))
+        let reader = WorkspaceTabOutlineReader(text: text, children: children, frame: frame,
+            key: { Int(CFHash($0)) }, equal: { CFEqual($0, $1) },
+            hasTime: { Date() < deadline }, readsComplete: { readsComplete })
+        guard let root = WorkspaceTabOutlineScanner.windowRoot(listed: windows,
+            focused: windowElement(kAXFocusedWindowAttribute), main: windowElement(kAXMainWindowAttribute),
+            targetFrame: window.frame, targetTitle: window.title, reader: reader,
+            isMinimized: { value($0, kAXMinimizedAttribute) as? Bool == true }) else { return ([], false) }
+        return WorkspaceTabOutlineScanner.scan(root: root, browser: window.bundle, tabs: tabs, selected: selected, reader: reader)
     }
 }

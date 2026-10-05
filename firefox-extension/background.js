@@ -12,11 +12,13 @@ const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v
 const browserSessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
+let hostSupportsTabCreation = false;
+let creationRulesActive = true;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
 let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
-  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeVisibility && browser.storage.session
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsTabCreation && browser.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && browser.storage.session
     && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
     ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
@@ -34,6 +36,11 @@ const minimizeBootstrap = typeof IntentFirefoxMinimizeBootstrap !== 'undefined'
   ? new IntentFirefoxMinimizeBootstrap(browser,{send:postCommandPort,identity:()=>nativeWindowVisibility?.identity(),
       validate:offer=>tabVisibility?.validateBootstrap(offer) ?? false}) : null;
 let rules = inactiveRules();
+const tabCreation = typeof IntentTabCreation !== "undefined" ? new IntentTabCreation(browser, {
+  session: () => browserSessionID, active: () => creationRulesActive || rules.active,
+  enabled: () => guardEnabled && hostSupportsTabCreation && nativeConnectionConfirmed && Boolean(commandPort), firefox: true, send: postCommandPort,
+  snapshot: () => publishTabSnapshot(true, true)
+}) : null;
 let lastAllowedTabId = null;
 let enforcing = false;
 let rulesFingerprint = fingerprintRules(rules);
@@ -148,6 +155,8 @@ function connectCommandPort() {
       const visibilityWasReady = Boolean(nativeWindowVisibility?.identity());
       nativeWindowVisibility?.receive(message);
       nativeConnectionConfirmed = true;
+      creationRulesActive = message?.tabCreationAllowed !== true;
+      hostSupportsTabCreation = message?.hostCapabilities?.includes("background-tab-create-host-v1") === true;
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
@@ -267,6 +276,9 @@ async function captureTabPreview(message) {
 }
 
 async function handleRequestedTab(message) {
+  if (message.action === "create" || message.action === "cancelCreate") {
+    await tabCreation?.handle(message); return;
+  }
   // Discovery is how Intent learns the current browser lifetime in the first place.
   if (message.action === "snapshot") {
     await publishTabSnapshot(true, true);

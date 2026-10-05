@@ -118,4 +118,42 @@ func runWorkspaceTabOutlineSpecs() throws {
     partial[7]?.frame = CGRect(x: 6, y: 148, width: 268, height: 38)
     try expect(scan(partial, selected: [51]).complete && !scan(partial, selected: [51]).regions.isEmpty,
                "A consistent tree partly outside the sidebar clips its row without treating the document as failed")
+
+    // Live Firefox follow-up: AXWindows listed only a minimized sibling, while
+    // AXFocusedWindow and AXMainWindow both exposed the other standard window.
+    // Exercise the production root resolver and walker, not just union logic.
+    let windowFrame = CGRect(x: 0, y: 39, width: 1710, height: 1073)
+    var roots = rows
+    roots[0]?.frame = windowFrame; roots[0]?.attributes["AXTitle"] = "Current browser window"
+    roots[100] = .init("AXWindow", frame: windowFrame, title: "Minimized sibling")
+    roots[101] = .init("AXWindow", frame: windowFrame, title: "Current browser window")
+    let rootReader = WorkspaceTabOutlineReader<Int>(text: { roots[$0]?.attributes[$1] },
+        children: { roots[$0]?.children ?? [] }, frame: { roots[$0]?.frame }, key: { $0 }, equal: { $0 == $1 },
+        hasTime: { true }, readsComplete: { true })
+    func root(_ listed: [Int], focused: Int? = nil, main: Int? = nil, minimized: Set<Int> = [100]) -> Int? {
+        WorkspaceTabOutlineScanner.windowRoot(listed: listed, focused: focused, main: main,
+            targetFrame: windowFrame, targetTitle: "Current browser window", reader: rootReader,
+            isMinimized: minimized.contains)
+    }
+    let missingListedRoot = root([100], focused: 0, main: 0)
+    let recovered = missingListedRoot.map {
+        WorkspaceTabOutlineScanner.scan(root: $0, browser: "org.mozilla.firefox", tabs: tabs, selected: [51], reader: rootReader)
+    }
+    try expect(missingListedRoot == 0 && recovered?.complete == true && recovered?.regions == [regular.insetBy(dx: 1, dy: 1)],
+               "A standard Firefox window omitted from AXWindows still gets its own exact sidebar outline through focused/main roots")
+    try expect(root([0], focused: 0, main: 0) == 0,
+               "The same AX object listed, focused and main is deduplicated rather than treated as ambiguous windows")
+    try expect(root([100], main: 0) == 0,
+               "A main-window root remains available when AXFocusedWindow is absent")
+    try expect(root([100]) == nil,
+               "A minimized sibling with the requested frame is never a substitute for an unavailable visible window")
+    try expect(root([100], focused: 0, minimized: []) == 0,
+               "Overlapping distinct windows still require the requested title instead of preferring arbitrary enumeration order")
+    try expect(root([0], focused: 101, minimized: []) == nil,
+               "Distinct overlapping same-title roots remain ambiguous even when one is focused")
+    roots[100]?.frame = windowFrame.offsetBy(dx: 100, dy: 0)
+    try expect(root([100], minimized: []) == nil,
+               "Additional AX roots never waive the requested native-window geometry")
+    try expect(root([0], focused: 0, minimized: [0]) == nil,
+               "Even a focused candidate cannot resurrect an outline on a confirmed minimized window")
 }

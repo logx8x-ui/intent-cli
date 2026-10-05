@@ -2,7 +2,7 @@ import Foundation
 
 /// Immediate overview exit and held-prefix controls. Search belongs to Apple Spotlight.
 public struct OverviewSearchGesture {
-    public enum Action: Equatable { case close, clear, modification(Int), mode, run, savedSlot(Int) }
+    public enum Action: Equatable { case close, clear, modification(Int), mode, run, savedSlot(Int), websiteFinder }
     public struct Result { public let consume: Bool; public let action: Action? }
     private var held = false
     public var isHoldingPrefix: Bool { held }
@@ -10,7 +10,7 @@ public struct OverviewSearchGesture {
     private var runIssued = false
     private var swallowed: Set<Int> = []
     public init() {}
-    public mutating func key(code: Int, down: Bool, modified: Bool, repeated: Bool, editing: Bool, capsLockHeld: Bool = false) -> Result {
+    public mutating func key(code: Int, down: Bool, modified: Bool, repeated: Bool, editing: Bool, capsLockHeld: Bool = false, browserPickerAvailable: Bool = false) -> Result {
         if !down, swallowed.remove(code) != nil { return .init(consume: true, action: nil) }
         if code == 53, down, !modified {
             let action: Action = held ? .clear : .close
@@ -46,6 +46,10 @@ public struct OverviewSearchGesture {
             if down { swallowed.insert(code) }
             return .init(consume: true, action: down && !repeated ? .savedSlot(index) : nil)
         }
+        if code == 17, down, !held, !modified, !editing, browserPickerAvailable {
+            swallowed.insert(code)
+            return .init(consume: true, action: repeated ? nil : .websiteFinder)
+        }
         // Key-up belongs to the hold that consumed key-down, even if Command,
         // Shift or Option changed in between. Otherwise the prefix stays stuck.
         if code == 50, !down {
@@ -57,7 +61,8 @@ public struct OverviewSearchGesture {
             return .init(consume: false, action: nil)
         }
         if held || repeated { return .init(consume: true, action: nil) }
-        guard !editing else { return .init(consume: false, action: nil) }
+        // Overview exit is available even inside its editors. Prefix chords
+        // still own the release, so editing a modifier cannot also close it.
         held = true; usedChord = capsLockHeld; runIssued = capsLockHeld
         return .init(consume: true, action: capsLockHeld ? .run : nil)
     }

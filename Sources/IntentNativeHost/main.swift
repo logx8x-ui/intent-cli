@@ -57,6 +57,7 @@ struct HostRequest: Codable {
     var appliedWebsitePolicySessionID: String?
     var browserSessionID: String?
     var preview: BrowserTabPreview?
+    var creation: BrowserTabCreationReceipt?
     var type: String?
     var enabled: Bool?
     var browserBundleIdentifier: String?
@@ -199,8 +200,8 @@ struct HostResponse: Codable {
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
-    var bundledExtensionVersion: String = "0.2.34"
-    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1"]
+    var bundledExtensionVersion: String = "0.2.35"
+    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1", "background-tab-create-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
     var active: Bool
@@ -223,6 +224,7 @@ struct HostResponse: Codable {
     var minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt?
     var minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt?
     var visibilityEnforcement: BrowserWindowVisibilityEnforcement?
+    var tabCreationAllowed = false
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,
          browserProcessIdentity: BrowserProcessIdentity? = nil, visibilityRestartReceipt: HostVisibilityRestartReceipt? = nil,
@@ -347,6 +349,7 @@ private final class HostRuntime {
     private var lastSnapshotTabs: [BrowserTabItem]?
     private var requestedSnapshotRefresh = false
     private var issuedSnapshotRequests: [String: Date] = [:]
+    private var issuedTabCreations: [String: BrowserTabCommand] = [:]
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
     private var directoryRefreshWorkItem: DispatchWorkItem?
@@ -502,6 +505,15 @@ private final class HostRuntime {
                            let item = try? JSONDecoder().decode(BrowserTabPreview.self, from: current),
                            item.requestID == preview.requestID { try? FileManager.default.removeItem(at: url) }
                     }
+                }
+            case "tabCreateResult":
+                if let receipt = request.creation, request.browserSessionID == profileSessionID,
+                   let issued = issuedTabCreations[receipt.requestID], receipt.matches(issued),
+                   let url = BrowserTabCreationReceipt.fileURL(requestID: receipt.requestID, directory: paths.directory),
+                   let data = try? JSONEncoder().encode(receipt), data.count <= 20000 {
+                    try? data.write(to: url, options: .atomic)
+                    issuedTabCreations.removeValue(forKey: receipt.requestID)
+                    queue.asyncAfter(deadline: .now() + 30) { try? FileManager.default.removeItem(at: url) }
                 }
             case "setGuardEnabled":
                 if let enabled = request.enabled, enabled != guardEnabled {
@@ -1002,6 +1014,10 @@ private final class HostRuntime {
     private func takePendingCommand() -> BrowserTabCommand? {
         guard let browserBundleIdentifier else { return nil }
         if let session = profileSessionID,
+           let creation = BrowserTabCreationMailbox(browser: browserBundleIdentifier, session: session, directory: paths.directory).take() {
+            return creation
+        }
+        if let session = profileSessionID,
            let command = BrowserTabCommandStore(fileURL: BrowserProfileSnapshots.partition(paths.command(for: browserBundleIdentifier), session: session)).take() {
             return command
         }
@@ -1017,6 +1033,18 @@ private final class HostRuntime {
                                   minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt? = nil,
                                   minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt? = nil) {
         let state = makeRuleState()
+        var tabCommand = tabCommand
+        if let command = tabCommand, command.action == .create {
+            issuedTabCreations = issuedTabCreations.filter { Date().timeIntervalSince($0.value.createdAt) < 20 }
+            let nowMS = Date().timeIntervalSince1970 * 1000
+            let eligible = cachedRules?.active != true && guardEnabled && command.browserSessionID == profileSessionID
+                && extensionCapabilities.contains(BrowserGuardCapability.backgroundTabCreation.rawValue)
+                && UUID(uuidString: command.id) != nil && command.tabID >= 0 && command.windowID >= 0
+                && command.url.flatMap(WebsiteFinderPolicy.validatedURL) != nil
+                && (command.expiresAtUnixMS ?? 0) > nowMS && (command.expiresAtUnixMS ?? 0) <= nowMS + 15000
+            if !eligible || issuedTabCreations[command.id] != nil { tabCommand = nil }
+            else { issuedTabCreations[command.id] = command }
+        }
         let record = currentVisibilityRecord()
         let offers = bootstrapOffers(record)
         let enforcement = record.flatMap { value -> BrowserWindowVisibilityEnforcement? in
@@ -1027,6 +1055,9 @@ private final class HostRuntime {
         var response = HostResponse(state: state, tabCommand: tabCommand, visibilityPlanReceipt: visibilityPlanReceipt,
             browserProcessIdentity: currentBrowserProcessIdentity, visibilityRestartReceipt: visibilityRestartReceipt,
             visibilityRecoveryReceipt: visibilityRecoveryReceipt, visibilityClosedReceipt: visibilityClosedReceipt)
+        // Effective rules can be inactive for an unrestricted browser during a
+        // global intention. Website creation is a pre-session operation only.
+        response.tabCreationAllowed = cachedRules?.active != true && guardEnabled
         response.minimizeBootstrapOffers = offers
         response.visibilityEnforcement = enforcement
         response.minimizeBootstrapClaimReceipt = minimizeBootstrapClaimReceipt

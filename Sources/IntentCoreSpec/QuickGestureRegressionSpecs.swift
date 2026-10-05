@@ -3,6 +3,23 @@ import IntentCore
 
 func runQuickGestureRegressionSpecs() throws {
     try runQuickMarkKeyboardInputSpecs()
+    var finder = OverviewSearchGesture()
+    try expect(!finder.key(code: 17, down: true, modified: false, repeated: false, editing: false).consume,
+        "T without a browser picker is ordinary input")
+    try expect(!finder.key(code: 17, down: true, modified: false, repeated: false, editing: true, browserPickerAvailable: true).consume,
+        "Typing T in a name, modifier or search never reopens the finder")
+    try expect(finder.key(code: 17, down: true, modified: false, repeated: false, editing: false, browserPickerAvailable: true).action == .websiteFinder,
+        "T in the chosen browser picker opens the finder")
+    try expect(finder.key(code: 17, down: true, modified: false, repeated: true, editing: true, browserPickerAvailable: true).action == nil,
+        "Holding T cannot repeatedly create finders")
+    try expect(finder.key(code: 17, down: false, modified: true, repeated: false, editing: true).consume,
+        "Finder trigger owns its release even after focus and modifier changes")
+    for editing in [false, true] {
+        var close = OverviewSearchGesture()
+        _ = close.key(code: 50, down: true, modified: false, repeated: false, editing: editing)
+        try expect(close.key(code: 50, down: false, modified: false, repeated: false, editing: editing).action == .close,
+            "Plain backtick exits overview including an open editor")
+    }
     for capsFirst in [true, false] {
         var run = QuickMarkGesture()
         let first = run.key(code: 50, down: true, modified: false, repeatKey: false, now: 0, capsLockHeld: capsFirst)

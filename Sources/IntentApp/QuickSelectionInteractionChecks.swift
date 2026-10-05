@@ -5,7 +5,8 @@ import IntentCore
 @MainActor
 enum QuickSelectionInteractionChecks {
     static func run(_ check: (Bool, String) throws -> Void) throws {
-        let modifierPanel = QuickSelectionController.makeStagedModifierPanel(frame: .init(x: 0, y: 0, width: 500, height: 46))
+        try WebsiteFinderFocusChecks.run(check)
+        let modifierPanel = QuickSelectionController.makeStagedModifierPanel(frame: .init(x: 0, y: 0, width: 500, height: 70))
         try check(modifierPanel.styleMask.contains(.nonactivatingPanel) && modifierPanel.canBecomeKey && !modifierPanel.canBecomeMain,
             "The real staged editor panel accepts keyboard focus without becoming an activating main window")
         modifierPanel.close()
@@ -21,21 +22,48 @@ enum QuickSelectionInteractionChecks {
             "Cancel during the first-use modifier prompt cannot enable a timer or recreate its controls")
         canceledController = nil
         // Exercise the actual overview-cancel owner without ordering desktop
-        // panels in model QA. The injected presenter receives the retained draft.
-        var returnedDrafts: [QuickSelection] = []
-        let transitions = QuickSelectionController(model: IntentAppModel(),
-            presentStagedSelection: { returnedDrafts.append($0) })
-        transitions.selection.toggleWindow(501, app: "qa.retained")
-        QuickSelectionOptionsSection.stopwatch.enable(in: &transitions.selection)
+        // panels in model QA. Cancellation must not revive the DBT draft.
+        let transitions = QuickSelectionController(model: IntentAppModel())
         for _ in 0..<3 {
+            transitions.selection.toggleWindow(501, app: "qa.retained")
+            QuickSelectionOptionsSection.stopwatch.enable(in: &transitions.selection)
             transitions.cancelImmediately()
-            try check(returnedDrafts.last?.windowIDsByApp["qa.retained"] == [501]
-                && returnedDrafts.last.map { QuickSelectionOptionsSection.stopwatch.enabled(in: $0) } == true,
-                "Leaving overview requests staged presentation with the retained modifiers and targets")
+            try check(transitions.selection.apps.isEmpty && transitions.selection.restrictionNodes.isEmpty
+                && transitions.selection.frictionNodes.isEmpty && !transitions.isStagedModifierSurfaceVisible,
+                "Leaving overview clears targets and modifiers without restoring staged presentation")
         }
-        try check(returnedDrafts.count == 3, "Repeated overview/escape cycles each restore staged presentation")
+        transitions.selection.toggleTab(.init(browser: "org.mozilla.firefox", id: 31), browserSessionID: "qa-picker")
+        QuickSelectionOptionsSection.checklist.enable(in: &transitions.selection)
+        transitions.selection.name = "Discard this draft"
+        transitions.prepareOverviewEntry()
+        try check(transitions.selection.apps.isEmpty && transitions.selection.tabs.isEmpty
+            && transitions.selection.frictionNodes.isEmpty && transitions.selection.name.isEmpty,
+            "DBT to SBT begins a fresh overview without old tabs, name or checklist")
         transitions.clearMarks(); transitions.cancelImmediately()
-        try check(returnedDrafts.count == 3, "Cleared targets cannot resurrect a staged strip")
+        try check(!transitions.isStagedModifierSurfaceVisible, "Cleared targets cannot resurrect a staged strip")
+        var saved = Intention(id: "qa-explicit-overview", name: "Saved setup", icon: "timer", colorHex: "#34C759", folder: "",
+            allowedApps: [], allowedWebsites: [], startupActions: [], restrictions: .init())
+        saved.restrictionNodes = [.init(kind: .timer, position: .zero, durationMinutes: 7)]
+        saved.frictionNodes = [.init(friction: .taskChecklist(["Saved line"]), position: .zero)]
+        transitions.prepare(saved, workspace: nil)
+        transitions.prepareOverviewEntry()
+        try check(transitions.selection.name == "Saved setup"
+            && transitions.selection.restrictionNodes.first?.durationMinutes == 7
+            && transitions.selection.frictionNodes == saved.frictionNodes,
+            "Explicit saved-intention entry retains its own timer and checklist")
+        transitions.prepareOverviewEntry()
+        try check(transitions.selection.restrictionNodes.isEmpty && transitions.selection.frictionNodes.isEmpty,
+            "Saved preloading is consumed once, never carried into a later fresh overview")
+        QuickSelectionOptionsSection.checklist.enable(in: &transitions.selection)
+        transitions.optionsSection = .checklist
+        transitions.closeModification()
+        try check(!QuickSelectionOptionsSection.checklist.enabled(in: transitions.selection),
+            "The real controller removes a blank checklist when its editor dismisses")
+        transitions.selection.frictionNodes = saved.frictionNodes
+        transitions.optionsSection = .checklist
+        transitions.closeModification()
+        try check(transitions.selection.frictionNodes == saved.frictionNodes,
+            "The real controller retains written checklist lines after editor dismissal")
         // These switches require no editor, target, browser IPC or Keychain UI.
         // Their keyboard entry point must work without an optional name.
         controller.modificationOrder = [.addAsYouGo, .stopwatch]

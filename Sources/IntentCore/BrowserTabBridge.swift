@@ -69,6 +69,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
 public struct BrowserTabSnapshot: Codable, Equatable {
     public var browserBundleIdentifier: String
     public var browserSessionID: String?
+
     public var tabs: [BrowserTabItem]
     public var allTabs: [BrowserTabItem]?
     public var updatedAt: Date
@@ -111,6 +112,8 @@ public struct BrowserTabCommand: Codable, Equatable, Identifiable {
     public var createdAt: Date
     public var action: BrowserTabCommandAction?
     public var browserSessionID: String?
+    public var url: String?
+    public var expiresAtUnixMS: Double?
 
     public init(
         id: String = UUID().uuidString,
@@ -118,7 +121,9 @@ public struct BrowserTabCommand: Codable, Equatable, Identifiable {
         windowID: Int,
         createdAt: Date = Date(),
         action: BrowserTabCommandAction = .activate,
-        browserSessionID: String? = nil
+        browserSessionID: String? = nil,
+        url: String? = nil,
+        expiresAtUnixMS: Double? = nil
     ) {
         self.id = id
         self.tabID = tabID
@@ -126,6 +131,8 @@ public struct BrowserTabCommand: Codable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.action = action
         self.browserSessionID = browserSessionID
+        self.url = url
+        self.expiresAtUnixMS = expiresAtUnixMS
     }
 }
 
@@ -134,6 +141,8 @@ public enum BrowserTabCommandAction: String, Codable, Equatable {
     case close
     case snapshot
     case preview
+    case create
+    case cancelCreate
 }
 
 public struct BrowserTabPreview: Codable, Sendable {

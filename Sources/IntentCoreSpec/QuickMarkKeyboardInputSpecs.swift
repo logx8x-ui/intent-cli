@@ -303,12 +303,13 @@ private func runOverviewKeyboardRoutingSpecs() throws {
 
         let typing = send(50, .keyDown, [], at: 2, overviewVisible: overviewVisible, editing: true,
             normalizer: &normalizer, overview: &overview, global: &global)
-        try expect(typing?.consume == false && typing?.overview == nil && typing?.global == nil,
-            "A fresh prefix inside an editor stays text instead of silently starting shortcut state")
+        try expect(typing?.consume == overviewVisible && typing?.overview == nil && typing?.global == nil,
+            "Overview owns its exit prefix while editing; ordinary external editors still receive literal text")
         let capsWhileTyping = send(57, .flagsChanged, physicalCaps, at: 2.1, overviewVisible: overviewVisible, editing: true,
             normalizer: &normalizer, overview: &overview, global: &global)
-        try expect(capsWhileTyping?.consume == false && capsWhileTyping?.overview == nil && capsWhileTyping?.global == nil,
-            "Caps typed in a text editor cannot manufacture Run from an unowned prefix")
+        try expect(capsWhileTyping?.consume == overviewVisible
+            && capsWhileTyping?.overview == (overviewVisible ? .run : nil) && capsWhileTyping?.global == nil,
+            "Caps Run works from an owned overview editor prefix but cannot manufacture Run in an external text editor")
 
         normalizer = QuickMarkKeyboardNormalizer(); overview = OverviewSearchGesture(); global.reset()
         _ = send(50, .keyDown, [], at: 3, overviewVisible: overviewVisible,

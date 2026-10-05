@@ -49,7 +49,10 @@ with another delayed activation or an independent copy of session state.
   standalone gesture reducer. Never hold inout gesture access across UI callbacks.
 - Explicit non-browser selection dismisses the tab picker, cancels its pending
   resolution/reload/preview work, and preserves already-selected browser tabs.
-- Leaving overview with a retained target restores its staged modifier strip.
+- Escape or plain backtick closes overview and clears its draft, modifiers and
+  pending mark work. Entering overview from DBT starts empty; only an explicit
+  saved/resume action may preload a configuration. This supersedes the earlier
+  retained-draft-on-cancel behavior at Logan's October 5 request.
   Editing a staged modifier preserves the selected visible window's outline;
   unrelated foreground applications do not inherit that exception. Partial
   tab selections highlight their exactly identified native-window preview,
@@ -66,6 +69,12 @@ with another delayed activation or an independent copy of session state.
   unrelated icon. No third-party favicon-discovery service is introduced.
 - New timers remember the last explicitly entered valid duration. Opening a
   saved timer must not change that preference or the saved timer's own meaning.
+  Cooldown has its own remembered duration. Valid hours/minutes edits persist
+  immediately without Return. Modifier bodies toggle; timer/cooldown duration
+  pills open editors. Checklist is the deliberate exception: click opens or
+  reopens its lined draft; blank outside dismissal disables it, written lines
+  survive dismissal, and only its editor removes it. A fresh session is blank
+  unless explicitly restoring a saved intention.
 - One input gesture produces at most one action. A consumed down event owns its
   corresponding up event even if modifiers change before release. Repeats do
   not toggle repeatedly. Session/context changes cancel pending gestures.
