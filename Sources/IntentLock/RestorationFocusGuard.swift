@@ -25,6 +25,7 @@ final class RestorationFocusGuard {
     private let beganUptime = ProcessInfo.processInfo.systemUptime
     private var observations: [[String: Any]] = []
     private var lastForegroundPID: pid_t?
+    private var lastFrontWindowID: UInt32?
     private var lastTargetOnScreen: Bool?
     private var lastTargetMinimized: Bool?
 
@@ -242,7 +243,19 @@ final class RestorationFocusGuard {
         case nil: observe("windowInventoryDeferred"); return
         case true?: break
         }
-        let onScreen = WorkspaceWindow.list().contains {
+        let onScreenWindows = WorkspaceWindow.list()
+        let frontWindow = onScreenWindows.first
+        if lastFrontWindowID != frontWindow?.id {
+            lastFrontWindowID = frontWindow?.id
+            // PID alone misses a different Firefox/Chrome window coming
+            // forward. Observe the separately queried onscreen native order;
+            // never derive z-order by filtering an all-window inventory.
+            observe("frontWindow", details: ["windowID": frontWindow?.id ?? 0,
+                "pid": frontWindow?.pid ?? 0,
+                "targetIsFront": frontWindow?.id == visibleWindowID
+                    && frontWindow?.pid == application.processIdentifier])
+        }
+        let onScreen = onScreenWindows.contains {
             $0.id == visibleWindowID && $0.pid == application.processIdentifier
         }
         if lastTargetOnScreen != onScreen {

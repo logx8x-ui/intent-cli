@@ -90,15 +90,96 @@ func runQuickMarkKeyboardInputSpecs() throws {
         }
     }
 
-    var normalizer = QuickMarkKeyboardNormalizer()
-    var gesture = QuickMarkGesture()
-    _ = send(50, .keyDown, [], at: 0, normalizer: &normalizer, gesture: &gesture)
-    try expect(send(57, .flagsChanged, .maskAlphaShift, at: 0.05, normalizer: &normalizer, gesture: &gesture) == nil,
-        "A latch-only flagsChanged event is not evidence of a physical Caps press")
-    _ = send(50, .keyUp, .maskAlphaShift, at: 0.1, normalizer: &normalizer, gesture: &gesture)
-    try expect(gesture.expire(now: 1) == .single, "Latch-only notifications never steal a pending single")
+    try runCapsLockCompatibilityRoutingSpecs()
     try runOverviewKeyboardRoutingSpecs()
-    print("Native keyboard normalization and routing regressions passed (overview and staged selection, physical Caps, both key orders, keycodes 57/255)")
+    print("Native keyboard normalization and routing regressions passed (overview/staged selection, Caps-specific latch transitions, stateless Caps in both key orders, keycodes 57/255)")
+}
+
+/// A Caps-specific flagsChanged event is an input edge, not merely the capitals
+/// latch carried by an unrelated key. Session event delivery need not include
+/// the optional HID stateless bits (Apple QA1519). The original fixture encoded
+/// only stateless events and incorrectly required this documented path to drop.
+private func runCapsLockCompatibilityRoutingSpecs() throws {
+    func event(_ code: CGKeyCode, _ type: CGEventType, _ flags: CGEventFlags) -> CGEvent {
+        let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: type == .keyDown)!
+        event.type = type; event.flags = flags
+        return event
+    }
+    for startingLatch in [CGEventFlags(), .maskAlphaShift] {
+        let toggledLatch: CGEventFlags = startingLatch.isEmpty ? .maskAlphaShift : []
+        var normalizer = QuickMarkKeyboardNormalizer()
+        _ = normalizer.normalize(type: .keyDown, event: event(50, .keyDown, startingLatch))
+        let caps = normalizer.normalize(type: .flagsChanged, event: event(57, .flagsChanged, toggledLatch))
+        try expect(caps?.code == 57 && caps?.down == true && caps?.capsLockHeld == false,
+            "A compatibility Caps transition is a single press edge, never a fabricated physical hold")
+        try expect(normalizer.normalize(type: .flagsChanged, event: event(57, .flagsChanged, toggledLatch)) == nil,
+            "Duplicate latch-only Caps flags are ignored at the native decoder")
+        let laterBacktick = normalizer.normalize(type: .keyDown, event: event(50, .keyDown, toggledLatch))!
+        try expect(!laterBacktick.capsLockHeld,
+            "A latch transition before backtick cannot leak a sticky physical-Caps state")
+
+        normalizer = QuickMarkKeyboardNormalizer()
+        _ = normalizer.normalize(type: .keyDown, event: event(50, .keyDown, startingLatch))
+        try expect(normalizer.normalize(type: .flagsChanged,
+            event: event(56, .flagsChanged, toggledLatch.union(.maskShift))) == nil,
+            "A changed capitals latch carried by an unrelated modifier key is not a Caps press")
+        try expect(normalizer.normalize(type: .flagsChanged, event: event(57, .flagsChanged, toggledLatch)) == nil,
+            "An unchanged Caps notification after a flags snapshot is not another press")
+
+        for mask in [NX_ALPHASHIFT_STATELESS_MASK, NX_DEVICE_ALPHASHIFT_STATELESS_MASK] {
+            normalizer = QuickMarkKeyboardNormalizer()
+            let held = startingLatch.union(CGEventFlags(rawValue: UInt64(mask)))
+            _ = normalizer.normalize(type: .flagsChanged, event: event(57, .flagsChanged, held))
+            try expect(normalizer.normalize(type: .flagsChanged, event: event(57, .flagsChanged, toggledLatch)) == nil,
+                "A known stateless Caps release cannot masquerade as a compatibility press when its latch changes")
+        }
+    }
+    for overviewVisible in [false, true] {
+        for capsLatched in [false, true] {
+            let before: CGEventFlags = capsLatched ? .maskAlphaShift : []
+            let after: CGEventFlags = capsLatched ? [] : .maskAlphaShift
+            var normalizer = QuickMarkKeyboardNormalizer()
+            var overview = OverviewSearchGesture(), global = QuickMarkGesture()
+            var overviewActions: [OverviewSearchGesture.Action] = []
+            var globalActions: [QuickMarkGesture.Action] = []
+            @discardableResult
+            func deliver(_ code: CGKeyCode, _ type: CGEventType, _ flags: CGEventFlags, time: Double) -> Bool {
+                let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: type == .keyDown)!
+                event.type = type; event.flags = flags
+                guard let input = normalizer.normalize(type: type, event: event) else { return false }
+                let route = QuickMarkKeyboardRouting.route(input, intentOwnsInput: overviewVisible,
+                    editingText: false, overviewHandler: { input in
+                        let result = overview.key(code: input.code, down: input.down, modified: input.modified,
+                            repeated: input.repeatKey, editing: false, capsLockHeld: input.capsLockHeld)
+                        if let action = result.action { overviewActions.append(action) }
+                        return result.consume
+                    }, gesture: global)
+                switch route {
+                case .overview: global.reset(); return true
+                case .text: global.reset(); return false
+                case .gesture:
+                    let result = global.key(input, now: time)
+                    if let action = result.action { globalActions.append(action) }
+                    return result.consume
+                }
+            }
+            deliver(50, .keyDown, before, time: 0)
+            try expect(deliver(57, .flagsChanged, after, time: 0.05),
+                "A documented Caps key transition completes an owned backtick even without stateless HID bits")
+            try expect(overviewVisible ? overviewActions == [.run] && globalActions.isEmpty
+                : globalActions == [.run] && overviewActions.isEmpty,
+                "Caps turning either on or off routes exactly one Run to the prefix owner")
+            deliver(57, .flagsChanged, after, time: 0.06)
+            deliver(50, .keyUp, after, time: 0.1)
+            try expect(overviewVisible ? overviewActions == [.run] : globalActions == [.run],
+                "A duplicate Caps notification and chord release cannot issue another action")
+            try expect(global.expire(now: 1) == nil, "Caps compatibility Run leaves no delayed single")
+            deliver(50, .keyDown, after, time: 2)
+            deliver(50, .keyUp, after, time: 2.1)
+            try expect(overviewVisible ? overviewActions == [.run, .close] : global.expire(now: 3) == .single,
+                "The capitals state left by compatibility Run does not turn a later plain backtick into Run")
+        }
+    }
 }
 
 /// Exercise the production routing boundary, not just the global reducer. The

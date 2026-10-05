@@ -186,6 +186,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private let queue = DispatchQueue(label: "intent.workspace-outlines", qos: .utility)
     private let mutex = NSLock()
     private var selection = QuickSelection()
+    private var preserveBehindIntentPanels = false
     private var timer: DispatchSourceTimer?
     private var revision = 0
     private var lastSnapshotRequest = Date.distantPast // worker queue only
@@ -193,8 +194,12 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private var panels: [NSPanel] = [] // main queue only
     private var scanCache: [UInt32: (key: String, at: Date, regions: [CGRect])] = [:] // worker queue
     public init() {}
-    public func update(_ selection: QuickSelection) {
-        mutex.lock(); self.selection = selection; revision += 1; mutex.unlock()
+    public func update(_ selection: QuickSelection, preserveBehindIntentPanels: Bool = false) {
+        mutex.lock()
+        self.selection = selection
+        self.preserveBehindIntentPanels = preserveBehindIntentPanels
+        revision += 1
+        mutex.unlock()
         if timer == nil {
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now(), repeating: 0.35)
@@ -204,11 +209,14 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     }
     public func stop() {
         timer?.cancel(); timer = nil
-        mutex.lock(); revision += 1; selection = QuickSelection(); mutex.unlock()
+        mutex.lock(); revision += 1; selection = QuickSelection(); preserveBehindIntentPanels = false; mutex.unlock()
         DispatchQueue.main.async { [weak self] in self?.panels.forEach { $0.orderOut(nil) }; self?.panels = [] }
     }
     private func refresh() {
-        mutex.lock(); let selection = self.selection; let token = revision; mutex.unlock()
+        mutex.lock()
+        let selection = self.selection; let token = revision
+        let preserveBehindIntentPanels = self.preserveBehindIntentPanels
+        mutex.unlock()
         // Idle browser extensions intentionally publish no spontaneous snapshots.
         // While marks are displayed, refresh so the border follows tab changes.
         if Date().timeIntervalSince(lastSnapshotRequest) >= 0.35 {
@@ -219,7 +227,17 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         }
         let windows = WorkspaceWindow.list(onScreen: false)
         var markedRegions: [UInt32: [CGRect]] = [:]
-        let front = WorkspaceWindow.focused()
+        let focused = WorkspaceWindow.focused()
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let presentationID = WorkspaceOutlinePresentation.windowID(
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            ownPID: ownPID, focusedWindowID: focused?.id,
+            topExternalWindowID: preserveBehindIntentPanels
+                ? WorkspaceWindow.list().first(where: { $0.pid != ownPID })?.id : nil,
+            preserveBehindIntentPanels: preserveBehindIntentPanels)
+        // Resolve against current live windows, not a retained rectangle. A
+        // hidden/destroyed mark must never float above the next application.
+        let front = windows.first(where: { $0.id == presentationID })
         let overviewVisible = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains {
             $0[kCGWindowOwnerName as String] as? String == "Dock" && $0[kCGWindowLayer as String] as? Int == 20
         }
@@ -271,7 +289,8 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         else if dockTransition { rectangles = [] }
         else {
             // A full-window border must not float across a window covering it.
-            // Render the focused marked window; Mission Control renders all marks.
+            // Render the focused marked window (or the still-visible window
+            // behind our staged modifier editor); Mission Control renders all marks.
             rectangles = front.flatMap { markedRegions[$0.id] } ?? []
         }
         DispatchQueue.main.async { [weak self] in

@@ -15,10 +15,14 @@ public struct QuickMarkKeyboardInput {
 
 public struct QuickMarkKeyboardNormalizer {
     private var capsLockWasHeld = false
+    private var capsLockWasLatched: Bool?
     private static let shortcutModifiers: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
     // AlphaShift (and CGEventSource.keyState for key 57) describes the capitals
     // latch, not a held key. The HID stateless bits describe physical key-down.
     // Reading the event itself also avoids querying state from a later event.
+    // Not every keyboard/event-delivery path includes those optional bits. A
+    // keycode-57 flagsChanged latch transition is also a Caps press (QA1519),
+    // but it must never make subsequent unrelated keys look physically held.
     private static let physicalCapsLockMask = UInt64(NX_ALPHASHIFT_STATELESS_MASK | NX_DEVICE_ALPHASHIFT_STATELESS_MASK)
 
     public init() {}
@@ -28,17 +32,23 @@ public struct QuickMarkKeyboardNormalizer {
         let flags = event.flags
         let capsLockHeld = flags.rawValue & Self.physicalCapsLockMask != 0
         let capsLockPressed = capsLockHeld && !capsLockWasHeld
+        let capsLockLatched = flags.contains(.maskAlphaShift)
+        let capsLockLatchChanged = capsLockWasLatched.map { $0 != capsLockLatched } ?? true
+        let wasPhysicallyHeld = capsLockWasHeld
         capsLockWasHeld = capsLockHeld
+        capsLockWasLatched = capsLockLatched
         let modifiers = flags.intersection(Self.shortcutModifiers)
         let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
 
         if type == .flagsChanged {
-            // Stateless Caps events may use keycode 0xff rather than 57. Only
-            // the physical rising edge may complete backtick-then-Caps Run;
-            // latch changes, releases and other modifier changes must not.
-            guard capsLockPressed else { return nil }
+            // Stateless Caps events may use keycode 0xff rather than 57. For
+            // latch-only delivery, require the Caps-specific event and a fresh
+            // transition; AlphaShift on a backtick/Shift event is not Run.
+            // A falling stateless edge is a release, even if the latch changed.
+            let capsKeyTransition = code == 57 && !capsLockHeld && !wasPhysicallyHeld && capsLockLatchChanged
+            guard capsLockPressed || capsKeyTransition else { return nil }
             return QuickMarkKeyboardInput(code: 57, down: true, modified: !modifiers.isEmpty,
-                repeatKey: false, capsLockHeld: true, opensSpotlight: false)
+                repeatKey: false, capsLockHeld: capsLockHeld, opensSpotlight: false)
         }
 
         return QuickMarkKeyboardInput(code: code, down: type == .keyDown,

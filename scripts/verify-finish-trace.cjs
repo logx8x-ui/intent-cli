@@ -22,6 +22,7 @@ function verifyFinishTrace(samples, diagnostic, { minimumSeconds = 20, maximumGa
     (event.event === 'ownedRestorePreservation' &&
       (event.targetWasFront !== true || event.targetWasFrontBeforeRaise !== true)) ||
     (event.event === 'foreground' && event.pid !== begin.targetPID) ||
+    (event.event === 'frontWindow' && event.targetIsFront !== true) ||
     (event.event === 'windowVisibility' && (event.exists === false || event.onScreen === false)));
   if (disruptive) fail(`Guard recorded ${disruptive.event}; not a quiet-finish pass`);
   if (!Array.isArray(samples) || samples.length < 2) fail('Insufficient samples');

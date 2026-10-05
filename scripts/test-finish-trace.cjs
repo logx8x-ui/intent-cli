@@ -15,6 +15,10 @@ assert.throws(() => verifyFinishTrace(trace.map(sample => ({ ...sample, at: samp
 assert.throws(() => verifyFinishTrace(trace.filter(sample => sample.at < 104 || sample.at > 109), diagnostic), /Gap/);
 assert.throws(() => verifyFinishTrace(trace.map((sample, i) => i === 29 ? { ...sample, pid: 99 } : sample), diagnostic), /Foreground/);
 assert.throws(() => verifyFinishTrace(trace.map((sample, i) => i === 29 ? { ...sample, frontWindowIDs: [456, 123] } : sample), diagnostic), /Foreground/);
+assert.throws(() => verifyFinishTrace(trace, { ...diagnostic, events: [...diagnostic.events,
+  { event: 'frontWindow', pid: 42, windowID: 456, targetIsFront: false }] }), /not a quiet/);
+assert.equal(verifyFinishTrace(trace, { ...diagnostic, events: [...diagnostic.events,
+  { event: 'frontWindow', pid: 42, windowID: 123, targetIsFront: true }] }).observedSeconds, 21);
 assert.throws(() => verifyFinishTrace(trace.map(sample => ({ at: sample.at, pid: sample.pid, windows: [{ id: 123, onScreen: true }] })), diagnostic), /Pre-finish/);
 assert.throws(() => verifyFinishTrace(trace.map(sample => sample.at <= 100 ? { ...sample, pid: 99 } : sample), diagnostic), /Pre-finish/);
 assert.throws(() => verifyFinishTrace(trace.filter(sample => sample.at < 101 || sample.at > 101.3), diagnostic), /Gap/);

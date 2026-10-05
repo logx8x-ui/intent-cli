@@ -4,6 +4,7 @@ import IntentCore
 /// Tiny input callback: no AX queries, disk IO or window capture in the tap.
 final class QuickMarkKeyMonitor {
     var overviewKeyHandler: ((Int, Bool, Bool, Bool, Bool) -> Bool)?
+    var overviewPrefixIsHeld: (() -> Bool)?
     var spotlightContext: (() -> (Bool, [SpotlightApplicationCandidate]))?
     var onSpotlightOpening: (() -> Void)?
     var onAction: ((QuickMarkGesture.Action) -> Void)?
@@ -13,6 +14,8 @@ final class QuickMarkKeyMonitor {
     private let expiryTimer = QuickMarkExpiryTimer()
     private var gesture = QuickMarkGesture()
     private var normalizer = QuickMarkKeyboardNormalizer()
+    private let runDiagnostics = QuickMarkRunDiagnostics(
+        fileURL: IntentEnvironment.dataDirectory.appendingPathComponent("quick-run-diagnostics.json"))
     private var generation = UUID()
     func cancelPending() {
         gesture.reset()
@@ -58,9 +61,18 @@ final class QuickMarkKeyMonitor {
             if event.getIntegerValueField(.eventSourceUserData) == NativeSpotlightKeyboard.dismissalTag {
                 return Unmanaged.passUnretained(event)
             }
+            let overviewHeld = owner.overviewPrefixIsHeld?() == true
+            let prefixHeld = overviewHeld || owner.gesture.isHoldingPrefix
             guard let input = owner.normalizer.normalize(type: type, event: event) else {
+                if type == .flagsChanged, code == 57, prefixHeld {
+                    // Includes legitimate releases/duplicate notifications, not
+                    // a failure assertion. Last dispatch is retained separately.
+                    owner.runDiagnostics.record(.capsEventFiltered, route: overviewHeld ? .overview : .staged)
+                }
                 return Unmanaged.passUnretained(event)
             }
+            let capsRunCandidate = input.down && ((input.code == 57 && prefixHeld)
+                || (input.code == 50 && input.capsLockHeld && !input.repeatKey))
             let opening = input.opensSpotlight
             if let context = owner.spotlightContext?() { owner.spotlight.setOverview(active: context.0, candidates: context.1) }
             if opening && type == .keyDown { owner.cancelPending(); owner.onSpotlightOpening?() }
@@ -88,19 +100,30 @@ final class QuickMarkKeyMonitor {
                         input.repeatKey, input.capsLockHeld) == true
                 }, gesture: owner.gesture) {
             case .overview:
+                if capsRunCandidate { owner.runDiagnostics.record(.overviewConsumed, route: .overview) }
                 if owner.generation == routeGeneration { owner.cancelPending() }
                 return nil
             case .text:
+                if capsRunCandidate { owner.runDiagnostics.record(.capsChordPassedThrough, route: overviewHeld ? .overview : .staged) }
                 if owner.generation == routeGeneration { owner.cancelPending() }
                 return Unmanaged.passUnretained(event)
             case .gesture:
                 guard owner.generation == routeGeneration else { return Unmanaged.passUnretained(event) }
                 result = owner.gesture.key(input, now: ProcessInfo.processInfo.systemUptime)
             }
+            if capsRunCandidate, result.action != .run {
+                owner.runDiagnostics.record(.capsChordPassedThrough, route: overviewHeld ? .overview : .staged)
+            }
             if let action = result.action {
                 let generation = owner.generation
+                if action == .run { owner.runDiagnostics.record(.stagedRunQueued, route: .staged) }
                 DispatchQueue.main.async { [weak owner] in
-                    guard let owner, owner.generation == generation else { return }
+                    guard let owner else { return }
+                    guard owner.generation == generation else {
+                        if action == .run { owner.runDiagnostics.record(.stagedRunCanceled, route: .staged) }
+                        return
+                    }
+                    if action == .run { owner.runDiagnostics.record(.stagedRunDelivered, route: .staged) }
                     owner.onAction?(action)
                 }
             }

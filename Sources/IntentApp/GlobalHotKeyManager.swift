@@ -271,6 +271,9 @@ final class GlobalHotKeyManager {
     var overviewKeyHandler: ((Int, Bool, Bool, Bool, Bool) -> Bool)? {
         didSet { markMonitor.overviewKeyHandler = overviewKeyHandler }
     }
+    var overviewPrefixIsHeld: (() -> Bool)? {
+        didSet { markMonitor.overviewPrefixIsHeld = overviewPrefixIsHeld }
+    }
     var spotlightContext: (() -> (Bool, [SpotlightApplicationCandidate]))? {
         didSet { markMonitor.spotlightContext = spotlightContext }
     }

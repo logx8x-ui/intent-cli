@@ -9,7 +9,7 @@ swiftc -emit-library -emit-module -module-name IntentCore \
   -emit-module-path "$spec_dir/IntentCore.swiftmodule" -o "$spec_dir/libIntentCore.dylib"
 swiftc -parse-as-library -I "$spec_dir" -L "$spec_dir" -lIntentCore \
   -Xlinker -rpath -Xlinker "$spec_dir" \
-  Sources/IntentApp/QuickMarkExpiryTimer.swift Sources/IntentCoreSpec/QuickMarkKeyboardInputSpecs.swift \
+  Sources/IntentApp/QuickMarkExpiryTimer.swift Sources/IntentApp/QuickMarkRunDiagnostics.swift Sources/IntentCoreSpec/QuickMarkKeyboardInputSpecs.swift \
   scripts/quick-mark-expiry-spec.swift scripts/quick-mark-input-spec.swift \
   -o "$spec_dir/QuickMarkInputSpec"
 "$spec_dir/QuickMarkInputSpec"

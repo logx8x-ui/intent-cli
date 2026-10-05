@@ -31,11 +31,23 @@ with another delayed activation or an independent copy of session state.
 - A latched Caps Lock state does not turn an otherwise plain backtick into a
   different modifier chord. Physical Caps Lock + backtick Run remains distinct.
 - The overview and staged-selection routes both accept physical Caps Run in
-  either key order. Native routing fixtures must include the overview callback,
+  either key order when physical-held state is supplied. Backtick-first also
+  accepts the documented Caps-specific latch-transition event when optional
+  stateless bits are absent; sticky Caps alone never means Run. Native routing
+  fixtures must include that compatibility path and the overview callback,
   optional empty names, editor transitions and consumed releases, not only the
   standalone gesture reducer. Never hold inout gesture access across UI callbacks.
 - Explicit non-browser selection dismisses the tab picker, cancels its pending
   resolution/reload/preview work, and preserves already-selected browser tabs.
+- Leaving overview with a retained target restores its staged modifier strip.
+  Editing a staged modifier preserves the selected visible window's outline;
+  unrelated foreground applications do not inherit that exception. Partial
+  tab selections highlight their exactly identified native-window preview,
+  without implying all tabs are allowed or guessing ambiguous window identity.
+- Tab icons use browser-provided addresses only, bounded memory caches, and
+  stable browser-session/tab/site identity. Missing or failing updates retain a
+  known good same-site icon; navigation/restart and late replies cannot reuse an
+  unrelated icon. No third-party favicon-discovery service is introduced.
 - New timers remember the last explicitly entered valid duration. Opening a
   saved timer must not change that preference or the saved timer's own meaning.
 - One input gesture produces at most one action. A consumed down event owns its

@@ -3,6 +3,18 @@ import IntentCore
 import IntentLock
 
 func runTabSelectionSpecs() throws {
+    try expect(WorkspaceOutlinePresentation.windowID(frontmostPID: 1, ownPID: 1, focusedWindowID: nil,
+        topExternalWindowID: 42, preserveBehindIntentPanels: true) == 42,
+        "A staged modifier editor retains the outline on the still-visible underlying window")
+    try expect(WorkspaceOutlinePresentation.windowID(frontmostPID: 2, ownPID: 1, focusedWindowID: 99,
+        topExternalWindowID: 42, preserveBehindIntentPanels: true) == 99,
+        "Switching to another app immediately stops borrowing an underlying marked window")
+    try expect(WorkspaceOutlinePresentation.windowID(frontmostPID: 1, ownPID: 1, focusedWindowID: nil,
+        topExternalWindowID: 42, preserveBehindIntentPanels: false) == nil,
+        "Ordinary Intent foreground without a staged editor cannot borrow a desktop outline")
+    try expect(WorkspaceOutlinePresentation.windowID(frontmostPID: 1, ownPID: 1, focusedWindowID: nil,
+        topExternalWindowID: nil, preserveBehindIntentPanels: true) == nil,
+        "A removed or hidden external window leaves no stale editor outline")
     try expect(BrowserAddressPolicy.isAddressControl(labels: ["Address and search bar"]), "Chrome address bar is identified")
     try expect(BrowserAddressPolicy.isAddressControl(labels: ["urlbar-input"]), "Firefox address control is identified")
     try expect(!BrowserAddressPolicy.isAddressControl(labels: ["Find in page"]), "In-page find remains available")

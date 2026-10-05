@@ -25,10 +25,13 @@ final class QuickSelectionController: ObservableObject {
     private var spotlightApps: [String: AllowedApp] = [:]
     var onOverviewClosed: (() -> Void)?
     private var overviewInput = OverviewSearchGesture()
+    private var overviewNormalizer = QuickMarkKeyboardNormalizer()
+    var ownsOverviewPrefixInput: Bool { panel?.isVisible == true && overviewInput.isHoldingPrefix }
     private var isEditingText: Bool { (NSApp.keyWindow ?? panel)?.firstResponder is NSTextView }
     func prepareForSpotlight() {
         guard panel?.isVisible == true else { return }
         overviewInput = OverviewSearchGesture()
+        overviewNormalizer = QuickMarkKeyboardNormalizer()
         optionsSection = nil; settingsOpen = false
         // System hotkeys are handled before AppKit local event monitors. Lower
         // the panel from the global tap, before Spotlight's window is presented.
@@ -44,7 +47,7 @@ final class QuickSelectionController: ObservableObject {
             editing: isEditingText, capsLockHeld: capsLockHeld)
         switch result.action {
         case .close: cancelImmediately()
-        case .clear: cancelImmediately(); clearMarks()
+        case .clear: clearMarks(); cancelImmediately()
         case .modification(let index): openModification(index)
         case .mode: toggleAccessMode()
         case .run: runSelection()
@@ -65,6 +68,7 @@ final class QuickSelectionController: ObservableObject {
     }
     func cancelImmediately() {
         overviewInput = OverviewSearchGesture()
+        overviewNormalizer = QuickMarkKeyboardNormalizer()
         if NSApp.modalWindow != nil { NSApp.abortModal() }
         if let sheet = panel?.attachedSheet { panel?.endSheet(sheet); sheet.orderOut(nil) }
         overviewOpenTask?.cancel(); overviewOpenTask = nil
@@ -72,7 +76,7 @@ final class QuickSelectionController: ObservableObject {
         hasStagedSelection = selection.hasDraftConfiguration
         let previous = previousApp
         close()
-        if hasStagedSelection { refreshStagedOutlines() }
+        restoreStagedPresentation()
         if previous?.bundleIdentifier != Bundle.main.bundleIdentifier { previous?.activate(options: []) }
     }
     private func preserveAddedAppIcons(in items: [WindowItem]) -> [WindowItem] {
@@ -433,6 +437,7 @@ final class QuickSelectionController: ObservableObject {
         optionsSection = section
         if panel?.isVisible != true {
             showStagedModifiers()
+            refreshStagedOutlines()
             NSApp.activate(ignoringOtherApps: true); stagedModifiersPanel?.makeKeyAndOrderFront(nil)
         }
         if QuickSelectionOptionsSection.timer.enabled(in: selection), QuickSelectionOptionsSection.checklist.enabled(in: selection),
@@ -478,6 +483,7 @@ final class QuickSelectionController: ObservableObject {
             }
             stagedPreviousApp = nil
         }
+        refreshStagedOutlines()
     }
     private func hideStagedModifiers() {
         hoverModification(nil)
@@ -512,7 +518,14 @@ final class QuickSelectionController: ObservableObject {
             workspaceOutlines.stop()
             return
         }
-        workspaceOutlines.update(selection)
+        workspaceOutlines.update(selection, preserveBehindIntentPanels: optionsSection != nil)
+    }
+    private func restoreStagedPresentation() {
+        guard hasStagedSelection, !selection.apps.isEmpty,
+              !model.hasActiveSession, panel?.isVisible != true else { return }
+        if let presentStagedSelection { presentStagedSelection(selection); return }
+        refreshStagedOutlines()
+        showStagedModifiers()
     }
     func markForeground(wholeWindow: Bool = false, fromShortcut: Bool = false) {
         guard !model.hasActiveSession, panel?.isVisible != true else { return }
@@ -662,6 +675,7 @@ final class QuickSelectionController: ObservableObject {
     private(set) var topSafeInset: CGFloat = 0
     let model: IntentAppModel
     private let offerExitPasscode: @MainActor () -> Void
+    private let presentStagedSelection: (@MainActor (QuickSelection) -> Void)?
     private var panel: NSPanel?
     private var monitor: Any?
     private var refreshTimer: Timer?
@@ -672,9 +686,11 @@ final class QuickSelectionController: ObservableObject {
     private var wasOverlayVisible = false
     private var generation = UUID()
 
-    init(model: IntentAppModel, offerExitPasscode: @escaping @MainActor () -> Void = { IntentExitPasscode.offerOnce() }) {
+    init(model: IntentAppModel, offerExitPasscode: @escaping @MainActor () -> Void = { IntentExitPasscode.offerOnce() },
+         presentStagedSelection: (@MainActor (QuickSelection) -> Void)? = nil) {
         self.model = model
         self.offerExitPasscode = offerExitPasscode
+        self.presentStagedSelection = presentStagedSelection
         model.quickSelectionDidStart = { [weak self] in
             guard let self else { return }
             self.workspaceOutlines.stop(); self.hideStagedModifiers()
@@ -769,11 +785,12 @@ final class QuickSelectionController: ObservableObject {
         NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil)
         onboarding.selectionVisible = panel.isVisible
         if panel.isVisible { onboarding.record(.overviewOpened) }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             guard let self, self.panel?.isVisible == true else { return event }
-            if self.handleOverviewKey(code: Int(event.keyCode), down: event.type == .keyDown,
-                modified: !event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-                repeatKey: event.isARepeat) { return nil }
+            if let cgEvent = event.cgEvent,
+               let input = self.overviewNormalizer.normalize(type: cgEvent.type, event: cgEvent),
+               self.handleOverviewKey(code: input.code, down: input.down, modified: input.modified,
+                   repeatKey: input.repeatKey, capsLockHeld: input.capsLockHeld) { return nil }
             guard event.type == .keyDown else { return event }
             if event.keyCode == 53 { self.cancelImmediately(); return nil }
             if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command {
@@ -964,7 +981,9 @@ final class QuickSelectionController: ObservableObject {
         guard let id = browserWindowID(for: window) else { return false }
         let selectable = (snapshots.first { $0.browserBundleIdentifier == window.appID }.map { $0.allTabs ?? $0.tabs } ?? [])
             .filter { $0.windowID == id && QuickSelection.isSelectable($0) }
-        return !selectable.isEmpty && selectable.allSatisfy { isTabSelected($0.id, browser: window.appID) }
+        // The window is the location of the selected tabs, not an assertion
+        // that every tab is allowed. A partial selection still marks its owner.
+        return selectable.contains { isTabSelected($0.id, browser: window.appID) }
     }
     func selectWindow(_ window: WindowItem) {
         guard !closing else { return }
@@ -1078,7 +1097,7 @@ final class QuickSelectionController: ObservableObject {
             } else {
                 self.hasStagedSelection = self.selection.hasDraftConfiguration
                 self.close()
-                if self.hasStagedSelection { self.refreshStagedOutlines() }
+                self.restoreStagedPresentation()
                 if self.wasOverlayVisible { self.model.showOverlay() } else { self.previousApp?.activate(options: []) }
             }
         }
@@ -1089,6 +1108,7 @@ final class QuickSelectionController: ObservableObject {
         settingsOpen = false; saveFlight = nil
         dismissBrowserPicker()
         overviewInput = OverviewSearchGesture()
+        overviewNormalizer = QuickMarkKeyboardNormalizer()
         expandedStack = nil
         hideStagedModifiers()
         hoverModification(nil)
@@ -1596,7 +1616,8 @@ private struct QuickSelectionView: View {
                             let selected = controller.isTabSelected(key.id, browser: window.appID)
                             Button { controller.selectTab(tab, browser: window.appID, extendingRange: NSEvent.modifierFlags.contains(.shift)) } label: {
                                 HStack(spacing: 10) {
-                                    TabSiteIcon(url: tab.faviconURL)
+                                    TabSiteIcon(url: tab.faviconURL, pageURL: tab.url,
+                                        identity: "\(window.appID):\(controller.snapshots.first(where: { $0.browserBundleIdentifier == window.appID })?.browserSessionID ?? ""):\(tab.id)")
                                     Text(tab.displayTitle).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
                                     Spacer(minLength: 0)
                                     if tab.pinned == true { Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.secondary) }
@@ -1627,27 +1648,6 @@ private struct QuickSelectionView: View {
                 if let tab = controller.hoveredTab { Text(tab.title).font(.caption).lineLimit(1).foregroundStyle(.secondary) }
             }.padding(16)
         }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-    }
-}
-
-private struct TabSiteIcon: View {
-    let url: String?
-    @State private var icon: NSImage?
-    var body: some View {
-        Group {
-            if let icon { Image(nsImage: icon).resizable().scaledToFit() }
-            else { Image(systemName: "globe").foregroundStyle(.secondary) }
-        }.frame(width: 18, height: 18).task(id: url) {
-            icon = nil
-            guard let url, let address = URL(string: url) else { return }
-            if address.scheme == "data", let encoded = url.split(separator: ",", maxSplits: 1).last,
-               let data = Data(base64Encoded: String(encoded)) { icon = NSImage(data: data); return }
-            guard ["https", "http"].contains(address.scheme ?? "") else { return }
-            var request = URLRequest(url: address); request.timeoutInterval = 5
-            if let (data, _) = try? await URLSession.shared.data(for: request), data.count < 1_000_000, !Task.isCancelled {
-                icon = NSImage(data: data)
-            }
-        }
     }
 }
 

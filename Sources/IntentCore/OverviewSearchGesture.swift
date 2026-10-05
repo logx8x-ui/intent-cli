@@ -5,6 +5,7 @@ public struct OverviewSearchGesture {
     public enum Action: Equatable { case close, clear, modification(Int), mode, run, savedSlot(Int) }
     public struct Result { public let consume: Bool; public let action: Action? }
     private var held = false
+    public var isHoldingPrefix: Bool { held }
     private var usedChord = false
     private var runIssued = false
     private var swallowed: Set<Int> = []
@@ -17,7 +18,10 @@ public struct OverviewSearchGesture {
             if held { swallowed.insert(50) }
             held = false; return .init(consume: true, action: repeated ? nil : action)
         }
-        if code == 57, down, held, capsLockHeld, !modified {
+        // Code 57 down is a decoded Caps press edge, including the documented
+        // flagsChanged path without physical stateless bits. capsLockHeld is
+        // only needed when backtick arrives second; a latched state is not held.
+        if code == 57, down, held, !modified {
             usedChord = true
             guard !runIssued, !repeated else { return .init(consume: true, action: nil) }
             runIssued = true

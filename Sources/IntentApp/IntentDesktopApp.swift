@@ -374,6 +374,9 @@ final class IntentRuntime {
                     repeatKey: repeated, capsLockHeld: capsLockHeld) ?? false
             }
         }
+        hotKeyManager?.overviewPrefixIsHeld = { [weak self] in
+            MainActor.assumeIsolated { self?.quickSelectionController.ownsOverviewPrefixInput ?? false }
+        }
         quickSelectionController.onOverviewClosed = { [weak self] in self?.hotKeyManager?.cancelSpotlightSelection() }
         hotKeyManager?.spotlightContext = { [weak self] in
             MainActor.assumeIsolated {
