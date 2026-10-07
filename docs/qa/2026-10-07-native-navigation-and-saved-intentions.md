@@ -90,3 +90,41 @@ Physical-key, rendered browser, exact-profile and delayed-focus acceptance are d
   expanded rule set exceeded the old fixed 100-ID cleanup range. That candidate
   remains uninstalled while cleanup, full-document Instagram routing and
   manual YouTube navigation regressions are being completed.
+
+## Combined source gate and current installed checkpoint
+
+`npm run test:changed -- --base b3fec3e` passed with unchanged source fingerprint
+`c62f5fea1acd250594e8b9c527cde460cdb954913b786355633afc82ef447575`.
+All selected suites passed: gate, session, Swift, extensions, host, release, AI,
+and Firefox lint. Evidence directory:
+`/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-change-gate-y7SoQt`.
+
+The combined source includes Browser Guard 0.2.36. Instagram Messages-only has
+request-stage and SPA inbox routing constrained by both source and destination
+policy. YouTube playback evidence survives deliberate full-document/new-tab
+navigation without granting automatic next playback. Chrome removes all owned
+feature rules in 24000–24999 on replacement/Finish, including older leaked IDs;
+other rule owners remain. Strict duplicate-ID lifecycle and negative-control
+regressions pass. The combined matrix peaks at 437 feature regexes plus three
+scope rules; actual Chrome compiled-regex acceptance remains a live check.
+
+Installed checkpoint before website controls:
+- App UUID `A346CFC9-B2B6-399D-B84E-9B54C6E5BB30`.
+- Native host UUID `14233596-13FF-3016-A379-68873E1EFFEF`.
+- App path `/Users/loganmondi/Applications/Intent.app`; identity
+  `dev.loganmondi.intent`; native finder and saved-workspace source `f59a046`.
+- Firefox development source is the primary checkout's firefox-extension;
+  fresh profile snapshot now carries the persisted profile identity.
+- The second live native finder opened exactly one compact Firefox window and
+  its owned disposable example.com/?intent-qa=oct7-native-added tab (raw window
+  773, tab 36), preserving native profile bookmarks/address suggestions.
+- The native automation can target Firefox/Intent's main window but cannot
+  select the separate companion panel. A single user Add-click check is pending.
+  No Add/Cancel live pass is claimed.
+- Chrome still runs earlier 0.2.35 code without native finder capability. Browser
+  automation explicitly denied chrome://extensions navigation; no alternate
+  browser surface or command was used to circumvent it. Matching reload needs
+  the user's action after final installation.
+- Firefox AMO is authenticated in the existing Firefox profile. Its existing
+  distribution is unlisted; 0.2.36 packages are built but not signed/submitted
+  or permanently installed at this checkpoint.

@@ -1,4 +1,4 @@
-importScripts("rule-helpers.js", "tab-visibility.js", "native-window-visibility.js", "website-features.js", "tab-creation.js", "native-finder.js");
+importScripts("rule-helpers.js", "tab-visibility.js", "native-window-visibility.js", "website-features.js", "website-playback-intent.js", "tab-creation.js", "native-finder.js");
 
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
@@ -11,6 +11,9 @@ const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
 const STARTUP_SESSION_RULE_ID_START = 22000;
 const STARTUP_SESSION_RULE_ID_END = 22999;
+// Reserve the entire feature namespace, including IDs leaked by older builds.
+const WEBSITE_SESSION_RULE_ID_START = 24000;
+const WEBSITE_SESSION_RULE_ID_COUNT = 1000;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "add-as-you-go-v1", "website-features-v1"];
@@ -639,6 +642,7 @@ function effectiveRules(nativeRules) {
 let ruleApplication = Promise.resolve();
 let requestedRulesFingerprint = null;
 let ruleApplicationRevision = 0;
+const websitePlayback = new IntentWebsitePlayback({api:chrome,getRules:()=>rules,isAllowedTab:isRuntimeAllowedTab});
 function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
   const requestedFingerprint = fingerprintRules(nextRules);
@@ -647,6 +651,7 @@ function applyNativeRules(nativeRules) {
   }
   requestedRulesFingerprint = requestedFingerprint;
   const revision = ++ruleApplicationRevision;
+  websitePlayback.clear();
   // Stop enforcement before restoring tabs: restoration emits ordinary tab
   // events, which must not activate anything using the old session's policy.
   if (!nextRules.active) rules = nextRules;
@@ -794,10 +799,16 @@ async function updateNetworkRules() {
         tabIds: searchAllowedIDs,
         regexFilter: "^https?://(www\\.)?google\\.[a-z.]+/(search([?].*)?|([?].*)?)$", resourceTypes: ["main_frame"]}});
     }
+    const exactWebsiteSelection = rules.accessMode !== "blacklist" && selected !== null;
+    const inboxAllowed = exactWebsiteSelection || isAllowedURL("https://www.instagram.com/direct/inbox/",rules);
+    const instagramRouting = inboxAllowed ? {
+      sources: exactWebsiteSelection || rules.addAsYouGo || rules.accessMode === "blacklist" ? ["instagram.com"] : rules.allowedWebsites,
+      excludedSources: rules.accessMode === "blacklist" ? rules.allowedWebsites : []
+    } : null;
     if (rules.active) sessionRules.push(...IntentWebsiteFeatures.networkRules(rules.websiteFeaturePolicies,
-      rules.accessMode === "blacklist" ? null : selected));
+      rules.accessMode === "blacklist" ? null : selected, instagramRouting));
     await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [23000, 23001, 23002, ...Array.from({length: 100}, (_, i) => 24000 + i)], addRules: sessionRules});
+      removeRuleIds: [23000, 23001, 23002, ...Array.from({length: WEBSITE_SESSION_RULE_ID_COUNT}, (_, i) => WEBSITE_SESSION_RULE_ID_START + i)], addRules: sessionRules});
   }
   const nextRules = desiredNetworkRules();
   const nextFingerprint = JSON.stringify(nextRules);
@@ -834,17 +845,51 @@ function broadcastRules() {
 }
 
 async function installWebsiteGuards() {
-  if (!rules.active || !Object.keys(rules.websiteFeaturePolicies || {}).length) return;
+  const current = rules, revision = ruleApplicationRevision;
+  if (!current.active || !Object.keys(current.websiteFeaturePolicies || {}).length) return;
+  const key = IntentWebsiteFeatures.policyKey(current);
+  const stillCurrent = () => revision === ruleApplicationRevision && rules === current;
   for (const tab of await chrome.tabs.query({})) {
-    if (!isRuntimeAllowedTab(tab) || !rules.websiteFeaturePolicies[IntentWebsiteFeatures.siteOf(tab.url)]) continue;
-    let receipt = await chrome.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules}).catch(() => null);
-    if (!receipt?.websiteFeatures) {
+    if (!stillCurrent()) return;
+    if (!isRuntimeAllowedTab(tab) || !current.websiteFeaturePolicies[IntentWebsiteFeatures.siteOf(tab.url)]) continue;
+    const requestID = `${browserSessionID}:${revision}:${tab.id}`;
+    const message = {type:"rulesUpdated", rules:current, websiteRequestID:requestID};
+    const accepted = receipt => receipt?.websiteFeatures === true && receipt.websiteRequestID === requestID
+      && receipt.websitePolicyKey === key && receipt.startupSessionID === current.startupSessionID;
+    let receipt = await chrome.tabs.sendMessage(tab.id, message).catch(() => null);
+    if (!stillCurrent()) return;
+    if (!accepted(receipt)) {
       await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ["website-features.js", "site-feature-guard.js"]});
-      receipt = await chrome.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules});
+      if (!stillCurrent()) return;
+      receipt = await chrome.tabs.sendMessage(tab.id, message);
     }
-    if (!receipt?.websiteFeatures) throw new Error("Website controls did not acknowledge installation");
+    if (!stillCurrent()) return;
+    if (!accepted(receipt)) throw new Error("Website controls did not acknowledge the current policy");
   }
-  postNative({type: "websitePolicyReady", browserSessionID, appliedWebsitePolicySessionID: rules.startupSessionID});
+  if (stillCurrent()) postNative({type: "websitePolicyReady", browserSessionID, appliedWebsitePolicySessionID: current.startupSessionID});
+}
+
+function websiteFeatureDestination(url, tabId, current = rules) {
+  if (!current.active || !Number.isInteger(tabId) || tabId < 0) return null;
+  const destination = IntentWebsiteFeatures.preferredDestination(url, current.websiteFeaturePolicies);
+  if (!destination || !isRuntimeAllowedTab({id:tabId,url})) return null;
+  const exactAllowedTab = current.accessMode !== "blacklist" && Array.isArray(current.selectedTabIDs)
+    && current.selectedTabIDs.includes(tabId);
+  if (!exactAllowedTab && (!isAllowedURL(url,current) || !isAllowedURL(destination,current))) return null;
+  return destination;
+}
+
+async function routeWebsiteFeature(message, sender) {
+  const current = rules, revision = ruleApplicationRevision;
+  if (!current.active || sender?.frameId > 0 || !Number.isInteger(sender?.tab?.id)
+      || message.websitePolicyKey !== IntentWebsiteFeatures.policyKey(current)) return {routed:false};
+  const tab = await chrome.tabs.get(sender.tab.id).catch(() => null);
+  if (revision !== ruleApplicationRevision || rules !== current || !tab || !isRuntimeAllowedTab(tab)) return {routed:false};
+  if (tab.url !== message.url) return {routed:false,retry:true};
+  const destination = websiteFeatureDestination(tab.url, tab.id, current);
+  if (!destination) return {routed:false};
+  await chrome.tabs.update(tab.id, {url:destination});
+  return {routed:true};
 }
 
 function isFreshBlankTab(tab) {
@@ -1171,7 +1216,16 @@ async function recoverBlockedNavigation(tabId) {
   await returnToAllowedTab();
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "rememberWebsitePlaybackIntent" || message?.type === "consumeWebsitePlaybackIntent") {
+    const operation = message.type === "rememberWebsitePlaybackIntent" ? "remember" : "consume";
+    websitePlayback[operation](message,sender).then(sendResponse).catch(()=>sendResponse({allowed:false}));
+    return true;
+  }
+  if (message?.type === "routeWebsiteFeature") {
+    routeWebsiteFeature(message, sender).then(sendResponse).catch(() => sendResponse({routed:false}));
+    return true;
+  }
   if (message?.type === "getGuardStatus") {
     ensureInitialized().then(() => { recoverForegroundConnection(); requestRules(); sendResponse(guardStatus()); });
     return true;
@@ -1299,6 +1353,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onCreated.addListener(async (tab) => {
+  websitePlayback.created(tab);
   if (isHoldingPage(tab.url)) return;
   committedURLByTab.set(tab.id, tab.url || "about:blank");
   if (rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist" && (!tab.url || isSearchStagingURL(tab.url) || IntentBrowserRules.isGoogleSearchURL(tab.url))) {
@@ -1342,6 +1397,7 @@ for (const event of [chrome.tabs.onMoved, chrome.tabs.onAttached, chrome.tabs.on
 }
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  websitePlayback.forget(tabId);
   searchSessionTabs.delete(tabId); saveSearchLedger(); committedURLByTab.delete(tabId);
   freshBlankTabIds.delete(tabId);
   lastAllowedURLByTab.delete(tabId);
@@ -1352,6 +1408,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+  websitePlayback.beforeNavigate(details);
   if (details.frameId !== 0 || details.tabId < 0) return;
   if (isHoldingPage(details.url)) { forgetHoldingSearch(details.tabId); return; }
   Promise.resolve().then(async () => {
@@ -1419,4 +1476,5 @@ chrome.webNavigation?.onCommitted?.addListener(async (details) => {
     return;
   }
   committedURLByTab.set(details.tabId, details.url);
+  websitePlayback.committed(details);
 });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Intent Browser Guard",
-  "version": "0.2.35",
+  "version": "0.2.36",
   "description": "Enforces active Intent browser rules inside Firefox.",
   "icons": {
     "48": "icons/intent-48.svg",
@@ -43,6 +43,7 @@
       "rule-helpers.js",
       "tab-visibility.js",
       "website-features.js",
+      "website-playback-intent.js",
       "native-window-visibility.js",
       "window-minimize-bootstrap.js",
       "tab-creation.js",

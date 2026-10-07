@@ -513,12 +513,14 @@ async function sendHeartbeat() {
 let ruleApplication = Promise.resolve();
 let requestedRulesFingerprint = null;
 let ruleApplicationRevision = 0;
+const websitePlayback = new IntentWebsitePlayback({api:browser,getRules:()=>rules,isAllowedTab:isRuntimeAllowedTab});
 function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
   const requestedFingerprint = fingerprintRules(nextRules);
   if (requestedFingerprint === requestedRulesFingerprint) return ruleApplication;
   requestedRulesFingerprint = requestedFingerprint;
   const revision = ++ruleApplicationRevision;
+  websitePlayback.clear();
   // Stop enforcement before restoring tabs: restoration emits ordinary tab
   // events, which must not activate anything using the old session's policy.
   if (!nextRules.active) rules = nextRules;
@@ -598,18 +600,52 @@ async function removeAlreadyBlockedTabs() {
 }
 
 async function installWebsiteGuards() {
-  if (!rules.active || !Object.keys(rules.websiteFeaturePolicies || {}).length) return;
+  const current = rules, revision = ruleApplicationRevision;
+  if (!current.active || !Object.keys(current.websiteFeaturePolicies || {}).length) return;
+  const key = IntentWebsiteFeatures.policyKey(current);
+  const stillCurrent = () => revision === ruleApplicationRevision && rules === current;
   for (const tab of await browser.tabs.query({})) {
-    if (!isRuntimeAllowedTab(tab) || !rules.websiteFeaturePolicies[IntentWebsiteFeatures.siteOf(tab.url)]) continue;
-    let receipt = await browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules}).catch(() => null);
-    if (!receipt?.websiteFeatures) {
+    if (!stillCurrent()) return;
+    if (!isRuntimeAllowedTab(tab) || !current.websiteFeaturePolicies[IntentWebsiteFeatures.siteOf(tab.url)]) continue;
+    const requestID = `${browserSessionID}:${revision}:${tab.id}`;
+    const message = {type:"rulesUpdated", rules:current, websiteRequestID:requestID};
+    const accepted = receipt => receipt?.websiteFeatures === true && receipt.websiteRequestID === requestID
+      && receipt.websitePolicyKey === key && receipt.startupSessionID === current.startupSessionID;
+    let receipt = await browser.tabs.sendMessage(tab.id, message).catch(() => null);
+    if (!stillCurrent()) return;
+    if (!accepted(receipt)) {
       await browser.tabs.executeScript(tab.id, {file: "website-features.js", runAt: "document_start"});
       await browser.tabs.executeScript(tab.id, {file: "site-feature-guard.js", runAt: "document_start"});
-      receipt = await browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules});
+      if (!stillCurrent()) return;
+      receipt = await browser.tabs.sendMessage(tab.id, message);
     }
-    if (!receipt?.websiteFeatures) throw new Error("Website controls did not acknowledge installation");
+    if (!stillCurrent()) return;
+    if (!accepted(receipt)) throw new Error("Website controls did not acknowledge the current policy");
   }
-  postCommandPort({type: "websitePolicyReady", browserSessionID, appliedWebsitePolicySessionID: rules.startupSessionID});
+  if (stillCurrent()) postCommandPort({type: "websitePolicyReady", browserSessionID, appliedWebsitePolicySessionID: current.startupSessionID});
+}
+
+function websiteFeatureDestination(url, tabId, current = rules) {
+  if (!current.active || !Number.isInteger(tabId) || tabId < 0) return null;
+  const destination = IntentWebsiteFeatures.preferredDestination(url, current.websiteFeaturePolicies);
+  if (!destination || !isRuntimeAllowedTab({id:tabId,url})) return null;
+  const exactAllowedTab = current.accessMode !== "blacklist" && Array.isArray(current.selectedTabIDs)
+    && current.selectedTabIDs.includes(tabId);
+  if (!exactAllowedTab && (!isAllowedURL(url,current) || !isAllowedURL(destination,current))) return null;
+  return destination;
+}
+
+async function routeWebsiteFeature(message, sender) {
+  const current = rules, revision = ruleApplicationRevision;
+  if (!current.active || sender?.frameId > 0 || !Number.isInteger(sender?.tab?.id)
+      || message.websitePolicyKey !== IntentWebsiteFeatures.policyKey(current)) return {routed:false};
+  const tab = await browser.tabs.get(sender.tab.id).catch(() => null);
+  if (revision !== ruleApplicationRevision || rules !== current || !tab || !isRuntimeAllowedTab(tab)) return {routed:false};
+  if (tab.url !== message.url) return {routed:false,retry:true};
+  const destination = websiteFeatureDestination(tab.url, tab.id, current);
+  if (!destination) return {routed:false};
+  await browser.tabs.update(tab.id, {url:destination});
+  return {routed:true};
 }
 
 async function getAllowedTab(tabId) {
@@ -960,7 +996,10 @@ async function recoverBlockedNavigation(tabId) {
   await returnToAllowedTab();
 }
 
-browser.runtime.onMessage.addListener((message) => {
+browser.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type === "rememberWebsitePlaybackIntent") return websitePlayback.remember(message,sender);
+  if (message?.type === "consumeWebsitePlaybackIntent") return websitePlayback.consume(message,sender);
+  if (message?.type === "routeWebsiteFeature") return routeWebsiteFeature(message, sender);
   if (message?.type === "getActiveRules") return Promise.resolve(rules);
   if (message?.type === "getGuardStatus") {
     return ensureInitialized().then(() => { recoverForegroundConnection(); postCommandPort({ type: "getRules" }); return guardStatus(); });
@@ -1107,6 +1146,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onCreated.addListener(async (tab) => {
+  websitePlayback.created(tab);
   minimizeBootstrap?.invalidateWindow(tab?.windowId);
   if (isHoldingPage(tab.url)) return;
   committedURLByTab.set(tab.id, tab.url || "about:blank");
@@ -1162,6 +1202,7 @@ for (const event of [browser.tabs.onMoved, browser.tabs.onAttached, browser.tabs
 }
 
 browser.tabs.onRemoved.addListener(async (tabId,info) => {
+  websitePlayback.forget(tabId);
   minimizeBootstrap?.invalidateWindow(info?.windowId);
   searchSessionTabs.delete(tabId); saveSearchLedger(); committedURLByTab.delete(tabId);
   scheduleTabSnapshot();
@@ -1184,7 +1225,10 @@ browser.tabs.onRemoved.addListener(async (tabId,info) => {
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (isHoldingPage(details.url)) { forgetHoldingSearch(details.tabId); return {}; }
-    if (rules.active && !IntentWebsiteFeatures.permits(details.url, rules.websiteFeaturePolicies)) return {cancel: true};
+    if (rules.active && !IntentWebsiteFeatures.permits(details.url, rules.websiteFeaturePolicies)) {
+      const destination = websiteFeatureDestination(details.url, details.tabId);
+      return destination ? {redirectUrl:destination} : {cancel:true};
+    }
     if (searchOnlyNavigation(details.tabId, details.url)) {
       setTimeout(() => restoreSearchPage(details.tabId), 0); return { cancel: true };
     }
@@ -1257,4 +1301,7 @@ browser.webNavigation?.onCommitted?.addListener(async (details) => {
     return;
   }
   committedURLByTab.set(details.tabId, details.url);
+  websitePlayback.committed(details);
 });
+
+browser.webNavigation?.onBeforeNavigate?.addListener(details => websitePlayback.beforeNavigate(details));

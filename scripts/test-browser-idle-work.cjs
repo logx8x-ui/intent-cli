@@ -60,6 +60,7 @@ async function harness(browserName, connected) {
     }
     now = end;
   };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, `../${browserName}-extension/website-playback-intent.js`), "utf8"), context);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, `../${browserName}-extension/background.js`), "utf8"), context);
   await drain();
   await advance(100);

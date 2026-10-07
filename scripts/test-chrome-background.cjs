@@ -41,7 +41,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const discoveryRetryTimers = new Map();
   let retryTimerID = 0;
   let dynamicRules = [];
-  let sessionRules = [];
+  let sessionRules = (options.sessionRules || []).map(rule => ({...rule}));
 
   const runtimeMessage = event();
   const tabActivated = event();
@@ -121,7 +121,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       },
       getSessionRules: async () => sessionRules.map((rule) => ({ ...rule })),
       updateSessionRules: async ({ removeRuleIds, addRules }) => {
-        sessionRules = sessionRules.filter((rule) => !removeRuleIds.includes(rule.id)).concat(addRules);
+        const next = sessionRules.filter((rule) => !removeRuleIds.includes(rule.id)).concat(addRules);
+        if (new Set(next.map(rule => rule.id)).size !== next.length) throw new Error("Duplicate session rule ID");
+        if (next.filter(rule => rule.condition.regexFilter).length > 1000) throw new Error("Session regex rule limit exceeded");
+        sessionRules = next;
         sessionUpdates.push({ removeRuleIds, addRules });
       }
     },
@@ -183,7 +186,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         tabs.delete(id);
         for (const listener of tabRemoved.listeners) await listener(id);
       },
-      sendMessage: async () => options.rejectWebsiteGuard ? {} : ({websiteFeatures:true})
+      sendMessage: async (id, message) => options.websiteReceipt ? options.websiteReceipt(id,message)
+        : options.rejectWebsiteGuard ? {} : ({websiteFeatures:true, websiteRequestID:message.websiteRequestID,
+          websitePolicyKey:require("../chrome-extension/website-features.js").policyKey(message.rules),
+          startupSessionID:message.rules?.startupSessionID || null})
     },
     windows: {
       getAll: async (query) => {
@@ -206,6 +212,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         return { id, ...patch };
       }
     },
+    scripting: {executeScript: async () => { options.onWebsiteInject?.(); }},
     webNavigation: { onBeforeNavigate: beforeNavigate, onCommitted: committed }
   };
 
@@ -220,6 +227,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     } : undefined,
     IntentBrowserRules: helpers,
     IntentWebsiteFeatures: require("../chrome-extension/website-features.js"),
+    IntentWebsitePlayback: null,
     URL,
     importScripts: () => {},
     setInterval: (callback, delay) => {
@@ -236,6 +244,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     },
     clearTimeout: id => discoveryRetryTimers.delete(id)
   };
+  vm.runInNewContext(fs.readFileSync(path.join(root, "chrome-extension/website-playback-intent.js"), "utf8"), context);
   vm.runInNewContext(source, context, { filename: "chrome-extension/background.js" });
 
   async function settle() {
@@ -261,6 +270,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       await context.applyNativeRules(next);
     },
     effectiveRules: context.effectiveRules,
+    routeWebsiteFeature: context.routeWebsiteFeature,
     allowedTabIDs: () => [...tabs.values()].filter(context.isRuntimeAllowedTab).map(tab => tab.id),
     browserSessionID: () => vm.runInNewContext("browserSessionID", context),
     browserProfileID: () => vm.runInNewContext("browserProfileID", context),
@@ -317,10 +327,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       await chrome.tabs.remove(id);
       await settle();
     },
-    async message(message) {
+    async message(message, sender = {}) {
       return new Promise((resolve) => {
         for (const listener of runtimeMessage.listeners) {
-          const asyncResponse = listener(message, {}, resolve);
+          const asyncResponse = listener(message, sender, resolve);
           if (asyncResponse !== true) resolve(asyncResponse);
         }
       });
@@ -1481,7 +1491,122 @@ async function run() {
   assert.equal(unavailableSite.nativeMessages.some(m=>m.type === "websitePolicyReady"), false, "Never confirm a page guard that failed to install");
 }
 
-run().catch((error) => {
+run().then(websiteRegression).catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+async function websiteRegression() {
+  const engine = require("../chrome-extension/website-features.js");
+  const active = {active:true,accessMode:"whitelist",selectedTabIDs:[71],allowedWebsites:[],startupWebsites:[],
+    startupSessionID:"website-readiness",blockNavigation:true,
+    websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:["messages"]}}};
+  const initial = [{id:71,windowId:1,active:true,url:"https://www.instagram.com/"},
+    {id:72,windowId:1,active:false,url:"https://www.instagram.com/"}];
+  const reply = m => ({websiteFeatures:true,websiteRequestID:m.websiteRequestID,
+    websitePolicyKey:engine.policyKey(m.rules),startupSessionID:m.rules?.startupSessionID || null});
+  const baseOptions = {};
+  {
+    const ordinary = {id:26001,priority:1,action:{type:"block"},condition:{regexFilter:"^https://unrelated.invalid/",resourceTypes:["main_frame"]}};
+    const leaked = {...ordinary,id:24555};
+    const h=createHarness({active:false},initial,{sessionRules:[ordinary,leaked]});
+    await h.settle();
+    assert.deepEqual(h.sessionRules.map(r=>r.id),[ordinary.id],"Initialization removes formerly leaked feature IDs but preserves other session owners");
+    const combined={...active,websiteFeaturePolicies:{...active.websiteFeaturePolicies,youtube:{version:1,allowedFeatures:["search"]}}};
+    await h.applyRules(combined);
+    assert.ok(h.sessionRules.some(r=>r.id>24099&&r.id<25000),"Exercise a policy larger than the old cleanup namespace");
+    assert.ok(h.sessionRules.some(r=>r.id===23000),"Keep exact-tab restrictions alongside website features");
+    await h.applyRules({...combined,websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search","shorts"]}}});
+    const expected=engine.networkRules({youtube:{version:1,allowedFeatures:["search","shorts"]}},[71]);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.sessionRules.filter(r=>r.id>=24000&&r.id<25000))),expected,"Policy replacement replaces every feature rule without duplicate IDs or stale rules");
+    await h.applyRules({active:false});
+    assert.deepEqual(h.sessionRules.map(r=>r.id),[ordinary.id],"Finish removes all feature and exact-tab rules while preserving another owner");
+    await h.applyRules(combined);
+    assert.ok(h.sessionRules.some(r=>r.id>24099&&r.id<25000),"A second intention installs cleanly after Finish");
+    await h.applyRules({active:false});
+    assert.deepEqual(h.sessionRules.map(r=>r.id),[ordinary.id]);
+  }
+  {
+    let injections=0, stale=true;
+    const h=createHarness({active:false},initial,{...baseOptions,onWebsiteInject(){injections++;},
+      websiteReceipt(_id,m){const r=reply(m);if(stale&&m.websiteRequestID){stale=false;r.websitePolicyKey="stale";}return r;}});
+    await h.settle();
+    await h.applyRules(active);
+    assert.ok(injections>0,"Stale/generic receipt cannot certify the current website guard");
+    assert.ok(h.nativeMessages.some(m=>m.type==="websitePolicyReady"&&m.appliedWebsitePolicySessionID===active.startupSessionID));
+    const msg={type:"routeWebsiteFeature",url:initial[0].url,websitePolicyKey:engine.policyKey(active)};
+    h.updates.length=0;
+    assert.equal((await h.routeWebsiteFeature(msg,{tab:{id:72},frameId:0})).routed,false,"Unselected tab cannot route itself");
+    assert.equal((await h.routeWebsiteFeature(msg,{tab:{id:71},frameId:2})).routed,false,"Subframes cannot drive tab navigation");
+    assert.equal((await h.routeWebsiteFeature({...msg,websitePolicyKey:"previous"},{tab:{id:71},frameId:0})).routed,false);
+    assert.equal((await h.routeWebsiteFeature(msg,{tab:{id:71},frameId:0})).routed,true);
+    assert.equal(h.tabs.get(71).url,"https://www.instagram.com/direct/inbox/");
+    assert.equal(h.tabs.get(71).active,true);assert.equal(h.tabs.size,2);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.updates)),[{tabId:71,patch:{url:"https://www.instagram.com/direct/inbox/"}}],"Inbox routing only changes the existing tab URL");
+    await h.applyRules({active:false});
+    assert.equal((await h.routeWebsiteFeature(msg,{tab:{id:71},frameId:0})).routed,false,"Finished session cannot navigate later");
+  }
+  {
+    const h=createHarness({active:false},initial,{...baseOptions,websiteReceipt(_id,m){return {...reply(m),websiteRequestID:"another-request"};}});
+    await h.settle();
+    await assert.rejects(h.applyRules(active),/current policy/);
+    assert.equal(h.nativeMessages.some(m=>m.type==="websitePolicyReady"),false);
+  }
+  {
+    let release;
+    const h=createHarness({active:false},initial,{...baseOptions,websiteReceipt(_id,m){
+      if(m.websiteRequestID && m.rules.active) return new Promise(resolve=>release=()=>resolve(reply(m)));
+      return reply(m);
+    }});
+    await h.settle();
+    const starting=h.applyRules(active);
+    for(let i=0;i<120&&!release;i++) await Promise.resolve();
+    assert.equal(typeof release,"function");
+    assert.equal(h.nativeMessages.some(m=>m.type==="websitePolicyReady"),false,"DOM receipt actually gates readiness");
+    const ending=h.applyRules({active:false});release();await starting;await ending;
+    assert.equal(h.nativeMessages.some(m=>m.type==="websitePolicyReady"),false,"Late receipt after finish cannot acknowledge old session");
+  }
+  {
+    function winner(h,url,tabId=71) {
+      return [...h.dynamicRules,...h.sessionRules].filter(r=>(!r.condition.tabIds||r.condition.tabIds.includes(tabId))
+        && (!r.condition.excludedTabIds||!r.condition.excludedTabIds.includes(tabId))
+        && new RegExp(r.condition.regexFilter||"$^","i").test(url)).sort((a,b)=>b.priority-a.priority)[0];
+    }
+    const h=createHarness({active:false},initial);await h.settle();await h.applyRules(active);
+    assert.equal(winner(h,initial[0].url).action.type,"redirect","A blocked initial document must have a request-stage redirect");
+    assert.equal(winner(h,initial[0].url).action.redirect.url,"https://www.instagram.com/direct/inbox/","An initial full-document request redirects before the feature block, without needing a loaded content script");
+    assert.equal(winner(h,initial[0].url,72).action.type,"block","Unselected tabs remain blocked ahead of the redirect");
+    assert.equal(winner(h,"https://www.instagram.com/accounts/login/"),undefined);
+    // Selected authentication remains untouched by Messages-only routing.
+  }
+  {
+    const videoRules={...active,websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}};
+    const source="https://www.youtube.com/results?search_query=manual",target="https://www.youtube.com/watch?v=chosen";
+    const h=createHarness({active:false},[{...initial[0],url:source}],baseOptions);
+    await h.settle();await h.applyRules(videoRules);
+    await h.commit(71,target,"link");
+    const message={type:"consumeWebsitePlaybackIntent",url:target,websitePolicyKey:engine.policyKey(videoRules)};
+    const sender={frameId:0,tab:{...h.tabs.get(71)},url:target};
+    assert.equal((await h.message(message,sender)).allowed,true,"Actual background commit and runtime message adapters deliver manual document playback");
+    await h.applyRules({active:false});
+    assert.equal((await h.message(message,sender)).allowed,false,"Finish clears document playback evidence");
+  }
+  for(const mode of ["whitelist","blacklist"]) {
+    const scoped={...active,selectedTabIDs:null,accessMode:mode,allowedWebsites:mode==="whitelist"?["instagram.com/direct","instagram.com/reels"]:["instagram.com/reels"]};
+    const h=createHarness({active:false},initial);await h.settle();await h.applyRules(scoped);
+    function action(url) {return [...h.dynamicRules,...h.sessionRules].filter(r=>new RegExp(r.condition.regexFilter||"$^","i").test(url)).sort((a,b)=>b.priority-a.priority)[0]?.action.type||"allow";}
+    assert.equal(action("https://www.instagram.com/reels/"),mode==="whitelist"?"redirect":"block","Request routing intersects the source URL policy");
+    assert.equal(action("https://www.instagram.com/"),mode==="whitelist"?"block":"redirect","An outer-denied source cannot gain access via redirect");
+    assert.equal(action("https://www.instagram.com/direct/inbox/"),"allow","Redirected inbox is allowed by both layers");
+  }
+  for(const mode of ["whitelist","blacklist"]) {
+    const scoped={...active,selectedTabIDs:null,accessMode:mode,
+      allowedWebsites:[mode==="whitelist"?"instagram.com/reels":"instagram.com/direct"]};
+    const url=mode==="whitelist"?"https://www.instagram.com/reels/":"https://www.instagram.com/";
+    const h=createHarness({active:false},[{...initial[0],url}],baseOptions);await h.settle();await h.applyRules(scoped);
+    const outcome=await h.routeWebsiteFeature({url,websitePolicyKey:engine.policyKey(scoped)},{tab:{id:71},frameId:0});
+    assert.equal(outcome.routed,false,"Messages routing cannot widen outer "+mode+" URL rules");
+    assert.equal(h.tabs.get(71).url,url);
+  }
+  console.log("chrome website background: correlated readiness, cancellation, same-tab inbox and outer restrictions passed");
+}
