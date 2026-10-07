@@ -187,6 +187,7 @@ function connectCommandPort() {
     nativeConnectionConfirmed = false;
     port.onMessage.addListener(async (message) => {
       if (commandPort !== port) return;
+      const refreshResolver = resolvePendingRuleRefresh;
       const visibilityWasReady = Boolean(nativeWindowVisibility?.identity());
       nativeWindowVisibility?.receive(message);
       nativeConnectionConfirmed = true;
@@ -209,10 +210,15 @@ function connectCommandPort() {
       }
       const desired = effectiveRules(message);
       minimizeBootstrap?.receive(message,{rules:desired,fingerprint:fingerprintRules(desired)});
+      // Register this rule revision in arrival order. A slow snapshot/preview
+      // from an older message must not reapply stale rules after Start or Finish.
+      const application = applyNativeRules(message).catch(() => {});
+      const applicationRevision = ruleApplicationRevision;
       if (message?.finderCommand) void nativeFinder?.handle(message.finderCommand);
-      if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
-      await applyNativeRules(message).catch(() => {});
-      settlePendingRuleRefresh();
+      if (message?.tabCommand) await handleRequestedTab(message.tabCommand).catch(() => {});
+      await application;
+      if (commandPort === port && ruleApplicationRevision === applicationRevision
+          && refreshResolver && resolvePendingRuleRefresh === refreshResolver) settlePendingRuleRefresh();
     });
     port.onDisconnect.addListener(() => {
       if (commandPort !== port) return;
@@ -793,7 +799,9 @@ function startupLaunchPending() {
 }
 
 async function synchronizeStartupTabs() {
-  const startupFingerprint = JSON.stringify(rules.startupWebsites);
+  const current = rules, revision = ruleApplicationRevision;
+  const stillCurrent = () => rules === current && current.active && revision === ruleApplicationRevision;
+  const startupFingerprint = JSON.stringify(current.startupWebsites);
   if (
     synchronizingStartupTabs ||
     !startupLaunchPending()
@@ -802,19 +810,21 @@ async function synchronizeStartupTabs() {
   synchronizingStartupTabs = true;
   try {
     const tabs = await browser.tabs.query({});
-    if (tabs.length === 0) return;
+    if (!stillCurrent() || tabs.length === 0) return;
 
     completedStartupFingerprint = startupFingerprint;
-    if (rules.startupSessionID) {
-      completedStartupSessionID = rules.startupSessionID;
+    if (current.startupSessionID) {
+      completedStartupSessionID = current.startupSessionID;
       await browser.storage.local.set({ completedStartupSessionID }).catch(() => {});
+      if (!stillCurrent()) return;
     }
 
     const claimedTabIds = new Set();
     let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
     let firstStartupTab = null;
 
-    for (const startupURL of uniqueStartupURLs(rules.startupWebsites)) {
+    for (const startupURL of uniqueStartupURLs(current.startupWebsites)) {
+      if (!stillCurrent()) return;
       let tab = tabs.find((candidate) =>
         !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
       );
@@ -842,16 +852,18 @@ async function synchronizeStartupTabs() {
           });
         } else {
           tab = await browser.tabs.create({ url: "about:blank", active: false });
+          if (!stillCurrent()) return;
           beginStartupNavigation(tab.id, startupURL);
           tab = await browser.tabs.update(tab.id, { url: startupURL, active: false });
         }
       }
+      if (!stillCurrent()) return;
       claimedTabIds.add(tab.id);
       freshBlankTabIds.delete(tab.id);
       firstStartupTab ||= tab;
     }
 
-    if (firstStartupTab) {
+    if (stillCurrent() && firstStartupTab) {
       lastAllowedTabId = firstStartupTab.id;
       await browser.tabs.update(firstStartupTab.id, { active: true });
     }

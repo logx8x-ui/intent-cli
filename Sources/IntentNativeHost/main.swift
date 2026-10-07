@@ -203,7 +203,7 @@ struct HostResponse: Codable {
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
-    var bundledExtensionVersion: String = "0.2.36"
+    var bundledExtensionVersion: String = "0.2.37"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1", "background-tab-create-host-v1", "native-website-finder-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
@@ -1050,9 +1050,18 @@ private final class HostRuntime {
            let command = BrowserTabCommandStore(fileURL: BrowserProfileSnapshots.partition(paths.command(for: browserBundleIdentifier), session: session)).take() {
             return command
         }
-        return BrowserTabCommandStore(
-            fileURL: paths.command(for: browserBundleIdentifier)
-        ).take()
+        if let command = BrowserTabCommandStore(fileURL: paths.command(for: browserBundleIdentifier)).take() {
+            return command
+        }
+        // Presence checks have their own read-only mailbox so background session
+        // monitoring cannot overwrite a pending user activation/preview command.
+        if let session = profileSessionID,
+           let command = BrowserTabCommandStore(fileURL: BrowserSelectedTabPresenceCheck.commandFileURL(
+                base: paths.command(for: browserBundleIdentifier), session: session)).take(),
+           command.action == .snapshot, command.browserSessionID == session,
+           Date().timeIntervalSince(command.createdAt) >= -0.25,
+           Date().timeIntervalSince(command.createdAt) <= 3 { return command }
+        return nil
     }
 
     private func sendCurrentState(tabCommand: BrowserTabCommand?, force: Bool, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,

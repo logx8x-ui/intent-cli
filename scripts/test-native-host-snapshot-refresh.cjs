@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
+const {createHash} = require('node:crypto');
 const host = path.resolve(__dirname, '../.build/release/IntentNativeHost');
 function frame(message) {
   const body = Buffer.from(JSON.stringify(message)), header = Buffer.alloc(4);
@@ -31,10 +32,11 @@ async function check(browser, suffix) {
   child.stderr.resume();
   const file = path.join(directory, `browser-tabs${suffix}.json`);
   const read = () => { try { return JSON.parse(fs.readFileSync(file)); } catch { return null; } };
-  const snapshot = {type: 'tabsSnapshot', browserBundleIdentifier: browser,
+  const session = 'presence-owner-' + browser;
+  const snapshot = {type: 'tabsSnapshot', browserBundleIdentifier: browser, browserSessionID: session,
     tabs: [{id: 1, windowID: 7, index: 0, title: 'Example', url: 'https://example.com', active: true}]};
   try {
-    child.stdin.write(frame({type: 'getRules', browserBundleIdentifier: browser}));
+    child.stdin.write(frame({type: 'getRules', browserBundleIdentifier: browser, browserSessionID: session}));
     child.stdin.write(frame(snapshot));
     await until(() => read());
     const first = read().updatedAt;
@@ -47,6 +49,30 @@ async function check(browser, suffix) {
     await until(() => read()?.updatedAt > first);
     assert.ok(read().updatedAt >= requested, 'An explicit unchanged snapshot acknowledges this request, not an old one');
     assert.equal(read().tabs[0].id, 1);
+
+    // A background presence query gets its own channel and cannot overwrite
+    // a user command waiting for this same browser/profile.
+    const component = createHash('sha256').update(session).digest('hex').slice(0,24);
+    const normalPath = path.join(directory, `browser-tab-command${suffix}.profile-${component}.json`);
+    const presencePath = path.join(directory, `browser-tab-command${suffix}.presence-profile-${component}.json`);
+    const queuedAt = Date.now() / 1000 - 978307200;
+    const normal = {id:'user-activate',action:'activate',tabID:1,windowID:7,browserSessionID:session,createdAt:queuedAt};
+    const presence = {id:'confirm-presence',action:'snapshot',tabID:-1,windowID:-1,browserSessionID:session,createdAt:queuedAt};
+    child.kill('SIGSTOP');
+    try {
+      fs.writeFileSync(normalPath, JSON.stringify(normal));
+      fs.writeFileSync(presencePath, JSON.stringify(presence));
+      child.stdin.write(frame({type:'getRules',browserBundleIdentifier:browser,browserSessionID:session}));
+    } finally { child.kill('SIGCONT'); }
+    await until(()=>replies.some(reply=>reply.tabCommand?.id===normal.id),'Pending normal command was lost');
+    child.stdin.write(frame({type:'getRules',browserBundleIdentifier:browser,browserSessionID:session}));
+    await until(()=>replies.some(reply=>reply.tabCommand?.id===presence.id),'Dedicated presence query did not reach its owner');
+    const delivered = replies.filter(reply=>[normal.id,presence.id].includes(reply.tabCommand?.id)).map(reply=>reply.tabCommand.id);
+    assert.deepEqual(delivered,[normal.id,presence.id],'Normal command has priority; both commands are delivered once');
+    child.stdin.write(frame({...snapshot,allTabs:snapshot.tabs,snapshotRequestIDs:[presence.id]}));
+    const discoveryPath = path.join(directory, `browser-tabs${suffix}.discovery-profile-${component}.json`);
+    await until(()=>{try{return JSON.parse(fs.readFileSync(discoveryPath)).profileDiscoveryRequestIDs?.includes(presence.id);}catch{return false;}},
+      'Dedicated presence reply was not correlated by the native host');
 
     const rulesFile = path.join(directory, 'browser-rules.json');
     const activeRules = {

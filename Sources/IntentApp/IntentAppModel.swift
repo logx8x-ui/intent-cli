@@ -1884,13 +1884,16 @@ final class IntentAppModel: ObservableObject {
             quickSelectionMonitor = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    guard !Task.isCancelled, let self, self.activeSessionID == intention.id else { return }
+                    guard !Task.isCancelled, let self, self.activeSessionID == intention.id,
+                          self.activeSessionOccurrenceID == occurrence,
+                          self.activeLock === lock, !lock.isStopRequested else { return }
                     if requireSelectedResources, !windowIDs.isEmpty, !windowIDs.isSubset(of: Set(WorkspaceWindow.list(onScreen: false).map(\.id))) {
                         self.activeLock?.stopForSafety()
                         self.errorMessage = "A marked window closed, so the intention ended safely."
                         return
                     }
                     for (browser, selected) in tabIDs {
+                        guard !Task.isCancelled, self.activeLock === lock, !lock.isStopRequested else { return }
                         let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
                         guard heartbeat.supports(intention.accessMode == .blacklist ? .blacklistSelection : .quickSelection, maxAge: 5),
                               heartbeat.supports(.tabSessionIdentity, maxAge: 5),
@@ -1909,9 +1912,34 @@ final class IntentAppModel: ObservableObject {
                         }
                         if requireSelectedResources, snapshot.updatedAt > Date().addingTimeInterval(-3),
                            !(snapshot.allTabs ?? snapshot.tabs).contains(where: { selected.contains($0.id) }) {
-                            self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
-                            self.activeLock?.stop()
-                            return
+                            // Idle/query-suppressed snapshots can be empty while
+                            // every selected tab is still open. Confirm absence
+                            // with a new exact-profile query, never cached rows.
+                            let check = BrowserSelectedTabPresenceCheck(browser: browser,
+                                expectedSession: expected, selectedIDs: selected)
+                            var confirmedPresent = false
+                            // Finish requests stop before teardown clears the
+                            // occurrence or cancels this task. Respect that gap.
+                            await BrowserSelectedTabPresenceMonitor.confirm(check, isCurrent: {
+                                self.activeSessionID == intention.id && self.activeSessionOccurrenceID == occurrence
+                                    && self.activeLock === lock && !lock.isStopRequested
+                            }, didConfirm: { result in
+                                switch result {
+                                case .present: confirmedPresent = true
+                                case .closed:
+                                    self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
+                                    self.activeLock?.stop()
+                                case .changed:
+                                    self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
+                                    self.activeLock?.stopForSafety()
+                                case .pending:
+                                    self.errorMessage = "Browser Guard could not confirm the selected tabs, so this intention stopped safely. Keep Browser Guard connected and try again."
+                                    self.activeLock?.stopForSafety()
+                                }
+                            })
+                            guard confirmedPresent, !Task.isCancelled, self.activeSessionID == intention.id,
+                                  self.activeSessionOccurrenceID == occurrence,
+                                  self.activeLock === lock, !lock.isStopRequested else { return }
                         }
                     }
                 }

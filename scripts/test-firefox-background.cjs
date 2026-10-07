@@ -156,6 +156,9 @@ function createHarness(activeRules, initialTabs, options = {}) {
       onDisconnect: { addListener() {} },
       postMessage(message) {
         nativeMessages.push(message);
+        // Real native host suppresses unchanged state pushes for snapshots and
+        // heartbeats. Do not let automatic fixture replies repair stale rules.
+        if (options.requestOnlyNativeReplies && !["getRules","setGuardEnabled"].includes(message.type)) return;
         const response = message.type === "windowVisibilityPlan"
           ? {...activeRules, visibilityPlanReceipt: {revision: message.visibilityPlan.revision, accepted: true}} : null;
         Promise.resolve().then(() => messages.forEach(listener => listener(response || activeRules)));
@@ -198,6 +201,13 @@ function createHarness(activeRules, initialTabs, options = {}) {
 
   return {
     tabs,
+    setNativeRules(next) {
+      if (Array.isArray(next.selectedTabIDs) && next.selectedBrowserSessionID === undefined) {
+        next = {...next, selectedBrowserSessionID: vm.runInNewContext("browserSessionID", context)};
+      }
+      activeRules = next;
+      return next;
+    },
     async applyRules(next) {
       if (Array.isArray(next.selectedTabIDs) && next.selectedBrowserSessionID === undefined) {
         next = {...next, selectedBrowserSessionID: vm.runInNewContext("browserSessionID", context)};
@@ -322,6 +332,70 @@ function createHarness(activeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  for (const initiallyActive of [false,true]) for (const rejectQuery of [false,true]) {
+    const active={active:true,accessMode:"whitelist",startupSessionID:"ordered-native-start",
+      selectedTabIDs:[8],allowedWebsites:["example.com"],startupWebsites:[],blockNavigation:true};
+    let holdNext=false, started, release;
+    const captured=new Promise(resolve=>started=resolve), gate=new Promise(resolve=>release=resolve);
+    const h=createHarness(initiallyActive?active:{active:false},[
+      {id:8,windowId:344,index:0,active:true,url:"https://example.com/"}
+    ],{withCommandPort:true,requestOnlyNativeReplies:true,async afterTabQuery(){if(holdNext){holdNext=false;started();await gate;if(rejectQuery)throw new Error("query cancelled");}}});
+    await h.ready();await new Promise(setImmediate);
+    holdNext=true;
+    const olderRules=h.setNativeRules(initiallyActive?active:{active:false});
+    const older=h.receiveNative({...olderRules,tabCommand:{id:"slow-old-command",action:"snapshot",tabID:-1,windowID:-1}});
+    await captured;
+    const newer=h.setNativeRules(initiallyActive?{active:false}:active);
+    await h.receiveNative(newer);
+    assert.equal((await h.message({type:"getActiveRules"})).active,!initiallyActive,"New Start/Finish applies while an older command is pending");
+    release();await older;await new Promise(setImmediate);
+    assert.equal((await h.message({type:"getActiveRules"})).active,!initiallyActive,
+      "An older native command completion or rejection must not reapply stale rules after Start/Finish");
+    if(!initiallyActive) assert.deepEqual(h.allowedTabIDs(),[8],"Latest active exact-tab enforcement survives old inactive command completion");
+  }
+  {
+    let holdQuery=false, queryStarted, releaseQuery, applicationStarted, releaseApplication;
+    const queryCaptured=new Promise(resolve=>queryStarted=resolve), queryGate=new Promise(resolve=>releaseQuery=resolve);
+    const applicationCaptured=new Promise(resolve=>applicationStarted=resolve), applicationGate=new Promise(resolve=>releaseApplication=resolve);
+    const h=createHarness({active:false},[{id:8,windowId:344,index:0,active:true,url:"https://example.com/"}],{
+      withCommandPort:true,requestOnlyNativeReplies:true,
+      async afterTabQuery(){if(holdQuery){holdQuery=false;queryStarted();await queryGate;}},
+      async onVisibilitySync(rules){if(rules.active){applicationStarted();await applicationGate;}}
+    });
+    await h.ready();await new Promise(setImmediate);
+    holdQuery=true;
+    const older=h.receiveNative({active:false,tabCommand:{id:"before-refresh",action:"snapshot",tabID:-1,windowID:-1}});
+    await queryCaptured;
+    h.setNativeRules({active:true,accessMode:"whitelist",startupSessionID:"newer-refresh",
+      allowedWebsites:["example.com"],startupWebsites:[],selectedTabIDs:[8]});
+    let refreshed=false;
+    const refreshing=h.refresh().then(()=>{refreshed=true;});
+    await applicationCaptured;
+    releaseQuery();await older;for(let n=0;n<16;n++)await Promise.resolve();
+    assert.equal(refreshed,false,"An older callback cannot settle a newer refresh while its rule application is pending");
+    releaseApplication();await refreshing;
+    assert.equal(refreshed,true,"The current refresh completes after its own latest rule application");
+  }
+  for (const replacementActive of [false,true]) {
+    let hold=false, started, release;
+    const captured=new Promise(resolve=>started=resolve), gate=new Promise(resolve=>release=resolve);
+    const h=createHarness({active:false},[{id:8,windowId:344,index:0,active:true,url:"about:blank"}],{
+      withCommandPort:true,requestOnlyNativeReplies:true,
+      async afterTabUpdate(patch){if(hold && patch.url){hold=false;started();await gate;}}
+    });
+    await h.ready();await new Promise(setImmediate);
+    hold=true;
+    const earlier=h.setNativeRules({active:true,accessMode:"whitelist",startupSessionID:"old-startup",
+      allowedWebsites:["example.com","example.org"],startupWebsites:["https://example.com/first","https://example.org/second"]});
+    const starting=h.receiveNative(earlier);await captured;
+    const replacement=h.setNativeRules(replacementActive?{...earlier,startupSessionID:"replacement-startup",startupWebsites:[]}:{active:false});
+    const finishing=h.receiveNative(replacement);
+    const effectCount=h.updates.length;release();await Promise.all([starting,finishing]);
+    assert.equal(h.updates.filter(update=>update.patch.url).length,1,"Finish/replacement prevents remaining old-session startup URL effects");
+    assert.equal(h.updates.slice(effectCount).some(update=>update.patch.active===true && !update.patch.url),false,
+      "Obsolete startup completion cannot activate its first tab after Finish/replacement");
+    assert.equal(h.tabs.size,1,"Obsolete startup loop cannot create the second requested tab");
+  }
   {
     let release;const gate=new Promise(resolve=>release=resolve), observed=[];
     const initial={active:true,nativeWindowVisibility:true,hideDistractions:true,startupSessionID:'bootstrap-routing',

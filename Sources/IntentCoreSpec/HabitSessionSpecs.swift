@@ -3,6 +3,8 @@ import IntentCore
 
 func runHabitSessionSpecs() throws {
     try runSavedWorkspaceRestorationSpecs()
+    try runBrowserSelectedTabPresenceSpecs()
+    try runBrowserSelectedTabPresenceMonitorSpecs()
     let desktop = CGRect(x: 28, y: 70, width: 1300, height: 680)
     for point in [CGPoint(x: -100, y: -50), CGPoint(x: 500, y: 250), CGPoint(x: 2000, y: 2000)] {
         let panel = FieldOfViewLayout.panel(origin: point, size: CGSize(width: 240, height: 260), in: desktop)
