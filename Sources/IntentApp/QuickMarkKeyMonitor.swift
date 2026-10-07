@@ -5,6 +5,7 @@ import IntentCore
 final class QuickMarkKeyMonitor {
     var overviewKeyHandler: ((Int, Bool, Bool, Bool, Bool) -> Bool)?
     var overviewPrefixIsHeld: (() -> Bool)?
+    var nativeFinderOwnsInput: (() -> Bool)?
     var spotlightContext: (() -> (Bool, [SpotlightApplicationCandidate]))?
     var onSpotlightOpening: (() -> Void)?
     var onAction: ((QuickMarkGesture.Action) -> Void)?
@@ -64,6 +65,12 @@ final class QuickMarkKeyMonitor {
                 owner.cancelPending()
                 // Callback is bounded; recover once on the next main-loop turn.
                 DispatchQueue.main.async { [weak owner] in if let tap = owner?.tap { CGEvent.tapEnable(tap: tap, enable: true) } }
+                return Unmanaged.passUnretained(event)
+            }
+            if owner.nativeFinderOwnsInput?() == true {
+                owner.cancelPending()
+                owner.normalizer = QuickMarkKeyboardNormalizer()
+                owner.spotlight.setOverview(active: false, candidates: [])
                 return Unmanaged.passUnretained(event)
             }
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))

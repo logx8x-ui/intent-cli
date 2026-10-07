@@ -17,6 +17,7 @@ enum IntentPersistenceChecks {
         do {
             try QuickSelectionPreferenceChecks.run(check)
             try QuickSelectionInteractionChecks.run(check)
+            try NativeWebsiteFinderCompanionChecks.run(check)
             try TabSiteIconChecks.run(check)
             let model = IntentAppModel()
             let presentation = SessionDismissalProbe()

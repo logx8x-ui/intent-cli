@@ -31,6 +31,7 @@ do {
     try runHabitSessionSpecs()
     try runQuickGestureRegressionSpecs()
     try runWebsiteFinderSpecs()
+    try runBrowserNativeFinderSpecs()
     try runTabSelectionSpecs()
     try runSessionRuntimeSpecs()
     try runSessionNotchLayoutSpecs()

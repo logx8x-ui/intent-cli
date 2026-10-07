@@ -104,9 +104,9 @@ public enum BrowserTabCreationError: LocalizedError {
 /// URLs through Launch Services, changes profile, or retries an uncertain effect.
 @MainActor
 public enum BrowserTabCreationService {
-    public static func create(target: WebsiteFinderTarget, url: URL,
+    public static func create(target: WebsiteFinderTarget, url: URL, requestID: String = UUID().uuidString,
                               isCurrent: @escaping @MainActor () -> Bool) async throws -> BrowserTabItem {
-        guard target.isValid, let destination = WebsiteFinderPolicy.validatedURL(url.absoluteString) else { throw BrowserTabCreationError.invalidURL }
+        guard UUID(uuidString: requestID) != nil, target.isValid, let destination = WebsiteFinderPolicy.validatedURL(url.absoluteString) else { throw BrowserTabCreationError.invalidURL }
         guard isCurrent(), !Task.isCancelled else { throw BrowserTabCreationError.cancelled }
         try assertInactive()
         let browser = target.browserBundleIdentifier
@@ -127,7 +127,7 @@ public enum BrowserTabCreationService {
         let rawAnchor = (owner.allTabs ?? owner.tabs).first { row in
             (profiles.count > 1 ? BrowserProfileSnapshots.compositeID(session: ownerSession, id: row.id) : row.id) == target.anchorTabID
         }!
-        let command = BrowserTabCommand(tabID: rawAnchor.id, windowID: rawAnchor.windowID, action: .create,
+        let command = BrowserTabCommand(id: requestID, tabID: rawAnchor.id, windowID: rawAnchor.windowID, action: .create,
             browserSessionID: ownerSession, url: destination.absoluteString, expiresAtUnixMS: Date().timeIntervalSince1970 * 1000 + 8000)
         // Write to the resolved profile partition, never to a broadcast channel.
         let store = BrowserTabCreationMailbox(browser: browser, session: ownerSession)

@@ -10,15 +10,42 @@ const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = browser.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "add-as-you-go-v1", "website-features-v1", "firefox-window-minimize-bootstrap-v1"];
 const browserSessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+// A profile survives browser restarts; numeric tab IDs and browserSessionID do not.
+let browserProfileID = null;
+let browserProfilePromise = null;
+function validBrowserProfileID(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    && value !== "00000000-0000-0000-0000-000000000000";
+}
+async function ensureBrowserProfileIdentity() {
+  if (browserProfileID) return browserProfileID;
+  if (!browserProfilePromise) browserProfilePromise = (async () => {
+    const stored = await browser.storage.local.get("intentBrowserProfileID");
+    if (validBrowserProfileID(stored.intentBrowserProfileID)) {
+      browserProfileID = stored.intentBrowserProfileID.toLowerCase();
+      return browserProfileID;
+    }
+    const generated = globalThis.crypto?.randomUUID?.();
+    if (!validBrowserProfileID(generated)) return null;
+    // Never publish an unpersisted fallback identity after a storage failure.
+    await browser.storage.local.set({ intentBrowserProfileID: generated });
+    const saved = await browser.storage.local.get("intentBrowserProfileID");
+    if (saved.intentBrowserProfileID !== generated) return null;
+    browserProfileID = generated;
+    return browserProfileID;
+  })().catch(() => null).finally(() => { browserProfilePromise = null; });
+  return browserProfilePromise;
+}
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
 let hostSupportsTabCreation = false;
+let hostSupportsNativeFinder = false;
 let creationRulesActive = true;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
 let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
-  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsTabCreation && browser.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && browser.storage.session
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeFinder && browser.storage.session && typeof IntentNativeFinder !== "undefined" ? ["native-website-finder-v1"] : []), ...(hostSupportsTabCreation && browser.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && browser.storage.session
     && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
     ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
@@ -44,8 +71,14 @@ const tabCreation = typeof IntentTabCreation !== "undefined" ? new IntentTabCrea
 let lastAllowedTabId = null;
 let enforcing = false;
 let rulesFingerprint = fingerprintRules(rules);
+const nativeFinder = typeof IntentNativeFinder !== "undefined" ? new IntentNativeFinder(browser, {
+  session: () => browserSessionID, active: () => creationRulesActive || rules.active,
+  enabled: () => guardEnabled && hostSupportsNativeFinder && nativeConnectionConfirmed && Boolean(commandPort),
+  firefox: true, send: postCommandPort, snapshot: () => publishTabSnapshot(true, true)
+}) : null;
 let guardEnabled = true;
 let initialized = false;
+let initializationPromise = null;
 let freshBlankTabIds = new Set();
 const lastAllowedURLByTab = new Map();
 const searchSessionTabs = new Set();
@@ -121,28 +154,30 @@ function fingerprintRules(value) {
 }
 
 async function ensureInitialized() {
-  if (initialized) {
-    return;
-  }
+  if (initialized) return;
+  if (!initializationPromise) initializationPromise = (async () => {
+    try {
+      const stored = await browser.storage.local.get({
+        guardEnabled: true,
+        completedStartupSessionID: null
+      });
+      guardEnabled = stored.guardEnabled !== false;
+      completedStartupSessionID = stored.completedStartupSessionID || null;
+    } catch (_) {
+      guardEnabled = true;
+    }
 
-  try {
-    const stored = await browser.storage.local.get({
-      guardEnabled: true,
-      completedStartupSessionID: null
-    });
-    guardEnabled = stored.guardEnabled !== false;
-    completedStartupSessionID = stored.completedStartupSessionID || null;
-  } catch (_) {
-    guardEnabled = true;
-  }
-
-  initialized = true;
-  connectCommandPort();
-  await notifyNativeGuardState();
-  browser.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
+    await ensureBrowserProfileIdentity();
+    initialized = true;
+    connectCommandPort();
+    await notifyNativeGuardState();
+    browser.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
+  })().finally(() => { initializationPromise = null; });
+  return initializationPromise;
 }
 
 function connectCommandPort() {
+  if (!initialized) { void ensureInitialized(); return; }
   if (commandPort || reconnectTimer !== null) return;
   if (typeof browser.runtime.connectNative !== "function") return;
   try {
@@ -157,6 +192,7 @@ function connectCommandPort() {
       nativeConnectionConfirmed = true;
       creationRulesActive = message?.tabCreationAllowed !== true;
       hostSupportsTabCreation = message?.hostCapabilities?.includes("background-tab-create-host-v1") === true;
+      hostSupportsNativeFinder = message?.hostCapabilities?.includes("native-website-finder-host-v1") === true;
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;
@@ -173,6 +209,7 @@ function connectCommandPort() {
       }
       const desired = effectiveRules(message);
       minimizeBootstrap?.receive(message,{rules:desired,fingerprint:fingerprintRules(desired)});
+      if (message?.finderCommand) void nativeFinder?.handle(message.finderCommand);
       if (message?.tabCommand) await handleRequestedTab(message.tabCommand);
       await applyNativeRules(message).catch(() => {});
       settlePendingRuleRefresh();
@@ -209,6 +246,7 @@ function postCommandPort(message) {
     commandPort.postMessage({
       ...message,
       browserSessionID,
+      ...(browserProfileID ? { browserProfileID } : {}),
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
       extensionCapabilities: advertisedCapabilities()
@@ -246,6 +284,8 @@ async function recordWebsiteVisit(tab) {
   try {
     await browser.runtime.sendNativeMessage(HOST_NAME, {
       ...message,
+      browserSessionID,
+      ...(browserProfileID ? { browserProfileID } : {}),
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
       extensionCapabilities: advertisedCapabilities()
@@ -281,7 +321,7 @@ async function handleRequestedTab(message) {
   }
   // Discovery is how Intent learns the current browser lifetime in the first place.
   if (message.action === "snapshot") {
-    await publishTabSnapshot(true, true);
+    await publishTabSnapshot(true, true, message.id);
     return;
   }
   let tab = null;
@@ -326,10 +366,17 @@ function scheduleTabSnapshot(force = false) {
   }, TAB_SNAPSHOT_DEBOUNCE_MS);
 }
 
-async function publishTabSnapshot(force = false, discovery = false) {
+async function publishTabSnapshot(force = false, discovery = false, requestID = null) {
+  await ensureInitialized();
+  if (!await ensureBrowserProfileIdentity()) return;
   if (!commandPort) connectCommandPort();
   if (!commandPort) return;
-  const tabs = rules.active || discovery ? await browser.tabs.query({}) : [];
+  // The receipt belongs only to this request's own query. Never lend a later
+  // request ID to an ordinary or already in-flight inventory.
+  const snapshotRequestIDs = discovery && typeof requestID === "string" && requestID.length > 0 && requestID.length <= 256
+    ? [requestID] : [];
+  const tabs = rules.active || discovery ? await browser.tabs.query({}).catch(() => null) : [];
+  if (!Array.isArray(tabs)) return;
   // Window identity is supplied by the browser; bounds disambiguate equal titles
   // when matching these IDs to macOS WindowServer preview windows.
   const windows = tabs.length && browser.windows?.getAll
@@ -349,6 +396,7 @@ async function publishTabSnapshot(force = false, discovery = false) {
         pinned: Boolean(tab.pinned),
         discarded: Boolean(tab.discarded),
         groupID: Number.isInteger(tab.groupId) ? tab.groupId : null,
+        cookieStoreID: typeof tab.cookieStoreId === "string" ? tab.cookieStoreId : null,
         windowFrame: (() => {
           const window = windowsByID.get(tab.windowId);
           return window && [window.left, window.top, window.width, window.height].every(Number.isFinite)
@@ -362,7 +410,7 @@ async function publishTabSnapshot(force = false, discovery = false) {
   const snapshotTabs = allSnapshotTabs.filter(tab => allowedIDs.has(tab.id));
   const nextFingerprint = JSON.stringify({ tabs: snapshotTabs, allTabs: allSnapshotTabs });
   if (!force && nextFingerprint === lastSnapshotFingerprint) return;
-  if (postCommandPort({ type: "tabsSnapshot", browserSessionID, tabs: snapshotTabs, allTabs: allSnapshotTabs })) {
+  if (postCommandPort({ type: "tabsSnapshot", browserSessionID, tabs: snapshotTabs, allTabs: allSnapshotTabs, snapshotRequestIDs })) {
     lastSnapshotFingerprint = nextFingerprint;
   }
 }
@@ -374,6 +422,8 @@ async function notifyNativeGuardState() {
     await browser.runtime.sendNativeMessage(HOST_NAME, {
       type: "setGuardEnabled",
       enabled: guardEnabled,
+      browserSessionID,
+      ...(browserProfileID ? { browserProfileID } : {}),
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
       extensionCapabilities: advertisedCapabilities()
@@ -431,6 +481,8 @@ async function refreshRules() {
   try {
     const nativeRules = await browser.runtime.sendNativeMessage(HOST_NAME, {
       type: "getRules",
+      browserSessionID,
+      ...(browserProfileID ? { browserProfileID } : {}),
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER
     });
     await applyNativeRules(nativeRules);
@@ -445,7 +497,9 @@ function settlePendingRuleRefresh() {
   resolvePendingRuleRefresh = null;
 }
 
-function sendHeartbeat() {
+async function sendHeartbeat() {
+  if (!initialized) await ensureInitialized();
+  if (!browserProfileID) await ensureBrowserProfileIdentity();
   syncTabVisibility();
   if (rules.active && Array.isArray(rules.selectedTabIDs)) {
     browser.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => {

@@ -53,3 +53,40 @@ Physical-key, rendered browser, exact-profile and delayed-focus acceptance are d
 - Synthetic Shift–backtick did not trigger the global Carbon shortcut. Used Intent Settings > File > Finish Intention instead; daily browser rules confirmed inactive. No completion screen was required. Because Settings was foreground for this command, this is not exact Firefox foreground-at-Finish acceptance.
 - Actual desktop-thumbnail clicking during an intention remains to be verified.
 - Follow-up naming evidence: the initially unfocused AX set reached the stored test name later, so the earlier note means no immediate visible AX focus/value confirmation, not a proven field-editing failure.
+
+## Continued implementation: actual-browser finder and saved workspaces
+
+- The finder now requests a normal compact window from the selected browser
+  profile, with native new-tab/address-bar/bookmarks behavior and explicit Add
+  or Cancel. It retains ownership of only its created tab. Initial presentation
+  does not activate its companion panel; explicitly returning to Intent makes
+  Add/Cancel keyboard-accessible without replacing the draft.
+- Cancellation is delivered through nonblocking mailbox locking with bounded
+  off-main retries. A cancel after tab movement cannot apply a late highlight,
+  and an old completion cannot close a replacement finder. The native host and
+  browser finder harnesses pass these ownership and cancellation cases.
+- Installed Firefox 0.2.35 development finder opened a compact native window
+  with the existing profile bookmarks/address bar and loaded the disposable
+  example.com/?intent-qa=oct7-native-finder URL. The original user windows were
+  retained. This establishes native presentation/navigation only: Add/Cancel
+  live acceptance awaits the keyboard-accessible companion build. The owned
+  test tab was closed after this check.
+- Saved workspace descriptors now retain durable browser profile identity,
+  per-run session/tab/window identity and container identity. Review stages
+  missing resources; explicit Run performs fresh profile discovery before
+  opening missing HTTP(S) tabs. Existing exact identities take precedence;
+  duplicate URLs are matched one-to-one. Blacklist plans never launch targets.
+  Durable issuance claims prevent a lost receipt or repeated Run from blindly
+  creating duplicates. Ambiguous/unavailable identities are not guessed.
+- The isolated core suite passed with the new saved-workspace restoration,
+  finder contention/cancellation and profile migration regressions. Initial
+  app compilation exposed a missing MainActor annotation on a nested restore
+  continuation; that annotation was corrected before any installation.
+- A prior session gate failed an old finder field's fixed 30 ms focus wait; a
+  targeted retry passed without source changes. The test now drains the queued
+  main-thread callback with a bounded deadline instead of relying on 30 ms.
+  Its assertions are unchanged. Full gate acceptance remains pending.
+- Website-feature independent review found a Chrome DNR lifetime bug: the
+  expanded rule set exceeded the old fixed 100-ID cleanup range. That candidate
+  remains uninstalled while cleanup, full-document Instagram routing and
+  manual YouTube navigation regressions are being completed.

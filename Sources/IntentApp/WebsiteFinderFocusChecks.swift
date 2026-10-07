@@ -14,18 +14,18 @@ enum WebsiteFinderFocusChecks {
         let valid = Fixture()
         defer { valid.close() }
         valid.attach()
-        pump()
+        try pump()
         try check(valid.window.focusRequests.count == 1 && valid.window.focusRequests.first === valid.field,
             "An attached website address field requests typing once in its already-key overview window")
         valid.field.requestInitialFocus(); valid.field.updateQuery()
-        pump()
+        try pump()
         try check(valid.window.focusRequests.count == 1,
             "A finder refresh cannot repeatedly steal focus after its initial address request")
 
         let cancelled = Fixture()
         defer { cancelled.close() }
         cancelled.attach(); cancelled.finder.cancel()
-        pump()
+        try pump()
         try check(cancelled.window.focusRequests.isEmpty,
             "Closing the finder before attachment delivery cancels its pending typing request")
 
@@ -33,7 +33,7 @@ enum WebsiteFinderFocusChecks {
         defer { stale.close() }
         stale.attach()
         stale.context.target?.overviewGeneration = UUID()
-        pump()
+        try pump()
         try check(stale.window.focusRequests.isEmpty,
             "A queued finder address request cannot focus a replacement overview generation")
 
@@ -41,14 +41,14 @@ enum WebsiteFinderFocusChecks {
         defer { switched.close() }
         switched.attach()
         switched.context.target?.browserSessionID = "different-profile"
-        pump()
+        try pump()
         try check(switched.window.focusRequests.isEmpty,
             "Changing browser ownership invalidates the old finder address request")
 
         let detached = Fixture()
         defer { detached.close() }
         detached.attach(); detached.field.removeFromSuperview()
-        pump()
+        try pump()
         try check(detached.window.focusRequests.isEmpty,
             "A detached finder field never sends its delayed focus request to its former window")
 
@@ -56,7 +56,7 @@ enum WebsiteFinderFocusChecks {
         defer { nonKey.close() }
         nonKey.window.reportsKey = false
         nonKey.attach()
-        pump()
+        try pump()
         try check(nonKey.window.focusRequests.isEmpty,
             "The finder cannot activate or take typing from a different foreground window")
 
@@ -64,14 +64,14 @@ enum WebsiteFinderFocusChecks {
         defer { hidden.close() }
         hidden.window.reportsVisible = false
         hidden.attach()
-        pump()
+        try pump()
         try check(hidden.window.focusRequests.isEmpty,
             "A hidden overview cannot receive a queued finder typing request")
 
         let dismantled = Fixture()
         defer { dismantled.close() }
         dismantled.attach(); dismantled.field.invalidatePendingFocus()
-        pump()
+        try pump()
         try check(dismantled.window.focusRequests.isEmpty,
             "SwiftUI dismantling invalidates a pending field attachment even before physical detachment")
 
@@ -80,14 +80,27 @@ enum WebsiteFinderFocusChecks {
         captured.attach()
         captured.finder.query = "https://example.org/"
         captured.finder.submit()
-        pump()
+        try pump()
         try check(captured.window.focusRequests.isEmpty && captured.context.captures == 1,
             "A result already captured for creation cannot retake address focus")
         try check(NSApp.keyWindow === originalKeyWindow && NSApp.isActive == originalActive,
             "Finder focus regressions do not activate Intent or change the actual key window")
     }
 
-    private static func pump() { RunLoop.current.run(until: Date().addingTimeInterval(0.03)) }
+    private static func pump() throws {
+        // Drain the actual main-queue attachment callback before asserting.
+        // A fixed 30 ms run-loop delay was flaky under the release-build load.
+        var drained = false
+        DispatchQueue.main.async { drained = true }
+        let deadline = Date().addingTimeInterval(2)
+        while !drained && Date() < deadline {
+            RunLoop.current.run(until: min(deadline, Date().addingTimeInterval(0.01)))
+        }
+        guard drained else {
+            throw NSError(domain: "WebsiteFinderFocusChecks", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The queued finder focus callback did not drain before the test deadline"])
+        }
+    }
 
     @MainActor private final class Context {
         var target: WebsiteFinderTarget? = .init(browserBundleIdentifier: "com.google.Chrome",

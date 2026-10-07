@@ -26,6 +26,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const reloads = [];
   const removals = [];
   const nativeMessages = [];
+  const profileWrites = [];
   const nativeReceivers = [];
   const intervals = [];
   const storage = {
@@ -51,8 +52,20 @@ function createHarness(activeRules, initialTabs, options = {}) {
     },
     storage: {
       local: {
-        get: async (defaults) => ({ ...defaults, ...storage }),
+        get: async (defaults) => {
+          if (defaults === "intentBrowserProfileID") {
+            await options.beforeProfileRead?.();
+            if (options.failProfileRead) throw new Error("profile storage unavailable");
+          }
+          return { ...(typeof defaults === "object" ? defaults : {}), ...storage };
+        },
         set: async (values) => {
+          if (Object.hasOwn(values, "intentBrowserProfileID")) {
+            profileWrites.push(values.intentBrowserProfileID);
+            await options.beforeProfileWrite?.();
+            if (options.failProfileWrite) throw new Error("profile storage unavailable");
+            if (options.dropProfileWrite) return;
+          }
           Object.assign(storage, values);
         }
       }
@@ -64,7 +77,12 @@ function createHarness(activeRules, initialTabs, options = {}) {
       onCreated: { addListener: (listener) => listeners.onCreated.push(listener) },
       onRemoved: { addListener: (listener) => listeners.onRemoved.push(listener) },
       get: async (tabId) => tabs.get(tabId) ? { ...tabs.get(tabId) } : Promise.reject(new Error("missing tab")),
-      query: async () => Array.from(tabs.values()).map((tab) => ({ ...tab })),
+      query: async () => {
+        if (options.failTabQuery) throw new Error("tabs unavailable");
+        const result = Array.from(tabs.values()).map((tab) => ({ ...tab }));
+        await options.afterTabQuery?.(result);
+        return result;
+      },
       update: async (tabId, patch) => {
         const tab = tabs.get(tabId);
         if (!tab) {
@@ -141,6 +159,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
     });
   }
   const context = {
+    crypto: options.crypto === undefined ? require("node:crypto").webcrypto : options.crypto,
     browser,
     IntentFirefoxMinimizeBootstrap: options.bootstrapObserver ? class {
       receive(message,context) { options.bootstrapObserver(message,context); }
@@ -183,6 +202,9 @@ function createHarness(activeRules, initialTabs, options = {}) {
     effectiveRules: context.effectiveRules,
     allowedTabIDs: () => [...tabs.values()].filter(context.isRuntimeAllowedTab).map(tab => tab.id),
     browserSessionID: () => vm.runInNewContext("browserSessionID", context),
+    browserProfileID: () => vm.runInNewContext("browserProfileID", context),
+    profileWrites,
+    async heartbeat() { await context.sendHeartbeat(); },
     async command(message) {
       await context.handleRequestedTab(message);
       for (let i = 0; i < 48; i++) await Promise.resolve();
@@ -577,7 +599,7 @@ async function run() {
     { id: 2, windowId: 1, index: 1, active: false, url: "file:///tmp/guide.pdf", highlighted: true },
     { id: 3, windowId: 1, index: 2, active: false, url: "about:newtab", highlighted: true },
     { id: 4, windowId: 1, index: 3, active: false, url: "", highlighted: true },
-    { id: 5, windowId: 1, index: 4, active: false, url: "https://example.org/", highlighted: true, pinned: true, discarded: true }
+    { id: 5, windowId: 1, index: 4, active: false, url: "https://example.org/", highlighted: true, pinned: true, discarded: true, cookieStoreId: "firefox-container-4" }
   ];
   const discovery = createHarness({ active: false }, mixedTabs, { withCommandPort: true });
   await discovery.ready();
@@ -585,14 +607,110 @@ async function run() {
   assert.deepEqual(Array.from(metadata.tabs, tab => tab.id), [1, 2, 3, 4, 5], "Discovery includes local PDF, internal, blank, pinned and discarded actual tabs");
   assert.deepEqual(Array.from(metadata.tabs.filter(tab => tab.highlighted), tab => tab.id), [2, 3, 4, 5], "Native Shift-selected group reaches Intent intact");
   assert.equal(metadata.tabs[4].pinned && metadata.tabs[4].discarded, true);
+  assert.equal(metadata.tabs[4].cookieStoreID, "firefox-container-4", "Snapshots retain the browser-reported container identity for same-URL tabs");
+  assert.equal(metadata.tabs[0].cookieStoreID, null, "Missing container metadata is not invented");
   assert.equal(metadata.tabs[0].windowFrame.left, 20, "Window geometry identifies same-title browser windows");
   assert.equal(metadata.tabs[0].windowFocused, true, "Browser focus disambiguates overlapping windows");
+  await discovery.command({action: "snapshot", id: "firefox-discovery-one", tabID: -1, windowID: -1});
+  const requestedDiscovery = discovery.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
+  assert.deepEqual(Array.from(requestedDiscovery.snapshotRequestIDs), ["firefox-discovery-one"],
+    "Firefox discovery echoes the ID whose full-tab query it performed");
+  assert.deepEqual(Array.from((await discovery.snapshot()).snapshotRequestIDs), [], "An ordinary inventory cannot inherit a discovery receipt");
+  for (const invalidID of [undefined, "", "x".repeat(257), 12]) {
+    await discovery.command({action: "snapshot", id: invalidID, tabID: -1, windowID: -1});
+    assert.deepEqual(Array.from(discovery.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1).snapshotRequestIDs), [],
+      "Malformed request IDs cannot earn a discovery receipt");
+  }
+  const failingDiscoveryOptions = {withCommandPort: true};
+  const failingDiscovery = createHarness({active: false}, mixedTabs, failingDiscoveryOptions);
+  await failingDiscovery.ready();
+  failingDiscoveryOptions.failTabQuery = true;
+  await failingDiscovery.command({action: "snapshot", id: "firefox-failed-discovery", tabID: -1, windowID: -1});
+  assert.equal(failingDiscovery.nativeMessages.some(message => message.snapshotRequestIDs?.includes("firefox-failed-discovery")), false,
+    "A failed tabs query cannot certify an empty profile");
+  for (const earlierID of [null, "firefox-earlier-request"]) {
+    let holdNextQuery = false, queryStarted, releaseQuery;
+    const queryGate = new Promise(resolve => { releaseQuery = resolve; });
+    const queryCaptured = new Promise(resolve => { queryStarted = resolve; });
+    const overlapping = createHarness({active: false}, mixedTabs, {withCommandPort: true,
+      async afterTabQuery() {
+        if (holdNextQuery) { holdNextQuery = false; queryStarted(); await queryGate; }
+      }});
+    await overlapping.ready();
+    await new Promise(setImmediate);
+    holdNextQuery = true;
+    const earlier = earlierID === null ? overlapping.snapshot()
+      : overlapping.command({action: "snapshot", id: earlierID, tabID: -1, windowID: -1});
+    await queryCaptured;
+    overlapping.tabs.set(88, {id: 88, windowId: 1, index: 5, active: false, url: "https://new.example/"});
+    await overlapping.command({action: "snapshot", id: "firefox-later-request", tabID: -1, windowID: -1});
+    const later = overlapping.nativeMessages.filter(message => message.snapshotRequestIDs?.includes("firefox-later-request")).at(-1);
+    assert.ok(later.allTabs.some(tab => tab.id === 88), "The later request owns the inventory queried after it arrived");
+    assert.deepEqual(Array.from(later.snapshotRequestIDs), ["firefox-later-request"], "Concurrent requests never borrow each other's receipts");
+    releaseQuery();
+    await earlier;
+    const old = overlapping.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
+    assert.equal(old.allTabs.some(tab => tab.id === 88), false, "The earlier query preserves its own captured inventory");
+    assert.deepEqual(Array.from(old.snapshotRequestIDs), earlierID === null ? [] : [earlierID],
+      "A pre-request query cannot acquire a later request's freshness ID");
+  }
+
   assert.ok(metadata.browserSessionID, "Every snapshot carries a browser-session identity");
+  assert.match(metadata.browserProfileID, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "Snapshots carry a durable UUID profile identity");
+  assert.notEqual(metadata.browserProfileID, metadata.browserSessionID, "A profile is separate from its current browser lifetime");
+  assert.equal(discovery.storage.intentBrowserProfileID, metadata.browserProfileID, "A published profile UUID was persisted first");
+  await discovery.heartbeat();
+  assert.ok(discovery.nativeMessages.filter(message => ["getRules", "setGuardEnabled", "heartbeat"].includes(message.type))
+    .every(message => message.browserProfileID === metadata.browserProfileID), "Native hello and heartbeat requests identify the same durable profile");
+  const secondProfile = createHarness({ active: false }, mixedTabs, { withCommandPort: true });
+  const secondMetadata = await secondProfile.snapshot();
+  assert.notEqual(secondMetadata.browserProfileID, metadata.browserProfileID, "Separate browser profiles cannot share saved tab descriptors");
+  for (const failure of ["failProfileRead", "failProfileWrite", "dropProfileWrite"]) {
+    const options = { withCommandPort: true, [failure]: true,
+      storage: failure === "failProfileRead" ? {intentBrowserProfileID: metadata.browserProfileID} : {} };
+    const unavailable = createHarness({ active: false }, mixedTabs, options);
+    assert.equal(await unavailable.snapshot(), undefined, failure + " cannot publish an unverified profile snapshot");
+    await unavailable.heartbeat();
+    assert.equal(unavailable.browserProfileID(), null, failure + " does not invent a fallback profile");
+    assert.ok(unavailable.nativeMessages.every(message => !Object.hasOwn(message, "browserProfileID")), failure + " does not advertise a false durable profile");
+    options[failure] = false;
+    const recovered = await unavailable.snapshot();
+    assert.equal(recovered.browserProfileID, unavailable.storage.intentBrowserProfileID, failure + " recovers only after successful storage");
+    if (failure === "failProfileRead") assert.equal(recovered.browserProfileID, metadata.browserProfileID, "A transient read error cannot rotate an existing profile");
+    await unavailable.heartbeat();
+    assert.equal(unavailable.nativeMessages.filter(message => message.type === "heartbeat").at(-1).browserProfileID,
+      recovered.browserProfileID, "Recovered heartbeats update the host with the persisted profile");
+  }
+  const noCrypto = createHarness({active: false}, mixedTabs, {withCommandPort: true, crypto: {}});
+  assert.equal(await noCrypto.snapshot(), undefined, "Missing secure UUID generation cannot invent a profile");
+  const persistedNoCrypto = createHarness({active: false}, mixedTabs,
+    {withCommandPort: true, crypto: {}, storage: {intentBrowserProfileID: metadata.browserProfileID.toUpperCase()}});
+  assert.equal((await persistedNoCrypto.snapshot()).browserProfileID, metadata.browserProfileID, "An existing UUID remains usable and canonical without generation");
+  for (const invalidID of ["invalid-profile", "00000000-0000-0000-0000-000000000000", 17]) {
+    const invalid = createHarness({active: false}, mixedTabs, {withCommandPort: true, storage: {intentBrowserProfileID: invalidID}});
+    const replaced = await invalid.snapshot();
+    assert.match(replaced.browserProfileID, /^[0-9a-f-]{36}$/, "Invalid saved profile values are replaced with a persisted UUID");
+    assert.equal(replaced.browserProfileID, invalid.storage.intentBrowserProfileID);
+  }
+  let releaseProfileWrite;
+  const profileWriteGate = new Promise(resolve => { releaseProfileWrite = resolve; });
+  const waitingProfile = createHarness({active: false}, mixedTabs,
+    {withCommandPort: true, beforeProfileWrite: () => profileWriteGate});
+  const pendingSnapshots = [waitingProfile.snapshot(), waitingProfile.snapshot(), waitingProfile.heartbeat()];
+  await new Promise(setImmediate);
+  assert.equal(waitingProfile.nativeMessages.length, 0, "Native startup waits for the durable profile write");
+  assert.equal(waitingProfile.profileWrites.length, 1, "Concurrent initialization shares one profile UUID write");
+  releaseProfileWrite();
+  const [firstWaiting, secondWaiting] = await Promise.all(pendingSnapshots);
+  assert.equal(firstWaiting.browserProfileID, secondWaiting.browserProfileID, "Concurrent discovery uses one committed profile UUID");
+  assert.equal(waitingProfile.profileWrites.length, 1, "Discovery does not rewrite an established profile UUID");
+
   assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1] }).active, false, "Missing identity cannot authorize a potentially reused tab ID");
   assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1], selectedBrowserSessionID: "previous-browser-session" }).active, false, "Old exact-ID rules cannot target tabs after restart");
-  const restartedBrowser = createHarness({ active: false }, mixedTabs, { withCommandPort: true });
+  const restartedBrowser = createHarness({ active: false }, mixedTabs, { withCommandPort: true, storage: discovery.storage });
   await restartedBrowser.ready();
   assert.notEqual((await restartedBrowser.snapshot()).browserSessionID, metadata.browserSessionID, "New Firefox background lifetimes cannot reuse staged tab identities");
+  assert.equal((await restartedBrowser.snapshot()).browserProfileID, metadata.browserProfileID, "Browser restart preserves durable profile identity while changing the tab lifetime");
   for (const accessMode of ["whitelist", "blacklist"]) {
     const group = createHarness({ active: true, accessMode, selectedTabIDs: [2, 3, 4, 5], allowedWebsites: [], startupWebsites: [], blockTabSwitching: true, blockNavigation: true, blockNewTabs: true }, mixedTabs);
     await group.ready();
@@ -710,6 +828,19 @@ async function run() {
     "about:blank",
     "Restarting Firefox Browser Guard must not reopen a completed session website"
   );
+
+  assert.equal(restartedStartupHarness.storage.intentBrowserProfileID, startupHarness.storage.intentBrowserProfileID,
+    "Restart preserves profile identity without spending the startup launch twice");
+  assert.ok(startupHarness.nativeMessages.filter(message => ["getRules", "setGuardEnabled"].includes(message.type))
+    .every(message => message.browserProfileID === startupHarness.storage.intentBrowserProfileID),
+    "Firefox one-shot native hello also identifies the durable browser profile");
+  const migratedStartup = createHarness(startupRules, [{id: 1, active: true, url: "about:blank"}],
+    {storage: {completedStartupSessionID: startupHarness.storage.completedStartupSessionID}});
+  await migratedStartup.refresh();
+  await migratedStartup.heartbeat();
+  assert.equal(migratedStartup.tabs.get(1).url, "about:blank", "Adding a profile UUID to old storage cannot relaunch a completed website");
+  assert.equal(migratedStartup.updates.filter(update => update.patch.url).length, 0,
+    "Profile migration and heartbeat do not repeat any startup URL navigation");
 
   const existingStartupHarness = createHarness(startupRules, [
     { id: 1, active: true, url: "https://www.instagram.com/direct/inbox/" }

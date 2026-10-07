@@ -27,6 +27,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
     public var windowFrame: BrowserWindowFrame?
     public var windowFocused: Bool?
     public var searchSessionID: String?
+    public var cookieStoreID: String?
 
     public var displayTitle: String {
         if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
@@ -47,7 +48,8 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         groupID: Int? = nil,
         windowFrame: BrowserWindowFrame? = nil,
         windowFocused: Bool? = nil,
-        searchSessionID: String? = nil
+        searchSessionID: String? = nil,
+        cookieStoreID: String? = nil
     ) {
         self.id = id
         self.windowID = windowID
@@ -63,12 +65,15 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         self.windowFrame = windowFrame
         self.windowFocused = windowFocused
         self.searchSessionID = searchSessionID
+        self.cookieStoreID = cookieStoreID
     }
 }
 
 public struct BrowserTabSnapshot: Codable, Equatable {
     public var browserBundleIdentifier: String
     public var browserSessionID: String?
+    /// Random extension-local profile identity, retained across browser restarts.
+    public var browserProfileID: String?
 
     public var tabs: [BrowserTabItem]
     public var allTabs: [BrowserTabItem]?
@@ -76,6 +81,8 @@ public struct BrowserTabSnapshot: Codable, Equatable {
     /// Set by the verified native host for a completed explicit discovery reply.
     public var browserProcessIdentity: BrowserProcessIdentity?
     public var snapshotRequestIDs: [String]?
+    /// Full tab-list reply correlated to this profile, independent of native window coverage.
+    public var profileDiscoveryRequestIDs: [String]?
     public var completeWindowInventory: Bool?
     public var guardEnabled: Bool?
     public var guardCapabilities: [String]?
@@ -83,22 +90,26 @@ public struct BrowserTabSnapshot: Codable, Equatable {
     public init(
         browserBundleIdentifier: String,
         browserSessionID: String? = nil,
+        browserProfileID: String? = nil,
         tabs: [BrowserTabItem],
         updatedAt: Date = Date(),
         allTabs: [BrowserTabItem]? = nil,
         browserProcessIdentity: BrowserProcessIdentity? = nil,
         snapshotRequestIDs: [String]? = nil,
+        profileDiscoveryRequestIDs: [String]? = nil,
         completeWindowInventory: Bool? = nil,
         guardEnabled: Bool? = nil,
         guardCapabilities: [String]? = nil
     ) {
         self.browserBundleIdentifier = browserBundleIdentifier
         self.browserSessionID = browserSessionID
+        self.browserProfileID = browserProfileID
         self.tabs = tabs
         self.allTabs = allTabs
         self.updatedAt = updatedAt
         self.browserProcessIdentity = browserProcessIdentity
         self.snapshotRequestIDs = snapshotRequestIDs
+        self.profileDiscoveryRequestIDs = profileDiscoveryRequestIDs
         self.completeWindowInventory = completeWindowInventory
         self.guardEnabled = guardEnabled
         self.guardCapabilities = guardCapabilities

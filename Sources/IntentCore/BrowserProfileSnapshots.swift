@@ -18,6 +18,24 @@ public enum BrowserProfileSnapshots {
     public static func coveragePartition(_ base: URL, session: String) -> URL {
         base.deletingPathExtension().appendingPathExtension("coverage-profile-\(component(session)).json")
     }
+    public static func discoveryPartition(_ base: URL, session: String) -> URL {
+        base.deletingPathExtension().appendingPathExtension("discovery-profile-\(component(session)).json")
+    }
+    /// A heartbeat from one profile, or a newer merged timestamp from another,
+    /// cannot prove that a saved tab is absent. Require this owner's exact query.
+    public static func isDiscoveryReply(_ reply: BrowserTabSnapshot, owner: BrowserTabSnapshot,
+                                        requestID: String, requestedAt: Date, now: Date = Date()) -> Bool {
+        guard !requestID.isEmpty, requestID.utf8.count <= 256,
+              let session = owner.browserSessionID, !session.isEmpty,
+              reply.browserSessionID == session, reply.browserProfileID == owner.browserProfileID,
+              reply.browserBundleIdentifier == owner.browserBundleIdentifier,
+              reply.profileDiscoveryRequestIDs?.contains(requestID) == true,
+              let rows = reply.allTabs, Set(rows.map(\.id)).count == rows.count,
+              rows.allSatisfy({ $0.id >= 0 && $0.windowID >= 0 }),
+              reply.updatedAt >= requestedAt else { return false }
+        let age = now.timeIntervalSince(reply.updatedAt)
+        return age >= -0.25 && age <= 3
+    }
     public static func sessions(base: URL, now: Date = Date()) -> [BrowserTabSnapshot] {
         let prefix = base.deletingPathExtension().lastPathComponent + ".profile-"
         let files = (try? FileManager.default.contentsOfDirectory(at: base.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []

@@ -2,6 +2,7 @@ import Foundation
 import IntentCore
 
 func runHabitSessionSpecs() throws {
+    try runSavedWorkspaceRestorationSpecs()
     let desktop = CGRect(x: 28, y: 70, width: 1300, height: 680)
     for point in [CGPoint(x: -100, y: -50), CGPoint(x: 500, y: 250), CGPoint(x: 2000, y: 2000)] {
         let panel = FieldOfViewLayout.panel(origin: point, size: CGSize(width: 240, height: 260), in: desktop)
@@ -37,14 +38,14 @@ func runHabitSessionSpecs() throws {
     try expect(restored.name == "Study chapter 2", "Named drafts survive persistence")
     try expect(restored.tabs == selection.tabs && restored.windowIDsByApp == selection.windowIDsByApp, "Replay snapshots preserve exact original scope")
     try expect(restored.browserSessionIDs == selection.browserSessionIDs, "Persisted browser IDs remain scoped to their original session")
-    let workspace = SessionWorkspace(selection: selection, windows: [.init(app: "org.example.notes", title: "Notes")], tabs: [.init(browser: "com.google.Chrome", url: "https://example.com/work", title: "Work")])
+    let workspace = SessionWorkspace(selection: selection, windows: [.init(app: "org.example.notes", title: "Notes")], tabs: [.init(browser: "com.google.Chrome", url: "https://example.com/work", title: "Work", profileID: "profile-a", sessionID: "session-a", nativeID: 7, windowID: 3)])
     let tab = BrowserTabItem(id: 99, windowID: 3, index: 0, title: "Work", url: "https://example.com/work", active: true)
-    let snapshot = BrowserTabSnapshot(browserBundleIdentifier: "com.google.Chrome", browserSessionID: "new-session", tabs: [tab])
+    let snapshot = BrowserTabSnapshot(browserBundleIdentifier: "com.google.Chrome", browserSessionID: "new-session", browserProfileID: "profile-a", tabs: [tab])
     let resolved = workspace.resolve(runningApps: ["com.apple.TextEdit", "org.example.notes", "com.google.Chrome"], windows: [.init(id: 200, app: "org.example.notes", title: "Notes")], snapshots: [snapshot])
     try expect(resolved.missing == 0 && resolved.selection.tabs.contains(.init(browser: "com.google.Chrome", id: 99)), "Replay resolves new IDs using exact workspace descriptors")
     try expect(resolved.selection.browserSessionIDs["com.google.Chrome"] == "new-session", "Replay pins the current browser lifetime")
     let duplicate = BrowserTabItem(id: 100, windowID: 4, index: 0, title: tab.title, url: tab.url, active: true)
-    let ambiguous = workspace.resolve(runningApps: ["com.apple.TextEdit", "com.google.Chrome"], windows: [], snapshots: [.init(browserBundleIdentifier: "com.google.Chrome", browserSessionID: "new-session", tabs: [tab, duplicate])])
+    let ambiguous = workspace.resolve(runningApps: ["com.apple.TextEdit", "com.google.Chrome"], windows: [], snapshots: [.init(browserBundleIdentifier: "com.google.Chrome", browserSessionID: "new-session", browserProfileID: "profile-a", tabs: [tab, duplicate])])
     try expect(ambiguous.missing == 2 && ambiguous.selection.tabs.isEmpty, "Duplicate tabs require review rather than choosing the wrong browser window")
     try expect(!ambiguous.selection.apps.contains("org.example.notes") && !ambiguous.selection.apps.contains("com.google.Chrome"), "Missing scoped resources never become unrestricted whole apps")
     let missingDescriptors = SessionWorkspace(selection: selection, windows: [], tabs: []).resolve(runningApps: selection.apps, windows: [], snapshots: [])

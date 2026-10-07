@@ -13,6 +13,7 @@ async function harness(browserName, connected) {
   const messages = [];
   const replies = [];
   const disconnects = [];
+  const storage = {};
   const event = () => ({ addListener() {} });
   const api = {
     runtime: {
@@ -24,7 +25,7 @@ async function harness(browserName, connected) {
         return { onMessage: { addListener: fn => replies.push(fn) }, onDisconnect: { addListener: fn => disconnects.push(fn) }, postMessage: m => messages.push(m) };
       }
     },
-    storage: { local: { get: async defaults => defaults, set: async () => {} } },
+    storage: { local: { get: async defaults => ({ ...(typeof defaults === "object" ? defaults : {}), ...storage }), set: async values => Object.assign(storage, values) } },
     tabs: {
       query: async () => { queries++; return []; },
       onActivated: event(), onUpdated: event(), onCreated: event(), onRemoved: event()
@@ -34,7 +35,7 @@ async function harness(browserName, connected) {
     declarativeNetRequest: { updateDynamicRules: async () => {}, getDynamicRules: async () => [] }
   };
   const context = {
-    browser: api, chrome: api, URL, console,
+    browser: api, chrome: api, URL, console, crypto: require("node:crypto").webcrypto,
     Date: class extends Date { static now() { return now; } },
     clearTimeout: id => timers.delete(id),
     IntentBrowserRules: require(`../${browserName}-extension/rule-helpers.js`),

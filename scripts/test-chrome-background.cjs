@@ -27,6 +27,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     nativeRules = { ...nativeRules, selectedBrowserSessionID: sessionStorage.intentBrowserSessionID };
   }
   const nativeMessages = [];
+  const profileWrites = [];
   const dynamicUpdates = [];
   const sessionUpdates = [];
   const removedTabs = [];
@@ -95,8 +96,22 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       onInstalled: event()
     },
     storage: { session: { get: async () => ({ ...sessionStorage }), set: async values => Object.assign(sessionStorage, values) }, local: {
-      get: async (defaults) => ({ ...defaults, ...storage }),
-      set: async (values) => Object.assign(storage, values)
+      get: async (defaults) => {
+        if (defaults === "intentBrowserProfileID") {
+          await options.beforeProfileRead?.();
+          if (options.failProfileRead) throw new Error("profile storage unavailable");
+        }
+        return { ...(typeof defaults === "object" ? defaults : {}), ...storage };
+      },
+      set: async (values) => {
+        if (Object.hasOwn(values, "intentBrowserProfileID")) {
+          profileWrites.push(values.intentBrowserProfileID);
+          await options.beforeProfileWrite?.();
+          if (options.failProfileWrite) throw new Error("profile storage unavailable");
+          if (options.dropProfileWrite) return;
+        }
+        Object.assign(storage, values);
+      }
     } },
     declarativeNetRequest: {
       getDynamicRules: async () => dynamicRules.map((rule) => ({ ...rule })),
@@ -195,6 +210,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   };
 
   const context = {
+    crypto: options.crypto === undefined ? require("node:crypto").webcrypto : options.crypto,
     chrome,
     IntentNativeWindowVisibility: options.nativeVisibility ? require("../chrome-extension/native-window-visibility.js") : undefined,
     IntentTabVisibility: options.onVisibilitySync ? class {
@@ -224,6 +240,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 
   async function settle() {
     for (let index = 0; index < 48; index += 1) await Promise.resolve();
+    await new Promise(setImmediate);
   }
 
   return {
@@ -246,6 +263,9 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     effectiveRules: context.effectiveRules,
     allowedTabIDs: () => [...tabs.values()].filter(context.isRuntimeAllowedTab).map(tab => tab.id),
     browserSessionID: () => vm.runInNewContext("browserSessionID", context),
+    browserProfileID: () => vm.runInNewContext("browserProfileID", context),
+    profileWrites,
+    async heartbeat() { await context.sendHeartbeat(); },
     async command(message) {
       await context.handleRequestedTab(message);
       for (let i = 0; i < 48; i++) await Promise.resolve();
@@ -670,14 +690,65 @@ async function run() {
 
   assert.equal(metadata.tabs[0].windowFocused, true, "Browser focus disambiguates overlapping windows");
   assert.ok(metadata.browserSessionID, "Every snapshot carries a browser-session identity");
+  assert.match(metadata.browserProfileID, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "Snapshots carry a durable UUID profile identity");
+  assert.notEqual(metadata.browserProfileID, metadata.browserSessionID, "A profile is separate from its current browser lifetime");
+  assert.equal(discovery.storage.intentBrowserProfileID, metadata.browserProfileID, "A published profile UUID was persisted first");
+  await discovery.heartbeat();
+  assert.ok(discovery.nativeMessages.filter(message => ["getRules", "setGuardEnabled", "heartbeat"].includes(message.type))
+    .every(message => message.browserProfileID === metadata.browserProfileID), "Native hello and heartbeat requests identify the same durable profile");
+  const secondProfile = createHarness({ active: false }, mixedTabs, { withCommandPort: true });
+  const secondMetadata = await secondProfile.snapshot();
+  assert.notEqual(secondMetadata.browserProfileID, metadata.browserProfileID, "Separate browser profiles cannot share saved tab descriptors");
+  for (const failure of ["failProfileRead", "failProfileWrite", "dropProfileWrite"]) {
+    const options = { withCommandPort: true, [failure]: true,
+      storage: failure === "failProfileRead" ? {intentBrowserProfileID: metadata.browserProfileID} : {} };
+    const unavailable = createHarness({ active: false }, mixedTabs, options);
+    assert.equal(await unavailable.snapshot(), undefined, failure + " cannot publish an unverified profile snapshot");
+    await unavailable.heartbeat();
+    assert.equal(unavailable.browserProfileID(), null, failure + " does not invent a fallback profile");
+    assert.ok(unavailable.nativeMessages.every(message => !Object.hasOwn(message, "browserProfileID")), failure + " does not advertise a false durable profile");
+    options[failure] = false;
+    const recovered = await unavailable.snapshot();
+    assert.equal(recovered.browserProfileID, unavailable.storage.intentBrowserProfileID, failure + " recovers only after successful storage");
+    if (failure === "failProfileRead") assert.equal(recovered.browserProfileID, metadata.browserProfileID, "A transient read error cannot rotate an existing profile");
+    await unavailable.heartbeat();
+    assert.equal(unavailable.nativeMessages.filter(message => message.type === "heartbeat").at(-1).browserProfileID,
+      recovered.browserProfileID, "Recovered heartbeats update the host with the persisted profile");
+  }
+  const noCrypto = createHarness({active: false}, mixedTabs, {withCommandPort: true, crypto: {}});
+  assert.equal(await noCrypto.snapshot(), undefined, "Missing secure UUID generation cannot invent a profile");
+  const persistedNoCrypto = createHarness({active: false}, mixedTabs,
+    {withCommandPort: true, crypto: {}, storage: {intentBrowserProfileID: metadata.browserProfileID.toUpperCase()}});
+  assert.equal((await persistedNoCrypto.snapshot()).browserProfileID, metadata.browserProfileID, "An existing UUID remains usable and canonical without generation");
+  for (const invalidID of ["invalid-profile", "00000000-0000-0000-0000-000000000000", 17]) {
+    const invalid = createHarness({active: false}, mixedTabs, {withCommandPort: true, storage: {intentBrowserProfileID: invalidID}});
+    const replaced = await invalid.snapshot();
+    assert.match(replaced.browserProfileID, /^[0-9a-f-]{36}$/, "Invalid saved profile values are replaced with a persisted UUID");
+    assert.equal(replaced.browserProfileID, invalid.storage.intentBrowserProfileID);
+  }
+  let releaseProfileWrite;
+  const profileWriteGate = new Promise(resolve => { releaseProfileWrite = resolve; });
+  const waitingProfile = createHarness({active: false}, mixedTabs,
+    {withCommandPort: true, beforeProfileWrite: () => profileWriteGate});
+  const pendingSnapshots = [waitingProfile.snapshot(), waitingProfile.snapshot(), waitingProfile.heartbeat()];
+  await new Promise(setImmediate);
+  assert.equal(waitingProfile.nativeMessages.length, 0, "Native startup waits for the durable profile write");
+  assert.equal(waitingProfile.profileWrites.length, 1, "Concurrent initialization shares one profile UUID write");
+  releaseProfileWrite();
+  const [firstWaiting, secondWaiting] = await Promise.all(pendingSnapshots);
+  assert.equal(firstWaiting.browserProfileID, secondWaiting.browserProfileID, "Concurrent discovery uses one committed profile UUID");
+  assert.equal(waitingProfile.profileWrites.length, 1, "Discovery does not rewrite an established profile UUID");
+
   assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1] }).active, false, "Missing identity cannot authorize a potentially reused tab ID");
   assert.equal(discovery.effectiveRules({ active: true, selectedTabIDs: [1], selectedBrowserSessionID: "previous-browser-session" }).active, false, "Old exact-ID rules cannot target tabs after restart");
-  const resumedWorker = createHarness({ active: false }, mixedTabs, { sessionStorage: { intentBrowserSessionID: metadata.browserSessionID } });
+  const resumedWorker = createHarness({ active: false }, mixedTabs, { storage: discovery.storage, sessionStorage: { intentBrowserSessionID: metadata.browserSessionID } });
   await resumedWorker.settle();
   assert.equal((await resumedWorker.snapshot()).browserSessionID, metadata.browserSessionID, "Chrome worker suspension preserves the browser session identity");
-  const restartedBrowser = createHarness({ active: false }, mixedTabs);
+  assert.equal((await resumedWorker.snapshot()).browserProfileID, metadata.browserProfileID, "Chrome worker suspension preserves the durable profile");
+  const restartedBrowser = createHarness({ active: false }, mixedTabs, { storage: discovery.storage });
   await restartedBrowser.settle();
   assert.notEqual((await restartedBrowser.snapshot()).browserSessionID, metadata.browserSessionID, "A new Chrome browser session receives a different identity even when tab IDs are reused");
+  assert.equal((await restartedBrowser.snapshot()).browserProfileID, metadata.browserProfileID, "Browser restart preserves durable profile identity while changing the tab lifetime");
   for (const accessMode of ["whitelist", "blacklist"]) {
     const group = createHarness({ active: true, accessMode, selectedTabIDs: [2, 3, 4, 5], allowedWebsites: [], startupWebsites: [], blockTabSwitching: true, blockNavigation: true, blockNewTabs: true }, mixedTabs);
     await group.settle();
@@ -1012,6 +1083,17 @@ async function run() {
     "chrome://newtab/",
     "Restarting Chrome Browser Guard must not reopen a completed session website"
   );
+
+  assert.equal(restartedStartup.storage.intentBrowserProfileID, startup.storage.intentBrowserProfileID,
+    "Restart preserves profile identity without spending the startup launch twice");
+  const migrationOptions = { storage: {completedStartupSessionID: startup.storage.completedStartupSessionID} };
+  const migratedStartup = createHarness({...lockedRules, startupWebsites: ["https://www.instagram.com/direct/inbox/"]},
+    [{id: 1, active: true, url: "chrome://newtab/"}], migrationOptions);
+  await migratedStartup.settle();
+  await migratedStartup.heartbeat();
+  assert.equal(migratedStartup.tabs.get(1).url, "chrome://newtab/", "Adding a profile UUID to old storage cannot relaunch a completed website");
+  assert.equal(migratedStartup.updates.filter(update => update.patch.url).length, 0,
+    "Profile migration and heartbeat do not repeat any startup URL navigation");
 
   const existingStartup = createHarness({
     ...lockedRules,

@@ -1,4 +1,4 @@
-importScripts("rule-helpers.js", "tab-visibility.js", "native-window-visibility.js", "website-features.js", "tab-creation.js");
+importScripts("rule-helpers.js", "tab-visibility.js", "native-window-visibility.js", "website-features.js", "tab-creation.js", "native-finder.js");
 
 const HOST_NAME = "intent_native_host";
 const BROWSER_BUNDLE_IDENTIFIER = "com.google.Chrome";
@@ -27,15 +27,42 @@ async function ensureBrowserSessionIdentity() {
   })().catch(() => { browserSessionPromise = null; return null; });
   return browserSessionPromise;
 }
+// A profile survives browser restarts; numeric tab IDs and browserSessionID do not.
+let browserProfileID = null;
+let browserProfilePromise = null;
+function validBrowserProfileID(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    && value !== "00000000-0000-0000-0000-000000000000";
+}
+async function ensureBrowserProfileIdentity() {
+  if (browserProfileID) return browserProfileID;
+  if (!browserProfilePromise) browserProfilePromise = (async () => {
+    const stored = await chrome.storage.local.get("intentBrowserProfileID");
+    if (validBrowserProfileID(stored.intentBrowserProfileID)) {
+      browserProfileID = stored.intentBrowserProfileID.toLowerCase();
+      return browserProfileID;
+    }
+    const generated = globalThis.crypto?.randomUUID?.();
+    if (!validBrowserProfileID(generated)) return null;
+    // Never publish an unpersisted fallback identity after a storage failure.
+    await chrome.storage.local.set({ intentBrowserProfileID: generated });
+    const saved = await chrome.storage.local.get("intentBrowserProfileID");
+    if (saved.intentBrowserProfileID !== generated) return null;
+    browserProfileID = generated;
+    return browserProfileID;
+  })().catch(() => null).finally(() => { browserProfilePromise = null; });
+  return browserProfilePromise;
+}
 let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
 let hostSupportsTabCreation = false;
+let hostSupportsNativeFinder = false;
 let creationRulesActive = true;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
 let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
-  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsTabCreation && chrome.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && chrome.storage.session
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeFinder && chrome.storage.session && typeof IntentNativeFinder !== "undefined" ? ["native-website-finder-v1"] : []), ...(hostSupportsTabCreation && chrome.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && chrome.storage.session
     && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
     ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
@@ -52,8 +79,14 @@ const tabCreation = typeof IntentTabCreation !== "undefined" ? new IntentTabCrea
   enabled: () => guardEnabled && hostSupportsTabCreation && nativeConnectionConfirmed && Boolean(nativePort), firefox: false, send: postNative,
   snapshot: () => publishTabSnapshot(true, true)
 }) : null;
+const nativeFinder = typeof IntentNativeFinder !== "undefined" ? new IntentNativeFinder(chrome, {
+  session: () => browserSessionID, active: () => creationRulesActive || rules.active,
+  enabled: () => guardEnabled && hostSupportsNativeFinder && nativeConnectionConfirmed && Boolean(nativePort),
+  firefox: false, send: postNative, snapshot: () => publishTabSnapshot(true, true)
+}) : null;
 let guardEnabled = true;
 let initialized = false;
+let initializationPromise = null;
 let nativePort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
@@ -134,24 +167,29 @@ function fingerprintRules(value) {
 
 async function ensureInitialized() {
   if (initialized) return;
-  try {
-    const stored = await chrome.storage.local.get({
-      guardEnabled: true,
-      completedStartupSessionID: null
-    });
-    guardEnabled = stored.guardEnabled !== false;
-    completedStartupSessionID = stored.completedStartupSessionID || null;
-  } catch (_) {
-    guardEnabled = true;
-  }
-  await ensureBrowserSessionIdentity();
-  initialized = true;
-  await clearStaleStartupNavigationRules();
-  connectNativeHost();
-  chrome.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
+  if (!initializationPromise) initializationPromise = (async () => {
+    try {
+      const stored = await chrome.storage.local.get({
+        guardEnabled: true,
+        completedStartupSessionID: null
+      });
+      guardEnabled = stored.guardEnabled !== false;
+      completedStartupSessionID = stored.completedStartupSessionID || null;
+    } catch (_) {
+      guardEnabled = true;
+    }
+    await ensureBrowserSessionIdentity();
+    await ensureBrowserProfileIdentity();
+    initialized = true;
+    await clearStaleStartupNavigationRules();
+    connectNativeHost();
+    chrome.tabs.query({}).then((tabs) => tabs.forEach((tab) => recordWebsiteVisit(tab))).catch(() => {});
+  })().finally(() => { initializationPromise = null; });
+  return initializationPromise;
 }
 
 function connectNativeHost() {
+  if (!initialized) { void ensureInitialized(); return; }
   if (nativePort || reconnectTimer !== null) return;
   try {
     const port = chrome.runtime.connectNative(HOST_NAME);
@@ -165,6 +203,7 @@ function connectNativeHost() {
       nativeConnectionConfirmed = true;
       creationRulesActive = message?.tabCreationAllowed !== true;
       hostSupportsTabCreation = message?.hostCapabilities?.includes("background-tab-create-host-v1") === true;
+      hostSupportsNativeFinder = message?.hostCapabilities?.includes("native-website-finder-host-v1") === true;
       reconnectDelayMs = RECONNECT_MS;
       if (message?.active !== true && message?.bundledExtensionVersion && message.bundledExtensionVersion !== chrome.runtime.getManifest().version) {
         const version = message.bundledExtensionVersion;
@@ -187,6 +226,7 @@ function connectNativeHost() {
         hostSupportsSessionIdentity = identitySupported;
         sendHeartbeat();
       }
+      if (message?.finderCommand) void nativeFinder?.handle(message.finderCommand);
       if (message?.tabCommand) handleRequestedTab(message.tabCommand);
       applyNativeRules(message).catch(() => {});
     });
@@ -224,6 +264,7 @@ function postNative(message) {
     nativePort.postMessage({
       ...message,
       browserSessionID,
+      ...(browserProfileID ? { browserProfileID } : {}),
       browserBundleIdentifier: BROWSER_BUNDLE_IDENTIFIER,
       extensionVersion: EXTENSION_VERSION,
       extensionCapabilities: advertisedCapabilities()
@@ -286,7 +327,9 @@ function settleRuleRequests() {
   pendingRuleRequests.clear();
 }
 
-function sendHeartbeat() {
+async function sendHeartbeat() {
+  if (!initialized) await ensureInitialized();
+  if (!browserProfileID) await ensureBrowserProfileIdentity();
   syncTabVisibility();
   if (rules.active && Array.isArray(rules.selectedTabIDs)) {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => {
@@ -494,6 +537,7 @@ function completeDiscoveryWindows(windows) {
 
 async function publishTabSnapshot(force = false, discovery = false) {
   await ensureInitialized();
+  if (!await ensureBrowserProfileIdentity()) return;
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
   if (previewBusy) { deferSnapshotForPreview(discovery); return; }

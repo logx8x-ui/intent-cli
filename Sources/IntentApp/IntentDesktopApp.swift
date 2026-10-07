@@ -43,6 +43,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return true }
+        if IntentRuntime.shared.focusNativeWebsiteFinderIfPresent() { return false }
         IntentRuntime.shared.model.showOverlay()
         return true
     }
@@ -277,6 +278,13 @@ final class IntentStatusItemController: NSObject {
 final class IntentRuntime {
     static let shared = IntentRuntime()
 
+    /// An explicit return to Intent should expose the current finder controls,
+    /// without replacing the browser-owned draft with another overview.
+    func focusNativeWebsiteFinderIfPresent() -> Bool {
+        guard let finder = quickSelectionController.nativeWebsiteFinder else { return false }
+        return finder.focusControls()
+    }
+
     let model: IntentAppModel
     let calendarSync: CalendarSyncManager
     let accountManager: IntentAccountManager
@@ -359,7 +367,7 @@ final class IntentRuntime {
             // Carbon and the gesture monitor deliver on the main run loop. Route
             // synchronously so a queued single cannot collapse a replacement run.
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, !self.quickSelectionController.nativeFinderOwnsInput else { return }
                 if self.quickSelectionController.isSelectionSurfaceVisible { self.quickSelectionController.toggle() }
                 else if self.model.hasActiveSession { self.model.toggleSessionControls() }
                 else {
@@ -374,6 +382,12 @@ final class IntentRuntime {
                     repeatKey: repeated, capsLockHeld: capsLockHeld) ?? false
             }
         }
+        quickSelectionController.onNativeFinderInputChanged = { [weak self] suspended in
+            self?.hotKeyManager?.setNativeFinderInputSuspended(suspended)
+        }
+        hotKeyManager?.nativeFinderOwnsInput = { [weak self] in
+            MainActor.assumeIsolated { self?.quickSelectionController.nativeFinderOwnsInput ?? false }
+        }
         hotKeyManager?.overviewPrefixIsHeld = { [weak self] in
             MainActor.assumeIsolated { self?.quickSelectionController.ownsOverviewPrefixInput ?? false }
         }
@@ -381,7 +395,7 @@ final class IntentRuntime {
         hotKeyManager?.spotlightContext = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return (false, []) }
-                return (self.quickSelectionController.isSelectionSurfaceVisible,
+                return (self.quickSelectionController.isSelectionSurfaceVisible && !self.quickSelectionController.nativeFinderOwnsInput,
                     self.model.installedApps.map { .init(name: $0.name, url: $0.url) })
             }
         }

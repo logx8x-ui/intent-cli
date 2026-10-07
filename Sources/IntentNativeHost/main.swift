@@ -44,6 +44,7 @@ struct HostTab: Codable {
     var windowFrame: BrowserWindowFrame?
     var windowFocused: Bool?
     var searchSessionID: String?
+    var cookieStoreID: String?
     var faviconURL: String?
     var id: Int
     var windowID: Int
@@ -56,8 +57,10 @@ struct HostTab: Codable {
 struct HostRequest: Codable {
     var appliedWebsitePolicySessionID: String?
     var browserSessionID: String?
+    var browserProfileID: String?
     var preview: BrowserTabPreview?
     var creation: BrowserTabCreationReceipt?
+    var finder: BrowserFinderReceipt?
     var type: String?
     var enabled: Bool?
     var browserBundleIdentifier: String?
@@ -201,7 +204,7 @@ struct HostResponse: Codable {
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
     var bundledExtensionVersion: String = "0.2.35"
-    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1", "background-tab-create-host-v1"]
+    var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1", "background-tab-create-host-v1", "native-website-finder-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
     var active: Bool
@@ -225,6 +228,7 @@ struct HostResponse: Codable {
     var minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt?
     var visibilityEnforcement: BrowserWindowVisibilityEnforcement?
     var tabCreationAllowed = false
+    var finderCommand: BrowserFinderCommand?
 
     init(state: HostRuleState, tabCommand: BrowserTabCommand?, visibilityPlanReceipt: HostVisibilityPlanReceipt? = nil,
          browserProcessIdentity: BrowserProcessIdentity? = nil, visibilityRestartReceipt: HostVisibilityRestartReceipt? = nil,
@@ -335,6 +339,7 @@ private final class HostRuntime {
 
     private var browserBundleIdentifier: String?
     private var profileSessionID: String?
+    private var browserProfileID: String?
     private var extensionVersion: String?
     private var extensionCapabilities: [String] = []
     private var guardEnabled = true
@@ -350,6 +355,7 @@ private final class HostRuntime {
     private var requestedSnapshotRefresh = false
     private var issuedSnapshotRequests: [String: Date] = [:]
     private var issuedTabCreations: [String: BrowserTabCommand] = [:]
+    private var issuedFinderCommands: [String: BrowserFinderCommand] = [:]
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
     private var directoryRefreshWorkItem: DispatchWorkItem?
@@ -429,6 +435,10 @@ private final class HostRuntime {
                     if let session = request.browserSessionID, !session.isEmpty, profileSessionID == nil {
                         profileSessionID = session
                     }
+                    if let profile = request.browserProfileID, UUID(uuidString: profile) != nil,
+                       browserProfileID == nil || browserProfileID == profile {
+                        browserProfileID = profile
+                    }
                     if let version = request.extensionVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !version.isEmpty {
                         extensionVersion = version
@@ -506,6 +516,15 @@ private final class HostRuntime {
                            item.requestID == preview.requestID { try? FileManager.default.removeItem(at: url) }
                     }
                 }
+            case "nativeFinderResult":
+                if let receipt = request.finder, request.browserSessionID == profileSessionID,
+                   let issued = issuedFinderCommands[receipt.requestID], receipt.matches(issued),
+                   let url = BrowserFinderReceipt.fileURL(requestID: receipt.requestID, directory: paths.directory),
+                   let data = try? JSONEncoder().encode(receipt), data.count <= 20000 {
+                    try? data.write(to: url, options: .atomic)
+                    issuedFinderCommands.removeValue(forKey: receipt.requestID)
+                    queue.asyncAfter(deadline: .now() + 30) { try? FileManager.default.removeItem(at: url) }
+                }
             case "tabCreateResult":
                 if let receipt = request.creation, request.browserSessionID == profileSessionID,
                    let issued = issuedTabCreations[receipt.requestID], receipt.matches(issued),
@@ -545,7 +564,7 @@ private final class HostRuntime {
             let hasReceipt = visibilityPlanReceipt != nil || visibilityRestartReceipt != nil
                 || visibilityRecoveryReceipt != nil || visibilityClosedReceipt != nil
                 || minimizeBootstrapClaimReceipt != nil || minimizeBootstrapResultReceipt != nil
-            if expectsResponse || rulesChanged || tabCommand != nil || hasReceipt {
+            if expectsResponse || rulesChanged || tabCommand != nil || hasReceipt || request.type == "nativeFinderResult" {
                 sendCurrentState(tabCommand: tabCommand,
                     force: expectsResponse || hasReceipt,
                     visibilityPlanReceipt: visibilityPlanReceipt, visibilityRestartReceipt: visibilityRestartReceipt,
@@ -845,6 +864,7 @@ private final class HostRuntime {
     }
 
     private var lastSnapshotSessionID: String?
+    private var lastSnapshotProfileID: String?
     private var lastSnapshotAllTabs: [BrowserTabItem]?
     private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserSessionID: String?, browserBundleIdentifier: String,
                                  snapshotRequestIDs: [String]?, completeWindowInventory: Bool?) {
@@ -852,6 +872,9 @@ private final class HostRuntime {
         issuedSnapshotRequests = issuedSnapshotRequests.filter { now.timeIntervalSince($0.value) <= 3 }
         let proof = self.browserBundleIdentifier == browserBundleIdentifier && self.profileSessionID == browserSessionID
             ? currentBrowserProcessIdentity : nil
+        let profileAnswered = self.browserBundleIdentifier == browserBundleIdentifier && self.profileSessionID == browserSessionID
+            && browserSessionID != nil && allTabs != nil && (snapshotRequestIDs ?? []).count <= 16
+            ? Array(Set((snapshotRequestIDs ?? []).filter { issuedSnapshotRequests[$0] != nil })).sorted() : []
         let answered = (snapshotRequestIDs ?? []).count <= 16 && allTabs != nil && proof != nil && completeWindowInventory == true
             ? Array(Set((snapshotRequestIDs ?? []).filter { issuedSnapshotRequests[$0] != nil })).sorted() : []
         let items = tabs.map {
@@ -862,20 +885,22 @@ private final class HostRuntime {
                 title: $0.title,
                 url: $0.url,
                 active: $0.active,
-                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID
+                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID
             )
         }
-        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID) }
+        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID) }
         // Explicit discovery is also a freshness acknowledgment. Preserve idle
         // deduplication, but refresh the timestamp even if requested tabs did not change.
-        guard !answered.isEmpty || requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID else { return }
+        guard !profileAnswered.isEmpty || !answered.isEmpty || requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID || browserProfileID != lastSnapshotProfileID else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
             browserSessionID: browserSessionID,
+            browserProfileID: self.profileSessionID == browserSessionID ? browserProfileID : nil,
             tabs: items,
             allTabs: allItems,
             browserProcessIdentity: proof,
             snapshotRequestIDs: answered.isEmpty ? nil : answered,
+            profileDiscoveryRequestIDs: profileAnswered.isEmpty ? nil : profileAnswered,
             completeWindowInventory: answered.isEmpty ? nil : true,
             guardEnabled: guardEnabled,
             guardCapabilities: extensionCapabilities
@@ -889,11 +914,15 @@ private final class HostRuntime {
                 if !answered.isEmpty {
                     try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.coveragePartition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
                 }
+                if !profileAnswered.isEmpty {
+                    try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.discoveryPartition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
+                }
                 maybeWriteHeartbeat(force: true)
             }
             requestedSnapshotRefresh = false
             metrics.snapshotWrites += 1
             lastSnapshotSessionID = browserSessionID
+            lastSnapshotProfileID = browserProfileID
             lastSnapshotTabs = items
             lastSnapshotAllTabs = allItems
         }
@@ -1033,6 +1062,19 @@ private final class HostRuntime {
                                   minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt? = nil,
                                   minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt? = nil) {
         let state = makeRuleState()
+        var finderCommand: BrowserFinderCommand?
+        if let browser = browserBundleIdentifier, let session = profileSessionID,
+           let command = BrowserFinderMailbox(browser: browser, session: session, directory: paths.directory).take() {
+            let now = Date().timeIntervalSince1970 * 1000
+            issuedFinderCommands = issuedFinderCommands.filter { $0.value.expiresAtUnixMS + 12000 > now }
+            if command.isValid, command.browserSessionID == session, command.expiresAtUnixMS > now,
+               command.expiresAtUnixMS <= now + 15000,
+               extensionCapabilities.contains("native-website-finder-v1"),
+               command.action == .cancel || (cachedRules?.active != true && guardEnabled),
+               issuedFinderCommands[command.id] == nil {
+                issuedFinderCommands[command.id] = command; finderCommand = command
+            }
+        }
         var tabCommand = tabCommand
         if let command = tabCommand, command.action == .create {
             issuedTabCreations = issuedTabCreations.filter { Date().timeIntervalSince($0.value.createdAt) < 20 }
@@ -1050,7 +1092,7 @@ private final class HostRuntime {
         let enforcement = record.flatMap { value -> BrowserWindowVisibilityEnforcement? in
             value.verificationRevision == value.plan.revision ? .init(record: value) : nil
         }
-        guard force || tabCommand != nil || state != lastPushedState || offers != lastPushedOffers
+        guard force || tabCommand != nil || finderCommand != nil || state != lastPushedState || offers != lastPushedOffers
             || enforcement != lastPushedEnforcement else { return }
         var response = HostResponse(state: state, tabCommand: tabCommand, visibilityPlanReceipt: visibilityPlanReceipt,
             browserProcessIdentity: currentBrowserProcessIdentity, visibilityRestartReceipt: visibilityRestartReceipt,
@@ -1058,6 +1100,7 @@ private final class HostRuntime {
         // Effective rules can be inactive for an unrestricted browser during a
         // global intention. Website creation is a pre-session operation only.
         response.tabCreationAllowed = cachedRules?.active != true && guardEnabled
+        response.finderCommand = finderCommand
         response.minimizeBootstrapOffers = offers
         response.visibilityEnforcement = enforcement
         response.minimizeBootstrapClaimReceipt = minimizeBootstrapClaimReceipt

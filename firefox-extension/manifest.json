@@ -46,6 +46,7 @@
       "native-window-visibility.js",
       "window-minimize-bootstrap.js",
       "tab-creation.js",
+      "native-finder.js",
       "background.js"
     ]
   },

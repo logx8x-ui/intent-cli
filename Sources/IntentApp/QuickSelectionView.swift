@@ -44,7 +44,7 @@ final class QuickSelectionController: ObservableObject {
         NativeSpotlightKeyboard.open()
     }
     func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool, capsLockHeld: Bool = false) -> Bool {
-        guard panel?.isVisible == true else { return false }
+        guard panel?.isVisible == true, !nativeFinderOwnsInput else { return false }
         let result = overviewInput.key(code: code, down: down, modified: modified, repeated: repeatKey,
             editing: isEditingText, capsLockHeld: capsLockHeld, browserPickerAvailable: currentWebsiteFinderTarget != nil)
         switch result.action {
@@ -65,7 +65,7 @@ final class QuickSelectionController: ObservableObject {
         message = text
     }
     func spotlightVisibilityChanged(_ visible: Bool) {
-        guard let panel, panel.isVisible else { return }
+        guard !nativeFinderOwnsInput, let panel, panel.isVisible else { return }
         panel.level = visible ? .normal : .popUpMenu
         if !visible { NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil) }
     }
@@ -137,6 +137,20 @@ final class QuickSelectionController: ObservableObject {
     @Published var selection = QuickSelection() {
         didSet {
             savedRunTask?.cancel(); savedRunTask = nil
+            if !applyingSavedWorkspace {
+                restoredRunWorkspace = nil
+                savedRestorationTask?.cancel(); savedRestorationTask = nil
+                savedRestorationGeneration = UUID(); restoringSavedWorkspace = false
+                if let staged = preparedSavedWorkspace,
+                   oldValue.apps != selection.apps || oldValue.tabs != selection.tabs || oldValue.windowIDsByApp != selection.windowIDsByApp
+                    || oldValue.wholeBrowserApps != selection.wholeBrowserApps {
+                    preparedSavedWorkspace = staged.reconcilingSelection(
+                        previous: captureWorkspace(selection: oldValue), current: captureWorkspace())
+                    replanPreparedWorkspace()
+                } else if preparedSavedWorkspace != nil, oldValue.accessMode != selection.accessMode {
+                    replanPreparedWorkspace()
+                }
+            }
             let keep = selection.accessMode == .whitelist ? selection.apps : []
             SpotlightAppPreparation.shared.release(except: keep)
         }
@@ -158,8 +172,46 @@ final class QuickSelectionController: ObservableObject {
     }
     var savedSlotPages: Int { max(1, (model.savedSlots.count + savedSlotCapacity - 1) / savedSlotCapacity) }
     private var savedRunTask: Task<Void, Never>?
+    @Published private(set) var restoringSavedWorkspace = false
+    @Published private(set) var pendingSavedTabs: [SessionWorkspace.PendingTab] = []
+    private var preparedSavedWorkspace: SessionWorkspace?
+    private var preparedSavedIntention: Intention?
+    private var restoredRunWorkspace: SessionWorkspace?
+    private var profileDiscoveryInFlight = false
+    private var browserLaunchesInFlight: Set<String> = []
+    private var applyingSavedWorkspace = false
+    private var savedRestorationTask: Task<Void, Never>?
+    private var savedRestorationGeneration = UUID()
+    private let savedRestoreClaims = SavedWorkspaceRestoreClaims()
+    var hasRunnableDraft: Bool { !selection.apps.isEmpty || preparedSavedWorkspace != nil }
+
+    private func copySavedConfiguration(_ source: QuickSelection, into draft: inout QuickSelection) {
+        draft.name = source.name; draft.sourceIntentionID = source.sourceIntentionID
+        draft.accessMode = source.accessMode
+        draft.restrictionNodes = source.restrictionNodes; draft.frictionNodes = source.frictionNodes
+        draft.websiteFeaturePolicies = source.websiteFeaturePolicies
+        draft.wholeBrowserApps = source.wholeBrowserApps
+        draft.startupAppIDs = source.startupAppIDs
+    }
+    private func replanPreparedWorkspace() {
+        guard let workspace = preparedSavedWorkspace, let intention = preparedSavedIntention else { return }
+        let configuration = selection
+        let resolved = savedResolution(workspace, intention: intention, accessMode: configuration.accessMode)
+        var draft = resolved.selection
+        copySavedConfiguration(configuration, into: &draft)
+        if draft.accessMode == .whitelist {
+            draft.apps.formUnion(Set(resolved.replayWorkspace.tabs.map(\.browser)).intersection(Set(model.installedApps.map(\.bundleIdentifier))))
+        }
+        applyingSavedWorkspace = true; selection = draft; applyingSavedWorkspace = false
+        preparedSavedWorkspace = resolved.replayWorkspace
+        pendingSavedTabs = resolved.pendingTabs
+        if resolved.missing > 0 { message = resolved.problems.first ?? "Review the saved resources before running." }
+        else if !resolved.pendingTabs.isEmpty { message = "Opens at Run: " + resolved.pendingTabs.map { $0.descriptor.title.isEmpty ? $0.descriptor.url : $0.descriptor.title }.joined(separator: ", ") }
+        else { message = "Ready when you are. Review your workspace, then Return." }
+    }
+
     func runSavedSlot(_ index: Int) {
-        guard isSelectionSurfaceVisible, !closing,
+        guard isSelectionSurfaceVisible, !closing, !restoringSavedWorkspace,
               visibleSavedSlots.indices.contains(index) else { return }
         let intention = visibleSavedSlots[index]
         savedRunTask?.cancel()
@@ -172,11 +224,16 @@ final class QuickSelectionController: ObservableObject {
             }
             guard !Task.isCancelled, let self, self.isSelectionSurfaceVisible,
                   let current = self.model.intentions.first(where: { $0.id == intention.id }) else { return }
+            let workspace = self.model.journal.workspaces[current.id]
+            // Saved-card/digit activation is the explicit Run gesture. The
+            // transaction handles closed browsers before requesting inventory.
             self.savedRunTask = nil
-            self.prepare(current, workspace: self.model.journal.workspaces[current.id], run: true)
+            self.prepare(current, workspace: workspace, run: true)
         }
     }
     func removeAddedApplication(_ id: String) {
+        preparedSavedWorkspace?.removeResources(for: id)
+        pendingSavedTabs.removeAll { $0.descriptor.browser == id }
         savedRunTask?.cancel()
         spotlightApps.removeValue(forKey: id)
         selection.apps.remove(id)
@@ -200,17 +257,78 @@ final class QuickSelectionController: ObservableObject {
         let name = selection.name; selection = QuickSelection(); selection.name = name
     }
     func toggleSlots() { savedSlotPage = 0; dismissBrowserPicker() }
-    func captureWorkspace() -> SessionWorkspace {
-        let native = WorkspaceWindow.list(onScreen: false)
-        let windows = selection.windowIDsByApp.flatMap { app, ids in native.filter { $0.bundle == app && ids.contains($0.id) }.map { SessionWorkspace.Window(app: app, title: $0.title) } }
-        let tabs = selection.tabs.compactMap { key -> SessionWorkspace.Tab? in
-            guard let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == key.browser }),
-                  let tab = (snapshot.allTabs ?? snapshot.tabs).first(where: { $0.id == key.id }) else { return nil }
-            return .init(browser: key.browser, url: tab.url, title: tab.title)
+    private func currentBrowserProfiles() -> [BrowserTabSnapshot] {
+        QuickSelection.browsers.sorted().flatMap { browser -> [BrowserTabSnapshot] in
+            let profiles = BrowserProfileSnapshots.sessions(base: BrowserTabSnapshotStore.fileURL(for: browser))
+            if !profiles.isEmpty { return profiles }
+            return snapshots.filter { $0.browserBundleIdentifier == browser && $0.browserSessionID?.hasPrefix("profiles:") != true }
+        }
+    }
+    private func liveWorkspaceWindows() -> [SessionWorkspace.LiveWindow] {
+        WorkspaceWindow.list(onScreen: false).map { window in
+            let process = NSRunningApplication(processIdentifier: window.pid)?.launchDate.map {
+                BrowserProcessIdentity(pid: window.pid, launched: $0.timeIntervalSinceReferenceDate)
+            }
+            return .init(id: window.id, app: window.bundle, title: window.title, process: process)
+        }
+    }
+    func captureWorkspace(profiles suppliedProfiles: [BrowserTabSnapshot]? = nil, selection suppliedSelection: QuickSelection? = nil) -> SessionWorkspace {
+        let selection = suppliedSelection ?? self.selection
+        let native = liveWorkspaceWindows()
+        let windows = selection.windowIDsByApp.flatMap { app, ids in
+            native.filter { $0.app == app && ids.contains($0.id) }.map {
+                SessionWorkspace.Window(app: app, title: $0.title, nativeID: $0.id, process: $0.process)
+            }
+        }
+        let profiles = suppliedProfiles ?? currentBrowserProfiles()
+        let tabs = selection.tabs.sorted { ($0.browser, $0.id) < ($1.browser, $1.id) }.compactMap { key -> SessionWorkspace.Tab? in
+            let owners = profiles.filter { $0.browserBundleIdentifier == key.browser }
+            for owner in owners {
+                guard let session = owner.browserSessionID else { continue }
+                if let tab = (owner.allTabs ?? owner.tabs).first(where: {
+                    (owners.count > 1 ? BrowserProfileSnapshots.compositeID(session: session, id: $0.id) : $0.id) == key.id
+                }) {
+                    return .init(browser: key.browser, url: tab.url, title: tab.title, profileID: owner.browserProfileID,
+                        sessionID: session, nativeID: tab.id, windowID: tab.windowID, cookieStoreID: tab.cookieStoreID)
+                }
+            }
+            return nil
         }
         return SessionWorkspace(selection: selection, windows: windows, tabs: tabs)
     }
-    func prepare(_ intention: Intention, workspace: SessionWorkspace?, resume: IntentSessionRecord? = nil, run: Bool = false) {
+    private func savedResolution(_ workspace: SessionWorkspace, intention: Intention,
+                                 profiles: [BrowserTabSnapshot]? = nil, accessMode: IntentionAccessMode? = nil) -> SessionWorkspace.Resolution {
+        let mode = accessMode ?? intention.accessMode
+        let presets = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
+        let installed = Set(model.installedApps.map(\.bundleIdentifier)).subtracting(presets)
+        // Defaults own these apps in both review and Run; remove their resource
+        // descriptors before calculating missing targets or effects.
+        var filtered = workspace
+        filtered.selection.apps.subtract(presets)
+        filtered.selection.tabs = filtered.selection.tabs.filter { !presets.contains($0.browser) }
+        filtered.selection.windowIDsByApp = filtered.selection.windowIDsByApp.filter { !presets.contains($0.key) }
+        filtered.selection.wholeBrowserApps = filtered.selection.wholeBrowserApps?.subtracting(presets)
+        filtered.selection.startupAppIDs = filtered.selection.startupAppIDs?.subtracting(presets)
+        filtered.windows.removeAll { presets.contains($0.app) }
+        filtered.tabs.removeAll { presets.contains($0.browser) }
+        var result = filtered.restorationPlan(runningApps: Set(apps.map(\.id)).union(installed),
+            windows: liveWorkspaceWindows(), profiles: profiles ?? currentBrowserProfiles(), accessMode: mode,
+            allowLegacyProfileMigration: profiles != nil)
+        // A fully closed native app may stage its default workspace only when
+        // allowing it. A missing blocked window must never widen into an app.
+        for app in intention.allowedApps where mode == .whitelist
+            && installed.contains(app.bundleIdentifier) && !QuickSelection.browsers.contains(app.bundleIdentifier)
+            && filtered.selection.apps.contains(app.bundleIdentifier)
+            && NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty {
+            result.selection.apps.insert(app.bundleIdentifier)
+            result.selection.windowIDsByApp.removeValue(forKey: app.bundleIdentifier)
+            result.missing = max(0, result.missing - filtered.windows.filter { $0.app == app.bundleIdentifier }.count)
+            result.replayWorkspace.removeResources(for: app.bundleIdentifier)
+            result.replayWorkspace.selection.apps.insert(app.bundleIdentifier)
+        }
+        return result
+    }
+    func prepare(_ intention: Intention, workspace: SessionWorkspace?, resume: IntentSessionRecord? = nil, run: Bool = false, profiles: [BrowserTabSnapshot]? = nil) {
         guard !model.hasActiveSession else { return }
         panel?.makeFirstResponder(nil)
         refresh()
@@ -219,14 +337,21 @@ final class QuickSelectionController: ObservableObject {
         draft.websiteFeaturePolicies = intention.websiteFeaturePolicies
         draft.frictionNodes = intention.frictionNodes
         var missing = 0
+        var pending: [SessionWorkspace.PendingTab] = []
+        var restorationProblems: [String] = []
+        var stagedWorkspace = workspace
         let presets = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
         let installed = Set(model.installedApps.map(\.bundleIdentifier)).subtracting(presets)
         if let workspace {
-            // Only whole-app selections may be reopened from a saved slot.
-            // A missing scoped window or tab must still be chosen again.
-            let resolved = workspace.resolve(runningApps: Set(apps.map(\.id)).union(installed),
-                windows: WorkspaceWindow.list(onScreen: false).map { .init(id: $0.id, app: $0.bundle, title: $0.title) }, snapshots: snapshots)
+            let resolved = savedResolution(workspace, intention: intention, profiles: profiles)
             draft = resolved.selection; draft.name = intention.name; missing = resolved.missing
+            pending = resolved.pendingTabs; restorationProblems = resolved.problems
+            stagedWorkspace = resolved.replayWorkspace
+            if draft.accessMode == .whitelist {
+                // Identity-only placeholders also cover a fully closed browser.
+                // No process or website opens until explicit Run below.
+                draft.apps.formUnion(Set(workspace.tabs.map(\.browser)).intersection(installed))
+            }
         } else {
             // Legacy saved tab setups have no stable replay snapshot. Never turn
             // their old browser allowance into unrestricted whole-browser access.
@@ -235,19 +360,6 @@ final class QuickSelectionController: ObservableObject {
                 else if intention.selectionRequiresTabReselection { missing += 1 }
                 else if apps.contains(where: { $0.id == app.bundleIdentifier }) || installed.contains(app.bundleIdentifier) { draft.apps.insert(app.bundleIdentifier) }
                 else { missing += 1 }
-            }
-        }
-        // A closed native app has no existing windows to accidentally widen into.
-        // Reopen its default workspace at Start, as requested. Browser tab scopes
-        // still require exact identity; never replace missing tabs with allow-all.
-        if let workspace {
-            for app in intention.allowedApps where installed.contains(app.bundleIdentifier)
-                && !QuickSelection.browsers.contains(app.bundleIdentifier)
-                && workspace.selection.apps.contains(app.bundleIdentifier)
-                && NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty {
-                draft.apps.insert(app.bundleIdentifier)
-                draft.windowIDsByApp.removeValue(forKey: app.bundleIdentifier)
-                missing = max(0, missing - workspace.windows.filter { $0.app == app.bundleIdentifier }.count)
             }
         }
         // Workspace snapshots own resource identity, not the saved setup’s latest settings.
@@ -271,18 +383,34 @@ final class QuickSelectionController: ObservableObject {
             draft.restrictionNodes.append(.init(kind: .timer, position: .zero, durationMinutes: max(1, Int(ceil(seconds / 60))), showsRemainingTime: true, locksSessionUntilTimerEnds: true))
         }
         draft.sourceIntentionID = intention.id
-        selection = draft
+        savedRestorationTask?.cancel(); savedRestorationTask = nil
+        savedRestorationGeneration = UUID(); restoringSavedWorkspace = false
+        applyingSavedWorkspace = true; selection = draft; applyingSavedWorkspace = false
+        restoredRunWorkspace = nil
+        preparedSavedWorkspace = stagedWorkspace; preparedSavedIntention = stagedWorkspace == nil ? nil : intention
+        pendingSavedTabs = pending
         refresh()
         windows = preserveAddedAppIcons(in: windows)
         hasStagedSelection = true; resumeRecord = resume
         preparedOverviewPending = panel?.isVisible != true
         message = missing == 0
             ? (draft.apps.isEmpty ? (draft.accessMode == .blacklist ? "This saved intention has no blocked apps or tabs. Choose what to block, then run and save it again." : "These apps are already covered by your defaults. Choose an additional app or tab.") : "Ready when you are. Review your workspace, then Return.")
-            : "\(missing) items need choosing again. Review your apps and tabs before running."
-        if run && missing == 0 { runSelection() }
+            : (restorationProblems.first ?? "\(missing) items need choosing again. Review your apps and tabs before running.")
+        if missing == 0, !pending.isEmpty {
+            message = "Opens at Run: " + pending.map { $0.descriptor.title.isEmpty ? $0.descriptor.url : $0.descriptor.title }.joined(separator: ", ")
+        }
+        if let workspace, draft.accessMode == .whitelist {
+            let closedBrowsers = workspace.browsersToLaunchOnRun(
+                runningApps: Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)), installedApps: installed, accessMode: draft.accessMode)
+            if !closedBrowsers.isEmpty {
+                let names = intention.allowedApps.filter { closedBrowsers.contains($0.bundleIdentifier) }.map(\.name)
+                message = "Opens at Run: " + names.joined(separator: ", ") + ". Intent will check the saved browser profile before restoring its websites."
+            }
+        }
+        if run && (missing == 0 || stagedWorkspace != nil) { runSelection() }
     }
     private func prepareRunMetadata() {
-        model.pendingWorkspace = captureWorkspace()
+        model.pendingWorkspace = restoredRunWorkspace ?? captureWorkspace()
         if var resumed = resumeRecord {
             let oldTasks = resumed.intention.orderedFrictionNodes.flatMap { node -> [String] in if case .taskChecklist(let tasks) = node.friction { return tasks }; return [] }
             let newTasks = selection.frictionNodes.flatMap { node -> [String] in if case .taskChecklist(let tasks) = node.friction { return tasks }; return [] }
@@ -321,6 +449,11 @@ final class QuickSelectionController: ObservableObject {
     @Published var tabPreviewError: String?
     @Published var tabPreviewLoading = false
     @Published private(set) var websiteFinder: WebsiteFinderController?
+    var onNativeFinderInputChanged: ((Bool) -> Void)?
+    @Published private(set) var nativeWebsiteFinder: NativeWebsiteFinderController? {
+        didSet { onNativeFinderInputChanged?(nativeWebsiteFinder != nil) }
+    }
+    var nativeFinderOwnsInput: Bool { nativeWebsiteFinder != nil }
     @Published private(set) var creatingWebsiteTab = false
     private var websiteCreationTask: Task<Void, Never>?
     private var websiteCreationID = UUID()
@@ -370,6 +503,101 @@ final class QuickSelectionController: ObservableObject {
     private var markTask: Task<Void, Never>?
     private var markSequence = 0
     private var runMarkedTask: Task<Void, Never>?
+    private func launchSavedBrowsersOnRun(_ workspace: SessionWorkspace, mode: IntentionAccessMode,
+                                         isCurrent: @escaping @MainActor () -> Bool) async throws -> Set<String> {
+        let defaults = Set((model.alwaysAllowedApps + model.alwaysBlockedApps).map(\.bundleIdentifier))
+        let installed = Set(model.installedApps.map(\.bundleIdentifier)).subtracting(defaults)
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        let needed = workspace.browsersToLaunchOnRun(runningApps: running, installedApps: installed, accessMode: mode)
+        let launchRequestedAt = Date()
+        for browser in needed.sorted() {
+            guard isCurrent(), !Task.isCancelled else { throw BrowserTabCreationError.cancelled }
+            guard !browserLaunchesInFlight.contains(browser),
+                  let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser) else { throw BrowserTabCreationError.changed }
+            // Opening the application carries no URL or profile argument. This
+            // cannot send a saved website into a guessed/default account.
+            browserLaunchesInFlight.insert(browser)
+            defer { browserLaunchesInFlight.remove(browser) }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false; configuration.hides = true
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                NSWorkspace.shared.openApplication(at: url, configuration: configuration) { application, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else if application != nil { continuation.resume() }
+                    else { continuation.resume(throwing: BrowserTabCreationError.unavailable) }
+                }
+            }
+            guard isCurrent(), !Task.isCancelled else { throw BrowserTabCreationError.cancelled }
+        }
+        // New browser processes need a bounded chance to start their native
+        // host. Presence is not identity proof: the correlated query follows.
+        if !needed.isEmpty {
+            for _ in 0..<100 {
+                guard isCurrent(), !Task.isCancelled else { throw BrowserTabCreationError.cancelled }
+                if needed.allSatisfy({ browser in
+                    let profiles = BrowserProfileSnapshots.sessions(base: BrowserTabSnapshotStore.fileURL(for: browser))
+                    return !profiles.isEmpty && profiles.allSatisfy { $0.updatedAt >= launchRequestedAt }
+                }) { return needed }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            throw BrowserTabCreationError.rejected("The browser opened, but Browser Guard has not connected. Enable Browser Guard in the saved browser profile, then run this intention again.")
+        }
+        return needed
+    }
+    private func freshRestorationProfiles(for browsers: Set<String>) async throws -> [BrowserTabSnapshot] {
+        guard !browsers.isEmpty else { return [] }
+        guard !profileDiscoveryInFlight else { throw BrowserTabCreationError.changed }
+        profileDiscoveryInFlight = true
+        defer { profileDiscoveryInFlight = false }
+        struct Query {
+            let owner: BrowserTabSnapshot
+            let command: BrowserTabCommand
+            let base: URL
+        }
+        let requestedAt = Date()
+        var queries: [Query] = []
+        for browser in browsers.sorted() {
+            let base = BrowserTabSnapshotStore.fileURL(for: browser)
+            let owners = BrowserProfileSnapshots.sessions(base: base)
+            guard !owners.isEmpty else {
+                throw BrowserTabCreationError.rejected("Open the saved browser profile with Browser Guard connected, then choose this intention again.")
+            }
+            for owner in owners {
+                guard let session = owner.browserSessionID else { throw BrowserTabCreationError.changed }
+                let command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot, browserSessionID: session)
+                let path = BrowserProfileSnapshots.partition(BrowserTabCommandStore.fileURL(for: browser), session: session)
+                try JSONEncoder().encode(command).write(to: path, options: .atomic)
+                queries.append(.init(owner: owner, command: command, base: base))
+            }
+        }
+        for _ in 0..<55 {
+            try Task.checkCancellation()
+            var replies: [BrowserTabSnapshot] = []
+            for query in queries {
+                let session = query.owner.browserSessionID!
+                guard let data = try? Data(contentsOf: BrowserProfileSnapshots.discoveryPartition(query.base, session: session)),
+                      let reply = try? JSONDecoder().decode(BrowserTabSnapshot.self, from: data),
+                      BrowserProfileSnapshots.isDiscoveryReply(reply, owner: query.owner,
+                          requestID: query.command.id, requestedAt: requestedAt) else { continue }
+                replies.append(reply)
+            }
+            if replies.count == queries.count {
+                // A profile joining/leaving changes merged public IDs. Never
+                // reinterpret a frozen preparation under a different profile set.
+                for browser in browsers {
+                    let live = BrowserProfileSnapshots.sessions(base: BrowserTabSnapshotStore.fileURL(for: browser))
+                    let expected = replies.filter { $0.browserBundleIdentifier == browser }
+                    guard live.count == expected.count,
+                          BrowserProfileSnapshots.nonce(live) == BrowserProfileSnapshots.nonce(expected),
+                          expected.allSatisfy({ reply in live.contains { $0.browserSessionID == reply.browserSessionID
+                              && $0.browserProfileID == reply.browserProfileID } }) else { throw BrowserTabCreationError.changed }
+                }
+                return replies
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw BrowserTabCreationError.rejected("Browser Guard did not confirm every profile’s tab list. Keep the saved browser profile open and try this intention again.")
+    }
     private func freshSnapshots(for browsers: Set<String>) async -> Bool {
         guard !browsers.isEmpty else { return true }
         let requestedAt = Date()
@@ -710,6 +938,7 @@ final class QuickSelectionController: ObservableObject {
     }
     func clearMarks() {
         guard !model.hasActiveSession else { return }
+        preparedSavedWorkspace = nil; preparedSavedIntention = nil; pendingSavedTabs = []; restoredRunWorkspace = nil
         dismissMarkNotice()
         hideStagedModifiers()
         markGeneration = UUID()
@@ -827,7 +1056,7 @@ final class QuickSelectionController: ObservableObject {
         onboarding.selectionVisible = panel.isVisible
         if panel.isVisible { onboarding.record(.overviewOpened) }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
-            guard let self, self.panel?.isVisible == true else { return event }
+            guard let self, self.panel?.isVisible == true, !self.nativeFinderOwnsInput else { return event }
             if let cgEvent = event.cgEvent,
                let input = self.overviewNormalizer.normalize(type: cgEvent.type, event: cgEvent),
                self.handleOverviewKey(code: input.code, down: input.down, modified: input.modified,
@@ -865,6 +1094,10 @@ final class QuickSelectionController: ObservableObject {
     func toggleAccessMode() {
         guard !closing else { return }
         panel?.makeFirstResponder(nil)
+        if preparedSavedWorkspace != nil {
+            selection.accessMode = selection.accessMode == .whitelist ? .blacklist : .whitelist
+            return
+        }
         selection.accessMode = selection.accessMode == .whitelist ? .blacklist : .whitelist
         // A whole-browser block has no tab selection; do not silently turn that
         // into an allow-all browser when returning to Allow mode.
@@ -891,7 +1124,9 @@ final class QuickSelectionController: ObservableObject {
         snapshots = QuickSelection.browsers.sorted().compactMap { browser in
             guard apps.contains(where: { $0.id == browser }),
                   BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.quickSelection, maxAge: 5) else { return nil }
-            try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot))
+            if !profileDiscoveryInFlight {
+                try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot))
+            }
             return BrowserTabSnapshotStore(browserBundleIdentifier: browser).load()
         }
     }
@@ -1092,6 +1327,10 @@ final class QuickSelectionController: ObservableObject {
         if app.app.isBrowser && selection.accessMode == .whitelist {
             message = "Select website tabs above a Chrome or Firefox window."; return
         }
+        if selection.apps.contains(app.id) {
+            preparedSavedWorkspace?.removeResources(for: app.id)
+            pendingSavedTabs.removeAll { $0.descriptor.browser == app.id }
+        }
         message = nil; selection.toggleApp(app.id, snapshots: snapshots)
     }
     func dismissBrowserPicker() {
@@ -1111,30 +1350,66 @@ final class QuickSelectionController: ObservableObject {
               let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == window.appID }),
               let session = snapshot.browserSessionID else { return nil }
         let tabs = (snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == windowID }
-        let previousAnchor = websiteFinder?.target.anchorTabID
+        let previousAnchor = nativeWebsiteFinder?.target.anchorTabID ?? websiteFinder?.target.anchorTabID
         guard let anchor = tabs.first(where: { $0.id == previousAnchor }) ?? tabs.first(where: \.active) ?? tabs.first else { return nil }
         let target = WebsiteFinderTarget(browserBundleIdentifier: window.appID, browserSessionID: session,
             browserWindowID: windowID, anchorTabID: anchor.id, overviewGeneration: generation)
         return target.isValid ? target : nil
     }
     func openWebsiteFinder() {
-        guard websiteFinder == nil, !creatingWebsiteTab, let target = currentWebsiteFinderTarget else { return }
-        // Resolution may have started before a fresh snapshot made identity
-        // available. Its delayed activation must not run behind this editor.
-        windowResolutionID = UUID()
-        windowResolutionTask?.cancel(); windowResolutionTask = nil
-        resolvingBrowserWindow = false
-        closeModification()
-        hoverTask?.cancel(); hoverTask = nil
-        tabPreviewLoading = false
-        message = nil
-        websiteFinder = WebsiteFinderController(target: target, currentTarget: { [weak self] in
-            self?.currentWebsiteFinderTarget
-        }, onCapture: { [weak self] target, url in
-            self?.createWebsiteTab(target: target, url: url)
-        })
+        guard nativeWebsiteFinder == nil, websiteFinder == nil, !creatingWebsiteTab, !restoringSavedWorkspace,
+              let target = currentWebsiteFinderTarget else { return }
+        windowResolutionID = UUID(); windowResolutionTask?.cancel(); windowResolutionTask = nil
+        resolvingBrowserWindow = false; closeModification()
+        hoverTask?.cancel(); hoverTask = nil; tabPreviewLoading = false
+        overviewInput = OverviewSearchGesture(); overviewNormalizer = QuickMarkKeyboardNormalizer()
+        do {
+            let finder = try NativeWebsiteFinderController(target: target, onCommit: { [weak self] target, tab in
+                self?.completeNativeWebsiteFinder(target: target, tab: tab)
+            }, onCancel: { [weak self] in self?.closeWebsiteFinder() })
+            nativeWebsiteFinder = finder; message = nil
+            // The user's real browser must own address-bar typing and Return.
+            // Preserve the entire overview draft behind it, without raising it.
+            panel?.makeFirstResponder(nil); panel?.level = .normal; panel?.ignoresMouseEvents = true
+            let width = min(760, max(480, displayFrame.width - 80))
+            let height = min(560, max(360, displayFrame.height - 200))
+            finder.start(frame: .init(left: displayFrame.midX - width / 2,
+                top: displayFrame.midY - height / 2 - 30, width: width, height: height))
+        } catch { message = error.localizedDescription }
+    }
+    private func completeNativeWebsiteFinder(target: WebsiteFinderTarget, tab: BrowserTabItem) {
+        guard nativeWebsiteFinder?.target == target, generation == target.overviewGeneration else {
+            return
+        }
+        creatingWebsiteTab = true
+        let requestID = UUID(); websiteCreationID = requestID
+        websiteCreationTask = Task { [weak self] in
+            guard let self else { return }
+            let refreshed = await self.freshSnapshots(for: [target.browserBundleIdentifier])
+            BrowserFinderCompletion.performIfCurrent(requestID: requestID, currentRequestID: self.websiteCreationID,
+                target: target, currentTarget: self.nativeWebsiteFinder?.target,
+                cancelled: Task.isCancelled || self.generation != target.overviewGeneration) {
+                guard refreshed, self.currentWebsiteFinderTarget == target,
+                      let snapshot = self.snapshots.first(where: { $0.browserBundleIdentifier == target.browserBundleIdentifier }),
+                      snapshot.browserSessionID == target.browserSessionID,
+                      let created = (snapshot.allTabs ?? snapshot.tabs).first(where: { $0.id == tab.id && $0.windowID == target.browserWindowID }) else {
+                    self.message = "The page was added to your browser. Refresh its tabs to select it."; self.closeWebsiteFinder(); return
+                }
+                if !self.isTabSelected(created.id, browser: target.browserBundleIdentifier) {
+                    self.selectTab(created, browser: target.browserBundleIdentifier, extendingRange: false)
+                }
+                self.closeWebsiteFinder()
+            }
+        }
     }
     func closeWebsiteFinder() {
+        let hadNativeFinder = nativeWebsiteFinder != nil
+        nativeWebsiteFinder?.dismiss(); nativeWebsiteFinder = nil
+        if hadNativeFinder { panel?.ignoresMouseEvents = false }
+        if hadNativeFinder, panel?.isVisible == true, !closing {
+            panel?.level = .popUpMenu
+            NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
+        }
         websiteCreationID = UUID()
         websiteCreationTask?.cancel(); websiteCreationTask = nil
         creatingWebsiteTab = false
@@ -1183,8 +1458,12 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func runSelection() {
-        guard !closing, !loading, !creatingWebsiteTab, openingApps.isEmpty, !selection.apps.isEmpty else { return }
+        guard !nativeFinderOwnsInput, !closing, !loading, !creatingWebsiteTab, !restoringSavedWorkspace, openingApps.isEmpty, hasRunnableDraft else { return }
         closeModification()
+        if let workspace = preparedSavedWorkspace, let intention = preparedSavedIntention {
+            runPreparedSavedWorkspace(workspace, intention: intention)
+            return
+        }
         refresh()
         for (key, policy) in selection.websiteFeaturePolicies ?? [:] {
             guard let site = FocusWebsite(rawValue: key), policy.isValid(for: site) else {
@@ -1194,6 +1473,94 @@ final class QuickSelectionController: ObservableObject {
         do { _ = try selection.makeIntention(apps: apps.map(\.app), snapshots: snapshots) }
         catch { message = error.localizedDescription; return }
         dismissForRun()
+    }
+    private func runPreparedSavedWorkspace(_ workspace: SessionWorkspace, intention: Intention) {
+        guard savedRestorationTask == nil, !model.hasActiveSession else { return }
+        let token = UUID(); savedRestorationGeneration = token
+        let overview = generation
+        let configuration = selection
+        restoringSavedWorkspace = true
+        message = "Preparing your saved workspace…"
+        savedRestorationTask = Task { [weak self] in
+            guard let self else { return }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && self.savedRestorationGeneration == token && self.generation == overview
+                    && !self.model.hasActiveSession && !self.closing && !self.nativeFinderOwnsInput && self.panel?.isVisible == true
+            }
+            defer {
+                if self.savedRestorationGeneration == token {
+                    self.restoringSavedWorkspace = false; self.savedRestorationTask = nil
+                }
+            }
+            do {
+                let defaults = Set((self.model.alwaysAllowedApps + self.model.alwaysBlockedApps).map(\.bundleIdentifier))
+                let browsers = Set(workspace.tabs.map(\.browser)).subtracting(defaults)
+                let launchedBrowsers = try await self.launchSavedBrowsersOnRun(workspace, mode: configuration.accessMode, isCurrent: isCurrent)
+                let initialProfiles = try await self.freshRestorationProfiles(for: browsers)
+                guard isCurrent() else { throw BrowserTabCreationError.cancelled }
+                let resolved = self.savedResolution(workspace, intention: intention, profiles: initialProfiles, accessMode: configuration.accessMode)
+                guard resolved.missing == 0 else {
+                    self.message = resolved.problems.first ?? "A saved window is unavailable. Review the selected apps before running."
+                    return
+                }
+                var draft = resolved.selection
+                self.copySavedConfiguration(configuration, into: &draft)
+                // These processes have already been started once without URLs.
+                draft.startupAppIDs?.subtract(launchedBrowsers)
+                // Claim every effect before the first create. Repeated Run, a
+                // lost receipt, or an app restart cannot mint replacement IDs.
+                let requests = try self.savedRestoreClaims.begin(sourceID: intention.id, tabs: resolved.pendingTabs)
+                for (pending, request) in zip(resolved.pendingTabs, requests) {
+                    guard isCurrent(), configuration.accessMode == .whitelist else { throw BrowserTabCreationError.cancelled }
+                    let profiles = initialProfiles.filter { $0.browserBundleIdentifier == pending.descriptor.browser }
+                    guard let nonce = BrowserProfileSnapshots.nonce(profiles),
+                          profiles.contains(where: { $0.browserSessionID == pending.ownerSessionID
+                              && (pending.descriptor.profileID == nil || $0.browserProfileID == pending.descriptor.profileID) }),
+                          let url = WebsiteFinderPolicy.validatedURL(pending.descriptor.url) else { throw BrowserTabCreationError.changed }
+                    let target = WebsiteFinderTarget(browserBundleIdentifier: pending.descriptor.browser, browserSessionID: nonce,
+                        browserWindowID: profiles.count > 1 ? BrowserProfileSnapshots.compositeID(session: pending.ownerSessionID, id: pending.windowID) : pending.windowID,
+                        anchorTabID: profiles.count > 1 ? BrowserProfileSnapshots.compositeID(session: pending.ownerSessionID, id: pending.anchorTabID) : pending.anchorTabID,
+                        overviewGeneration: token)
+                    let tab = try await BrowserTabCreationService.create(target: target, url: url, requestID: request.requestID, isCurrent: isCurrent)
+                    guard isCurrent(), draft.pinBrowserSession(pending.descriptor.browser, sessionID: nonce) else { throw BrowserTabCreationError.changed }
+                    draft.toggleTab(.init(browser: pending.descriptor.browser, id: tab.id), browserSessionID: nonce)
+                }
+                let finalProfiles = try await self.freshRestorationProfiles(for: browsers)
+                guard isCurrent() else { throw BrowserTabCreationError.cancelled }
+                for browser in browsers {
+                    let initial = initialProfiles.filter { $0.browserBundleIdentifier == browser }
+                    let final = finalProfiles.filter { $0.browserBundleIdentifier == browser }
+                    guard BrowserProfileSnapshots.nonce(initial) == BrowserProfileSnapshots.nonce(final),
+                          initial.allSatisfy({ owner in final.contains { $0.browserSessionID == owner.browserSessionID
+                              && $0.browserProfileID == owner.browserProfileID } }) else { throw BrowserTabCreationError.changed }
+                }
+                self.refresh()
+                self.snapshots.removeAll { browsers.contains($0.browserBundleIdentifier) }
+                self.snapshots.append(contentsOf: Dictionary(grouping: finalProfiles, by: \.browserBundleIdentifier).values.compactMap { BrowserProfileSnapshots.merged($0) })
+                _ = try draft.makeIntention(apps: self.apps.map(\.app), snapshots: self.snapshots)
+                // The receipt's IDs, not a possibly redirected URL/title, own
+                // this run. Save refreshed replay bindings before retiring claims.
+                self.applyingSavedWorkspace = true; self.selection = draft; self.applyingSavedWorkspace = false
+                let captured = self.captureWorkspace(profiles: finalProfiles)
+                guard captured.tabs.count == draft.tabs.count,
+                      captured.windows.count == draft.windowIDsByApp.values.reduce(0, { $0 + $1.count }) else { throw BrowserTabCreationError.changed }
+                let previous = self.model.journal.workspaces[intention.id]
+                self.model.journal.workspaces[intention.id] = captured
+                guard self.model.persistJournal() else {
+                    self.model.journal.workspaces[intention.id] = previous
+                    throw BrowserTabCreationError.rejected("Could not save the restored workspace. Its tabs are open; review them before retrying.")
+                }
+                try self.savedRestoreClaims.complete(sourceID: intention.id)
+                self.restoredRunWorkspace = captured
+                self.preparedSavedWorkspace = nil; self.preparedSavedIntention = nil; self.pendingSavedTabs = []
+                self.restoringSavedWorkspace = false; self.savedRestorationTask = nil
+                guard isCurrent() else { return }
+                self.runSelection()
+            } catch {
+                guard self.savedRestorationGeneration == token, self.generation == overview else { return }
+                self.message = error.localizedDescription
+            }
+        }
     }
     func cancel() { cancelImmediately() }
     private func dismissForRun() {
@@ -1217,6 +1584,9 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        closing = true
+        savedRestorationGeneration = UUID()
+        savedRestorationTask?.cancel(); savedRestorationTask = nil; restoringSavedWorkspace = false
         onOverviewClosed?()
         savedRunTask?.cancel(); savedRunTask = nil
         settingsOpen = false; saveFlight = nil
@@ -1249,7 +1619,7 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func hoverTab(_ tab: BrowserTabItem, browser: String, entered: Bool) {
-        guard websiteFinder == nil else { return }
+        guard websiteFinder == nil, nativeWebsiteFinder == nil else { return }
         hoverTask?.cancel(); hoveredTab = nil; tabPreview = nil; tabPreviewError = nil
         guard entered else { return }
         let expectedBrowserSessionID = snapshots.first(where: { $0.browserBundleIdentifier == browser })?.browserSessionID
@@ -1542,7 +1912,7 @@ private struct QuickSelectionView: View {
                         Button(controller.selection.accessMode == .blacklist ? "Block selected · B" : "Allow selected · B") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
                         Spacer()
                         Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
-                            .disabled(controller.selection.apps.isEmpty || controller.loading || controller.closing || !controller.openingApps.isEmpty)
+                            .disabled(!controller.hasRunnableDraft || controller.loading || controller.closing || controller.restoringSavedWorkspace || !controller.openingApps.isEmpty)
                         Button { controller.settingsOpen.toggle() } label: {
                             Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 32, height: 32)
                                 .background(.ultraThinMaterial, in: Circle())

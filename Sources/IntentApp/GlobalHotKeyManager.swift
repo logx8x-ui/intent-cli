@@ -271,6 +271,9 @@ final class GlobalHotKeyManager {
     var overviewKeyHandler: ((Int, Bool, Bool, Bool, Bool) -> Bool)? {
         didSet { markMonitor.overviewKeyHandler = overviewKeyHandler }
     }
+    var nativeFinderOwnsInput: (() -> Bool)? {
+        didSet { markMonitor.nativeFinderOwnsInput = nativeFinderOwnsInput }
+    }
     var overviewPrefixIsHeld: (() -> Bool)? {
         didSet { markMonitor.overviewPrefixIsHeld = overviewPrefixIsHeld }
     }
@@ -298,6 +301,7 @@ final class GlobalHotKeyManager {
     private(set) var selectionRegistrationStatus: OSStatus = OSStatus(eventNotHandledErr)
     private var eventHandlerRef: EventHandlerRef?
     private(set) var registrationStatus: OSStatus = OSStatus(eventNotHandledErr)
+    private var nativeFinderInputSuspended = false
 
     init() {
         registrationStatus = installHandler()
@@ -358,6 +362,26 @@ final class GlobalHotKeyManager {
         }
     }
 
+    func setNativeFinderInputSuspended(_ suspended: Bool) {
+        guard nativeFinderInputSuspended != suspended else { return }
+        nativeFinderInputSuspended = suspended
+        if suspended {
+            markMonitor.cancelPending(); markMonitor.spotlight.cancelSelection()
+            // A Carbon reservation consumes the key even when its handler does
+            // nothing. Remove normal shortcuts so real browser typing receives
+            // backtick and tilde; the emergency Safety Stop stays registered.
+            unregister(ref: &selectionHotKeyRef)
+            unregister(ref: &finishHotKeyRef)
+            unregister(ref: &saveHotKeyRef)
+        } else {
+            _ = updateFinishShortcut(FinishShortcutStore.load())
+            _ = register(OverlayShortcut.finishAndSaveShortcut, id: UInt32.max - 3, ref: &saveHotKeyRef)
+            if !isQuickGestureReady {
+                selectionRegistrationStatus = register(OverlayShortcut.quickSelectionShortcut, id: UInt32.max, ref: &selectionHotKeyRef)
+            }
+        }
+    }
+
     private func recoverQuickGestureIfNeeded() {
         guard !isQuickGestureReady else { return }
         let accessibilityTrusted = AXIsProcessTrusted()
@@ -399,6 +423,7 @@ final class GlobalHotKeyManager {
             guard let event, GetEventParameter(event, EventParamName(kEventParamDirectObject),
                 EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier) == noErr,
                 identifier.signature == fourCharCode("IntO") else { return OSStatus(eventNotHandledErr) }
+            if manager.nativeFinderInputSuspended && identifier.id != UInt32.max - 2 { return noErr }
             if identifier.id == UInt32.max {
                 // Unregistering a hotkey does not retract an already queued
                 // Carbon event. Only the gesture monitor owns input once ready.
@@ -423,6 +448,7 @@ final class GlobalHotKeyManager {
 
     func updateFinishShortcut(_ candidate: OverlayShortcut) -> OSStatus {
         guard !candidate.isRetiredLauncherShortcut else { return OSStatus(eventNotHandledErr) }
+        guard !nativeFinderInputSuspended else { return noErr }
         unregister(ref: &finishHotKeyRef)
         let status = register(candidate, id: UInt32.max - 1, ref: &finishHotKeyRef)
         if status != noErr {
