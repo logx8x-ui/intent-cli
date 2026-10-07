@@ -859,6 +859,35 @@ do {
         ),
         "Mission Control Space and background navigation should remain usable"
     )
+    for mode: IntentionAccessMode in [.whitelist, .blacklist] {
+        let controlled: Set<String> = mode == .whitelist ? ["allowed.app"] : ["blocked.app"]
+        try expect(FocusClickTargetPolicy.shouldAllowMissionControlClick(ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: "blocked.app", controlledBundleIdentifiers: controlled,
+            accessMode: mode, isSpaceNavigation: true),
+            "A desktop containing a blocked app remains clickable while visibility enforcement hides that app")
+        try expect(!FocusClickTargetPolicy.shouldAllowMissionControlClick(ownerBundleIdentifier: "com.apple.dock",
+            representedBundleIdentifier: "blocked.app", controlledBundleIdentifiers: controlled,
+            accessMode: mode, isSpaceNavigation: false), "An actual blocked app tile remains blocked")
+        try expect(!FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: nil,
+            accessMode: mode, controlledBundleIdentifiers: controlled, missionControlActive: false),
+            "An empty destination desktop must not raise a remembered window from another Space")
+    }
+    try expect(FocusClickTargetPolicy.isMissionControlSpaceNavigation(ownerBundleIdentifier: "com.apple.dock",
+        ancestorIdentifiers: ["", "mc.spaces.list", "mc.display", "mc"]),
+        "A desktop button is recognized through its observed Spaces list ancestor")
+    try expect(!FocusClickTargetPolicy.isMissionControlSpaceNavigation(ownerBundleIdentifier: "blocked.app",
+        ancestorIdentifiers: ["mc.spaces.list"]), "An application cannot spoof Dock's desktop navigation")
+    try expect(!FocusClickTargetPolicy.isMissionControlSpaceNavigation(ownerBundleIdentifier: "com.apple.dock",
+        ancestorIdentifiers: ["mc.windows", "mc.spacesFake"]), "Ordinary window tiles are not desktop navigation")
+    for foreground: String? in [nil, "com.apple.finder", "com.apple.dock", "com.apple.WindowManager"] {
+        try expect(FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(visibleBundleIdentifier: nil,
+            foregroundBundleIdentifier: foreground),
+            "Empty desktop shell transitions bypass single-app timer recovery without raising any window")
+        try expect(!FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(visibleBundleIdentifier: "blocked.app",
+            foregroundBundleIdentifier: foreground), "A visible forbidden window does not inherit the empty desktop exception")
+    }
+    try expect(!FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(visibleBundleIdentifier: nil,
+        foregroundBundleIdentifier: "blocked.app"), "Unknown visibility of a regular forbidden app is not treated as the desktop shell")
     try expect(
         FocusClickTargetPolicy.representedBundleIdentifier(
             labels: ["Spotify — Music and Podcasts"],
@@ -982,6 +1011,22 @@ do {
         "Normal app windows should not disable click protection"
     )
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 48), "Cmd+Tab should be handled by Intent's allowed-app switcher")
+    for restricted in [false, true] {
+        try expect(FocusSystemShortcutPolicy.tabRoute(keyCode: 48, command: false, control: true,
+            restrictApplicationSwitching: restricted) == .nativeBrowser,
+            "The event-tap router forwards Control-Tab without constructing an Intent tab chooser")
+        try expect(FocusSystemShortcutPolicy.tabRoute(keyCode: 48, command: false, control: false,
+            restrictApplicationSwitching: restricted) == .ordinary, "Plain Tab keeps ordinary input routing")
+        for reverse in [false, true] {
+            try expect(!FocusBrowserShortcutPolicy.shouldBlock(keyCode: 48, command: false, control: true,
+                option: false, shift: reverse, allowGoogleSearchTabs: false),
+                "Both native browser tab directions remain usable in restrictive sessions")
+        }
+    }
+    try expect(FocusSystemShortcutPolicy.tabRoute(keyCode: 48, command: true, control: false,
+        restrictApplicationSwitching: true) == .allowedApplications, "Command-Tab retains its permitted-app chooser")
+    try expect(FocusSystemShortcutPolicy.tabRoute(keyCode: 50, command: false, control: true,
+        restrictApplicationSwitching: true) == .ordinary, "Backtick is never routed as browser tab switching")
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 50), "Cmd+grave should keep normal within-app window switching")
     try expect(!FocusSystemShortcutPolicy.shouldBlock(keyCode: 49), "Cmd+Space should keep macOS Spotlight available")
     try expect(FocusSystemShortcutPolicy.shouldBlock(keyCode: 4), "Cmd+H should stay blocked as an escape shortcut")

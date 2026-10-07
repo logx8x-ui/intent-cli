@@ -30,10 +30,21 @@ public enum FocusLockError: Error, CustomStringConvertible {
 }
 
 public enum FocusForegroundPolicy {
+    public static func shouldLeaveEmptyDesktopAlone(visibleBundleIdentifier: String?,
+                                                    foregroundBundleIdentifier: String?) -> Bool {
+        guard visibleBundleIdentifier == nil else { return false }
+        // Finder is the desktop shell, even in a single-app intention. This
+        // exception never applies when a Finder or other app window is visible.
+        guard let foregroundBundleIdentifier else { return true }
+        return ["com.apple.finder", "com.apple.dock", "com.apple.WindowManager"].contains(foregroundBundleIdentifier)
+    }
+
     public static func shouldRestoreVisibleWindow(visibleBundleIdentifier: String?, accessMode: IntentionAccessMode,
                                                    controlledBundleIdentifiers: Set<String>, missionControlActive: Bool) -> Bool {
         guard !missionControlActive else { return false }
-        guard let visibleBundleIdentifier else { return accessMode == .whitelist }
+        // No visible application is a valid empty desktop. Do not pull a
+        // remembered window (and its Space) back merely because it is empty.
+        guard let visibleBundleIdentifier else { return false }
         return accessMode == .whitelist ? !controlledBundleIdentifiers.contains(visibleBundleIdentifier)
             : controlledBundleIdentifiers.contains(visibleBundleIdentifier)
     }
@@ -130,7 +141,6 @@ public final class FocusLock {
     private let stopStateLock = NSLock()
     private let focusActions = DeferredSessionActionGate()
     private let allowedAppSwitcher: AllowedAppSwitcher
-    private let allowedBrowserTabSwitcher = AllowedBrowserTabSwitcher()
     private let nativeTabClickGuard = NativeBrowserTabClickGuard()
     private let visibilityController: FocusVisibilityController
     private lazy var blurController = FocusBlurController(spec: spec, tabGuard: nativeTabClickGuard)
@@ -218,12 +228,11 @@ public final class FocusLock {
 
     private func cancelPendingFocusActions() {
         // Do this at the stop request, not up to one run-loop turn later in
-        // cleanup: queued Cmd-Tab/Ctrl-Tab and AX work can otherwise steal focus
+        // cleanup: queued Cmd-Tab and AX work can otherwise steal focus
         // after the session has already ended.
         focusActions.invalidate()
         permittedWindowRecovery.stop()
         allowedAppSwitcher.stop()
-        allowedBrowserTabSwitcher.stop()
     }
 
     public var isStopRequested: Bool { isStopped }
@@ -550,12 +559,13 @@ public final class FocusLock {
             let missionControl = isMissionControlActive()
             nativeTabClickGuard.recordMouseDown(missionControl: missionControl)
             if missionControl {
-                let target = clickTarget(at: event.location)
+                let target = clickTarget(at: event.location, inMissionControl: true)
                 guard FocusClickTargetPolicy.shouldAllowMissionControlClick(
                     ownerBundleIdentifier: target.ownerBundleIdentifier,
                     representedBundleIdentifier: target.representedBundleIdentifier,
                     controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
-                    accessMode: spec.accessMode
+                    accessMode: spec.accessMode,
+                    isSpaceNavigation: target.isSpaceNavigation
                 ) else {
                     // Keep Mission Control open; a known forbidden tile is a no-op.
                     return nil
@@ -594,10 +604,6 @@ public final class FocusLock {
                !event.flags.contains(.maskCommand) {
                 allowedAppSwitcher.commit()
             }
-            if allowedBrowserTabSwitcher.isVisible,
-               !event.flags.contains(.maskControl) {
-                allowedBrowserTabSwitcher.commit()
-            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -617,35 +623,22 @@ public final class FocusLock {
             return nil
         }
 
-        if command && keyCode == KeyCode.tab && (spec.blockAppSwitching || spec.keepFocused) {
-            allowedBrowserTabSwitcher.cancel()
+        switch FocusSystemShortcutPolicy.tabRoute(keyCode: keyCode, command: command, control: control,
+            restrictApplicationSwitching: spec.blockAppSwitching || spec.keepFocused) {
+        case .allowedApplications:
             allowedAppSwitcher.advance(reverse: shift)
             return nil
-        }
-
-        if control,
-           keyCode == KeyCode.tab,
-           spec.blockBrowserTabEscape,
-           let browserBundleIdentifier = supportedFrontmostBrowserBundleIdentifier() {
-            let didShowSwitcher = allowedBrowserTabSwitcher.advance(
-                browserBundleIdentifier: browserBundleIdentifier,
-                reverse: shift
-            )
-            if didShowSwitcher {
-                allowedAppSwitcher.cancel()
-                return nil
-            }
-
-            // Older, disconnected, or sleeping Browser Guard builds may not
-            // have published a tab snapshot. Preserve native Ctrl+Tab rather
-            // than swallowing the shortcut with no visible result.
+        case .nativeBrowser:
+            // Native Control-Tab/Control-Shift-Tab, including key repeats, goes
+            // directly to the browser. Guard keeps the destination policy.
             return Unmanaged.passUnretained(event)
+        case .ordinary:
+            break
         }
 
         if keyCode == KeyCode.escape,
-           allowedAppSwitcher.isVisible || allowedBrowserTabSwitcher.isVisible {
+           allowedAppSwitcher.isVisible {
             allowedAppSwitcher.cancel()
-            allowedBrowserTabSwitcher.cancel()
             return nil
         }
 
@@ -809,6 +802,14 @@ public final class FocusLock {
     private func handleActivated(_ app: NSRunningApplication) {
         guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+        // An empty Space activates its desktop shell. It is not an attempt to
+        // open a blocked Finder window, and must not pull the user back.
+        if FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(
+            visibleBundleIdentifier: PermittedWindowRecovery.visibleApplication()?.bundleIdentifier,
+            foregroundBundleIdentifier: app.bundleIdentifier
+        ) {
+            return
+        }
         if let id = app.bundleIdentifier, spec.selectedWindowIDsByApp[id] != nil,
            let window = WorkspaceWindow.focused(), window.bundle == id,
            !spec.permitsWindow(window.id, bundleIdentifier: id) {
@@ -892,7 +893,12 @@ public final class FocusLock {
     private func enforceFocus() {
         guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
 
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else {
+        let foreground = NSWorkspace.shared.frontmostApplication
+        let visible = PermittedWindowRecovery.visibleApplication()
+        if FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(visibleBundleIdentifier: visible?.bundleIdentifier,
+            foregroundBundleIdentifier: foreground?.bundleIdentifier) { return }
+
+        guard let frontmost = foreground else {
             if shouldWaitForSystemSwitcher(bundleIdentifier: nil) {
                 return
             }
@@ -904,7 +910,7 @@ public final class FocusLock {
 
         // Space swipes can leave NSWorkspace reporting the old permitted app while
         // a forbidden window is visibly occupying the new Space.
-        if let visible = PermittedWindowRecovery.visibleApplication(),
+        if let visible,
            FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible.bundleIdentifier,
                 accessMode: spec.accessMode, controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
                 missionControlActive: isMissionControlActive()) {
@@ -1059,15 +1065,21 @@ public final class FocusLock {
         )
     }
 
-    private func clickTarget(at point: CGPoint) -> (
+    private func clickTarget(at point: CGPoint, inMissionControl: Bool = false) -> (
         ownerBundleIdentifier: String?,
-        representedBundleIdentifier: String?
+        representedBundleIdentifier: String?,
+        isSpaceNavigation: Bool
     ) {
-        if let owner = windowOwnerBundleIdentifier(at: point),
+        if !inMissionControl, let owner = windowOwnerBundleIdentifier(at: point),
            !["com.apple.dock", "com.apple.WindowManager"].contains(owner) {
-            return (owner, nil)
+            return (owner, nil, false)
         }
-        let systemWide = AXUIElementCreateSystemWide()
+        // Dock owns transformed Mission Control tiles. Looking at ordinary CG
+        // window ownership first can instead identify the app behind a Space.
+        let systemWide = inMissionControl
+            ? NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
+                .map { AXUIElementCreateApplication($0.processIdentifier) } ?? AXUIElementCreateSystemWide()
+            : AXUIElementCreateSystemWide()
         // Bound synchronous accessibility work in the input callback. A hung app
         // must not hold every mouse click while the default AX timeout elapses.
         AXUIElementSetMessagingTimeout(systemWide, 0.01)
@@ -1078,27 +1090,44 @@ public final class FocusLock {
             AXUIElementGetPid(element, &pid)
             let ownerBundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
                 ?? windowOwnerBundleIdentifier(at: point)
-            return (
-                ownerBundleIdentifier,
-                ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier)
-                    ? representedBundleIdentifier(startingAt: element) : nil
-            )
+            let represented = ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier)
+                ? representedTarget(startingAt: element, owner: ownerBundleIdentifier) : (nil, false)
+            return (ownerBundleIdentifier, represented.0, represented.1)
         }
 
-        return (windowOwnerBundleIdentifier(at: point), nil)
+        return (windowOwnerBundleIdentifier(at: point), nil, false)
     }
 
-    private func representedBundleIdentifier(startingAt element: AXUIElement) -> String? {
+    private func representedTarget(startingAt element: AXUIElement, owner: String?) -> (String?, Bool) {
         var current: AXUIElement? = element
+        var ancestry: [AXUIElement] = []
         var labels: [String] = []
+        var representedBundle: String?
         let deadline = Date(timeIntervalSinceNow: 0.06)
 
         for _ in 0..<8 {
             guard Date() < deadline, let currentElement = current else { break }
+            AXUIElementSetMessagingTimeout(currentElement, 0.006)
 
-            if let url = accessibilityURL(currentElement),
+            if let identifier = accessibilityString(currentElement, attribute: kAXIdentifierAttribute),
+               FocusClickTargetPolicy.isMissionControlSpaceNavigation(ownerBundleIdentifier: owner,
+                    ancestorIdentifiers: [identifier]) {
+                return (nil, true)
+            }
+
+            ancestry.append(currentElement)
+            if Date() < deadline { current = accessibilityElement(currentElement, attribute: kAXParentAttribute) }
+        }
+
+        // Determine Space ancestry before asking for app URLs or labels. Those
+        // reads can otherwise use the entire tap budget on a thumbnail's child.
+        guard Date() < deadline else { return (nil, false) }
+        for currentElement in ancestry {
+            guard Date() < deadline else { break }
+
+            if representedBundle == nil, let url = accessibilityURL(currentElement),
                let bundleIdentifier = ApplicationBundleIdentifierResolver.resolve(from: url) {
-                return bundleIdentifier
+                representedBundle = bundleIdentifier
             }
 
             for attribute in [
@@ -1112,8 +1141,6 @@ public final class FocusLock {
                     labels.append(value)
                 }
             }
-
-            if Date() < deadline { current = accessibilityElement(currentElement, attribute: kAXParentAttribute) }
         }
 
         var applicationNames: [String: String] = [:]
@@ -1124,10 +1151,10 @@ public final class FocusLock {
                 ?? bundleIdentifier
             applicationNames[bundleIdentifier] = name.replacingOccurrences(of: ".app", with: "")
         }
-        return FocusClickTargetPolicy.representedBundleIdentifier(
+        return (representedBundle ?? FocusClickTargetPolicy.representedBundleIdentifier(
             labels: labels,
             applicationNamesByBundleIdentifier: applicationNames
-        )
+        ), false)
     }
 
     private func isMenuBarClick(_ point: CGPoint) -> Bool {
@@ -1243,7 +1270,6 @@ public final class FocusLock {
         pendingSpaceRecovery?.cancel()
         pendingSpaceRecovery = nil
         allowedAppSwitcher.cancel()
-        allowedBrowserTabSwitcher.cancel()
         focusTimer?.invalidate()
         focusTimer = nil
 

@@ -21,6 +21,24 @@ func runBrowserWindowCoverageSpecs() throws {
     let standard: [Policy.StandardWindow] = [a, b].map { .init(bundleIdentifier: browser, processIdentity: proof, title: $0.title, frame: $0.frame) }
     let observed = Policy.standardIdentities(native: all, standard: standard)
     try expect(observed == Set([a.identity, b.identity]), "AX positives classify real windows without size/title exceptions for auxiliary surfaces")
+    // Observed on Chrome: CG appends an audio glyph; AX has browser/profile
+    // suffixes; the extension supplies only the actual page title.
+    let audible = native(21, "Video lesson 🔊")
+    let audioAX = Policy.StandardWindow(bundleIdentifier: browser, processIdentity: proof,
+        title: "Video lesson - Google Chrome – Study", frame: frame)
+    try expect(Policy.standardIdentities(native: [audible], standard: [audioAX]) == [audible.identity],
+        "Playing audio must not prevent a real Chrome window from being identified")
+    let audioClaim = BrowserWindowVisibilityWindow(windowID: 200, title: "Video lesson",
+        frame: .init(left: frame.minX, top: frame.minY, width: frame.width, height: frame.height), state: "maximized")
+    let audioCandidate = BrowserWindowVisibilityMatching.NativeCandidate(id: 21, pid: proof.pid,
+        bundle: browser, title: audible.title, frame: frame)
+    try expect(BrowserWindowVisibilityMatching.match(window: audioClaim, browserBundleIdentifier: browser,
+        candidates: [audioCandidate])?.id == 21, "Blocked audible Chrome windows retain a valid minimize target")
+    let audioDuplicate = BrowserWindowVisibilityMatching.NativeCandidate(id: 22, pid: proof.pid,
+        bundle: browser, title: "Video lesson", frame: frame)
+    try expect(BrowserWindowVisibilityMatching.match(window: audioClaim, browserBundleIdentifier: browser,
+        candidates: [audioCandidate, audioDuplicate]) == nil,
+        "Audio title normalization never guesses between two same-looking windows")
     let selected = report(100, "Allowed")
     guard case .complete(let coverage) = Policy.evaluate(browserBundleIdentifier: browser, native: all,
         observedStandard: observed!, reported: [selected], requiredSelected: [selected.identity], knownProfiles: ["a", "empty-profile"], continuousIdentities: observed!, witnessedBeforeSnapshot: observed!) else {

@@ -293,6 +293,10 @@ public enum BrowserWindowMatching {
         for suffix in [" — Mozilla Firefox", " - Mozilla Firefox", " — Google Chrome", " - Google Chrome"] {
             if value.hasSuffix(suffix) { value.removeLast(suffix.count) }
         }
+        // Chrome adds this audio indicator to its WindowServer title, while
+        // both its AX title and Browser Guard report omit it. Keep the existing
+        // bidirectional uniqueness checks when comparing these representations.
+        if value.hasSuffix(" 🔊") { value.removeLast(" 🔊".count) }
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

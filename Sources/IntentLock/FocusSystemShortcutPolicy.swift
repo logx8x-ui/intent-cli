@@ -1,5 +1,17 @@
 import Foundation
 public enum FocusSystemShortcutPolicy {
+    public enum TabRoute: Equatable { case nativeBrowser, allowedApplications, ordinary }
+
+    public static func tabRoute(keyCode: Int64, command: Bool, control: Bool,
+                                restrictApplicationSwitching: Bool) -> TabRoute {
+        guard keyCode == KeyCode.tab else { return .ordinary }
+        if command && restrictApplicationSwitching { return .allowedApplications }
+        // Shift, repeat timing and browser-specific ordering belong to the
+        // browser. Never substitute Intent's application-style chooser here.
+        if control && !command { return .nativeBrowser }
+        return .ordinary
+    }
+
     public static func shouldBlock(keyCode: Int64) -> Bool {
         [
             KeyCode.q,

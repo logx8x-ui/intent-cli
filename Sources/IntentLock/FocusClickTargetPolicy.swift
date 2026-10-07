@@ -61,8 +61,12 @@ public enum FocusClickTargetPolicy {
         ownerBundleIdentifier: String?,
         representedBundleIdentifier: String?,
         controlledBundleIdentifiers: Set<String>,
-        accessMode: IntentionAccessMode
+        accessMode: IntentionAccessMode,
+        isSpaceNavigation: Bool = false
     ) -> Bool {
+        // A desktop is a container, not an app permission. Its blocked windows
+        // are owned by visibility enforcement even when its AX label names them.
+        if isSpaceNavigation && missionControlOwners.contains(ownerBundleIdentifier ?? "") { return true }
         if let representedBundleIdentifier {
             return isPermitted(
                 representedBundleIdentifier,
@@ -71,11 +75,19 @@ public enum FocusClickTargetPolicy {
             )
         }
         guard let ownerBundleIdentifier else { return true }
-        if ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier) { return true }
+        if missionControlOwners.contains(ownerBundleIdentifier) { return true }
         return isPermitted(ownerBundleIdentifier,
                            controlledBundleIdentifiers: controlledBundleIdentifiers,
                            accessMode: accessMode)
     }
+
+    public static func isMissionControlSpaceNavigation(ownerBundleIdentifier: String?,
+                                                       ancestorIdentifiers: [String]) -> Bool {
+        guard missionControlOwners.contains(ownerBundleIdentifier ?? "") else { return false }
+        return ancestorIdentifiers.contains { $0 == "mc.spaces" || $0.hasPrefix("mc.spaces.") }
+    }
+
+    private static let missionControlOwners: Set<String> = ["com.apple.dock", "com.apple.WindowManager"]
 
     public static func shouldAllowAuxiliaryApplication(
         bundleIdentifier: String?,
