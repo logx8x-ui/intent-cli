@@ -20,9 +20,9 @@ Adjacent behavior to protect: exact current window/tab at DBT Run and Finish; de
 | --- | --- | --- |
 | Apple Mission Control clicks | Dock AX has `mc.spaces` / `mc.spaces.list`; app labels were mistaken for blocked-window destinations; empty-desktop enforcement could refocus | Source fix, CoreSpec and full affected gate pass; active-session click acceptance pending |
 | Native Control–Tab | Source routed it to `AllowedBrowserTabSwitcher` during enforcement | Custom chooser routing removed; native event pass-through and protected Command–Tab regressions pass; installed Firefox Control–Tab and Control–Shift–Tab checks pass through CUA input |
-| Preset preparation | User reports reselect errors; repeated website opens also reported in other chat | Implemented and isolated regressions pass; final installed legacy-preset test exposed false closure detection, tracked below |
-| Actual-browser T view | Previous implementation was separate ephemeral WebKit/DDG | Native profile presentation/navigation verified; companion Add/Cancel still requires direct input acceptance |
-| Website controls | User reports Instagram Messages only fails; YouTube not personally tested | Implemented and extension regressions pass; final profile feature-by-feature live checks remain |
+| Preset preparation | User reports reselect errors; repeated website opens also reported in other chat | Installed .37 Firefox tests pass: stage missing pages, reopen once, reuse both, replace only one missing page, and finish after actual selected-tab closure |
+| Actual-browser T view | Previous implementation was separate ephemeral WebKit/DDG | Installed Chrome Add/Cancel and Firefox Add pass through the native profile; Firefox Cancel still pending |
+| Website controls | User reports Instagram Messages only fails; YouTube not personally tested | Live .37 exposed blocked YouTube Search shell; .38 source fix and full automated gate pass, matching installation and feature matrix remain pending |
 
 Physical-key, rendered browser, exact-profile and delayed-focus acceptance are distinct from passing unit tests. Carry forward outstanding permanent Firefox distribution and earlier unverified physical checks honestly; this document is not a claim of global release readiness.
 
@@ -237,3 +237,73 @@ Installed checkpoint before website controls:
   No successful exact-window Finish claim is made at this checkpoint. CUA's
   Dock binding also timed out while checking Apple Mission Control; physical
   desktop-thumbnail selection remains pending.
+
+### Further .37 installed acceptance
+
+- The physical Finish question above was superseded before ending the test via
+  Settings > File > Finish Intention. No user response or physical shortcut
+  pass was received. Finishing from Settings is not Firefox foreground-at-Finish
+  acceptance. The two selected example tabs stayed active for about 15 minutes
+  without the old false-closure stop.
+- Rerunning saved test slot 5 reused Firefox tabs 12 and 13 in browser window
+  17 without duplicate creation. Session `C34A634F-AC8B-427D-8979-FF8DF1B4ED13`
+  stayed active; direct CUA clicks on its Sidebery tabs worked in both directions.
+  Normal File > Finish cleared rules.
+- With the session inactive, closed only owned example.org tab 13. Next Run
+  reused example.com tab 12 and created exactly one replacement example.org tab
+  17, in window 17. Session `7DE32443-69D1-4097-8AF6-0BAD79E84A0D` remained active.
+  Deliberately closing those two owned tabs then produced a real selected-tab
+  closure and cleared the active rules. User tabs were retained.
+- Firefox's T finder opened the actual daily profile with native address bar,
+  search engine and bookmarks. Adding its owned Instagram tab 22 succeeded
+  alongside owned YouTube tab 21; site defaults were visible in Intent's picker.
+  Firefox Cancel is still unverified. Chrome Add/Cancel acceptance above remains
+  the evidence for that browser.
+- Website-control session `628B9E10-CD6C-48E3-B088-4BB20250ABFC` selected YouTube
+  Search only and Instagram Messages only. YouTube root showed a full-page
+  policy block and hid Search. The Mac locked before Instagram acceptance;
+  do not infer a Messages-only live pass from policy selection or acknowledgments.
+  A later passive read confirmed browser rules inactive.
+- Source-only publication of .37 is verified at `ad719d0f78b4156c9feabe43a49b8a2003fd9d2e`
+  on `codex/overview-finder-fixes`, equivalent to primary `a8c4407` for scoped
+  sources/scripts/packages/docs. Two pushes hit server errors before a normal
+  retry succeeded; the remote ref was then verified. No release/feed change.
+
+## YouTube Search-shell follow-up, Browser Guard .38
+
+Reproduction: start an intention with a selected `https://www.youtube.com/`
+tab, Search enabled, Home feed disabled. The installed .37 guard blocked the
+entire root document, including the native search header. Expected: Search
+works while Home recommendations stay hidden.
+
+Cause: shared route policy assigned the root solely to Feed. Both browser copies
+now allow the YouTube root for Search OR Feed; Instagram is unchanged. Existing
+CSS independently hides the Home browse surface. Feed descendants, Shorts and
+unknown routes keep their prior restrictions. Outer URL and selected-tab bans
+remain authoritative; the fix does not add an allow rule overriding them.
+
+Regression coverage includes both browser policy/DNR decisions and actual
+content-script harness execution: no root block/notice with Search, intact
+header DOM, injected feed-hiding CSS, search-results/manual-video routes,
+denied descendants, and disabling/re-enabling Search. An in-memory negative
+control restoring the old root rule fails the new fixture. These harnesses do
+not execute YouTube's live CSS layout or native search form; rendered acceptance
+remains necessary.
+
+- Full source-stable affected gate against `a8c4407` passed on
+  2026-10-07 17:34:21 UTC: gate, session, Swift, extensions, host, release, AI,
+  lint. Fingerprint:
+  `7052c99eeb4c6c9e64523d9c04f49332f517c637bb761ef083ecd917f1beda77`.
+- Durable evidence: `~/.codex/artifacts/intent-20261008/youtube-search-gate.log`
+  and `youtube-search-change-gate/`. Builds used two Swift workers, serially.
+- Matching .38 Firefox and Chrome source ZIPs were built. Both manifests and
+  bundled native-host version are .38; permissions are unchanged.
+- Mac remained locked when CUA was retried. No lock-screen bypass attempted.
+  .38 is not installed or signed at this checkpoint; the installed app/helper
+  and signed daily Firefox remain the .37 identities above. Before installing,
+  reconfirm there is no active personal session.
+- Next live checks: fresh YouTube root with native Search usable/Home tiles
+  absent, results and deliberate video playback, denied Shorts/Feed, Instagram
+  Messages only and remaining feature toggles in both browsers. Apple desktop
+  clicks, exact foreground Finish and protected physical shortcuts remain
+  separate outstanding checks. No global bug-free or tester-ready claim.

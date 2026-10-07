@@ -203,7 +203,7 @@ struct HostResponse: Codable {
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
-    var bundledExtensionVersion: String = "0.2.37"
+    var bundledExtensionVersion: String = "0.2.38"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1", "background-tab-create-host-v1", "native-website-finder-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?

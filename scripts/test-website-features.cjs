@@ -18,8 +18,11 @@ const cases = [
   ["https://www.youtube.com/results?search_query=calculus", true],
   ["https://www.youtube.com/@course/videos", true],
   ["https://www.youtube.com/shorts/abc", false],
-  ["https://www.youtube.com/", false],
+  ["https://www.youtube.com/", true],
+  ["https://www.youtube.com/?app=desktop", true],
+  ["https://www.youtube.com/#search", true],
   ["https://www.youtube.com/feed/subscriptions", false],
+  ["https://www.youtube.com/unknown", false],
   ["https://www.youtube.com/resultsevil", false],
   ["https://youtube.com.evil.test/shorts/x", true]
 ];
@@ -42,16 +45,28 @@ for (const [url, allowed] of cases.filter(([url]) => !url.includes("evil"))) {
 }
 const tabBlock = {priority:1000,action:{type:"block"},condition:{excludedTabIds:[42],regexFilter:"^https?://"}};
 assert.equal(verdict("https://www.youtube.com/watch?v=a", 99, [tabBlock]), "block", "Feature allowance cannot override unselected-tab block");
+assert.equal(verdict("https://www.youtube.com/", 99, [tabBlock]), "block", "Search shell cannot override an unselected-tab block");
+assert.equal(verdict("https://www.youtube.com/", 42, [{priority:1,action:{type:"block"},condition:{regexFilter:"^https://www\\.youtube\\.com/"}}]),
+  "block", "Search shell remains unavailable when an outer URL policy blocks YouTube");
 assert.equal(new Set(rules.map(r=>r.id)).size, rules.length);
 assert.ok(engine.networkRules(policies, null).every(r => r.action.type === "block"), "URL-scoped sessions can only narrow existing permissions");
 assert.deepEqual(engine.networkRules(policies, []), []);
 const css = engine.css("youtube", policies.youtube);
 for (const selector of ["#comments", "#related", "/shorts/", "autonav"]) assert.ok(css.includes(selector), selector);
+assert.ok(css.includes('ytd-browse[page-subtype="home"]'), "Search-only shell still hides the Home feed");
+assert.ok(!/(?:ytd-masthead|ytd-searchbox|html|body)\s*[,\{]/.test(css), "Feed hiding must not hide the native search/header shell");
+for (const allowedFeatures of [[],["search"],["feed"],["search","feed"],["comments"]]) {
+  const p={youtube:{version:1,allowedFeatures}};
+  assert.equal(engine.permits("https://www.youtube.com/",p),allowedFeatures.includes("search")||allowedFeatures.includes("feed"),
+    "Root shell is available exactly when Search or Feed is enabled");
+  assert.equal(engine.permits("https://www.youtube.com/feed/subscriptions",p),allowedFeatures.includes("feed"),
+    "Allowing root Search never enables Feed routes");
+}
 const all = {version:1,allowedFeatures:["search","feed","shorts","recommendations","comments","autoplay"]};
 assert.equal(engine.css("youtube", all), "", "Checking all optional features restores the original page");
 const matrix = {
   instagram: {features:["messages","feed","reels","stories","explore"], paths:["/","/direct","/direct?x=1","/direct/#hash","/direct/t/123/","/directevil/","/reel/id","/reels","/stories/user/","/explore/","/someone/","/p/post/","/p","/accounts/login","/accounts/login?next=x","/accounts/password/reset","/accounts/other","/challenge","/two_factor/","/%64irect/t/1","/%72eels/","/direct%2ft/1","/DIRECT/T/1","/%","/%0","/%zz"]},
-  youtube: {features:["search","feed","shorts","recommendations","comments","autoplay"], paths:["/","/watch?v=test","/embed/id","/live/id","/results?search_query=a","/resultsevil","/@course/videos","/@","/@/videos","/channel/1","/user/name","/playlist?list=x","/shorts?x=1","/shorts/id","/feed/subscriptions","/feed","/account","/oops","/unknown","/%73horts/id","/%77atch?v=x","/watch?bad=%zz"]}
+  youtube: {features:["search","feed","shorts","recommendations","comments","autoplay"], paths:["/","/?app=desktop","/#search","/watch?v=test","/embed/id","/live/id","/results?search_query=a","/resultsevil","/@course/videos","/@","/@/videos","/channel/1","/user/name","/playlist?list=x","/shorts?x=1","/shorts/id","/feed/subscriptions","/feed","/account","/oops","/unknown","/%73horts/id","/%77atch?v=x","/watch?bad=%zz"]}
 };
 for(const [site,{features,paths}] of Object.entries(matrix)) {
   for(let mask=site === "instagram" ? 1 : 0; mask < 2**features.length;mask++) {

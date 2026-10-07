@@ -91,6 +91,32 @@ const yt={active:true,startupSessionID:'yt-session',websiteFeaturePolicies:{yout
 async function flush() {for(let i=0;i<8;i++) await Promise.resolve();}
 (async()=>{
 for(const browser of ['firefox','chrome']) {
+  {
+    const h=harness(browser,'https://www.youtube.com/');
+    const masthead=h.add('ytd-masthead'), search=h.document.createElement('input');masthead.appendChild(search);
+    const feed=h.add('ytd-browse');feed.setAttribute('page-subtype','home');
+    h.update(yt);
+    assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false,
+      'Search-only YouTube root must not receive the full-page block that hides native Search');
+    assert.equal(h.nodes.some(n=>n.id==='intent-site-feature-notice'&&n.isConnected),false);
+    assert.equal(search.isConnected,true,'The native header/search DOM remains intact');
+    const css=h.nodes.find(n=>n.id==='intent-site-feature-style').textContent;
+    assert.ok(css.includes('ytd-browse[page-subtype="home"]'),'Home feed stays hidden independently of root access');
+    const result=h.add('a',{href:'https://www.youtube.com/results?search_query=calculus'});
+    assert.equal(h.event('click',result).prevented,undefined,'Native search may open the allowed results route');
+    h.route(result.href);assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false);
+    h.route('https://www.youtube.com/watch?v=lesson');assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false);
+    for(const url of ['https://www.youtube.com/feed/subscriptions','https://www.youtube.com/shorts/blocked','https://www.youtube.com/unknown']) {
+      h.route(url);assert.equal(h.document.documentElement.getAttribute('data-intent-site-blocked'),'true','Other disabled routes remain blocked');
+    }
+    h.route('https://www.youtube.com/');
+    h.update({...yt,websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:[]}}});
+    assert.equal(h.document.documentElement.getAttribute('data-intent-site-blocked'),'true','Root remains blocked without Search or Feed');
+    h.update(yt);
+    assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false,'Enabling Search clears a previous root block');
+    assert.equal(h.nodes.some(n=>n.id==='intent-site-feature-notice'&&n.isConnected),false);
+  }
+
   for (const firstPolicy of ['initial','update']) {
     for (const allowed of [false,true]) {
       let resolveHandoff;

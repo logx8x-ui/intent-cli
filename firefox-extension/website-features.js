@@ -51,7 +51,10 @@
       current.children.set("/", node(allowed));
     };
     const prefix = (path, allowed) => Object.assign(at(path), node(allowed));
-    root.exact = has("feed");
+    // YouTube's root also contains its native search/header shell. Search may
+    // use that shell while CSS independently removes the disabled Home feed.
+    // Descendant feed routes retain their separate Feed-only policy.
+    root.exact = has("feed") || site === "youtube" && has("search");
     if (site === "instagram") {
       for (const auth of ["login","logout","onetap","password","edit"]) route("accounts/" + auth, true);
       for (const auth of ["challenge","two_factor"]) route(auth, true);
