@@ -85,6 +85,16 @@
     }
     for (const element of targets) element.setAttribute("data-intent-feature-hidden", name);
   }
+  // Observed native Home uses MAIN > ... > UL > LI > DIV[role=button]
+  // for Stories, without an href. Restrict the English label fallback to that
+  // structural context; never classify an arbitrary image or profile avatar.
+  function instagramControlFeature(target) {
+    const story = target?.closest?.('[role="button"][aria-label^="Story by "]');
+    if (story?.closest("main") && story.closest("ul")) return "stories";
+    const button = target?.closest?.('[role="button"],button');
+    if (button?.querySelector?.('svg[aria-label="Messages"]')) return "messages";
+    return null;
+  }
   function instagramSurfaces(p) {
     const surfaces = engine.instagramSurfaces(p);
     const home = new URL(location.href).pathname === "/";
@@ -99,6 +109,11 @@
         } catch (_) { return false; }
       })) : [];
     markInstagramSurface("feed", posts, !surfaces.feed);
+    const buttons = [...document.querySelectorAll('[role="button"],button')];
+    markInstagramSurface("stories", home ? buttons.filter(button =>
+      instagramControlFeature(button) === "stories").map(button => button.closest("li") || button) : [], !surfaces.stories);
+    markInstagramSurface("messages", buttons.filter(button =>
+      instagramControlFeature(button) === "messages"), !surfaces.messages);
   }
   function render() {
     const p = policy();
@@ -200,6 +215,10 @@
   for (const name of ["click","auxclick"]) document.addEventListener(name, event => {
     if (!policy()) return;
     if (event.isTrusted) interactionVersion++;
+    const feature = site === "instagram" ? instagramControlFeature(event.target) : null;
+    if (feature && !policy().allowedFeatures?.includes(feature)) {
+      event.preventDefault(); event.stopImmediatePropagation(); return;
+    }
     const link = event.target?.closest?.("a[href]");
     if (link && !engine.permits(link.href, rules.websiteFeaturePolicies)) {
       event.preventDefault(); event.stopImmediatePropagation(); return;

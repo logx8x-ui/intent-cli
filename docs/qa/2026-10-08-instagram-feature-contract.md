@@ -2,6 +2,12 @@
 
 ## Status and scope
 
+**October 9 follow-up:** normal Home and the native Story / floating Messages
+controls have now been observed after an authorized Unscroll pause. See
+[the native-control follow-up](2026-10-09-instagram-native-controls.md) for the
+fix and exact installed verification. The historical limitations below describe
+the October 8 inspection, not the later result.
+
 This documents the current source implementation and focused automated evidence in the primary Documents checkout. It is **not installed-build or live-browser acceptance** of all combinations. The normal authenticated Story tray still needs live DOM evidence; no guessed production selector has been added for it. Fresh live evidence confirms that the current native Search anchor targets `/explore/`, already covered by the route policy. Root owns the full gate, versions, installation, signing and live QA.
 
 The five independently stored controls are Messages (`M`), Feed (`F`), Reels (`R`), Stories (`S`) and Explore & profiles (`E`). A checked control grants that area only after the outer intention permits the tab and URL. Old saved intentions without an Instagram policy keep their previous behavior. New Instagram policies default to Messages only.

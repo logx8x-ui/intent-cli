@@ -24,7 +24,9 @@ function harness(browserName, url, hasRoot = true, transport = null, readyState 
       return Promise.resolve();
     }
     closest(selector) {
-      if(['main','article'].includes(selector)) return this.tagName===selector ? this : this.parentNode?.closest(selector);
+      if(['main','article','ul','li'].includes(selector)) return this.tagName===selector ? this : this.parentNode?.closest(selector);
+      if(selector==='[role="button"][aria-label^="Story by "]') return this.getAttribute('role')==='button' && this.getAttribute('aria-label')?.startsWith('Story by ') ? this : this.parentNode?.closest(selector);
+      if(selector==='[role="button"],button') return this.tagName==='button' || this.getAttribute('role')==='button' ? this : this.parentNode?.closest(selector);
       if(selector==='a[href]') return this.tagName==='a' ? this : this.parentNode?.closest(selector);
       if(selector.includes('navigation')) return this.navigation ? this : null;
       if(selector.includes('contenteditable')) return ['input','textarea','select'].includes(this.tagName) || this.isContentEditable || this.editable ? this : this.parentNode?.closest(selector);
@@ -32,7 +34,10 @@ function harness(browserName, url, hasRoot = true, transport = null, readyState 
       if(selector.includes('video') && (this.player || selector.includes('html5-video-player') && this.playerContainer)) return this;
       return this.parentNode?.closest(selector) || null;
     }
-    querySelector() { return this.icon ? this : null; }
+    querySelector(selector) {
+      if(selector==='svg[aria-label="Messages"]') return this.querySelectorAll('*').find(n=>n.tagName==='svg' && n.getAttribute('aria-label')==='Messages') || null;
+      return this.icon ? this : null;
+    }
     querySelectorAll(selector) {
       const descendants = this.children.flatMap(child=>[child,...child.querySelectorAll('*')]);
       return selector==='*' ? descendants : selector==='a[href]' ? descendants.filter(n=>n.tagName==='a' && (n.href || n.hasAttribute('href'))) : [];
@@ -46,6 +51,7 @@ function harness(browserName, url, hasRoot = true, transport = null, readyState 
       return nodes.filter(n=>n.isConnected && (
         selector==='[data-intent-feature-hidden]' ? n.hasAttribute('data-intent-feature-hidden') :
         /^\[data-intent-feature-hidden="[a-z]+"\]$/.test(selector) ? n.getAttribute('data-intent-feature-hidden')===selector.split('"')[1] :
+        selector==='[role="button"],button' ? n.tagName==='button' || n.getAttribute('role')==='button' :
         selector==='main article' ? n.tagName==='article' && n.closest('main') :
         selector==='video,audio' ? ['video','audio'].includes(n.tagName) :
         selector.startsWith('[role="tab"]') ? n.getAttribute('role')==='tab' || n.getAttribute('data-intent-feature-hidden')==='shorts' :
@@ -102,12 +108,24 @@ for(const browser of ['firefox','chrome']) {
     const features=['messages','feed','reels','stories','explore'];
     const h=harness(browser,'https://www.instagram.com/'),main=h.add('main'),post=h.document.createElement('article');main.appendChild(post);
     const permalink=h.document.createElement('a');permalink.href='https://www.instagram.com/p/example/';post.appendChild(permalink);
+    const tray=h.document.createElement('ul'),item=h.document.createElement('li'),story=h.document.createElement('div'),avatar=h.document.createElement('img');
+    main.appendChild(tray);tray.appendChild(item);item.appendChild(story);story.appendChild(avatar);
+    story.setAttribute('role','button');story.setAttribute('aria-label','Story by example, not seen');
+    const messages=h.add('div'),messageIcon=h.document.createElement('svg');
+    messages.setAttribute('role','button');messageIcon.setAttribute('aria-label','Messages');messages.appendChild(messageIcon);
+    const unrelated=h.add('div');unrelated.setAttribute('role','button');unrelated.setAttribute('aria-label','Story by example, not seen');
     for(let mask=0;mask<32;mask++) {
       const flags=Object.fromEntries(features.map((f,i)=>[f,Boolean(mask&(1<<i))]));
       const policy={...ig,websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:features.filter(f=>flags[f])}}};
       h.route('https://www.instagram.com/');h.update(policy);
       assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),!(flags.feed||flags.stories),`Instagram ${mask}: shared Home shell`);
       assert.equal(post.getAttribute('data-intent-feature-hidden')==='feed',!flags.feed,`Instagram ${mask}: post feed is an independent surface`);
+      assert.equal(item.getAttribute('data-intent-feature-hidden')==='stories',!flags.stories,`Instagram ${mask}: native Story button hidden independently`);
+      assert.equal(messages.getAttribute('data-intent-feature-hidden')==='messages',!flags.messages,`Instagram ${mask}: floating Messages launcher hidden independently`);
+      assert.equal(Boolean(h.event('click',avatar).prevented),!flags.stories,`Instagram ${mask}: nested Story control click`);
+      assert.equal(Boolean(h.event('click',messageIcon).prevented),!flags.messages,`Instagram ${mask}: floating Messages nested icon click`);
+      assert.equal(unrelated.hasAttribute('data-intent-feature-hidden'),false,'Labels outside the observed tray do not hide unrelated controls');
+
       for(const [path,allowed] of [['/direct/inbox/',flags.messages],['/stories/friend/123/',flags.stories],['/reels/',flags.reels],['/someone/',flags.explore],['/someone/reels/',flags.explore&&flags.reels]]) {
         const link=h.add('a',{href:'https://www.instagram.com'+path});
         assert.equal(Boolean(h.event('click',link).prevented),!allowed,`Instagram ${mask}: disabled feature cannot be opened from a link`);
@@ -117,7 +135,14 @@ for(const browser of ['firefox','chrome']) {
         link.remove();
       }
     }
+    h.route('https://www.instagram.com/'); h.update(ig);
+    const late=h.document.createElement('div'),lateItem=h.document.createElement('li');late.setAttribute('role','button');late.setAttribute('aria-label','Story by late, not seen');lateItem.appendChild(late);tray.appendChild(lateItem);
+    assert.equal(h.event('click',late).prevented,true,'New Story clicks blocked before next observer frame');
+    h.interval();assert.equal(lateItem.getAttribute('data-intent-feature-hidden'),'stories','Dynamic Story insertion hidden');
+    late.setAttribute('aria-label','Unrelated');h.interval();assert.equal(lateItem.hasAttribute('data-intent-feature-hidden'),false,'Recycled tray item loses stale marker');
+    messageIcon.setAttribute('aria-label','Different');h.interval();assert.equal(messages.hasAttribute('data-intent-feature-hidden'),false,'Recycled launcher loses stale marker');
     h.update({active:false});
+    assert.equal(item.hasAttribute('data-intent-feature-hidden'),false,'Finish restores the native Story buttons');
     assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false,'Finish restores an all-off policy too');
   }
 
