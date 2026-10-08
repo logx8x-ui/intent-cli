@@ -39,9 +39,11 @@ Protect Logan's physically confirmed Caps Lock + backtick Run and backtick-numbe
 toggles (baseline `f969241`, October 5, 2026) when touching selection or input.
 DBT Run preserves the tab/native window where Run is invoked. Every finish mode
 preserves the exact window (and browser tab) where the user finishes, not the
-session's starting window or another window of the same app. Restoring minimized
-windows must not violate that priority; deferred windows stay in the Dock until
-the user reopens them. Do not add delayed raises or forced Space correction.
+session's starting window or another window of the same app. As requested on
+October 9, restore all visibility changes owned by Intent at finish, including
+older deferred entries; do not leave those windows minimized in the Dock.
+Windows the user had already hidden or minimized stay that way. Restoration must
+preserve the current foreground window and must not force a Space change.
 
 A passing isolated gate is not physical-key, actual-outline, foreground-focus,
 installed-build or browser-profile acceptance. Install matching authorized

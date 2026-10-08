@@ -24,6 +24,7 @@ function harness(browserName, url, hasRoot = true, transport = null, readyState 
       return Promise.resolve();
     }
     closest(selector) {
+      if(['main','article'].includes(selector)) return this.tagName===selector ? this : this.parentNode?.closest(selector);
       if(selector==='a[href]') return this.tagName==='a' ? this : this.parentNode?.closest(selector);
       if(selector.includes('navigation')) return this.navigation ? this : null;
       if(selector.includes('contenteditable')) return ['input','textarea','select'].includes(this.tagName) || this.isContentEditable || this.editable ? this : this.parentNode?.closest(selector);
@@ -32,6 +33,10 @@ function harness(browserName, url, hasRoot = true, transport = null, readyState 
       return this.parentNode?.closest(selector) || null;
     }
     querySelector() { return this.icon ? this : null; }
+    querySelectorAll(selector) {
+      const descendants = this.children.flatMap(child=>[child,...child.querySelectorAll('*')]);
+      return selector==='*' ? descendants : selector==='a[href]' ? descendants.filter(n=>n.tagName==='a' && (n.href || n.hasAttribute('href'))) : [];
+    }
   }
   const document = {
     documentElement:null,body:null,readyState,
@@ -40,6 +45,8 @@ function harness(browserName, url, hasRoot = true, transport = null, readyState 
     querySelectorAll(selector) {
       return nodes.filter(n=>n.isConnected && (
         selector==='[data-intent-feature-hidden]' ? n.hasAttribute('data-intent-feature-hidden') :
+        /^\[data-intent-feature-hidden="[a-z]+"\]$/.test(selector) ? n.getAttribute('data-intent-feature-hidden')===selector.split('"')[1] :
+        selector==='main article' ? n.tagName==='article' && n.closest('main') :
         selector==='video,audio' ? ['video','audio'].includes(n.tagName) :
         selector.startsWith('[role="tab"]') ? n.getAttribute('role')==='tab' || n.getAttribute('data-intent-feature-hidden')==='shorts' :
         selector.startsWith('a[href]') ? n.tagName==='a' || n.getAttribute('data-intent-feature-hidden')==='navigation' : false));
@@ -91,6 +98,70 @@ const yt={active:true,startupSessionID:'yt-session',websiteFeaturePolicies:{yout
 async function flush() {for(let i=0;i<8;i++) await Promise.resolve();}
 (async()=>{
 for(const browser of ['firefox','chrome']) {
+  {
+    const features=['messages','feed','reels','stories','explore'];
+    const h=harness(browser,'https://www.instagram.com/'),main=h.add('main'),post=h.document.createElement('article');main.appendChild(post);
+    const permalink=h.document.createElement('a');permalink.href='https://www.instagram.com/p/example/';post.appendChild(permalink);
+    for(let mask=0;mask<32;mask++) {
+      const flags=Object.fromEntries(features.map((f,i)=>[f,Boolean(mask&(1<<i))]));
+      const policy={...ig,websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:features.filter(f=>flags[f])}}};
+      h.route('https://www.instagram.com/');h.update(policy);
+      assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),!(flags.feed||flags.stories),`Instagram ${mask}: shared Home shell`);
+      assert.equal(post.getAttribute('data-intent-feature-hidden')==='feed',!flags.feed,`Instagram ${mask}: post feed is an independent surface`);
+      for(const [path,allowed] of [['/direct/inbox/',flags.messages],['/stories/friend/123/',flags.stories],['/reels/',flags.reels],['/someone/',flags.explore],['/someone/reels/',flags.explore&&flags.reels]]) {
+        const link=h.add('a',{href:'https://www.instagram.com'+path});
+        assert.equal(Boolean(h.event('click',link).prevented),!allowed,`Instagram ${mask}: disabled feature cannot be opened from a link`);
+        h.route(link.href);
+        assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),!allowed,`Instagram ${mask}: SPA destination is checked too`);
+        assert.equal(post.hasAttribute('data-intent-feature-hidden'),false,'Home feed hiding never leaks into another native surface');
+        link.remove();
+      }
+    }
+    h.update({active:false});
+    assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false,'Finish restores an all-off policy too');
+  }
+
+  {
+    const h=harness(browser,'https://www.instagram.com/?variant=following');
+    const main=h.add('main'), wrapper=h.document.createElement('div');main.appendChild(wrapper);
+    const post=h.document.createElement('article');wrapper.appendChild(post);
+    const permalink=h.document.createElement('a');permalink.href='https://www.instagram.com/p/example/';post.appendChild(permalink);
+    // Counterexample structure: ARTICLE must not imply feed when it contains
+    // only story entries. This asserts independence, not Instagram tray markup.
+    const storyArticle=h.document.createElement('article'),storyLink=h.document.createElement('a');
+    storyLink.href='https://www.instagram.com/stories/friend/123/';storyArticle.appendChild(storyLink);wrapper.appendChild(storyArticle);
+    const nestedPost=h.document.createElement('article'),nestedPermalink=h.document.createElement('a');
+    nestedPermalink.href='https://www.instagram.com/p/nested/';nestedPost.appendChild(nestedPermalink);storyArticle.appendChild(nestedPost);
+    const unrelated=h.document.createElement('article'),externalLink=h.document.createElement('a');
+    externalLink.href='https://unrelated.example/p/example/';unrelated.appendChild(externalLink);wrapper.appendChild(unrelated);
+    const nativeHeader=h.add('header'), home=h.document.createElement('a');home.href='https://www.instagram.com/';nativeHeader.appendChild(home);
+    const stories={...ig,websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:['stories']}}};
+    h.update(stories);
+    assert.equal(h.document.documentElement.hasAttribute('data-intent-site-blocked'),false,'Stories-only retains Home rather than showing the full-page block');
+    assert.equal(post.getAttribute('data-intent-feature-hidden'),'feed','Observed Home MAIN/ARTICLE posts are hidden when Feed is disabled');
+    assert.equal(main.hasAttribute('data-intent-feature-hidden'),false,'The shared Home main shell is never blanket-hidden');
+    assert.equal(storyArticle.hasAttribute('data-intent-feature-hidden'),false,'An ARTICLE containing a Story tray is not a feed post');
+    assert.equal(storyLink.hasAttribute('data-intent-feature-hidden'),false,'Allowed Story entries remain recognizable');
+    assert.equal(nestedPost.getAttribute('data-intent-feature-hidden'),'feed','A nested post is hidden without hiding its shared Story-tray parent');
+    assert.equal(unrelated.hasAttribute('data-intent-feature-hidden'),false,'An unrelated external /p/ link is not evidence of an Instagram post');
+    assert.equal(home.hasAttribute('data-intent-feature-hidden'),false,'Home stays available as the entry to Stories');
+    const late=h.document.createElement('article');wrapper.appendChild(late);h.interval();
+    assert.equal(late.hasAttribute('data-intent-feature-hidden'),false,'A new arbitrary ARTICLE is not prematurely treated as a post');
+    const latePermalink=h.document.createElement('a');latePermalink.href='https://www.instagram.com/reel/example/';late.appendChild(latePermalink);h.interval();
+    assert.equal(late.getAttribute('data-intent-feature-hidden'),'feed','A dynamically inserted canonical feed permalink identifies its post');
+    latePermalink.remove();h.interval();
+    assert.equal(late.hasAttribute('data-intent-feature-hidden'),false,'A recycled non-post ARTICLE loses its stale Feed marker');
+    h.update({...ig,websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:['feed','stories']}}});
+    assert.equal(post.hasAttribute('data-intent-feature-hidden'),false,'Enabling Feed restores existing posts without reloading');
+    h.update(stories);
+    h.route('https://www.instagram.com/stories/friend/123/');
+    assert.equal(post.hasAttribute('data-intent-feature-hidden'),false,'A reused ARTICLE on a story route is not mistaken for Home feed');
+    h.update(ig);h.route('https://www.instagram.com/direct/inbox/');
+    assert.equal(post.hasAttribute('data-intent-feature-hidden'),false,'Inbox ARTICLE semantics are not blanket-hidden');
+    h.update({active:false});
+    assert.equal(h.nodes.some(n=>n.hasAttribute('data-intent-feature-hidden')),false,'Finish removes content markers');
+  }
+
   {
     const h=harness(browser,'https://www.youtube.com/');
     const masthead=h.add('ytd-masthead'), search=h.document.createElement('input');masthead.appendChild(search);

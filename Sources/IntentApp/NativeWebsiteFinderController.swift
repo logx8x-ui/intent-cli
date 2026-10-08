@@ -11,6 +11,7 @@ final class NativeWebsiteFinderController: ObservableObject {
     @Published private(set) var controlsFocusRequest: UUID?
     private let client: BrowserFinderClient
     private var task: Task<Void, Never>?
+    private var observationTask: Task<Void, Never>?
     private var companion: NativeWebsiteFinderCompanionPresentation?
     private var committed = false
     private var finished = false
@@ -28,8 +29,10 @@ final class NativeWebsiteFinderController: ObservableObject {
             do {
                 let receipt = try await client.open(frame: frame)
                 guard !finished, !Task.isCancelled else { return }
-                opened = true; busy = false; status = "Browse in this tab, then add it to Intent."
+                opened = true; busy = false
+                status = client.supportsAutomaticSelection ? "Search here. Visiting a website adds it to your intention." : "Browse in this tab, then add it to Intent."
                 presentCompanion(frame: receipt.frame ?? frame)
+                beginObservation()
             } catch {
                 guard !finished, !Task.isCancelled else { return }
                 busy = false; status = error.localizedDescription
@@ -37,13 +40,37 @@ final class NativeWebsiteFinderController: ObservableObject {
             }
         }
     }
-    func add() {
+    private func beginObservation() {
+        guard client.supportsAutomaticSelection, !finished else { return }
+        observationTask?.cancel()
+        observationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.finished, self.opened else { return }
+                do {
+                    try await Task.sleep(nanoseconds: 400_000_000)
+                    guard !self.busy, !self.finished else { continue }
+                    if let url = try await self.client.observe() {
+                        guard !Task.isCancelled, !self.finished, !self.busy else { return }
+                        self.add(expectedURL: url)
+                        return
+                    }
+                } catch {
+                    guard !Task.isCancelled, !self.finished else { return }
+                    self.status = "Choose Add to intention when your page is ready."
+                    return
+                }
+            }
+        }
+    }
+    func add() { add(expectedURL: nil) }
+    private func add(expectedURL: String?) {
         guard opened, !busy, !finished else { return }
+        observationTask?.cancel(); observationTask = nil
         busy = true; status = "Adding this page…"
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                let tab = try await client.commit()
+                let tab = try await client.commit(expectedURL: expectedURL)
                 guard !finished, !Task.isCancelled else { return }
                 committed = true; dismiss(); onCommit(target, tab)
             } catch {
@@ -66,18 +93,21 @@ final class NativeWebsiteFinderController: ObservableObject {
     func dismiss() {
         guard !finished else { return }
         finished = true; task?.cancel(); task = nil
+        observationTask?.cancel(); observationTask = nil
         companion?.dismiss(); companion = nil
         if !committed { client.cancel() }
     }
     private func presentCompanion(frame: BrowserWindowFrame) {
-        guard !finished, companion == nil else { return }
+        guard !finished else { return }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.left + frame.width / 2, y: top - frame.top - frame.height / 2)) }) ?? NSScreen.main
         let available = screen?.visibleFrame ?? .init(x: frame.left, y: top - frame.top - frame.height, width: frame.width, height: frame.height)
         let width = min(580, available.width - 32)
         let x = min(max(available.minX + 16, frame.left + (frame.width - width) / 2), available.maxX - width - 16)
         let y = max(available.minY + 16, top - frame.top - frame.height - 90)
-        let panel = NativeWebsiteFinderPanel(contentRect: .init(x: x, y: y, width: width, height: 76),
+        let rect = NSRect(x: x, y: y, width: width, height: 76)
+        if let companion { companion.reposition(rect); return }
+        let panel = NativeWebsiteFinderPanel(contentRect: rect,
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Add website to Intent"
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hidesOnDeactivate = false
@@ -134,6 +164,11 @@ final class NativeWebsiteFinderCompanionPresentation {
                 }
             }
         panel.orderFrontRegardless()
+    }
+
+    func reposition(_ frame: NSRect) {
+        guard phase == .shown else { return }
+        panel.setFrame(frame, display: true)
     }
 
     @discardableResult

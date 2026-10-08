@@ -62,14 +62,59 @@ for (const allowedFeatures of [[],["search"],["feed"],["search","feed"],["commen
   assert.equal(engine.permits("https://www.youtube.com/feed/subscriptions",p),allowedFeatures.includes("feed"),
     "Allowing root Search never enables Feed routes");
 }
+// Independent product contract: every one of the 32 Instagram combinations,
+// including none selected, is checked against explicit feature expectations.
+// These expectations do not call the engine to compute their answer.
+const instagramFeatures=["messages","feed","reels","stories","explore"];
+const instagramRoutes=[
+  ["/",f=>f.feed||f.stories], ["/?source=home",f=>f.feed||f.stories], ["/#stories",f=>f.feed||f.stories],
+  ["/direct/inbox/",f=>f.messages], ["/direct/t/123/",f=>f.messages],
+  ["/reels/",f=>f.reels], ["/reel/example/",f=>f.reels],
+  ["/stories/friend/123/",f=>f.stories],
+  ["/explore/",f=>f.explore], ["/explore/search/",f=>f.explore], ["/someone/",f=>f.explore],
+  ["/someone/tagged/",f=>f.explore], ["/someone/reels/",f=>f.explore&&f.reels],
+  ["/s/reels/",f=>f.explore&&f.reels], ["/storiesx/reels/",f=>f.explore&&f.reels],
+  ["/stories/reels/123/",f=>f.stories], ["/direct/t/reels/",f=>f.messages], ["/p/example/",f=>f.feed||f.explore],
+  ["/accounts/login/",()=>true], ["/challenge/",()=>true]
+];
+for(let mask=0;mask<32;mask++) {
+  const flags=Object.fromEntries(instagramFeatures.map((feature,i)=>[feature,Boolean(mask&(1<<i))]));
+  const instagram={version:1,allowedFeatures:instagramFeatures.filter(feature=>flags[feature])}, policy={instagram};
+  const valid=mask!==0;
+  const expectedLanding=!valid?null:"https://www.instagram.com"+(flags.feed||flags.stories?"/":flags.messages?"/direct/inbox/":flags.reels?"/reels/":"/explore/");
+  assert.equal(engine.valid("instagram",instagram),valid,`Instagram ${mask}: empty selection stays invalid`);
+  assert.deepEqual(engine.instagramSurfaces(instagram),{home:flags.feed||flags.stories,...flags},`Instagram ${mask}: independent content surfaces`);
+  assert.equal(engine.landingDestination("instagram",policy),expectedLanding,`Instagram ${mask}: enabled landing`);
+  if(expectedLanding) assert.equal(engine.preferredDestination(expectedLanding,policy),null,`Instagram ${mask}: no landing redirect loop`);
+  const routed=engine.networkRules(policy,[42],{sources:["instagram.com"],excludedSources:[]});
+  for(const [path,expect] of instagramRoutes) {
+    const url="https://www.instagram.com"+path, allowed=valid&&expect(flags);
+    assert.equal(engine.permits(url,policy),allowed,`Instagram ${mask}: explicit route ${path}`);
+    assert.equal(engine.preferredDestination(url,policy),allowed?null:expectedLanding,`Instagram ${mask}: denied route landing ${path}`);
+    const winner=routed.filter(rule=>new RegExp(rule.condition.regexFilter,"i").test(url)).sort((a,b)=>b.priority-a.priority)[0];
+    assert.equal(winner?.action.type||"allow",allowed?"allow":valid?"redirect":"block",`Instagram ${mask}: DNR route ${path}`);
+    if(winner?.action.type==="redirect") assert.equal(winner.action.redirect.url,expectedLanding);
+  }
+}
+// Scoped redirects for profile Reels must retain raw outer URL boundaries.
+for(const source of ["instagram.com/someone","instagram.com/someone/reels","instagram.com/someone%2freels"]) {
+  const p={instagram:{version:1,allowedFeatures:["explore"]}};
+  const generated=engine.networkRules(p,[42],{sources:[source],excludedSources:[]});
+  const winner=url=>generated.filter(rule=>new RegExp(rule.condition.regexFilter,"i").test(url)).sort((a,b)=>b.priority-a.priority)[0];
+  assert.equal(winner("https://"+source+(source.endsWith("someone")?"/reels/":"/")).action.type,"redirect","Only the allowed profile source can redirect");
+  assert.equal(winner("https://www.instagram.com/another/reels/").action.type,"block","Unrelated profile is not captured by a scoped redirect");
+}
+assert.equal(engine.landingDestination("instagram",{}),null,"No policy means no new navigation behavior for old intentions");
+assert.equal(engine.preferredDestination("https://unrelated.example/",{instagram:{version:1,allowedFeatures:["stories"]}}),null);
+
 const all = {version:1,allowedFeatures:["search","feed","shorts","recommendations","comments","autoplay"]};
 assert.equal(engine.css("youtube", all), "", "Checking all optional features restores the original page");
 const matrix = {
-  instagram: {features:["messages","feed","reels","stories","explore"], paths:["/","/direct","/direct?x=1","/direct/#hash","/direct/t/123/","/directevil/","/reel/id","/reels","/stories/user/","/explore/","/someone/","/p/post/","/p","/accounts/login","/accounts/login?next=x","/accounts/password/reset","/accounts/other","/challenge","/two_factor/","/%64irect/t/1","/%72eels/","/direct%2ft/1","/DIRECT/T/1","/%","/%0","/%zz"]},
+  instagram: {features:["messages","feed","reels","stories","explore"], paths:["/","/direct","/direct?x=1","/direct/#hash","/direct/t/123/","/directevil/","/reel/id","/reels","/stories/user/","/explore/","/someone/","/someone/reels/","/s/reels/","/storiesx/reels/","/stories/reels/123/","/direct/t/reels/","/%73omeone/%72eels/","/someone%2freels/","/p/post/","/p","/accounts/login","/accounts/login?next=x","/accounts/password/reset","/accounts/other","/challenge","/two_factor/","/%64irect/t/1","/%72eels/","/direct%2ft/1","/DIRECT/T/1","/%","/%0","/%zz"]},
   youtube: {features:["search","feed","shorts","recommendations","comments","autoplay"], paths:["/","/?app=desktop","/#search","/watch?v=test","/embed/id","/live/id","/results?search_query=a","/resultsevil","/@course/videos","/@","/@/videos","/channel/1","/user/name","/playlist?list=x","/shorts?x=1","/shorts/id","/feed/subscriptions","/feed","/account","/oops","/unknown","/%73horts/id","/%77atch?v=x","/watch?bad=%zz"]}
 };
 for(const [site,{features,paths}] of Object.entries(matrix)) {
-  for(let mask=site === "instagram" ? 1 : 0; mask < 2**features.length;mask++) {
+  for(let mask=0; mask < 2**features.length;mask++) {
     const policies={[site]:{version:1,allowedFeatures:features.filter((_,i)=>mask&(1<<i))}};
     for(const scope of [null,[42]]) {
       const generated=engine.networkRules(policies,scope).map(r=>({...r,regex:new RegExp(r.condition.regexFilter,"i")}));

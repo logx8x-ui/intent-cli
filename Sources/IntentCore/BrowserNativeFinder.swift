@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 public struct BrowserFinderCommand: Codable, Equatable {
-    public enum Action: String, Codable { case open, commit, cancel }
+    public enum Action: String, Codable { case open, commit, cancel, observe }
     public var id: String = UUID().uuidString
     public var finderID: String
     public var action: Action
@@ -12,20 +12,23 @@ public struct BrowserFinderCommand: Codable, Equatable {
     public var frame: BrowserWindowFrame?
     public var finderWindowID: Int?
     public var finderTabID: Int?
+    public var expectedURL: String?
     public var expiresAtUnixMS: Double = Date().timeIntervalSince1970 * 1000 + 8000
     public init(id: String = UUID().uuidString, finderID: String, action: Action, browserSessionID: String,
                 windowID: Int, anchorTabID: Int, frame: BrowserWindowFrame? = nil,
-                finderWindowID: Int? = nil, finderTabID: Int? = nil,
+                finderWindowID: Int? = nil, finderTabID: Int? = nil, expectedURL: String? = nil,
                 expiresAtUnixMS: Double = Date().timeIntervalSince1970 * 1000 + 8000) {
         self.id = id; self.finderID = finderID; self.action = action; self.browserSessionID = browserSessionID
         self.windowID = windowID; self.anchorTabID = anchorTabID; self.frame = frame
-        self.finderWindowID = finderWindowID; self.finderTabID = finderTabID; self.expiresAtUnixMS = expiresAtUnixMS
+        self.finderWindowID = finderWindowID; self.finderTabID = finderTabID; self.expectedURL = expectedURL
+        self.expiresAtUnixMS = expiresAtUnixMS
     }
     public var isValid: Bool {
         let owned = finderWindowID.map { $0 >= 0 && $0 != windowID } == true
             && finderTabID.map { $0 >= 0 && $0 != anchorTabID } == true
         let noOwned = finderWindowID == nil && finderTabID == nil
-        guard action == .open ? noOwned : (action == .commit ? owned : (owned || noOwned)) else { return false }
+        guard action == .open ? noOwned : ([.commit, .observe].contains(action) ? owned : (owned || noOwned)) else { return false }
+        if let expectedURL, action != .commit || WebsiteFinderPolicy.validatedURL(expectedURL) == nil { return false }
         return UUID(uuidString: id) != nil && UUID(uuidString: finderID) != nil && !browserSessionID.isEmpty
             && browserSessionID.utf8.count <= 1024 && windowID >= 0 && anchorTabID >= 0
             && expiresAtUnixMS.isFinite
@@ -43,6 +46,7 @@ public struct BrowserFinderReceipt: Codable, Equatable {
     public var tabID: Int?
     public var frame: BrowserWindowFrame?
     public var tab: BrowserTabItem?
+    public var readyURL: String?
     public var error: String?
     public func matches(_ command: BrowserFinderCommand) -> Bool {
         guard command.isValid, requestID == command.id, finderID == command.finderID, action == command.action,
@@ -55,10 +59,15 @@ public struct BrowserFinderReceipt: Codable, Equatable {
             return windowID >= 0 && windowID != originalWindowID && tabID >= 0 && tabID != anchorTabID
                 && [frame.left, frame.top, frame.width, frame.height].allSatisfy(\.isFinite)
                 && frame.width > 0 && frame.height > 0 && tab == nil
+                && command.frame.map { abs(frame.width - $0.width) <= 64 && abs(frame.height - $0.height) <= 64 } == true
         case .commit:
             guard let tab else { return false }
             return windowID == originalWindowID && tab.windowID == originalWindowID && tabID == tab.id
                 && tab.id == command.finderTabID && tab.id >= 0 && tab.id != anchorTabID && WebsiteFinderPolicy.validatedURL(tab.url) != nil
+                && (command.expectedURL == nil || tab.url == command.expectedURL)
+        case .observe:
+            return windowID == command.finderWindowID && tabID == command.finderTabID && tab == nil
+                && (readyURL == nil || readyURL.flatMap(WebsiteFinderPolicy.validatedURL) != nil)
         case .cancel: return tab == nil
         }
     }
@@ -162,6 +171,7 @@ public final class BrowserFinderClient {
     private var ownedWindowID: Int?
     private var ownedTabID: Int?
     private var cancellationTask: Task<Void, Never>?
+    public let supportsAutomaticSelection: Bool
     public init(target: WebsiteFinderTarget) throws {
         self.target = target
         guard target.isValid else { throw BrowserTabCreationError.changed }
@@ -182,6 +192,7 @@ public final class BrowserFinderClient {
             throw BrowserTabCreationError.rejected("Update Browser Guard to use your real browser for website search.")
         }
         ownerSession = session; anchorID = anchor.id; windowID = anchor.windowID
+        supportsAutomaticSelection = owner.guardCapabilities?.contains("native-website-finder-observe-v1") == true
         mailbox = BrowserFinderMailbox(browser: target.browserBundleIdentifier, session: session)
     }
     public func open(frame: BrowserWindowFrame) async throws -> BrowserFinderReceipt {
@@ -191,8 +202,8 @@ public final class BrowserFinderClient {
         ownedWindowID = receipt.windowID; ownedTabID = receipt.tabID
         return receipt
     }
-    public func commit() async throws -> BrowserTabItem {
-        let receipt = try await request(.commit)
+    public func commit(expectedURL: String? = nil) async throws -> BrowserTabItem {
+        let receipt = try await request(.commit, expectedURL: expectedURL)
         guard var tab = receipt.tab else { throw BrowserTabCreationError.uncertain }
         let profiles = try currentProfiles()
         if profiles.count > 1 {
@@ -200,6 +211,12 @@ public final class BrowserFinderClient {
             tab.windowID = BrowserProfileSnapshots.compositeID(session: ownerSession, id: tab.windowID)
         }
         return tab
+    }
+    /// Polls only the exact owned tab through its authenticated mailbox. Browser
+    /// snapshots/profile enumeration are unnecessary while the user is typing.
+    public func observe() async throws -> String? {
+        guard supportsAutomaticSelection else { return nil }
+        return try await request(.observe, validateProfiles: false).readyURL
     }
     public func cancel() {
         guard opened, cancellationTask == nil else { return }
@@ -223,19 +240,22 @@ public final class BrowserFinderClient {
         // this heartbeat-backed identity read is not proof of a closed window.
         return profiles
     }
-    private func request(_ action: BrowserFinderCommand.Action, frame: BrowserWindowFrame? = nil) async throws -> BrowserFinderReceipt {
-        try Self.assertInactive(); _ = try currentProfiles()
+    private func request(_ action: BrowserFinderCommand.Action, frame: BrowserWindowFrame? = nil,
+                         expectedURL: String? = nil, validateProfiles: Bool = true) async throws -> BrowserFinderReceipt {
+        try Self.assertInactive()
+        if validateProfiles { _ = try currentProfiles() }
         let command = BrowserFinderCommand(finderID: finderID, action: action, browserSessionID: ownerSession,
             windowID: windowID, anchorTabID: anchorID, frame: frame,
-            finderWindowID: ownedWindowID, finderTabID: ownedTabID)
+            finderWindowID: ownedWindowID, finderTabID: ownedTabID, expectedURL: expectedURL)
         let url = BrowserFinderReceipt.fileURL(requestID: command.id)!
         defer { try? FileManager.default.removeItem(at: url) }
         try await mailbox.writePending(command)
         for _ in 0..<100 {
             guard !Task.isCancelled else { throw BrowserTabCreationError.cancelled }
-            try Self.assertInactive(); _ = try currentProfiles()
+            try Self.assertInactive()
             if let data = try? Data(contentsOf: url), let receipt = try? JSONDecoder().decode(BrowserFinderReceipt.self, from: data), receipt.matches(command) {
                 if let error = receipt.error { throw BrowserTabCreationError.rejected(error) }
+                if validateProfiles { _ = try currentProfiles() }
                 return receipt
             }
             try await Task.sleep(nanoseconds: 100_000_000)

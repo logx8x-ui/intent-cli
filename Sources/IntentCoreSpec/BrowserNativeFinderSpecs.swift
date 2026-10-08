@@ -41,6 +41,19 @@ func runBrowserNativeFinderSpecs() throws {
     try expect(!changed.matches(commit), "Credential-bearing URL cannot be staged")
     let cancelled = try receipt(cancel, extra: [:])
     try expect(cancelled.matches(cancel), "Cancellation receipt is correlated without a captured website")
+    var automatic = commit
+    automatic.expectedURL = "https://example.test/path"
+    try expect(added.matches(automatic), "Automatic capture commits only the page that was observed")
+    automatic.expectedURL = "https://different.test/"
+    try expect(!added.matches(automatic), "A navigation race cannot acknowledge the wrong automatic selection")
+    let observe = BrowserFinderCommand(finderID: finder, action: .observe, browserSessionID: "profile-a", windowID: 4,
+        anchorTabID: 7, finderWindowID: 10, finderTabID: 20)
+    let ready = try receipt(observe, extra: ["windowID": 10, "tabID": 20, "readyURL": "https://example.test/path"])
+    try expect(observe.isValid && ready.matches(observe), "Observation is bound to the exact owned tab/window/profile")
+    var wrongReady = ready; wrongReady.tabID = 21
+    try expect(!wrongReady.matches(observe), "An unrelated tab cannot satisfy automatic observation")
+    var oversized = opened; oversized.frame?.width = 1600
+    try expect(!oversized.matches(open), "Full-size creation cannot masquerade as the requested compact finder")
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("intent-finder-spec-\(UUID())", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let mailbox = BrowserFinderMailbox(browser: "com.google.Chrome", session: "profile-a", directory: directory)

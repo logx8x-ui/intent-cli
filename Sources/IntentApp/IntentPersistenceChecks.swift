@@ -19,6 +19,7 @@ enum IntentPersistenceChecks {
             try QuickSelectionInteractionChecks.run(check)
             try NativeWebsiteFinderCompanionChecks.run(check)
             try TabSiteIconChecks.run(check)
+            try OverviewLayoutChecks.run(check)
             let model = IntentAppModel()
             let presentation = SessionDismissalProbe()
             model.overlayPresenter = presentation

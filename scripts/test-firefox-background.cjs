@@ -1347,5 +1347,35 @@ async function websiteRegression() {
     assert.equal(outcome.routed,false,"Messages routing cannot widen outer "+mode+" URL rules");
     assert.equal(h.tabs.get(71).url,url);
   }
+  // Enabled Instagram areas share one fallback contract, including the home
+  // shell required by Stories-only. Routing must stay in the existing tab.
+  for(const [allowedFeatures,source,destination] of [
+    [["stories"],"https://www.instagram.com/reels/","https://www.instagram.com/"],
+    [["reels"],"https://www.instagram.com/","https://www.instagram.com/reels/"],
+    [["explore"],"https://www.instagram.com/stories/friend/","https://www.instagram.com/explore/"],
+    [["messages","stories"],"https://www.instagram.com/reels/","https://www.instagram.com/"]
+  ]) {
+    const policy={...active,websiteFeaturePolicies:{instagram:{version:1,allowedFeatures}}};
+    const h=createHarness({active:false},[{...initial[0],url:source},initial[1]],baseOptions);
+    await h.ready();await h.applyRules(policy);
+    assert.equal(h.listeners.onBeforeRequest[0]({tabId:71,url:source,type:"main_frame"}).redirectUrl,destination,
+      "Firefox's initial request and content routing choose the same enabled area");
+    h.updates.length=0;
+    const outcome=await h.routeWebsiteFeature({url:source,websitePolicyKey:engine.policyKey(policy)},{tab:{id:71},frameId:0});
+    assert.equal(outcome.routed,true,"An enabled Instagram area supplies its native landing shell");
+    assert.equal(h.tabs.get(71).url,destination);assert.equal(h.tabs.size,2);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.updates)),[{tabId:71,patch:{url:destination}}],"Fallback never opens or activates a tab/window");
+    assert.equal((await h.routeWebsiteFeature({url:destination,websitePolicyKey:engine.policyKey(policy)},{tab:{id:71},frameId:0})).routed,false,"Native landing does not loop");
+  }
+  for(const mode of ["whitelist","blacklist"]) {
+    const policy={...active,selectedTabIDs:null,accessMode:mode,
+      allowedWebsites:[mode==="whitelist"?"instagram.com/reels":"instagram.com"],
+      websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:["stories"]}}};
+    const source="https://www.instagram.com/reels/",h=createHarness({active:false},[{...initial[0],url:source}],baseOptions);
+    await h.ready();await h.applyRules(policy);
+    const result=await h.routeWebsiteFeature({url:source,websitePolicyKey:engine.policyKey(policy)},{tab:{id:71},frameId:0});
+    assert.equal(result.routed,false,"Stories fallback cannot reopen an outer-denied home shell");
+    assert.equal(h.tabs.get(71).url,source);
+  }
   console.log("firefox website background: correlated readiness, cancellation, same-tab inbox and outer restrictions passed");
 }

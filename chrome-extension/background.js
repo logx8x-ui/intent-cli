@@ -60,12 +60,13 @@ let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
 let hostSupportsTabCreation = false;
 let hostSupportsNativeFinder = false;
+let hostSupportsFinderObserve = false;
 let creationRulesActive = true;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
 let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
-  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeFinder && chrome.storage.session && typeof IntentNativeFinder !== "undefined" ? ["native-website-finder-v1"] : []), ...(hostSupportsTabCreation && chrome.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && chrome.storage.session
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeFinder && hostSupportsFinderObserve && chrome.storage.session && typeof chrome.webNavigation?.getFrame === "function" ? ["native-website-finder-observe-v1"] : []), ...(hostSupportsNativeFinder && chrome.storage.session && typeof IntentNativeFinder !== "undefined" ? ["native-website-finder-v1"] : []), ...(hostSupportsTabCreation && chrome.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && chrome.storage.session
     && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
     ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
@@ -207,6 +208,7 @@ function connectNativeHost() {
       creationRulesActive = message?.tabCreationAllowed !== true;
       hostSupportsTabCreation = message?.hostCapabilities?.includes("background-tab-create-host-v1") === true;
       hostSupportsNativeFinder = message?.hostCapabilities?.includes("native-website-finder-host-v1") === true;
+      hostSupportsFinderObserve = message?.hostCapabilities?.includes("native-website-finder-observe-host-v1") === true;
       reconnectDelayMs = RECONNECT_MS;
       if (message?.active !== true && message?.bundledExtensionVersion && message.bundledExtensionVersion !== chrome.runtime.getManifest().version) {
         const version = message.bundledExtensionVersion;
@@ -800,8 +802,9 @@ async function updateNetworkRules() {
         regexFilter: "^https?://(www\\.)?google\\.[a-z.]+/(search([?].*)?|([?].*)?)$", resourceTypes: ["main_frame"]}});
     }
     const exactWebsiteSelection = rules.accessMode !== "blacklist" && selected !== null;
-    const inboxAllowed = exactWebsiteSelection || isAllowedURL("https://www.instagram.com/direct/inbox/",rules);
-    const instagramRouting = inboxAllowed ? {
+    const instagramDestination = IntentWebsiteFeatures.landingDestination("instagram", rules.websiteFeaturePolicies);
+    const destinationAllowed = instagramDestination && (exactWebsiteSelection || isAllowedURL(instagramDestination, rules));
+    const instagramRouting = destinationAllowed ? {
       sources: exactWebsiteSelection || rules.addAsYouGo || rules.accessMode === "blacklist" ? ["instagram.com"] : rules.allowedWebsites,
       excludedSources: rules.accessMode === "blacklist" ? rules.allowedWebsites : []
     } : null;

@@ -155,8 +155,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
     }
     public static func restoreInterruptedSession() {
-        if Thread.isMainThread { _ = beginRecovery() }
-        else { DispatchQueue.main.sync { _ = beginRecovery() } }
+        if Thread.isMainThread { _ = beginRecovery(policy: .restoreOwnedWorkspace) }
+        else { DispatchQueue.main.sync { _ = beginRecovery(policy: .restoreOwnedWorkspace) } }
     }
     private func onMain(_ action: () -> Void) {
         if Thread.isMainThread { action() }
@@ -169,7 +169,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         stopRecoveryWatcher()
         let generation = recoveryGeneration
         var saved = loadEntries()
-        if policy == .onUserReveal || controllerOwnershipID != nil {
+        if policy == .onUserReveal || policy == .restoreOwnedWorkspace || controllerOwnershipID != nil {
             RestorationFocusGuard.cancel()
             for index in saved.indices {
                 saved[index].restorationPolicy = (saved[index].restorationPolicy ?? .automatic).atStop(
@@ -252,8 +252,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard mayEnforce else { return }
             guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-                  let bundle = app.bundleIdentifier, let launched = app.launchDate else { continue }
-            if !spec.permitsApplication(bundle) || initialApps.map({ !$0.contains(bundle) }) == true {
+                  let bundle = app.bundleIdentifier, let launched = app.launchDate,
+                  !FocusSystemToolPolicy.isScreenshotApplication(bundle) else { continue }
+            if spec.shouldHideApplication(bundle, initialAllowedApps: initialApps) {
                 guard !app.isHidden else { continue }
                 let entry = Entry(pid: app.processIdentifier, launched: launched, bundle: bundle, window: nil,
                     restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)

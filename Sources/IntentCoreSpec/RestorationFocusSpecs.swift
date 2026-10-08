@@ -17,6 +17,19 @@ func runRestorationFocusSpecs() throws {
     try expect(HiddenWorkspaceRestorationPolicy.onUserReveal.atStop(requested: .automatic, ownsEntry: false) == .onUserReveal
         && HiddenWorkspaceRestorationPolicy.onUserReveal.atStop(requested: .automatic, ownsEntry: true) == .automatic,
         "Safety recovery retains earlier quiet ownership but releases visibility effects acquired by the current controller")
+    for previous in [HiddenWorkspaceRestorationPolicy.automatic, .onUserReveal, .restoreOwnedWorkspace] {
+        for currentOwner in [false, true] {
+            let recovered = previous.atStop(requested: .restoreOwnedWorkspace, ownsEntry: currentOwner)
+            try expect(recovered == .automatic && recovered.action(isHidden: true) == .reveal,
+                "Finish restores both current ownership and older Intent-owned deferred visibility")
+            try expect(recovered.action(isHidden: false) == .relinquish && recovered.action(isHidden: nil) == .retain,
+                "Restoration neither touches already visible windows nor guesses unavailable state")
+            let persisted = try JSONDecoder().decode(HiddenWorkspaceRestorationPolicy.self,
+                from: JSONEncoder().encode(recovered))
+            try expect(persisted.needsRecoveryObservation(isParking: false),
+                "Failed restoration remains retryable across restart instead of becoming permanently minimized")
+        }
+    }
     let firefoxAnchor = FocusStartAnchor(nativeWindowID: 118, pid: 77, bundleIdentifier: "org.mozilla.firefox",
         browserWindowID: 8, browserTabID: 82, browserSessionID: "profile-A")
     let nativeAnchor = FocusStartAnchor(nativeWindowID: 119, pid: 78, bundleIdentifier: "com.apple.calculator")
@@ -223,8 +236,8 @@ func runRestorationFocusSpecs() throws {
     let legacySpec = FocusSessionSpec.make(for: intention)
     let appSpec = legacySpec.preservingForegroundOnStop()
     try expect(legacySpec.hiddenWorkspaceRestorationOnStop == .automatic
-        && appSpec.hiddenWorkspaceRestorationOnStop == .onUserReveal,
-        "GUI completion never automatically reveals other windows; legacy CLI recovery remains automatic")
+        && appSpec.hiddenWorkspaceRestorationOnStop == .restoreOwnedWorkspace,
+        "GUI completion restores Intent-owned visibility without reopening or returning to the start app")
     var quietSpec = appSpec
     quietSpec.hiddenWorkspaceRestorationOnStop = .onUserReveal
     try expect(quietSpec.deferringBrowserWebsiteStartupToGuard().hiddenWorkspaceRestorationOnStop == .onUserReveal,

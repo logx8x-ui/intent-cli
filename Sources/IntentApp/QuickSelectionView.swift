@@ -1850,111 +1850,90 @@ private struct QuickSelectionView: View {
             let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
-            let header = controller.topSafeInset + (model.savedSlots.isEmpty ? 58 : 156) + (onboarding.isTeaching ? 60 : 0)
-            let footer: CGFloat = controller.message == nil ? 140 : 210
-            let area = CGRect(x: 28, y: header + 12, width: max(1, geometry.size.width - 56 - tabWidth), height: max(1, geometry.size.height - header - footer - 12))
-            let notesSize = CGSize(width: 240, height: min(260, area.height * 0.45))
-            let notesFrame = FieldOfViewLayout.panel(origin: CGPoint(
-                x: area.minX + (area.width - notesSize.width) * notesX + notesDrag.width,
-                y: area.minY + (area.height - notesSize.height) * notesY + notesDrag.height), size: notesSize, in: area)
-            // The panel follows the pointer immediately; previews reflow only on
-            // release. Repacking every pointer event flips between competing
-            // layouts and creates distracting rapid movement.
-            let settledNotesFrame = FieldOfViewLayout.panel(origin: CGPoint(
-                x: area.minX + (area.width - notesSize.width) * notesX,
-                y: area.minY + (area.height - notesSize.height) * notesY), size: notesSize, in: area)
             ZStack(alignment: .topLeading) {
                 Group {
                     if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
-                AppStackOverview(items: visibleWindows.map { .init(id: $0.id, app: $0.appID, source: $0.sourceFrame, tabCount: controller.tabs(for: $0).count) },
-                                 area: area, obstacle: focused == nil ? settledNotesFrame : nil,
-                                 selected: Set(visibleWindows.filter { controller.isSelected($0) }.map(\.id)),
-                                 names: Dictionary(uniqueKeysWithValues: controller.apps.map { ($0.id, $0.app.name) }),
-                                 fronts: $controller.frontWindowByApp, expanded: $controller.expandedStack, hovered: hoveredWindow) { id, frame, captionFrame, showsCaption in
-                    Group { if let window = visibleWindows.first(where: { $0.id == id }) { windowCard(window, frame: frame, captionFrame: captionFrame, showsCaption: showsCaption) } }
-                }
-                VStack {
-                    HStack {
-                        Spacer()
-                        if showClock { TimelineView(.periodic(from: .now, by: 1)) { context in
-                            Text(context.date, style: .time).monospacedDigit().font(.system(size: 14, weight: .medium)).frame(minWidth: 80)
-                        } }
-                    }.overlay {
-                        IntentOptionalNameBar(name: $controller.selection.name).frame(width: min(520, max(180, geometry.size.width - 240)))
-                    }.padding(.horizontal, 28).frame(height: 48).padding(.top, controller.topSafeInset)
-                    if !model.savedSlots.isEmpty {
-                        IntentSavedSlotsView(controller: controller, model: model).frame(height: 94)
-                    }
-                    if onboarding.isTeaching {
-                        OnboardingSelectionHint(coordinator: controller.onboarding)
-                            .frame(height: 60).padding(.horizontal, 28)
-                    }
-                }.frame(width: geometry.size.width)
-                VStack(spacing: 8) {
-                    ModificationStrip(controller: controller).frame(maxWidth: 1050).padding(.horizontal, 28)
-                    if let message = controller.message {
-                        Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
-                            .padding(8).frame(maxWidth: geometry.size.width - 56).frame(height: 52)
-                            .background(.regularMaterial, in: Capsule()).help(message)
-                    }
-                    HStack {
-                        AppPresetStatusStrip(model: model) { controller.settingsOpen = true }
-                        Spacer(minLength: 16)
-                    }.padding(.horizontal, 28).frame(height: 26)
-                    HStack {
-                        Button("Close · Esc") { controller.cancel() }.buttonStyle(.plain)
-                        Button("Apple Spotlight · ⌘Space") { controller.openAppleSpotlight() }.buttonStyle(.plain)
-                        Button("Saved · 1–9") { controller.toggleSlots() }.buttonStyle(.plain)
-                        Spacer()
-                        Button(controller.selection.accessMode == .blacklist ? "Block selected · B" : "Allow selected · B") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
-                        Spacer()
-                        Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
-                            .disabled(!controller.hasRunnableDraft || controller.loading || controller.closing || controller.restoringSavedWorkspace || !controller.openingApps.isEmpty)
-                        Button { controller.settingsOpen.toggle() } label: {
-                            Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 32, height: 32)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }.buttonStyle(.plain).accessibilityLabel("Overview settings").help("Settings and app presets")
-                            .popover(isPresented: $controller.settingsOpen, arrowEdge: .top) {
-                                OverviewSettingsView(model: model).frame(width: 380).padding(20).preferredColorScheme(.dark)
-                            }
-                    }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
-                }.frame(width: geometry.size.width, height: footer, alignment: .bottom)
-                    .position(x: geometry.size.width / 2, y: geometry.size.height - footer / 2)
-                if controller.loading && visibleWindows.isEmpty {
-                    OverviewLoadingSkeleton().frame(width: area.width, height: area.height)
-                        .position(x: area.midX, y: area.midY).allowsHitTesting(false)
-                }
-                if let focused {
-                    tabGrid(focused).frame(width: tabWidth - 20, height: area.height)
-                        .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
-                }
-                if focused == nil {
-                    VStack(spacing: 0) {
+                OverviewChromeLayout {
+                    VStack {
                         HStack {
-                            Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
-                            Image(systemName: "line.3.horizontal")
-                        }.font(.caption.weight(.medium)).padding(12).contentShape(Rectangle())
-                            .help("Drag to move; your apps make room")
-                            .accessibilityLabel("Move recent intentions")
-                            .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                                .onChanged { notesDrag = $0.translation }
-                                .onEnded { value in
-                                    let final = FieldOfViewLayout.panel(origin: CGPoint(
-                                        x: area.minX + (area.width - notesSize.width) * notesX + value.translation.width,
-                                        y: area.minY + (area.height - notesSize.height) * notesY + value.translation.height), size: notesSize, in: area)
-                                    notesX = (final.minX - area.minX) / max(1, area.width - notesSize.width)
-                                    notesY = (final.minY - area.minY) / max(1, area.height - notesSize.height)
-                                    notesDrag = .zero
-                                })
-                            .contextMenu { Button("Reset position") { notesX = 1; notesY = 0; notesDrag = .zero } }
-                        IntentSessionNotesView(controller: controller, model: model)
-                    }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                        .frame(width: notesFrame.width, height: notesFrame.height)
-                        .position(x: notesFrame.midX, y: notesFrame.midY)
-                }
+                            Spacer()
+                            if showClock { TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Text(context.date, style: .time).monospacedDigit().font(.system(size: 14, weight: .medium)).frame(minWidth: 80)
+                            } }
+                        }.overlay {
+                            IntentOptionalNameBar(name: $controller.selection.name).frame(width: min(520, max(180, geometry.size.width - 240)))
+                        }.padding(.horizontal, 28).frame(height: 48).padding(.top, controller.topSafeInset)
+                        if !model.savedSlots.isEmpty {
+                            IntentSavedSlotsView(controller: controller, model: model).frame(height: 94)
+                        }
+                        if onboarding.isTeaching {
+                            OnboardingSelectionHint(coordinator: controller.onboarding)
+                                .frame(height: 60).padding(.horizontal, 28)
+                        }
+                    }.frame(width: geometry.size.width).fixedSize(horizontal: false, vertical: true)
+                    GeometryReader { workspace in
+                        let area = CGRect(x: 28, y: 0, width: max(0, workspace.size.width - 56 - tabWidth), height: workspace.size.height)
+                        let notesSize = CGSize(width: 240, height: min(260, area.height * 0.45))
+                        let notesFrame = FieldOfViewLayout.panel(origin: CGPoint(
+                            x: area.minX + (area.width - notesSize.width) * notesX + notesDrag.width,
+                            y: area.minY + (area.height - notesSize.height) * notesY + notesDrag.height), size: notesSize, in: area)
+                        // The panel follows the pointer immediately; previews reflow only on
+                        // release. Repacking every pointer event flips between competing
+                        // layouts and creates distracting rapid movement.
+                        let settledNotesFrame = FieldOfViewLayout.panel(origin: CGPoint(
+                            x: area.minX + (area.width - notesSize.width) * notesX,
+                            y: area.minY + (area.height - notesSize.height) * notesY), size: notesSize, in: area)
+                        ZStack(alignment: .topLeading) {
+                            AppStackOverview(items: visibleWindows.map { .init(id: $0.id, app: $0.appID, source: $0.sourceFrame, tabCount: controller.tabs(for: $0).count) },
+                                             area: area, obstacle: focused == nil ? settledNotesFrame : nil,
+                                             selected: Set(visibleWindows.filter { controller.isSelected($0) }.map(\.id)),
+                                             names: Dictionary(uniqueKeysWithValues: controller.apps.map { ($0.id, $0.app.name) }),
+                                             fronts: $controller.frontWindowByApp, expanded: $controller.expandedStack, hovered: hoveredWindow) { id, frame, captionFrame, showsCaption in
+                                Group { if let window = visibleWindows.first(where: { $0.id == id }) { windowCard(window, frame: frame, captionFrame: captionFrame, showsCaption: showsCaption) } }
+                            }
+                            if controller.loading && visibleWindows.isEmpty {
+                                OverviewLoadingSkeleton().frame(width: area.width, height: area.height)
+                                    .position(x: area.midX, y: area.midY).allowsHitTesting(false)
+                            }
+                            if let focused {
+                                tabGrid(focused).frame(width: tabWidth - 20, height: area.height)
+                                    .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
+                            }
+                            if focused == nil {
+                                VStack(spacing: 0) {
+                                    HStack {
+                                        Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
+                                        Image(systemName: "line.3.horizontal")
+                                    }.font(.caption.weight(.medium)).padding(12).contentShape(Rectangle())
+                                        .help("Drag to move; your apps make room")
+                                        .accessibilityLabel("Move recent intentions")
+                                        .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                                            .onChanged { notesDrag = $0.translation }
+                                            .onEnded { value in
+                                                let final = FieldOfViewLayout.panel(origin: CGPoint(
+                                                    x: area.minX + (area.width - notesSize.width) * notesX + value.translation.width,
+                                                    y: area.minY + (area.height - notesSize.height) * notesY + value.translation.height), size: notesSize, in: area)
+                                                notesX = (final.minX - area.minX) / max(1, area.width - notesSize.width)
+                                                notesY = (final.minY - area.minY) / max(1, area.height - notesSize.height)
+                                                notesDrag = .zero
+                                            })
+                                        .contextMenu { Button("Reset position") { notesX = 1; notesY = 0; notesDrag = .zero } }
+                                    IntentSessionNotesView(controller: controller, model: model)
+                                }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                                    .frame(width: notesFrame.width, height: notesFrame.height)
+                                    .position(x: notesFrame.midX, y: notesFrame.midY)
+                            }
+                        }.frame(width: workspace.size.width, height: workspace.size.height, alignment: .topLeading)
+                            // Old placements are clipped immediately while the
+                            // asynchronous packer adapts to newly sized chrome.
+                            .clipped()
+                    }
+                    OverviewFooter(controller: controller, model: model)
+                        .fixedSize(horizontal: false, vertical: true)
+                }.frame(width: geometry.size.width, height: geometry.size.height)
                 if !reduceMotion, let flight = controller.saveFlight,
                    let source = intentionFrames["record:" + flight.recordID.uuidString],
                    let target = intentionFrames["slot:" + flight.savedID] {
@@ -2176,6 +2155,45 @@ private struct QuickMarkRecoveryNotice: View {
             Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Dismiss")
         }.padding(16).frame(width: 420, height: 120).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             .preferredColorScheme(.dark)
+    }
+}
+
+
+/// Shared by the overview and isolated rendering checks; no fixed outer height.
+struct OverviewFooter: View {
+    @ObservedObject var controller: QuickSelectionController
+    @ObservedObject var model: IntentAppModel
+    private var accent: Color { controller.selection.accessMode == .blacklist ? .red : .green }
+    var body: some View {
+        VStack(spacing: 8) {
+            ModificationStrip(controller: controller).frame(maxWidth: 1050).padding(.horizontal, 28)
+            if let message = controller.message {
+                Text(message).font(.callout).foregroundStyle(.orange).lineLimit(2).multilineTextAlignment(.center)
+                    .padding(8).frame(maxWidth: .infinity).frame(height: 52)
+                    .background(.regularMaterial, in: Capsule()).padding(.horizontal, 28).help(message)
+            }
+            HStack {
+                AppPresetStatusStrip(model: model) { controller.settingsOpen = true }
+                Spacer(minLength: 16)
+            }.padding(.horizontal, 28).frame(height: 26)
+            HStack {
+                Button("Close · Esc") { controller.cancel() }.buttonStyle(.plain)
+                Button("Apple Spotlight · ⌘Space") { controller.openAppleSpotlight() }.buttonStyle(.plain)
+                Button("Saved · 1–9") { controller.toggleSlots() }.buttonStyle(.plain)
+                Spacer()
+                Button(controller.selection.accessMode == .blacklist ? "Block selected · B" : "Allow selected · B") { controller.toggleAccessMode() }.buttonStyle(.plain).foregroundStyle(accent)
+                Spacer()
+                Button("Run · Return ↵") { controller.runSelection() }.buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.black)
+                    .disabled(!controller.hasRunnableDraft || controller.loading || controller.closing || controller.restoringSavedWorkspace || !controller.openingApps.isEmpty)
+                Button { controller.settingsOpen.toggle() } label: {
+                    Image(systemName: "gearshape").font(.system(size: 17)).frame(width: 32, height: 32)
+                        .background(.ultraThinMaterial, in: Circle())
+                }.buttonStyle(.plain).accessibilityLabel("Overview settings").help("Settings and app presets")
+                    .popover(isPresented: $controller.settingsOpen, arrowEdge: .top) {
+                        OverviewSettingsView(model: model).frame(width: 380).padding(20).preferredColorScheme(.dark)
+                    }
+            }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 28).frame(height: 52)
+        }
     }
 }
 

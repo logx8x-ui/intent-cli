@@ -1,9 +1,12 @@
 import Foundation
 
-/// Persist quiet completion with each owned visibility change before hiding it so a
-/// retry, app restart, or subsequent session cannot silently reveal it later.
+/// Persist restoration intent with each owned visibility change so finish and
+/// crash recovery can restore the workspace without touching user-owned changes.
 public enum HiddenWorkspaceRestorationPolicy: String, Codable, Sendable {
     case automatic
+    /// Restore all visibility changes still owned by Intent, including entries
+    /// left deferred by older versions. User-minimized windows have no entry.
+    case restoreOwnedWorkspace
     case onUserReveal
 
     public enum Action: Equatable {
@@ -30,13 +33,13 @@ public enum HiddenWorkspaceRestorationPolicy: String, Codable, Sendable {
     public func action(isHidden: Bool?) -> Action {
         guard let isHidden else { return .retain }
         if !isHidden { return .relinquish }
-        return self == .automatic ? .reveal : .retain
+        return self == .onUserReveal ? .retain : .reveal
     }
 
-    /// A successful GUI finish cannot reveal even an older pending entry.
-    /// Explicit safety/failed-start cleanup restores only this controller's
-    /// changes, never a previous intention's deliberately deferred workspace.
+    /// GUI finish restores all Intent-owned changes, including older deferred
+    /// entries. Narrow automatic cleanup still only promotes its own entries.
     public func atStop(requested: Self, ownsEntry: Bool) -> Self {
+        if requested == .restoreOwnedWorkspace { return .automatic }
         if requested == .onUserReveal { return .onUserReveal }
         return ownsEntry ? .automatic : self
     }
@@ -44,6 +47,6 @@ public enum HiddenWorkspaceRestorationPolicy: String, Codable, Sendable {
     /// Ordinary deferred windows need no timer/file watch. Parked holders still
     /// need the browser's durable closure receipt before ownership is retired.
     public func needsRecoveryObservation(isParking: Bool) -> Bool {
-        self == .automatic || isParking
+        self != .onUserReveal || isParking
     }
 }

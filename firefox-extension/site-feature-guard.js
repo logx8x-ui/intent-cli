@@ -78,6 +78,28 @@
       timer = setInterval(schedule, 500);
     }
   }
+  function markInstagramSurface(name, elements, hidden) {
+    const targets = new Set(hidden ? elements : []);
+    for (const previous of document.querySelectorAll('[data-intent-feature-hidden="' + name + '"]')) {
+      if (!targets.has(previous)) previous.removeAttribute("data-intent-feature-hidden");
+    }
+    for (const element of targets) element.setAttribute("data-intent-feature-hidden", name);
+  }
+  function instagramSurfaces(p) {
+    const surfaces = engine.instagramSurfaces(p);
+    const home = new URL(location.href).pathname === "/";
+    // Observed Home posts are MAIN/ARTICLE descendants with a canonical post
+    // permalink. ARTICLE alone is not a post: a tray/dialog can use it too.
+    // Keep this Home-only so inbox and story viewers never inherit feed hiding.
+    const posts = home ? [...document.querySelectorAll("main article")].filter(article =>
+      [...article.querySelectorAll("a[href]")].some(link => {
+        try {
+          const url = new URL(link.href, location.href);
+          return link.closest("article") === article && engine.siteOf(url.href) === "instagram" && /^\/(?:p|reel)\//.test(url.pathname);
+        } catch (_) { return false; }
+      })) : [];
+    markInstagramSurface("feed", posts, !surfaces.feed);
+  }
   function render() {
     const p = policy();
     if (site === "youtube") observeVideo();
@@ -105,6 +127,7 @@
       if (hide) chip.setAttribute("data-intent-feature-hidden", "shorts");
       else chip.removeAttribute("data-intent-feature-hidden");
     }
+    if (site === "instagram") instagramSurfaces(p);
     if (site === "instagram") for (const link of document.querySelectorAll('a[href],[data-intent-feature-hidden="navigation"]')) {
       const navigation = link.closest?.('nav,[role="navigation"],aside') || link.getAttribute("aria-label") || link.querySelector?.("svg,img");
       const hide = navigation && engine.siteOf(link.href) === site && !engine.permits(link.href, rules.websiteFeaturePolicies);

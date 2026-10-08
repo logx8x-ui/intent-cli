@@ -42,6 +42,7 @@ public enum FocusForegroundPolicy {
     public static func shouldRestoreVisibleWindow(visibleBundleIdentifier: String?, accessMode: IntentionAccessMode,
                                                    controlledBundleIdentifiers: Set<String>, missionControlActive: Bool) -> Bool {
         guard !missionControlActive else { return false }
+        guard !FocusSystemToolPolicy.isScreenshotApplication(visibleBundleIdentifier) else { return false }
         // No visible application is a valid empty desktop. Do not pull a
         // remembered window (and its Space) back merely because it is empty.
         guard let visibleBundleIdentifier else { return false }
@@ -54,7 +55,8 @@ public enum FocusForegroundPolicy {
         controlledBundleIdentifiers: Set<String>,
         isRegularApplication: Bool = true
     ) -> Bool {
-        guard let bundleIdentifier, bundleIdentifier != Bundle.main.bundleIdentifier else { return false }
+        guard let bundleIdentifier, bundleIdentifier != Bundle.main.bundleIdentifier,
+              !FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) else { return false }
         switch accessMode {
         case .blacklist: return controlledBundleIdentifiers.contains(bundleIdentifier)
         case .whitelist: return isRegularApplication && !shouldDeferRefocus(bundleIdentifier: bundleIdentifier)
@@ -72,6 +74,7 @@ public enum FocusForegroundPolicy {
 
     public static func shouldDeferRefocus(bundleIdentifier: String?) -> Bool {
         guard let bundleIdentifier else { return false }
+        if FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) { return true }
         return [
             "com.apple.dock",
             "com.apple.Spotlight",
@@ -89,6 +92,7 @@ public enum FocusForegroundPolicy {
         controlledBundleIdentifiers: Set<String>
     ) -> Bool {
         guard let bundleIdentifier else { return true }
+        if FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) { return false }
         switch accessMode {
         case .whitelist:
             return !controlledBundleIdentifiers.contains(bundleIdentifier)
@@ -532,6 +536,12 @@ public final class FocusLock {
             return Unmanaged.passUnretained(event)
         }
         if isStopped { return Unmanaged.passUnretained(event) }
+        if FocusSystemToolPolicy.isScreenshotApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+            // Once capture is open, its drag, Space, Return and Escape belong to
+            // macOS even if a forbidden browser window is underneath it.
+            suppressedTabButtons.removeAll()
+            return Unmanaged.passUnretained(event)
+        }
         if type == .scrollWheel {
             let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
             let wholeWindowBlocked = nativeTabClickGuard.blocksForegroundWindow(foregroundPID)
@@ -618,6 +628,10 @@ public final class FocusLock {
         let control = flags.contains(.maskControl)
         let option = flags.contains(.maskAlternate)
 
+        if FocusSystemShortcutPolicy.isScreenshotShortcut(keyCode: keyCode, command: command, shift: shift) {
+            return Unmanaged.passUnretained(event)
+        }
+
         if command && control && option && keyCode == KeyCode.escape {
             stopForSafety()
             return nil
@@ -671,13 +685,10 @@ public final class FocusLock {
         // A browser with no permitted tab cannot redirect an already-open or
         // internal page. Keep its content inert without closing anything. The
         // stop/switcher routes above and Intent's grave-key controls stay usable.
-        if keyCode != KeyCode.grave,
-           !(keyCode == KeyCode.tab && (command || control)),
-           !(control && FocusSystemShortcutPolicy.isSpaceNavigationKey(keyCode)),
-           !FocusBrowserShortcutPolicy.createsSearchSurface(keyCode: keyCode, command: command, control: control,
-                option: option, shift: shift, allowGoogleSearchTabs: spec.allowGoogleSearchTabs),
-           !IntentInteractivePanelRegions.shared.hasKeyboardFocus,
-           nativeTabClickGuard.blocksForegroundWindow(NSWorkspace.shared.frontmostApplication?.processIdentifier) {
+        if FocusSystemShortcutPolicy.shouldBlockInertBrowserInput(keyCode: keyCode, command: command,
+            control: control, option: option, shift: shift, allowGoogleSearchTabs: spec.allowGoogleSearchTabs,
+            hasPanelKeyboardFocus: IntentInteractivePanelRegions.shared.hasKeyboardFocus,
+            windowBlocked: nativeTabClickGuard.blocksForegroundWindow(NSWorkspace.shared.frontmostApplication?.processIdentifier)) {
             return nil
         }
 
@@ -770,7 +781,8 @@ public final class FocusLock {
     }
 
     private func recoverSpace(attempt: Int) {
-        guard !isStopped else { return }
+        guard !isStopped,
+              !FocusSystemToolPolicy.isScreenshotApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return }
         let visible = PermittedWindowRecovery.visibleApplication()
         guard FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible?.bundleIdentifier,
             accessMode: spec.accessMode, controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
@@ -802,6 +814,7 @@ public final class FocusLock {
     private func handleActivated(_ app: NSRunningApplication) {
         guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+        if FocusSystemToolPolicy.isScreenshotApplication(app.bundleIdentifier) { return }
         // An empty Space activates its desktop shell. It is not an attempt to
         // open a blocked Finder window, and must not pull the user back.
         if FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(
@@ -894,6 +907,7 @@ public final class FocusLock {
         guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
 
         let foreground = NSWorkspace.shared.frontmostApplication
+        if FocusSystemToolPolicy.isScreenshotApplication(foreground?.bundleIdentifier) { return }
         let visible = PermittedWindowRecovery.visibleApplication()
         if FocusForegroundPolicy.shouldLeaveEmptyDesktopAlone(visibleBundleIdentifier: visible?.bundleIdentifier,
             foregroundBundleIdentifier: foreground?.bundleIdentifier) { return }
@@ -985,7 +999,8 @@ public final class FocusLock {
     }
 
     private func refocus(ignoreSystemTransitionGrace: Bool = false, restoreWindow: Bool = false) {
-        guard !isStopped else { return }
+        guard !isStopped,
+              !FocusSystemToolPolicy.isScreenshotApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return }
         if !ignoreSystemTransitionGrace,
            shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
             return
@@ -1091,14 +1106,14 @@ public final class FocusLock {
             let ownerBundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
                 ?? windowOwnerBundleIdentifier(at: point)
             let represented = ["com.apple.dock", "com.apple.WindowManager"].contains(ownerBundleIdentifier)
-                ? representedTarget(startingAt: element, owner: ownerBundleIdentifier) : (nil, false)
+                ? representedTarget(startingAt: element, owner: ownerBundleIdentifier, inMissionControl: inMissionControl) : (nil, false)
             return (ownerBundleIdentifier, represented.0, represented.1)
         }
 
         return (windowOwnerBundleIdentifier(at: point), nil, false)
     }
 
-    private func representedTarget(startingAt element: AXUIElement, owner: String?) -> (String?, Bool) {
+    private func representedTarget(startingAt element: AXUIElement, owner: String?, inMissionControl: Bool) -> (String?, Bool) {
         var current: AXUIElement? = element
         var ancestry: [AXUIElement] = []
         var labels: [String] = []
@@ -1109,10 +1124,14 @@ public final class FocusLock {
             guard Date() < deadline, let currentElement = current else { break }
             AXUIElementSetMessagingTimeout(currentElement, 0.006)
 
-            if let identifier = accessibilityString(currentElement, attribute: kAXIdentifierAttribute),
-               FocusClickTargetPolicy.isMissionControlSpaceNavigation(ownerBundleIdentifier: owner,
+            let identifier = accessibilityString(currentElement, attribute: kAXIdentifierAttribute)
+            if let identifier, FocusClickTargetPolicy.isMissionControlSpaceNavigation(ownerBundleIdentifier: owner,
                     ancestorIdentifiers: [identifier]) {
                 return (nil, true)
+            }
+            if inMissionControl, FocusClickTargetPolicy.isMissionControlRepresentationBoundary(
+                role: accessibilityString(currentElement, attribute: kAXRoleAttribute), identifier: identifier) {
+                break
             }
 
             ancestry.append(currentElement)
@@ -1130,6 +1149,7 @@ public final class FocusLock {
                 representedBundle = bundleIdentifier
             }
 
+            guard !inMissionControl else { continue }
             for attribute in [
                 kAXTitleAttribute,
                 kAXDescriptionAttribute,
@@ -1143,6 +1163,11 @@ public final class FocusLock {
             }
         }
 
+        if inMissionControl {
+            return (FocusClickTargetPolicy.representedBundleIdentifier(labels: [], applicationNamesByBundleIdentifier: [:],
+                verifiedApplicationBundleIdentifier: representedBundle, isMissionControl: true), false)
+        }
+
         var applicationNames: [String: String] = [:]
         for application in NSWorkspace.shared.runningApplications {
             guard let bundleIdentifier = application.bundleIdentifier else { continue }
@@ -1151,9 +1176,10 @@ public final class FocusLock {
                 ?? bundleIdentifier
             applicationNames[bundleIdentifier] = name.replacingOccurrences(of: ".app", with: "")
         }
-        return (representedBundle ?? FocusClickTargetPolicy.representedBundleIdentifier(
+        return (FocusClickTargetPolicy.representedBundleIdentifier(
             labels: labels,
-            applicationNamesByBundleIdentifier: applicationNames
+            applicationNamesByBundleIdentifier: applicationNames,
+            verifiedApplicationBundleIdentifier: representedBundle
         ), false)
     }
 

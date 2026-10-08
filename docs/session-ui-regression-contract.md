@@ -105,9 +105,11 @@ with another delayed activation or an independent copy of session state.
   reopen an already present website, or rely on PID alone. Completion captures
   the current native window/tab at finish, independently of the start target.
   A sibling Firefox window is a failure even though its PID and bundle match.
-  Automatically restoring other minimized windows must not move focus or Spaces;
-  unsafe restoration is deferred until deliberate user reveal, including across
-  retries/restarts. Never hide a jump with a later corrective activation.
+  Finish restores every visibility change still owned by Intent, including
+  deferred entries from older builds (Logan, October 9). Windows already hidden
+  or minimized before Intent stay that way. Restore without launching anything
+  or selecting a different browser tab; keep the exact finish window in front.
+  Keep failed restores durably retryable rather than requiring manual Dock reveal.
 - Completion feedback cannot become key/main, activate Intent, switch Spaces,
   raise a browser or accept clicks. Delayed work from an ended/replaced occurrence
   cannot act on a new one. Locked/sleeping sessions never replay old celebration

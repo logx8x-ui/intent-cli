@@ -204,14 +204,14 @@ public struct FocusSessionSpec {
         return result
     }
 
-    /// GUI completion is observational: release restrictions while leaving the
-    /// user's current app, windows and tabs intact. Legacy CLI cleanup options
-    /// remain available on an unmodified specification.
+    /// Restore Intent-owned visibility without returning to the session-start
+    /// app or closing resources. Already minimized/hidden user windows are not
+    /// owned and must remain as they were.
     public func preservingForegroundOnStop() -> FocusSessionSpec {
         var result = self
         result.restorePreviousApplicationOnStop = false
         result.closeSessionResourcesOnFinish = false
-        result.hiddenWorkspaceRestorationOnStop = .onUserReveal
+        result.hiddenWorkspaceRestorationOnStop = .restoreOwnedWorkspace
         return result
     }
 
@@ -249,12 +249,14 @@ public struct FocusSessionSpec {
     }
 
     public func permitsWindow(_ id: UInt32, bundleIdentifier: String) -> Bool {
+        if FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) { return true }
         if presetBlockedBundleIdentifiers.contains(bundleIdentifier) { return false }
         guard let ids = selectedWindowIDsByApp[bundleIdentifier] else { return permitsApplication(bundleIdentifier) }
         return accessMode == .whitelist ? ids.contains(id) : !ids.contains(id)
     }
 
     public func permitsApplication(_ bundleIdentifier: String) -> Bool {
+        if FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) { return true }
         if presetBlockedBundleIdentifiers.contains(bundleIdentifier) { return false }
         if !requiresEnforcement { return true }
         if selectedWindowIDsByApp[bundleIdentifier] != nil { return true }
@@ -266,6 +268,11 @@ public struct FocusSessionSpec {
 
     public var requiresEnforcement: Bool {
         blockAppSwitching || blockNewApps || keepFocused || blockBrowserTabEscape || blockFirefoxChromeClicks
+    }
+
+    public func shouldHideApplication(_ bundleIdentifier: String, initialAllowedApps: Set<String>?) -> Bool {
+        guard !FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) else { return false }
+        return !permitsApplication(bundleIdentifier) || initialAllowedApps.map { !$0.contains(bundleIdentifier) } == true
     }
 
     private static func make(for task: ShallowTask) -> FocusSessionSpec {

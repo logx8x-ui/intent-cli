@@ -40,12 +40,13 @@ let hostSupportsQuickSelection = false;
 let hostSupportsTabPreview = false;
 let hostSupportsTabCreation = false;
 let hostSupportsNativeFinder = false;
+let hostSupportsFinderObserve = false;
 let creationRulesActive = true;
 let hostSupportsNativeTabGroups = false;
 let hostSupportsSessionIdentity = false;
 let hostSupportsNativeVisibility = false;
 function advertisedCapabilities() {
-  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeFinder && browser.storage.session && typeof IntentNativeFinder !== "undefined" ? ["native-website-finder-v1"] : []), ...(hostSupportsTabCreation && browser.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && browser.storage.session
+  const ready = [...EXTENSION_CAPABILITIES, ...(hostSupportsNativeFinder && hostSupportsFinderObserve && browser.storage.session && typeof browser.webNavigation?.getFrame === "function" ? ["native-website-finder-observe-v1"] : []), ...(hostSupportsNativeFinder && browser.storage.session && typeof IntentNativeFinder !== "undefined" ? ["native-website-finder-v1"] : []), ...(hostSupportsTabCreation && browser.storage.session && typeof IntentTabCreation !== "undefined" ? ["background-tab-create-v1"] : []), ...(hostSupportsNativeVisibility && browser.storage.session
     && nativeWindowVisibility?.identity() ? ["native-window-visibility-v1"] : [])];
   return hostSupportsQuickSelection && hostSupportsSessionIdentity && browserSessionID
     ? [...ready, "quick-selection-tabs-v1", "blacklist-selection-tabs-v1", ...(hostSupportsNativeTabGroups ? ["native-tab-groups-v1"] : []), ...(hostSupportsSessionIdentity && browserSessionID ? ["tab-session-identity-v1"] : []), ...(hostSupportsTabPreview ? ["tab-preview-v1"] : [])] : ready;
@@ -194,6 +195,7 @@ function connectCommandPort() {
       creationRulesActive = message?.tabCreationAllowed !== true;
       hostSupportsTabCreation = message?.hostCapabilities?.includes("background-tab-create-host-v1") === true;
       hostSupportsNativeFinder = message?.hostCapabilities?.includes("native-website-finder-host-v1") === true;
+      hostSupportsFinderObserve = message?.hostCapabilities?.includes("native-website-finder-observe-host-v1") === true;
       reconnectDelayMs = RECONNECT_MS;
       const supported = message?.hostCapabilities?.includes("quick-selection-host-v1") === true;
       const previewSupported = message?.hostCapabilities?.includes("tab-preview-host-v1") === true;

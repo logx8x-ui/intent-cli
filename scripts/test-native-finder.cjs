@@ -9,10 +9,10 @@ function harness(options={}) {
   const windows=new Map([[4,{id:4,type:'normal',incognito:!!options.private,left:10,top:10,width:1200,height:800}]]);
   const tabs=new Map([[7,{id:7,windowId:4,index:0,active:true,highlighted:true,url:'https://original.test',cookieStoreId:options.container}],
     [8,{id:8,windowId:4,index:1,active:false,highlighted:true,url:'https://second.test'}]]);
-  const api={storage:{session:{async get(){if(options.readFails)throw Error();return structuredClone(storage)},async set(v){if(options.writeFails)throw Error();Object.assign(storage,structuredClone(v));await options.afterSave?.();}}},
+  const api={webNavigation:{async getFrame({tabId}){await options.duringFrame?.();return {url:options.frameURL || tabs.get(tabId)?.url,parentFrameId:-1,errorOccurred:!!options.frameError}}},storage:{session:{async get(){if(options.readFails)throw Error();return structuredClone(storage)},async set(v){if(options.writeFails)throw Error();Object.assign(storage,structuredClone(v));await options.afterSave?.();}}},
     windows:{async get(id){if(!windows.has(id))throw Error('closed');return structuredClone(windows.get(id))},
-      async create(props){calls.push(['create',structuredClone(props)]);await options.duringCreate?.();const id=nextWindow++,tabID=nextTab++;const tab={id:tabID,windowId:id,index:0,active:true,highlighted:true,url:'chrome://newtab/'};const win={...props,id,tabs:[tab]};windows.set(id,win);tabs.set(tabID,tab);return structuredClone(win)},
-      async remove(){throw Error('Never delete a window')},async update(){throw Error('Never resize, raise or rewrite original windows')}},
+      async create(props){calls.push(['create',structuredClone(props)]);await options.duringCreate?.();const id=nextWindow++,tabID=nextTab++;const tab={id:tabID,windowId:id,index:0,active:true,highlighted:true,url:'chrome://newtab/'};const win={...props,...(options.ignoredBounds?{width:1700,height:1100}:{}),id,tabs:[tab]};windows.set(id,win);tabs.set(tabID,tab);return structuredClone(win)},
+      async remove(){throw Error('Never delete a window')},async update(id,props){assert.notEqual(id,4,'Never resize original window');calls.push(['resize',id,props]);Object.assign(windows.get(id),props);return structuredClone(windows.get(id))}},
     tabs:{async get(id){if(!tabs.has(id))throw Error('closed');return structuredClone(tabs.get(id))},
       async query(q){return [...tabs.values()].filter(t=>t.windowId===q.windowId).map(t=>structuredClone(t))},
       async move(id,props){calls.push(['move',id,props]);await options.duringMove?.();const t=tabs.get(id);t.windowId=props.windowId;t.index=2;return structuredClone(t)},
@@ -58,5 +58,25 @@ async function opened(options={}){const h=harness(options),open=command();await 
  }
  let userGroup;userGroup=await opened({duringMove:async()=>{userGroup.tabs.get(7).highlighted=true;userGroup.tabs.get(8).highlighted=false;userGroup.tabs.get(userGroup.owned).highlighted=false}});userGroup.tabs.get(userGroup.owned).url='https://chosen.test';await userGroup.finder.handle(next(userGroup.open,'commit'));assert.equal(userGroup.calls.filter(c=>c[0]==='highlight').length,0,'A changed native multi-selection is not overwritten');
  const uncertain=command();const store={intentNativeFinders:{['profile-a:'+uncertain.finderID]:{session:'profile-a',originalWindowID:4,anchorTabID:7,state:'opening',requests:{[uncertain.id]:{fingerprint:JSON.stringify(uncertain)}}}}};const u=harness({storage:store});await u.finder.handle(uncertain);assert.equal(u.calls.length,0);assert.match(u.receipts.at(-1).error,/may already/);
+ for(const firefox of [true,false]) {
+  const h=await opened({firefox});const tab=h.tabs.get(h.owned);tab.status='complete';tab.url='https://example.com/ready';
+  const observe=()=>({...next(h.open,'observe'),finderWindowID:h.ownedWindow,finderTabID:h.owned});
+  await h.finder.handle(observe());assert.equal(h.receipts.at(-1).readyURL,tab.url);
+  const record=Object.values(h.storage.intentNativeFinders)[0];const requests=Object.keys(record.requests).length;
+  for(let i=0;i<130;i++)await h.finder.handle(observe());
+  assert.equal(Object.keys(Object.values(h.storage.intentNativeFinders)[0].requests).length,requests,'Read-only observations do not fill mutation journal');
+  for(const url of ['about:blank','https://www.google.com/search?q=test','https://google.co.kr/search?q=test','https://www.bing.com/search?q=test','https://duckduckgo.com/?q=test','https://search.yahoo.com/search?p=test','https://search.brave.com/search?q=test','https://www.ecosia.org/search?q=test']) {
+   tab.url=url;await h.finder.handle(observe());assert.equal(h.receipts.at(-1).readyURL,undefined,'Search stays open: '+url);
+  }
+  for(const url of ['https://docs.google.com/document/example','https://google.com.example.org/']) {
+   tab.url=url;await h.finder.handle(observe());assert.equal(h.receipts.at(-1).readyURL,url,'Real website not confused with search host');
+  }
+  tab.url='https://example.com/ready';tab.pendingUrl='https://example.org/';await h.finder.handle(observe());assert.equal(h.receipts.at(-1).readyURL,undefined);delete tab.pendingUrl;
+  tab.status='loading';await h.finder.handle(observe());assert.equal(h.receipts.at(-1).readyURL,undefined);tab.status='complete';
+  await h.finder.handle({...next(h.open,'commit'),expectedURL:'https://example.com/old'});assert.equal(h.calls.filter(c=>c[0]==='move').length,0,'URL race cannot capture different page');
+  await h.finder.handle({...next(h.open,'commit'),expectedURL:tab.url});assert.equal(h.calls.filter(c=>c[0]==='move').length,1);
+ }
+ const compact=await opened({ignoredBounds:true});assert.equal(compact.windows.get(compact.ownedWindow).width,720);assert.equal(compact.calls.filter(c=>c[0]==='resize').length,1);
+ const frameMismatch=await opened({frameURL:'https://example.org/other'});frameMismatch.tabs.get(frameMismatch.owned).url='https://example.com/';frameMismatch.tabs.get(frameMismatch.owned).status='complete';await frameMismatch.finder.handle({...next(frameMismatch.open,'observe'),finderWindowID:frameMismatch.ownedWindow,finderTabID:frameMismatch.owned});assert.equal(frameMismatch.receipts.at(-1).readyURL,undefined,'Committed top frame must agree with tab URL');
  console.log('Native finder: real normal windows, exact profile ownership, privacy, group preservation, cancellation races and restart/idempotency checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

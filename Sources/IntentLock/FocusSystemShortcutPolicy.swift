@@ -1,4 +1,14 @@
 import Foundation
+
+/// macOS owns these capture surfaces. They remain usable without becoming a
+/// saved app permission, including the launcher's first visibility pass.
+public enum FocusSystemToolPolicy {
+    public static func isScreenshotApplication(_ bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return ["com.apple.screencaptureui", "com.apple.screenshot.launcher"].contains(bundleIdentifier)
+    }
+}
+
 public enum FocusSystemShortcutPolicy {
     public enum TabRoute: Equatable { case nativeBrowser, allowedApplications, ordinary }
 
@@ -18,6 +28,26 @@ public enum FocusSystemShortcutPolicy {
             KeyCode.h,
             KeyCode.m
         ].contains(keyCode)
+    }
+
+    public static func isScreenshotShortcut(keyCode: Int64, command: Bool, shift: Bool) -> Bool {
+        // Control copies to the clipboard, and Option is used by capture modes.
+        command && shift && [KeyCode.three, KeyCode.four, KeyCode.five, KeyCode.six].contains(keyCode)
+    }
+
+    /// This is the event tap's whole-browser input gate, before the narrower
+    /// browser-command policy. System capture must pass this earlier gate too.
+    public static func shouldBlockInertBrowserInput(keyCode: Int64, command: Bool, control: Bool,
+        option: Bool, shift: Bool, allowGoogleSearchTabs: Bool, hasPanelKeyboardFocus: Bool,
+        windowBlocked: @autoclosure () -> Bool) -> Bool {
+        guard !isScreenshotShortcut(keyCode: keyCode, command: command, shift: shift),
+              keyCode != KeyCode.grave,
+              !(keyCode == KeyCode.tab && (command || control)),
+              !(control && isSpaceNavigationKey(keyCode)),
+              !FocusBrowserShortcutPolicy.createsSearchSurface(keyCode: keyCode, command: command, control: control,
+                  option: option, shift: shift, allowGoogleSearchTabs: allowGoogleSearchTabs),
+              !hasPanelKeyboardFocus else { return false }
+        return windowBlocked()
     }
 
     public static func isSpaceNavigationKey(_ keyCode: Int64) -> Bool {
@@ -48,7 +78,7 @@ public enum FocusBrowserShortcutPolicy {
         shift: Bool,
         allowGoogleSearchTabs: Bool
     ) -> Bool {
-        if command && shift && screenshotKeyCodes.contains(keyCode) {
+        if FocusSystemShortcutPolicy.isScreenshotShortcut(keyCode: keyCode, command: command, shift: shift) {
             return false
         }
 
@@ -88,14 +118,6 @@ public enum FocusBrowserShortcutPolicy {
         }
 
         return false
-    }
-
-    private static var screenshotKeyCodes: Set<Int64> {
-        [
-            KeyCode.three,
-            KeyCode.four,
-            KeyCode.five
-        ]
     }
 
     private static var browserCommandKeys: Set<Int64> {

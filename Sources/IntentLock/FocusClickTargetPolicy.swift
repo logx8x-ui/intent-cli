@@ -12,6 +12,7 @@ public enum FocusClickTargetPolicy {
     ) -> Bool {
         // Intent's own editor may name disallowed apps. Its controls must always work.
         if let ownerBundleIdentifier, ownerBundleIdentifier == intentBundleIdentifier { return true }
+        if FocusSystemToolPolicy.isScreenshotApplication(ownerBundleIdentifier) { return true }
         if isMenuBarClick {
             switch accessMode {
             case .whitelist:
@@ -67,6 +68,7 @@ public enum FocusClickTargetPolicy {
         // A desktop is a container, not an app permission. Its blocked windows
         // are owned by visibility enforcement even when its AX label names them.
         if isSpaceNavigation && missionControlOwners.contains(ownerBundleIdentifier ?? "") { return true }
+        if FocusSystemToolPolicy.isScreenshotApplication(ownerBundleIdentifier) { return true }
         if let representedBundleIdentifier {
             return isPermitted(
                 representedBundleIdentifier,
@@ -85,6 +87,10 @@ public enum FocusClickTargetPolicy {
                                                        ancestorIdentifiers: [String]) -> Bool {
         guard missionControlOwners.contains(ownerBundleIdentifier ?? "") else { return false }
         return ancestorIdentifiers.contains { $0 == "mc.spaces" || $0.hasPrefix("mc.spaces.") }
+    }
+
+    public static func isMissionControlRepresentationBoundary(role: String?, identifier: String?) -> Bool {
+        role == "AXApplication" || ["mc.windows", "mc.display", "mc"].contains(identifier ?? "")
     }
 
     private static let missionControlOwners: Set<String> = ["com.apple.dock", "com.apple.WindowManager"]
@@ -111,8 +117,15 @@ public enum FocusClickTargetPolicy {
 
     public static func representedBundleIdentifier(
         labels: [String],
-        applicationNamesByBundleIdentifier: [String: String]
+        applicationNamesByBundleIdentifier: [String: String],
+        verifiedApplicationBundleIdentifier: String? = nil,
+        isMissionControl: Bool = false
     ) -> String? {
+        if let verifiedApplicationBundleIdentifier { return verifiedApplicationBundleIdentifier }
+        // Window titles are content, not application identities. A page called
+        // "Instagram Messages" or the owner's "Dock" ancestry must not turn a
+        // permitted Firefox thumbnail into a forbidden application target.
+        guard !isMissionControl else { return nil }
         let normalizedLabels = labels.map(normalized)
         return applicationNamesByBundleIdentifier
             .sorted { $0.value.count > $1.value.count }
@@ -131,9 +144,10 @@ public enum FocusClickTargetPolicy {
         controlledBundleIdentifiers: Set<String>,
         accessMode: IntentionAccessMode
     ) -> Bool {
+        if FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier) { return true }
         switch accessMode {
-        case .whitelist: controlledBundleIdentifiers.contains(bundleIdentifier)
-        case .blacklist: !controlledBundleIdentifiers.contains(bundleIdentifier)
+        case .whitelist: return controlledBundleIdentifiers.contains(bundleIdentifier)
+        case .blacklist: return !controlledBundleIdentifiers.contains(bundleIdentifier)
         }
     }
 
