@@ -59,7 +59,7 @@ Chrome's fresh heartbeat also reports 0.2.39 and native finder observation suppo
 | Overview layout | Installed overview screenshot shows bottom captions above the modifications. Isolated rendered layout checks cover measured chrome and 800x600, 1280x800, 1710x1112. |
 
 Local evidence: `~/.codex/artifacts/intent-20261008/oct9-*.json`,
-`oct9-combined-gate.log`, `oct9-final-gate.log`, `oct9-final-install.log`. These are local-only QA artifacts.
+`oct9-combined-gate.log`, `oct9-idle-final-gate.log`, `oct9-final-install.log`. These are local-only QA artifacts.
 
 ## Acceptance boundaries and pending work
 
@@ -98,3 +98,13 @@ and [overlap-removal constraints](https://bridges.monash.edu/articles/report/Fas
 support treating ordering/stability and geometric non-overlap as separate
 constraints. This is a design inference from those references, not a claim that
 Apple's private Mission Control algorithm is reproduced.
+
+## Final gate accounting
+
+The intermediate `oct9-final-gate.log` run failed its isolated notch activation
+assertion while live UI actions were also in progress. It is not a pass. UI
+actions were stopped, then the complete gate was rerun against the same source
+fingerprint `6999ef733ad49e6995101d83bd7e62000e9d662394013bf354f54717c9dfa3f9`.
+`intent-change-gate-sh9CiA/result.json` reports `automated-pass` for gate, session,
+Swift, extensions, native host, release, AI and lint. No production code or
+regression assertion was changed to obtain that result.
