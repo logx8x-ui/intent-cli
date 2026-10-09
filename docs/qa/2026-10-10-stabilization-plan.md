@@ -41,7 +41,7 @@ of an installed browser operation, a physical shortcut or a macOS animation.
 
 ## Final candidate verification
 
-Current evidence as of October 10 (see
+Earlier candidate evidence from October 10 (see
 `2026-10-10-browser-start-and-outlines.md` for exact identities):
 
 | Check | Status | Evidence boundary |
@@ -54,6 +54,29 @@ Current evidence as of October 10 (see
 | Quiet finish | FAIL | Native restoration can raise a sibling window; final settled visibility is not continuous foreground preservation. |
 | Settings-host cleanup → overview close | AUTOMATION LIMIT / possible defect | Done returned to an idle overview; supported close actions did not dismiss an independently confirmed on-screen window. Normal Quit/relaunch succeeded. Cause and physical acceptance are unresolved. |
 | Remaining core matrices and soak runs | NOT EXERCISED on final candidate | Search transfer, live preview race/reconnect, saved replay, modifications, Spaces and social controls retain separate rows. |
+
+Latest follow-up evidence on October 10:
+
+- The larger common-scale overview previews and movable recent-intentions log
+  passed the installed drag, control-avoidance, caption and reopen checks;
+  see `2026-10-10-overview-space-and-history.md`. The source was published on
+  `codex/overview-finder-fixes`, without a new binary release.
+- Direct Intent accessibility observation can reopen its host. The later
+  closure checks observed Chrome and an independent onscreen-only WindowServer
+  query instead: the overview closed and the saved log position persisted.
+  The earlier Settings-host observation does not by itself establish a stuck
+  close defect; physical closure acceptance is still separate.
+- The observer-only finish experiment failed: native restoration displaced
+  three Chrome sibling windows. It was reverted, not shipped. The retained
+  independent trace tooling and qualified evidence are in
+  `2026-10-10-observation-only-finish.md`; the final reverted runtime passed
+  eight serial suites and was installed as UUID
+  `F2018616-15B2-357C-B171-BA44ACAD6E2C`. This does not recertify the earlier
+  browser matrix on that UUID or clear the quiet-completion release blocker.
+- Custom-named, identical-frame Chrome windows hit
+  `coverage-ambiguousIdentity`; ordinary distinct-title windows started.
+  Add this startup identity case to the queue. The final permanent Firefox
+  component and hardware DBT contours remain unverified.
 
 After the core FAIL rows are cleared, run 20 disposable start/finish cycles
 split across both browsers and both selection methods. Alternate access modes,
