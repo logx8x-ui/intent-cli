@@ -46,54 +46,45 @@ public enum AppStackLayout {
         }
         let minX = centers.map(\.x).min()!, maxX = centers.map(\.x).max()!
         let minY = centers.map(\.y).min()!, maxY = centers.map(\.y).max()!
-        // Bounded spatial packing keeps the arrangement familiar without imposing
-        // rows across the desktop. Sort the larger *group* footprints first.
-        for attempt in 0..<36 {
-            let scale = 0.42 * pow(0.90, Double(attempt))
+        // Find the largest shared scale that fits the preview and caption
+        // footprints. Sparse desktops can reach native size; crowded desktops
+        // shrink only as far as their actual geometry requires.
+        func layout(at scale: CGFloat) -> [Group]? {
             let spreads = windows.map { spread($0, scale: scale) }
             let sizes = spreads.map { spread in
                 spread.reduce(CGRect.null) { $0.union($1.frame).union($1.captionFrame) }.size
             }
-            var placed: [Int: CGRect] = [:]
-            for index in names.indices.sorted(by: {
-                let a = sizes[$0].width * sizes[$0].height, b = sizes[$1].width * sizes[$1].height
-                return a == b ? $0 < $1 : a > b
-            }) {
-                let size = sizes[index]
-                guard size.width <= bounds.width, size.height <= bounds.height else { break }
-                let source = centers[index]
-                let wanted = CGPoint(x: bounds.minX + (maxX > minX ? (source.x - minX) / (maxX - minX) : 0.5) * bounds.width,
-                                     y: bounds.minY + (maxY > minY ? (source.y - minY) / (maxY - minY) : 0.5) * bounds.height)
-                var best: CGRect?; var cost = CGFloat.infinity
-                for y in 0...20 { for x in 0...24 {
-                    let candidate = CGRect(x: bounds.minX + CGFloat(x) / 24 * (bounds.width - size.width),
-                                           y: bounds.minY + CGFloat(y) / 20 * (bounds.height - size.height),
-                                           width: size.width, height: size.height)
-                    let padded = candidate.insetBy(dx: -9, dy: -9)
-                    if let obstacle, padded.intersects(obstacle) { continue }
-                    if placed.values.contains(where: { padded.intersects($0.insetBy(dx: -9, dy: -9)) }) { continue }
-                    let dx = candidate.midX - wanted.x, dy = candidate.midY - wanted.y
-                    let score = dx * dx + dy * dy
-                    if score < cost { cost = score; best = candidate }
-                } }
-                guard let best else { break }
-                placed[index] = best
+            let wanted = centers.map { source in
+                CGPoint(x: bounds.minX + (maxX > minX ? (source.x - minX) / (maxX - minX) : 0.5) * bounds.width,
+                        y: bounds.minY + (maxY > minY ? (source.y - minY) / (maxY - minY) : 0.5) * bounds.height)
             }
-            if placed.count == names.count {
-                return names.indices.map { index in
-                    let frame = placed[index]!
-                    let ordered = windows[index].sorted {
-                        if $0.tabCount != $1.tabCount { return $0.tabCount > $1.tabCount }
-                        return $0.id < $1.id
-                    }
-                    let positions = spreads[index].map {
-                        WindowPlacement(id: $0.id,
-                                        frame: $0.frame.offsetBy(dx: frame.minX, dy: frame.minY),
-                                        captionFrame: $0.captionFrame.offsetBy(dx: frame.minX, dy: frame.minY))
-                    }
-                    return Group(app: names[index], ids: ordered.map(\.id), frame: frame, windows: positions)
+            guard let placed = pack(sizes, wanted: wanted, in: bounds, avoiding: obstacle) else { return nil }
+            return names.indices.map { index in
+                let frame = placed[index]
+                let ordered = windows[index].sorted {
+                    if $0.tabCount != $1.tabCount { return $0.tabCount > $1.tabCount }
+                    return $0.id < $1.id
                 }
+                let positions = spreads[index].map {
+                    WindowPlacement(id: $0.id,
+                                    frame: $0.frame.offsetBy(dx: frame.minX, dy: frame.minY),
+                                    captionFrame: $0.captionFrame.offsetBy(dx: frame.minX, dy: frame.minY))
+                }
+                return Group(app: names[index], ids: ordered.map(\.id), frame: frame, windows: positions)
             }
+        }
+        if let native = layout(at: 1) { return native }
+        if layout(at: 0) != nil {
+            var lower: CGFloat = 0, upper: CGFloat = 1
+            var best: [Group]?
+            // Fixed iterations bound refresh cost and avoid the old ten-percent
+            // jumps, which left usable space empty even after a safe pack fit.
+            for _ in 0..<16 {
+                let scale = (lower + upper) / 2
+                if let candidate = layout(at: scale) { lower = scale; best = candidate }
+                else { upper = scale }
+            }
+            if let best { return best }
         }
         // Unusually crowded displays still show every window directly. Do not
         // replace the overview with an app-specific sheet or silently omit IDs.
@@ -111,6 +102,100 @@ public enum AppStackLayout {
             return Group(app: name, ids: positions.map(\.id),
                          frame: positions.reduce(CGRect.null) { $0.union($1.frame).union($1.captionFrame) }, windows: positions)
         }
+    }
+
+    /// Split the remaining empty rectangles at occupied edges, instead of
+    /// sampling a coarse screen grid. This keeps large previews close to their
+    /// familiar source positions while still fitting tightly beside each other.
+    private static func pack(_ sizes: [CGSize], wanted: [CGPoint], in bounds: CGRect, avoiding obstacle: CGRect?) -> [CGRect]? {
+        let margin: CGFloat = 9
+        let area = bounds.insetBy(dx: -margin, dy: -margin)
+        var initial = [area]
+        if let obstacle, obstacle.minX.isFinite, obstacle.minY.isFinite,
+           obstacle.width.isFinite, obstacle.height.isFinite, !obstacle.isEmpty {
+            initial = subtract(obstacle, from: initial)
+        }
+        var orders: [[Int]] = []
+        for dimension in 0...2 {
+            let order = sizes.indices.sorted {
+                let a = dimension == 0 ? sizes[$0].width * sizes[$0].height : (dimension == 1 ? sizes[$0].width : sizes[$0].height)
+                let b = dimension == 0 ? sizes[$1].width * sizes[$1].height : (dimension == 1 ? sizes[$1].width : sizes[$1].height)
+                return a == b ? $0 < $1 : a > b
+            }
+            if !orders.contains(order) { orders.append(order) }
+        }
+        var best: [CGRect]?, bestTravel = CGFloat.infinity
+        for order in orders { for prioritizeFit in [true, false] {
+            var free = initial
+            var placed = Array(repeating: CGRect.zero, count: sizes.count)
+            var finished = true
+            for index in order {
+                let size = CGSize(width: sizes[index].width + margin * 2, height: sizes[index].height + margin * 2)
+                var chosen: CGRect?, bestShort = CGFloat.infinity, bestLong = CGFloat.infinity, bestDistance = CGFloat.infinity
+                for region in free where size.width <= region.width && size.height <= region.height {
+                    let short = min(region.width - size.width, region.height - size.height)
+                    let long = max(region.width - size.width, region.height - size.height)
+                    let xs = [region.minX, region.maxX - size.width]
+                    let ys = [region.minY, region.maxY - size.height]
+                    for x in xs { for y in ys {
+                        // Center a sole app in its usable rectangle. Multiple
+                        // groups anchor at free edges so they cannot strand a
+                        // large empty border around an arbitrarily centered tile.
+                        let candidate = sizes.count == 1
+                            ? CGRect(x: min(max(region.minX, wanted[index].x - size.width / 2), region.maxX - size.width),
+                                     y: min(max(region.minY, wanted[index].y - size.height / 2), region.maxY - size.height),
+                                     width: size.width, height: size.height)
+                            : CGRect(x: x, y: y, width: size.width, height: size.height)
+                        let dx = candidate.midX - wanted[index].x, dy = candidate.midY - wanted[index].y
+                        let distance = dx * dx + dy * dy
+                        let betterFit = short < bestShort || (short == bestShort && (long < bestLong || (long == bestLong && distance < bestDistance)))
+                        let betterPosition = distance < bestDistance || (distance == bestDistance && (short < bestShort || (short == bestShort && long < bestLong)))
+                        if prioritizeFit ? betterFit : betterPosition {
+                            chosen = candidate; bestShort = short; bestLong = long; bestDistance = distance
+                        }
+                    } }
+                }
+                guard let chosen else { finished = false; break }
+                placed[index] = chosen.insetBy(dx: margin, dy: margin)
+                free = subtract(chosen, from: free)
+            }
+            if finished {
+                let travel = placed.indices.reduce(CGFloat.zero) { result, index in
+                    let dx = placed[index].midX - wanted[index].x, dy = placed[index].midY - wanted[index].y
+                    return result + dx * dx + dy * dy
+                }
+                if travel < bestTravel { best = placed; bestTravel = travel }
+            }
+        } }
+        return best
+    }
+
+    /// Empty rectangles may overlap each other, but each is entirely clear of
+    /// every occupied footprint. Keeping only maximal rectangles bounds the
+    /// search without throwing away long horizontal or vertical free lanes.
+    private static func subtract(_ occupied: CGRect, from free: [CGRect]) -> [CGRect] {
+        var remaining: [CGRect] = []
+        for region in free {
+            guard region.intersects(occupied) else { remaining.append(region); continue }
+            if occupied.minX > region.minX {
+                remaining.append(CGRect(x: region.minX, y: region.minY, width: occupied.minX - region.minX, height: region.height))
+            }
+            if occupied.maxX < region.maxX {
+                remaining.append(CGRect(x: occupied.maxX, y: region.minY, width: region.maxX - occupied.maxX, height: region.height))
+            }
+            if occupied.minY > region.minY {
+                remaining.append(CGRect(x: region.minX, y: region.minY, width: region.width, height: occupied.minY - region.minY))
+            }
+            if occupied.maxY < region.maxY {
+                remaining.append(CGRect(x: region.minX, y: occupied.maxY, width: region.width, height: region.maxY - occupied.maxY))
+            }
+        }
+        let positive = remaining.filter { $0.width > 0 && $0.height > 0 }
+        return positive.enumerated().filter { index, rectangle in
+            !positive.enumerated().contains { other, container in
+                other != index && container.contains(rectangle) && (container != rectangle || other < index)
+            }
+        }.map { $0.element }
     }
 
     private static func spread(_ items: [Item], scale: CGFloat) -> [WindowPlacement] {

@@ -1,6 +1,39 @@
 import Foundation
 import IntentCore
 
+private func checkAppStackGeometry(_ items: [AppStackLayout.Item], bounds: CGRect, panel: CGRect? = nil) throws -> [AppStackLayout.Group] {
+    let groups = AppStackLayout.groups(items, in: bounds, avoiding: panel)
+    let windows = groups.flatMap(\.windows)
+    try expect(Set(windows.map(\.id)) == Set(items.map(\.id)), "Every source window remains directly present in the larger overview")
+    try expect(groups == AppStackLayout.groups(items.reversed(), in: bounds, avoiding: panel), "Free-space packing is independent of source enumeration")
+    let sources = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.source) })
+    let scale = windows[0].frame.width / sources[windows[0].id]!.width
+    try expect(scale > 0 && scale <= 1, "Larger previews never exceed their native source size")
+    for window in windows {
+        let source = sources[window.id]!
+        try expect(abs(window.frame.width / source.width - scale) < 0.0001
+                   && abs(window.frame.height / source.height - scale) < 0.0001,
+                   "Portrait, landscape and tiny windows retain their shape and shared scale")
+        try expect(bounds.insetBy(dx: -0.0001, dy: -0.0001).contains(window.frame)
+                   && bounds.insetBy(dx: -0.0001, dy: -0.0001).contains(window.captionFrame),
+                   "Larger thumbnails reserve their full caption before reaching any screen control")
+        if let panel {
+            try expect(!window.frame.intersects(panel) && !window.captionFrame.intersects(panel),
+                       "A moved recent-intentions panel never covers a thumbnail or its title")
+        }
+        try expect(windows.allSatisfy { !window.captionFrame.intersects($0.frame) }, "A caption stays exposed even when another app window is hovered")
+        try expect(windows.filter { $0.id != window.id }.allSatisfy { !window.captionFrame.intersects($0.captionFrame) }, "Mixed-size window titles remain separate")
+    }
+    for (index, group) in groups.enumerated() {
+        for other in groups.dropFirst(index + 1) {
+            try expect(group.windows.allSatisfy { window in
+                other.windows.allSatisfy { !window.frame.intersects($0.frame) }
+            }, "Different app previews do not overlap as their scale increases")
+        }
+    }
+    return groups
+}
+
 func runAppStackPolicySpecs() throws {
     let area = CGRect(x: 20, y: 80, width: 1300, height: 720)
     let panel = CGRect(x: 1050, y: 80, width: 270, height: 260)
@@ -53,6 +86,59 @@ func runAppStackPolicySpecs() throws {
     for window in allNine {
         try expect(allNine.allSatisfy { !window.captionFrame.intersects($0.frame) }, "A second spread row cannot cover a preceding row's title")
     }
+
+    // The previous hard cap made even a single ordinary window less than half
+    // size on an otherwise empty desktop. Occupied geometry now determines the
+    // scale, including labels; a spacious sparse desktop needs no shrinkage.
+    for count in [1, 2, 4] {
+        let sparse: [AppStackLayout.Item] = (0..<count).map { (index: Int) -> AppStackLayout.Item in
+            let x: CGFloat = CGFloat(index % 2) * 1000
+            let y: CGFloat = CGFloat(index / 2) * 700
+            let source = CGRect(x: x, y: y, width: CGFloat(1000), height: CGFloat(600))
+            return AppStackLayout.Item(id: UInt32(index + 1), app: "sparse\(index)", source: source)
+        }
+        let groups = try checkAppStackGeometry(sparse, bounds: roomy)
+        let nativeWindows: [AppStackLayout.WindowPlacement] = groups.flatMap { $0.windows }
+        try expect(nativeWindows.allSatisfy { $0.frame.width == 1000 && $0.frame.height == 600 },
+                   "One, two and four windows use native preview size whenever their complete footprints fit")
+        let laptop = try checkAppStackGeometry(sparse, bounds: CGRect(x: 24, y: 96, width: 1600, height: 900))
+        let laptopWindows: [AppStackLayout.WindowPlacement] = laptop.flatMap { $0.windows }
+        try expect(laptopWindows.allSatisfy { $0.frame.width / 1000 > 0.68 },
+                   "Sparse laptop layouts are substantially larger than the old 0.42 scale ceiling")
+    }
+
+    for count in [6, 18, 36, 50] {
+        let mixed: [AppStackLayout.Item] = (0..<count).map { index in
+            let sizes: [CGSize] = [.init(width: 1400, height: 850), .init(width: 600, height: 1000),
+                                   .init(width: 280, height: 180), .init(width: 900, height: 520)]
+            return .init(id: UInt32(index + 1), app: "mixed\(index / 3)",
+                         source: CGRect(origin: CGPoint(x: CGFloat(index % 5) * 220, y: CGFloat(index / 5) * 90), size: sizes[index % sizes.count]))
+        }
+        for bounds in [area, CGRect(x: -2580, y: -250, width: 2540, height: 680), CGRect(x: 20, y: 40, width: 850, height: 1250)] {
+            _ = try checkAppStackGeometry(mixed, bounds: bounds)
+        }
+    }
+
+    let movedPanels = [CGRect(x: roomy.minX, y: roomy.minY, width: 270, height: 310),
+                       CGRect(x: roomy.maxX - 270, y: roomy.minY, width: 270, height: 310),
+                       CGRect(x: roomy.midX - 135, y: roomy.midY - 155, width: 270, height: 310)]
+    for movedPanel in movedPanels {
+        let spread = try checkAppStackGeometry(equalWindows, bounds: roomy, panel: movedPanel)
+        let three = spread.first { $0.app == "Firefox" }!, one = spread.first { $0.app == "Notes" }!
+        try expect(three.windows.allSatisfy { $0.frame.size == one.windows[0].frame.size }
+                   && three.frame.width * three.frame.height > one.frame.width * one.frame.height * 2,
+                   "Moving the panel to either top corner preserves equal sibling scale and the larger app-group footprint")
+    }
+    try expect(AppStackLayout.groups([], in: area).isEmpty && AppStackLayout.groups(equalWindows, in: .zero).isEmpty,
+               "Unavailable desktops do not emit invalid preview geometry")
+    try expect(AppStackLayout.groups(equalWindows, in: CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 700)).isEmpty,
+               "Nonfinite display geometry cannot escape preview bounds")
+    let translated = equalWindows.map { item -> AppStackLayout.Item in
+        var translated = item; translated.source = item.source.offsetBy(dx: -3000, dy: 700); return translated
+    }
+    try expect(AppStackLayout.groups(translated, in: roomy) == spreadGroups,
+               "The same desktop moved to another monitor keeps its app arrangement")
+
     var selection = QuickSelection()
     selection.toggleWindow(20, app: "com.apple.Notes")
     selection.toggleWindow(21, app: "com.apple.Notes")

@@ -1854,6 +1854,7 @@ private struct QuickSelectionView: View {
     @AppStorage("overviewNotesX") private var notesX = 1.0
     @AppStorage("overviewNotesY") private var notesY = 0.0
     @State private var notesDrag = CGSize.zero
+    @State private var notesDragStart: CGRect?
     @State private var intentionFrames: [String: CGRect] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     init(controller: QuickSelectionController) {
@@ -1868,6 +1869,34 @@ private struct QuickSelectionView: View {
             let visibleWindows = controller.windows.filter { !presetIDs.contains($0.appID) }
             let focused = visibleWindows.first { $0.id == controller.focusedBrowserWindow }
             let tabWidth: CGFloat = focused == nil ? 0 : min(440, geometry.size.width * 0.38)
+            let viewport = CGRect(origin: .zero, size: geometry.size)
+            let panelBounds = intentionFrames["overview-footer"].map {
+                OverviewRecentPanelLayout.bounds(in: viewport, topSafeInset: controller.topSafeInset, footer: $0)
+            }
+            let protected = ["overview-name", "overview-saved", "overview-clock", "overview-onboarding"]
+                .compactMap { intentionFrames[$0] }
+            let panelSize = panelBounds.flatMap { bounds in
+                OverviewRecentPanelLayout.frame(origin: bounds.origin, size: OverviewRecentPanelLayout.size(in: bounds),
+                                               in: bounds, avoiding: protected)?.size
+            } ?? .zero
+            let settledPanel = panelBounds.flatMap { bounds in
+                OverviewRecentPanelLayout.frame(
+                    origin: OverviewRecentPanelLayout.origin(position: CGPoint(x: notesX, y: notesY), size: panelSize, in: bounds),
+                    size: panelSize, in: bounds, avoiding: protected)
+            }
+            let draggedPanel = panelBounds.flatMap { bounds in
+                (notesDragStart ?? settledPanel).flatMap { start in
+                    OverviewRecentPanelLayout.frame(
+                        origin: CGPoint(x: start.minX + notesDrag.width, y: start.minY + notesDrag.height),
+                        size: panelSize, in: bounds, avoiding: protected)
+                }
+            }
+            let panelObstacle = intentionFrames["preview-canvas"].flatMap { canvas in
+                settledPanel.flatMap { panel -> CGRect? in
+                    let overlap = panel.intersection(canvas)
+                    return overlap.isNull || overlap.isEmpty ? nil : overlap.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                }
+            }
             ZStack(alignment: .topLeading) {
                 Group {
                     if let image = controller.wallpaper { Image(nsImage: image).resizable().scaledToFill() }
@@ -1875,38 +1904,13 @@ private struct QuickSelectionView: View {
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
                 OverviewChromeLayout {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            if showClock { TimelineView(.periodic(from: .now, by: 1)) { context in
-                                Text(context.date, style: .time).monospacedDigit().font(.system(size: 14, weight: .medium)).frame(minWidth: 80)
-                            } }
-                        }.overlay {
-                            IntentOptionalNameBar(name: $controller.selection.name).frame(width: min(520, max(180, geometry.size.width - 240)))
-                        }.padding(.horizontal, 28).frame(height: 48).padding(.top, controller.topSafeInset)
-                        if !model.savedSlots.isEmpty {
-                            IntentSavedSlotsView(controller: controller, model: model).frame(height: 94)
-                        }
-                        if onboarding.isTeaching {
-                            OnboardingSelectionHint(coordinator: controller.onboarding)
-                                .frame(height: 60).padding(.horizontal, 28)
-                        }
-                    }.frame(width: geometry.size.width).fixedSize(horizontal: false, vertical: true)
+                    OverviewHeader(controller: controller, model: model, showClock: showClock,
+                                   topSafeInset: controller.topSafeInset, width: geometry.size.width)
                     GeometryReader { workspace in
                         let area = CGRect(x: 28, y: 0, width: max(0, workspace.size.width - 56 - tabWidth), height: workspace.size.height)
-                        let notesSize = CGSize(width: 240, height: min(260, area.height * 0.45))
-                        let notesFrame = FieldOfViewLayout.panel(origin: CGPoint(
-                            x: area.minX + (area.width - notesSize.width) * notesX + notesDrag.width,
-                            y: area.minY + (area.height - notesSize.height) * notesY + notesDrag.height), size: notesSize, in: area)
-                        // The panel follows the pointer immediately; previews reflow only on
-                        // release. Repacking every pointer event flips between competing
-                        // layouts and creates distracting rapid movement.
-                        let settledNotesFrame = FieldOfViewLayout.panel(origin: CGPoint(
-                            x: area.minX + (area.width - notesSize.width) * notesX,
-                            y: area.minY + (area.height - notesSize.height) * notesY), size: notesSize, in: area)
                         ZStack(alignment: .topLeading) {
                             AppStackOverview(items: visibleWindows.map { .init(id: $0.id, app: $0.appID, source: $0.sourceFrame, tabCount: controller.tabs(for: $0).count) },
-                                             area: area, obstacle: focused == nil ? settledNotesFrame : nil,
+                                             area: area, obstacle: focused == nil ? panelObstacle : nil,
                                              selected: Set(visibleWindows.filter { controller.isSelected($0) }.map(\.id)),
                                              names: Dictionary(uniqueKeysWithValues: controller.apps.map { ($0.id, $0.app.name) }),
                                              fronts: $controller.frontWindowByApp, expanded: $controller.expandedStack, hovered: hoveredWindow) { id, frame, captionFrame, showsCaption in
@@ -1921,38 +1925,18 @@ private struct QuickSelectionView: View {
                                     .intentionFrame("website-menu")
                                     .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
                             }
-                            if focused == nil {
-                                VStack(spacing: 0) {
-                                    HStack {
-                                        Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
-                                        Image(systemName: "line.3.horizontal")
-                                    }.font(.caption.weight(.medium)).padding(12).contentShape(Rectangle())
-                                        .help("Drag to move; your apps make room")
-                                        .accessibilityLabel("Move recent intentions")
-                                        .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                                            .onChanged { notesDrag = $0.translation }
-                                            .onEnded { value in
-                                                let final = FieldOfViewLayout.panel(origin: CGPoint(
-                                                    x: area.minX + (area.width - notesSize.width) * notesX + value.translation.width,
-                                                    y: area.minY + (area.height - notesSize.height) * notesY + value.translation.height), size: notesSize, in: area)
-                                                notesX = (final.minX - area.minX) / max(1, area.width - notesSize.width)
-                                                notesY = (final.minY - area.minY) / max(1, area.height - notesSize.height)
-                                                notesDrag = .zero
-                                            })
-                                        .contextMenu { Button("Reset position") { notesX = 1; notesY = 0; notesDrag = .zero } }
-                                    IntentSessionNotesView(controller: controller, model: model)
-                                }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                                    .frame(width: notesFrame.width, height: notesFrame.height)
-                                    .position(x: notesFrame.midX, y: notesFrame.midY)
-                            }
                         }.frame(width: workspace.size.width, height: workspace.size.height, alignment: .topLeading)
                             // Old placements are clipped immediately while the
                             // asynchronous packer adapts to newly sized chrome.
                             .clipped()
-                    }
+                    }.intentionFrame("preview-canvas")
                     OverviewFooter(controller: controller, model: model)
                         .fixedSize(horizontal: false, vertical: true)
+                        .intentionFrame("overview-footer")
                 }.frame(width: geometry.size.width, height: geometry.size.height)
+                if focused == nil, let bounds = panelBounds, let frame = draggedPanel, let settled = settledPanel {
+                    recentPanel(frame: frame, settled: settled, bounds: bounds, protected: protected)
+                }
                 if !reduceMotion, let flight = controller.saveFlight,
                    let source = intentionFrames["record:" + flight.recordID.uuidString],
                    let target = intentionFrames["slot:" + flight.savedID] {
@@ -1988,6 +1972,39 @@ private struct QuickSelectionView: View {
                     if let focused, ids.contains(focused.appID) { controller.dismissBrowserPicker() }
                 }
         }.ignoresSafeArea().onExitCommand { controller.cancelImmediately() }
+    }
+    private func recentPanel(frame: CGRect, settled: CGRect, bounds: CGRect, protected: [CGRect]) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "hand.draw"); Text("Recent intentions"); Spacer()
+                Image(systemName: "line.3.horizontal")
+            }.font(.caption.weight(.medium)).padding(12).contentShape(Rectangle())
+                .help("Drag to move; your apps make room")
+                .accessibilityLabel("Move recent intentions")
+                .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                    .onChanged { value in
+                        if notesDragStart == nil { notesDragStart = settled }
+                        notesDrag = value.translation
+                    }
+                    .onEnded { value in
+                        let start = notesDragStart ?? settled
+                        if let final = OverviewRecentPanelLayout.frame(
+                            origin: CGPoint(x: start.minX + value.translation.width, y: start.minY + value.translation.height),
+                            size: frame.size, in: bounds, avoiding: protected) {
+                            let position = OverviewRecentPanelLayout.position(for: final, in: bounds)
+                            notesX = position.x; notesY = position.y
+                        }
+                        notesDrag = .zero; notesDragStart = nil
+                    })
+                .contextMenu { Button("Reset position") {
+                    notesX = 1; notesY = 0; notesDrag = .zero; notesDragStart = nil
+                } }
+            IntentSessionNotesView(controller: controller, model: model)
+        }.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .frame(width: frame.width, height: frame.height)
+            .position(x: frame.midX, y: frame.midY)
+        // Only the settled panel reserves preview space. Repacking during each
+        // pointer event makes windows oscillate while the log is being dragged.
     }
     private func windowCard(_ window: QuickSelectionController.WindowItem, frame: CGRect, captionFrame: CGRect, showsCaption: Bool) -> some View {
         let app = controller.apps.first { $0.id == window.appID }
