@@ -61,19 +61,51 @@ QA Oct9 T replay 041 intention, closed its tab, and clicked its saved slot:
 Intent recreated the exact URL in the same Chrome profile, automatically ran,
 and restored Stopwatch. No manual re-selection was requested. Finished via the
 menu again with the same page retained. These are native UI automation results,
-not physical shortcut acceptance. Firefox 0.2.41 signing/install/live acceptance
-remains in progress.
-Firefox's signed 0.2.40 was installed from its approved Mozilla file 5100875 in
-the daily `ykomjweq.default-release` profile; extension metadata confirms enabled
-0.2.40. This is installation evidence, not T/Run or Instagram feature acceptance.
+not physical shortcut acceptance.
 
-Private profile information,
-user page titles, and browsing content are not included in this note.
+## Official Firefox update and installed acceptance
 
-Mozilla upload for 0.2.41 completed and validated with zero errors/warnings.
-The next submission step is not yet confirmed. Stopped desktop automation when
-Firefox switched from the update page to another user window during input;
-requested a quiet window to finish signing/install and daily-profile acceptance.
-No signed 0.2.41 artifact or Firefox acceptance is claimed. QA saved slot and
-owned example.com/example.org/example.net tabs remain for continuation/cleanup.
-Physical shortcuts and visual animation smoothness still need acceptance.
+Mozilla version 6558052 / file 5102190 was approved after zero validation
+errors or warnings. Downloaded the official signed 0.2.41 package and checked
+its signature metadata, manifest, and byte-identical background.js against source.
+SHA-256: `43c2f96511b31272e286ad26b2b29f657ec40d40d075e881fd00e1e0aca83f39`.
+Installed it in daily `ykomjweq.default-release`; extensions.json confirms
+0.2.41, active true, signedState 2. The native heartbeat also reports 0.2.41.
+Permissions are unchanged from the installed 0.2.40 package.
+
+Native UI acceptance passed:
+- The compact real Firefox window measured 760 by 560 points and retained the
+  existing profile, bookmarks and browser suggestions.
+- T navigation to `https://example.org/?intent-qa-firefox-transfer-041`
+  automatically selected the exact transferred tab. Run succeeded with Stopwatch.
+  The actual Firefox address bar and page confirmed the URL during the session.
+- Finish via File > Finish Intention retained that page without a completion UI.
+- Saved the QA intention, then closed its entire original two-tab QA window.
+  Other daily Firefox windows remained open. Clicking saved slot 6 recreated the
+  exact required URL in the same profile, ran automatically, and restored Stopwatch.
+  No manual tab or app reselection was requested. Finish retained the same page.
+- Closed-app replay also passed: Calculator was confirmed not running, prepared
+  and saved with Stopwatch, quit, and reopened automatically by its saved slot.
+  The prior Calculator calculation was retained. Calculator was quit after testing
+  to return it to its original non-running state.
+
+One initial Firefox attempt typed into the original window because native
+computer automation retained its previous window binding. This was not counted
+as a T pass. Selecting the compact finder via Firefox's Window menu corrected
+that automation targeting; the actual flow above then passed.
+
+The disposable Chrome, Firefox and Calculator bookmarks were removed through the
+UI; recent run history remains recoverable. Owned Chrome example test tabs and
+Firefox QA tabs/window were closed. User tabs, documents and saved intentions
+were preserved. No new Intent, Firefox or Chrome crash was observed during these
+checks. Private browsing content is omitted from this report.
+
+The URL flight animation is implemented, but the brief moving chip was not
+captured by the desktop screenshot cadence; visual smoothness remains unverified.
+Physical shortcuts remain unverified. Stopwatch was tested live in these replay
+flows; Timer/Checklist persistence is covered by automated regression checks,
+not claimed as an exhaustive live test of every modification combination.
+
+Implementation is published at `codex/overview-finder-fixes`, commit
+`3c8930a103e3d79324d657c54c66a08b7737f44d`. This is a scoped source push and matching
+local development installation, not a new public macOS binary release.
