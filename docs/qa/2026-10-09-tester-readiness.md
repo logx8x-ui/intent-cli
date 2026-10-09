@@ -32,7 +32,7 @@ physical-input or live-profile pass. Preserve user tabs, data and preferences.
 | Core browser flow | Firefox/Chrome: select existing tabs, T add/search/cancel, run, Control-Tab, close selected tab | T/Run native UI PASS on 0.2.41; remaining cases queued |
 | Saved replay | Missing tab, original window closed, missing app, modifications, no duplicate launches | Native UI PASS: Chrome missing tab; Firefox closed original window; Calculator absent; Stopwatch restored |
 | Input | Escape, plain backtick, DBT outlines, held Caps+backtick, latched Caps, successive number toggles | Deterministic coverage passed; physical current-build acceptance pending |
-| Completion | Manual, timer, checklist; exact current tab/window retained; owned visibility restored; prehidden untouched; delayed callbacks | Earlier installed evidence exists; candidate repeat queued |
+| Completion | Manual, timer, checklist; exact current tab/window retained; owned visibility restored; prehidden untouched; delayed callbacks | FAIL: Firefox and Chrome sibling windows rise during native restoration; latest measured Chrome repeat below |
 | Rules | Both access modes; persistent bans; Add as you go on/off; Tab searches old/new tabs | Automated coverage exists; candidate live matrix queued |
 | Social controls | Instagram each feature and combinations, Stories-only home without feed; YouTube each option | DOM/route matrix exists; final authenticated profile checks queued |
 | Layout | Multiple app windows, labels clear of modifiers, compact finder, URL flight, Reduce Motion | Compact finder verified; flight smoothness pending |
@@ -102,3 +102,39 @@ non-notarized build; its Sparkle archive signature is not Apple notarization.
 The September tester instructions contain obsolete shortcuts and extension
 versions and must be replaced before inviting users. No new binary was released
 during this pass.
+
+### October 9 evening: reject a failed focus correction
+
+- Tested changing the existing restoration owner to use visible WindowServer
+  order instead of waiting for AXFocusedWindow/AXMinimized replies. It retained
+  input, Space, target-lifetime and new-session cancellation. The candidate
+  passed five isolated suites (Z88vdo, fingerprint
+  8e9f726bb099c8ee674df4671ce8274e1f666c917017de9735ee5588593d665a), and installed
+  as UUID 41A05AD1-0D5C-3DC2-8213-0A923E3387A5.
+- **Rejected on installed acceptance.** With a selected Chrome test tab, other
+  browser windows minimized by Intent, and normal File > Finish Intention:
+  independent 50 ms onscreen samples saw target 510 at +0.054 s, sibling 769 at
+  +0.343 s, and target 510 again at +1.005 s. The recording covers 29.457 seconds
+  after finish. Native diagnostics separately confirm the displacement and
+  repeated AX cannotComplete replies during it. The strict finish verifier
+  rejects this run. Faster/different corrective raises did not fix quiet finish.
+- Candidate source reverted to 13fd6b9; do not ship this experiment as a fix.
+  A successful test gate does not override the failed live check. The restoration
+  effect itself needs a solution; another independent delayed raise is not one.
+- This run cleared active browser rules and all current-run hidden ownership.
+  The pre-existing Notes PID 632 entry remained. No saved data or user tabs were
+  removed; the one disposable QA website tab was closed after verification.
+- A separate startup case failed at the activation-confirmation stage after
+  installing/reconnecting the helper. The selected tab was active in Chrome but
+  its retained inventory still said windowFocused=false. Refreshing the selection
+  and retrying started successfully. Cause is **not established**; retain this as
+  a startup/preview/reconnection race to reproduce rather than declaring it fixed.
+- Tomorrow's download/onboarding work remains the next milestone. It can be
+  developed while these failures are investigated, but release readiness still
+  requires the exact packaged build to pass start and quiet-finish checks.
+
+Rollback completed through the normal development installer. Installed and source
+release UUIDs both equal 42E56D4C-1B1D-3DC6-86A8-98330CE9A3AE; strict/deep signature
+verification passed. Source files match 13fd6b9 exactly. This is a rebuilt baseline,
+not a corrected quiet-finish candidate. No browser source or extension version was
+changed in this experiment.
