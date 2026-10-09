@@ -196,7 +196,7 @@ public struct SessionWorkspace: Codable {
                let owner = owners.first, let session = owner.browserSessionID,
                WebsiteFinderPolicy.validatedURL(saved.url) != nil,
                saved.cookieStoreID == nil || ["firefox-default", "firefox-private"].contains(saved.cookieStoreID!),
-               let anchor = Self.restorationAnchor(saved: saved, profile: owner) {
+               let anchor = Self.restorationAnchor(saved: saved, profile: owner, verifiedLegacyOwner: legacyOwner) {
                 pending.append(.init(descriptor: saved, descriptorIndex: offset, ownerSessionID: session, anchorTabID: anchor.id, windowID: anchor.windowID))
                 continue
             }
@@ -267,14 +267,22 @@ public struct SessionWorkspace: Codable {
         }
         return normalized(lhs) == normalized(rhs)
     }
-    private static func restorationAnchor(saved: Tab, profile: BrowserTabSnapshot) -> BrowserTabItem? {
+    private static func restorationAnchor(saved: Tab, profile: BrowserTabSnapshot, verifiedLegacyOwner: Bool = false) -> BrowserTabItem? {
         let rows = (profile.allTabs ?? profile.tabs).filter { tab in
             QuickSelection.isSelectable(tab) && (saved.cookieStoreID == nil || tab.cookieStoreID == saved.cookieStoreID)
         }
         if saved.sessionID == profile.browserSessionID, let window = saved.windowID,
            let anchor = rows.first(where: { $0.windowID == window && $0.active }) ?? rows.first(where: { $0.windowID == window }) { return anchor }
-        // A verified profile is enough to create a missing website, but multiple
-        // windows after a restart have no durable native window identity.
+        // A durable profile identifies where the website belongs even after its
+        // old window closes. Prefer this profile's focused window, otherwise use
+        // a stable existing window. This creates a missing tab; it does not guess
+        // which existing tab to select or move any of the user's windows.
+        if (saved.profileID != nil && saved.profileID == profile.browserProfileID) || verifiedLegacyOwner {
+            let ordered = rows.sorted { ($0.windowID, $0.index, $0.id) < ($1.windowID, $1.index, $1.id) }
+            return ordered.first(where: { $0.windowFocused == true && $0.active })
+                ?? ordered.first(where: \.active) ?? ordered.first
+        }
+        // Identity-free legacy saves remain conservative during migration.
         guard Set(rows.map(\.windowID)).count == 1 else { return nil }
         return rows.first(where: \.active) ?? rows.first
     }

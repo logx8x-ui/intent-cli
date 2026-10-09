@@ -5,6 +5,17 @@ func runBrowserWindowCoverageSpecs() throws {
     typealias Policy = BrowserWindowCoveragePolicy
     let browser = "com.google.Chrome", proof = BrowserProcessIdentity(pid: 401, launched: 900)
     let frame = CGRect(x: 0, y: 30, width: 1000, height: 700)
+    let oldActive = BrowserTabItem(id: 1, windowID: 10, index: 0, title: "New tab", url: "chrome://newtab/", active: true, windowFocused: true)
+    let added = BrowserTabItem(id: 2, windowID: 10, index: 1, title: "Example", url: "https://example.com", active: false)
+    let finderSnapshot = BrowserTabSnapshot(browserBundleIdentifier: browser, browserSessionID: "finder-profile", tabs: [oldActive, added])
+    try expect(Policy.startupTab(snapshot: finderSnapshot, expectedSession: "finder-profile", selected: [2], preservesForeground: false)?.id == 2,
+        "Overview Run activates the T-added selected website rather than keeping an ambiguous unselected New tab current")
+    try expect(Policy.startupTab(snapshot: finderSnapshot, expectedSession: "finder-profile", selected: [2], preservesForeground: true) == nil,
+        "Coverage preparation never changes DBT's exact foreground tab")
+    try expect(Policy.startupTab(snapshot: finderSnapshot, expectedSession: "restarted", selected: [2], preservesForeground: false) == nil,
+        "Coverage startup cannot activate a recycled tab ID after a browser restart")
+    try expect(Policy.startupTab(snapshot: finderSnapshot, expectedSession: "finder-profile", selected: [99], preservesForeground: false) == nil,
+        "Coverage startup never falls back to an unselected tab")
     func native(_ id: UInt32, _ title: String, _ bounds: CGRect? = nil, process: BrowserProcessIdentity? = nil) -> Policy.NativeWindow {
         let p = process ?? proof
         return .init(identity: .init(bundleIdentifier: browser, pid: p.pid, launched: p.launched, windowID: id), title: title, frame: bounds ?? frame)

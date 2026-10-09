@@ -314,12 +314,12 @@ final class QuickSelectionController: ObservableObject {
         var result = filtered.restorationPlan(runningApps: Set(apps.map(\.id)).union(installed),
             windows: liveWorkspaceWindows(), profiles: profiles ?? currentBrowserProfiles(), accessMode: mode,
             allowLegacyProfileMigration: profiles != nil)
-        // A fully closed native app may stage its default workspace only when
+        // A native app with no remaining windows may stage its default workspace only when
         // allowing it. A missing blocked window must never widen into an app.
         for app in intention.allowedApps where mode == .whitelist
             && installed.contains(app.bundleIdentifier) && !QuickSelection.browsers.contains(app.bundleIdentifier)
             && filtered.selection.apps.contains(app.bundleIdentifier)
-            && NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).isEmpty {
+            && !liveWorkspaceWindows().contains(where: { $0.app == app.bundleIdentifier }) {
             result.selection.apps.insert(app.bundleIdentifier)
             result.selection.windowIDsByApp.removeValue(forKey: app.bundleIdentifier)
             result.missing = max(0, result.missing - filtered.windows.filter { $0.app == app.bundleIdentifier }.count)
@@ -426,6 +426,8 @@ final class QuickSelectionController: ObservableObject {
     }
 
     @Published var modificationOrder = QuickSelectionOptionsSection.ordered
+    @Published var websiteTransfer: (id: UUID, label: String)?
+    private var websiteTransferStartedAt: TimeInterval?
     @Published var combinationNotice = false
     @Published var optionsSection: QuickSelectionOptionsSection?
     @Published var message: String?
@@ -1366,7 +1368,16 @@ final class QuickSelectionController: ObservableObject {
         do {
             let finder = try NativeWebsiteFinderController(target: target, onCommit: { [weak self] target, tab in
                 self?.completeNativeWebsiteFinder(target: target, tab: tab)
-            }, onCancel: { [weak self] in self?.closeWebsiteFinder() })
+            }, onCancel: { [weak self] in self?.closeWebsiteFinder() }, onTransfer: { [weak self] url in
+                guard let self, self.generation == target.overviewGeneration, !self.closing else { return }
+                self.websiteTransfer = (UUID(), url ?? "Website")
+                self.websiteTransferStartedAt = ProcessInfo.processInfo.systemUptime
+                self.panel?.level = .popUpMenu
+                self.panel?.orderFrontRegardless()
+            }, onTransferFailed: { [weak self] in
+                self?.websiteTransfer = nil
+                self?.panel?.level = .normal
+            })
             nativeWebsiteFinder = finder; message = nil
             // The user's real browser must own address-bar typing and Return.
             // Preserve the entire overview draft behind it, without raising it.
@@ -1386,6 +1397,11 @@ final class QuickSelectionController: ObservableObject {
         websiteCreationTask = Task { [weak self] in
             guard let self else { return }
             let refreshed = await self.freshSnapshots(for: [target.browserBundleIdentifier])
+            if let started = self.websiteTransferStartedAt {
+                let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.1 : 0.6
+                let remaining = duration - (ProcessInfo.processInfo.systemUptime - started)
+                if remaining > 0 { try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) }
+            }
             BrowserFinderCompletion.performIfCurrent(requestID: requestID, currentRequestID: self.websiteCreationID,
                 target: target, currentTarget: self.nativeWebsiteFinder?.target,
                 cancelled: Task.isCancelled || self.generation != target.overviewGeneration) {
@@ -1403,6 +1419,8 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func closeWebsiteFinder() {
+        websiteTransfer = nil
+        websiteTransferStartedAt = nil
         let hadNativeFinder = nativeWebsiteFinder != nil
         nativeWebsiteFinder?.dismiss(); nativeWebsiteFinder = nil
         if hadNativeFinder { panel?.ignoresMouseEvents = false }
@@ -1900,6 +1918,7 @@ private struct QuickSelectionView: View {
                             }
                             if let focused {
                                 tabGrid(focused).frame(width: tabWidth - 20, height: area.height)
+                                    .intentionFrame("website-menu")
                                     .position(x: geometry.size.width - tabWidth / 2 - 12, y: area.midY)
                             }
                             if focused == nil {
@@ -1938,6 +1957,11 @@ private struct QuickSelectionView: View {
                    let source = intentionFrames["record:" + flight.recordID.uuidString],
                    let target = intentionFrames["slot:" + flight.savedID] {
                     SavedIntentionFlight(source: source, target: target).id(flight.token)
+                }
+                if let transfer = controller.websiteTransfer, let menu = intentionFrames["website-menu"] {
+                    WebsiteSelectionFlight(label: transfer.label,
+                        source: CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2 - 200),
+                        target: CGPoint(x: menu.midX, y: menu.minY + 110)).id(transfer.id)
                 }
                 RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)

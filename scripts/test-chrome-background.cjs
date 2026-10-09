@@ -353,6 +353,20 @@ function createHarness(nativeRules, initialTabs, options = {}) {
 }
 
 async function run() {
+  {
+    const h=createHarness({active:false},[
+      {id:401,windowId:44,index:0,active:true,url:'about:blank',title:'New tab'},
+      {id:402,windowId:44,index:1,active:false,url:'https://example.com/t-added',title:'Example'}
+    ]);
+    await h.settle();
+    h.nativeMessages.length=0;
+    await h.command({browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+    const reply=h.nativeMessages.filter(message=>message.type==='tabsSnapshot').at(-1);
+    assert(reply?.allTabs.some(tab=>tab.id===402&&tab.active),
+      'An explicit idle activation must publish its actual new active tab without waiting for a second discovery request');
+    assert(reply.allTabs.some(tab=>tab.id===401&&!tab.active),'The old active tab must no longer be reported as current');
+    assert.equal(h.tabs.size,2,'Startup confirmation must never open or reload a replacement tab');
+  }
   // The real adapter waits for a receipt inside the serialized rules pipeline.
   // Delivering receipts after awaiting that same pipeline would deadlock setup.
   for (const [compatible, processProof] of [[true, true], [true, false], [false, true]]) {

@@ -120,6 +120,29 @@ struct SavedIntentionFlight: View {
     }
 }
 
+struct WebsiteSelectionFlight: View {
+    let label: String
+    let source: CGPoint
+    let target: CGPoint
+    @State private var progress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "globe").foregroundStyle(.green)
+            Text(label).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.middle)
+            ProgressView().controlSize(.small)
+        }.padding(.horizontal, 14).padding(.vertical, 11).frame(width: 300)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.25)))
+            .shadow(color: .black.opacity(0.2), radius: 12, y: 5)
+            .scaleEffect(1 - progress * 0.12)
+            .position(x: reduceMotion ? target.x : source.x + (target.x - source.x) * progress,
+                      y: reduceMotion ? target.y : source.y + (target.y - source.y) * progress - sin(progress * .pi) * 60)
+            .allowsHitTesting(false).accessibilityLabel("Adding website to selected tabs")
+            .onAppear { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.55)) { progress = 1 } }
+    }
+}
+
 struct IntentSessionNotesView: View {
     @ObservedObject var controller: QuickSelectionController
     @ObservedObject var model: IntentAppModel

@@ -25,6 +25,25 @@ func runSavedWorkspaceRestorationSpecs() throws {
         workspace.restorationPlan(runningApps: [browser], windows: [], profiles: profiles)
     }
     let one = workspace(ids: [1])
+    var focusedAnchor = row(3, "https://anchor.example", window: 40)
+    focusedAnchor.windowFocused = true
+    let reopened = plan(one, [snapshot([row(7, "https://other.example", window: 20), focusedAnchor], session: "new-lifetime")])
+    try expect(reopened.missing == 0 && reopened.pendingTabs.count == 1 && reopened.pendingTabs[0].windowID == 40,
+        "A saved website reopens in its verified profile's focused window after restart, even with several windows open")
+    let closedOriginal = plan(one, [snapshot([row(7, "https://other.example", window: 20), focusedAnchor])])
+    try expect(closedOriginal.missing == 0 && closedOriginal.pendingTabs.first?.anchorTabID == 3,
+        "Closing only the old saved window does not force manual reselection of a missing website")
+    var noFocused = focusedAnchor; noFocused.windowFocused = false
+    let backgroundRestore = plan(one, [snapshot([noFocused, row(7, "https://other.example", window: 20)], session: "restarted")])
+    try expect(backgroundRestore.missing == 0 && backgroundRestore.pendingTabs.count == 1,
+        "A saved profile can restore its website while another application owns focus")
+    var configured = one
+    configured.selection.restrictionNodes = [.init(kind: .timer, position: .zero, durationMinutes: 7)]
+    configured.selection.frictionNodes = [.init(friction: .taskChecklist(["Read", "Write"]), position: .zero)]
+    let restoredConfiguration = plan(configured, [snapshot([focusedAnchor], session: "new-lifetime")]).selection
+    try expect(restoredConfiguration.restrictionNodes.first?.durationMinutes == 7
+        && restoredConfiguration.frictionNodes.count == 1,
+        "Restoring missing websites retains timer and checklist configuration")
     let changed = plan(one, [snapshot([row(1, "https://redirected.example/new", title: "New title")])])
     try expect(changed.missing == 0 && changed.pendingTabs.isEmpty && changed.selection.tabIDsByBrowser[browser] == [1],
         "Existing same-lifetime tab survives title, URL, hash and redirect changes without reload or creation")
@@ -73,8 +92,8 @@ func runSavedWorkspaceRestorationSpecs() throws {
     try expect(closed.missing == 1 && closed.pendingTabs.isEmpty && closed.selection.apps.isEmpty,
         "A closed/unreported saved profile cannot launch a guessed default profile")
     let multipleWindows = plan(one, [snapshot([row(3, "https://anchor.example"), row(4, "https://other.example", window: 20)], session: "new")])
-    try expect(multipleWindows.missing == 1 && multipleWindows.pendingTabs.isEmpty,
-        "After restart a missing tab needs a positively identified destination window")
+    try expect(multipleWindows.missing == 0 && multipleWindows.pendingTabs.first?.windowID == 10,
+        "After restart a known saved profile restores the missing website in a live window without requiring reselection")
     let existingWindow = plan(one, [snapshot([row(3, "https://anchor.example"), row(4, "https://other.example", window: 20)])])
     try expect(existingWindow.missing == 0 && existingWindow.pendingTabs.first?.windowID == 10,
         "A missing tab retains its live original window even when another window exists")
@@ -120,8 +139,8 @@ func runSavedWorkspaceRestorationSpecs() throws {
     try expect(wrongKnownProfile.restorationPlan(runningApps: [browser], windows: [], profiles: [freshLegacyOwner], allowLegacyProfileMigration: true).missing == 1,
         "The legacy migration path cannot replace a known saved profile with the current sole profile")
     var twoWindowLegacy = freshMissing; twoWindowLegacy.allTabs?.append(row(4, "https://other.example", window: 20))
-    try expect(legacy.restorationPlan(runningApps: [browser], windows: [], profiles: [twoWindowLegacy], allowLegacyProfileMigration: true).pendingTabs.isEmpty,
-        "A missing legacy tab cannot guess between multiple destination windows")
+    try expect(legacy.restorationPlan(runningApps: [browser], windows: [], profiles: [twoWindowLegacy], allowLegacyProfileMigration: true).pendingTabs.count == 1,
+        "A fresh uniquely identified legacy owner can restore a missing website even with multiple windows")
 
     // Review edits operate on refreshed resource identities while retaining
     // missing targets the user has not removed; B never changes their scope.

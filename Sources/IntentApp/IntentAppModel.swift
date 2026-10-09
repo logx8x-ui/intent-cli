@@ -1584,7 +1584,7 @@ final class IntentAppModel: ObservableObject {
         let token = UUID()
         browserCoverageStartID = token; browserCoverageIntentionID = intention.id
         browserCoverageStartTask = Task { [weak self] in
-            let deadline = ProcessInfo.processInfo.systemUptime + 2.5
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
             guard let self else { return }
             @MainActor func isCurrent() -> Bool {
                 !Task.isCancelled && self.browserCoverageStartID == token && !self.hasActiveSession
@@ -1603,6 +1603,32 @@ final class IntentAppModel: ObservableObject {
             // its full inventory. An absence reply cannot speak for a window
             // that was born after that profile's query.
             guard isCurrent() else { return }
+            // Overview Run may bring a selected tab forward. Do it before the
+            // coverage query: a finder restores the old active tab when it moves
+            // its new website, so two profiles may both still show "New tab".
+            // DBT Run must instead preserve its explicitly captured foreground.
+            if !self.quickSelectionPreservesCurrentWindowOnStart,
+               let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+               let tab = BrowserWindowCoveragePolicy.startupTab(snapshot: snapshot,
+                    expectedSession: expected, selected: Set(selected), preservesForeground: false) {
+                let requestedAt = Date()
+                do {
+                    try BrowserTabCommandStore(browserBundleIdentifier: browser).write(
+                        .init(tabID: tab.id, windowID: tab.windowID, browserSessionID: expected))
+                } catch { fail(); return }
+                var confirmed = false
+                for _ in 0..<25 {
+                    guard isCurrent() else { return }
+                    if let current = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+                       current.browserSessionID == expected, current.updatedAt >= requestedAt,
+                       (current.allTabs ?? current.tabs).contains(where: { $0.id == tab.id
+                           && $0.windowID == tab.windowID && $0.active && $0.windowFocused == true }) {
+                        confirmed = true; break
+                    }
+                    try? await Task.sleep(nanoseconds: 75_000_000)
+                }
+                guard confirmed, isCurrent() else { fail(); return }
+            }
             let initialObservation: WorkspaceWindow.CoverageObservation? = await withCheckedContinuation { continuation in
                 Self.browserCoverageQueue.async {
                     continuation.resume(returning: WorkspaceWindow.browserCoverageObservation(

@@ -4,6 +4,15 @@ import Foundation
 /// plus authoritative browser reports. AX-absent, unreported CG backing windows
 /// are not classified as browser windows and are never claimed to be covered.
 public enum BrowserWindowCoveragePolicy {
+    /// Only explicit overview startup may choose a selected foreground tab.
+    /// Never use a stale profile, an unselected tab, or disturb DBT's Run anchor.
+    public static func startupTab(snapshot: BrowserTabSnapshot, expectedSession: String,
+                                  selected: Set<Int>, preservesForeground: Bool) -> BrowserTabItem? {
+        guard !preservesForeground, snapshot.browserSessionID == expectedSession else { return nil }
+        let tabs = (snapshot.allTabs ?? snapshot.tabs).filter { selected.contains($0.id) && QuickSelection.isSelectable($0) }
+            .sorted { ($0.windowID, $0.index, $0.id) < ($1.windowID, $1.index, $1.id) }
+        return tabs.first(where: { $0.active && $0.windowFocused == true }) ?? tabs.first(where: \.active) ?? tabs.first
+    }
     public struct NativeIdentity: Hashable {
         public var bundleIdentifier: String
         public var pid: Int32

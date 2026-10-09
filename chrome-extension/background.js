@@ -498,6 +498,10 @@ async function handleRequestedTab(message) {
   const current = await chrome.tabs.get(tab.id).catch(() => null);
   if (current?.windowId !== message.windowID || !isRuntimeAllowedTab(current)) return;
   await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+  // Idle event snapshots deliberately omit tab inventory. Explicit activation
+  // still needs a fresh acknowledgement for overview resolution and Run.
+  // Read actual browser state after the effect; never synthesize an active row.
+  await publishTabSnapshot(true, true);
 }
 
 function scheduleTabSnapshot(force = false) {

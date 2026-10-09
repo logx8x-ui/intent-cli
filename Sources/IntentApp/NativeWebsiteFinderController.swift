@@ -15,12 +15,17 @@ final class NativeWebsiteFinderController: ObservableObject {
     private var companion: NativeWebsiteFinderCompanionPresentation?
     private var committed = false
     private var finished = false
+    private var finderFrame: BrowserWindowFrame?
+    private let onTransfer: (String?) -> Void
+    private let onTransferFailed: () -> Void
     private let onCommit: (WebsiteFinderTarget, BrowserTabItem) -> Void
     private let onCancel: () -> Void
     init(target: WebsiteFinderTarget, onCommit: @escaping (WebsiteFinderTarget, BrowserTabItem) -> Void,
-         onCancel: @escaping () -> Void) throws {
+         onCancel: @escaping () -> Void, onTransfer: @escaping (String?) -> Void = { _ in },
+         onTransferFailed: @escaping () -> Void = {}) throws {
         self.target = target; client = try BrowserFinderClient(target: target)
         self.onCommit = onCommit; self.onCancel = onCancel
+        self.onTransfer = onTransfer; self.onTransferFailed = onTransferFailed
     }
     func start(frame: BrowserWindowFrame) {
         presentCompanion(frame: frame)
@@ -67,15 +72,24 @@ final class NativeWebsiteFinderController: ObservableObject {
         guard opened, !busy, !finished else { return }
         observationTask?.cancel(); observationTask = nil
         busy = true; status = "Adding this page…"
+        // Cover the native handoff before moving the last tab closes its window.
+        // Keep one overview presentation instead of flashing the original browser.
+        companion?.dismiss(); companion = nil
+        onTransfer(expectedURL)
         task = Task { [weak self] in
             guard let self else { return }
             do {
+                // Give AppKit a display turn before the browser closes its finder.
+                try await Task.sleep(nanoseconds: 80_000_000)
+                guard !finished, !Task.isCancelled else { return }
                 let tab = try await client.commit(expectedURL: expectedURL)
                 guard !finished, !Task.isCancelled else { return }
                 committed = true; dismiss(); onCommit(target, tab)
             } catch {
                 guard !finished, !Task.isCancelled else { return }
                 busy = false; status = error.localizedDescription
+                onTransferFailed()
+                if let finderFrame { presentCompanion(frame: finderFrame) }
             }
         }
     }
@@ -99,6 +113,7 @@ final class NativeWebsiteFinderController: ObservableObject {
     }
     private func presentCompanion(frame: BrowserWindowFrame) {
         guard !finished else { return }
+        finderFrame = frame
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.left + frame.width / 2, y: top - frame.top - frame.height / 2)) }) ?? NSScreen.main
         let available = screen?.visibleFrame ?? .init(x: frame.left, y: top - frame.top - frame.height, width: frame.width, height: frame.height)
