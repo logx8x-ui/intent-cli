@@ -3,18 +3,32 @@ import SwiftUI
 import IntentCore
 
 @MainActor
+protocol NativeWebsiteFinderClient {
+    var supportsAutomaticSelection: Bool { get }
+    func open(frame: BrowserWindowFrame) async throws -> BrowserFinderReceipt
+    func observeState() async throws -> BrowserFinderObservation
+    func commit(expectedURL: String?) async throws -> BrowserTabItem
+    func cancel()
+}
+
+extension BrowserFinderClient: NativeWebsiteFinderClient {}
+
+@MainActor
 final class NativeWebsiteFinderController: ObservableObject {
     let target: WebsiteFinderTarget
     @Published private(set) var status = "Opening your browser…"
     @Published private(set) var busy = true
     @Published private(set) var opened = false
     @Published private(set) var controlsFocusRequest: UUID?
-    private let client: BrowserFinderClient
+    private let client: any NativeWebsiteFinderClient
+    private let companionFactory: ((BrowserWindowFrame) -> NativeWebsiteFinderCompanionPresentation)?
+    private let observationDelayNanoseconds: UInt64
     private var task: Task<Void, Never>?
     private var observationTask: Task<Void, Never>?
     private var companion: NativeWebsiteFinderCompanionPresentation?
     private var committed = false
     private var finished = false
+    private var started = false
     private var finderFrame: BrowserWindowFrame?
     private let onTransfer: (String?) -> Void
     private let onTransferFailed: () -> Void
@@ -22,15 +36,23 @@ final class NativeWebsiteFinderController: ObservableObject {
     private let onCancel: () -> Void
     init(target: WebsiteFinderTarget, onCommit: @escaping (WebsiteFinderTarget, BrowserTabItem) -> Void,
          onCancel: @escaping () -> Void, onTransfer: @escaping (String?) -> Void = { _ in },
-         onTransferFailed: @escaping () -> Void = {}) throws {
-        self.target = target; client = try BrowserFinderClient(target: target)
+         onTransferFailed: @escaping () -> Void = {},
+         client: (any NativeWebsiteFinderClient)? = nil,
+         companionFactory: ((BrowserWindowFrame) -> NativeWebsiteFinderCompanionPresentation)? = nil,
+         observationDelayNanoseconds: UInt64 = 400_000_000) throws {
+        self.target = target
+        self.client = try client ?? BrowserFinderClient(target: target)
+        self.companionFactory = companionFactory
+        self.observationDelayNanoseconds = observationDelayNanoseconds
         self.onCommit = onCommit; self.onCancel = onCancel
         self.onTransfer = onTransfer; self.onTransferFailed = onTransferFailed
     }
     func start(frame: BrowserWindowFrame) {
+        guard !finished, !started else { return }
+        started = true
         presentCompanion(frame: frame)
         task = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !self.finished, !Task.isCancelled else { return }
             do {
                 let receipt = try await client.open(frame: frame)
                 guard !finished, !Task.isCancelled else { return }
@@ -52,17 +74,29 @@ final class NativeWebsiteFinderController: ObservableObject {
             while !Task.isCancelled {
                 guard let self, !self.finished, self.opened else { return }
                 do {
-                    try await Task.sleep(nanoseconds: 400_000_000)
+                    try await Task.sleep(nanoseconds: self.observationDelayNanoseconds)
                     guard !self.busy, !self.finished else { continue }
-                    if let url = try await self.client.observe() {
-                        guard !Task.isCancelled, !self.finished, !self.busy else { return }
+                    let observation = try await self.client.observeState()
+                    guard !Task.isCancelled, !self.finished, !self.busy else { return }
+                    switch observation {
+                    case .closed:
+                        // Only the authenticated owner reports terminal closure.
+                        // Release overview input through the normal Cancel path.
+                        self.cancel()
+                        return
+                    case .ready(let url):
                         self.add(expectedURL: url)
                         return
+                    case .waiting:
+                        continue
                     }
                 } catch {
                     guard !Task.isCancelled, !self.finished else { return }
                     self.status = "Choose Add to intention when your page is ready."
-                    return
+                    // A transient query failure is not terminal ownership proof.
+                    // Keep observing so a subsequent browser close still releases
+                    // the overview, with the same bounded polling cadence.
+                    continue
                 }
             }
         }
@@ -90,6 +124,7 @@ final class NativeWebsiteFinderController: ObservableObject {
                 busy = false; status = error.localizedDescription
                 onTransferFailed()
                 if let finderFrame { presentCompanion(frame: finderFrame) }
+                beginObservation()
             }
         }
     }
@@ -114,6 +149,12 @@ final class NativeWebsiteFinderController: ObservableObject {
     private func presentCompanion(frame: BrowserWindowFrame) {
         guard !finished else { return }
         finderFrame = frame
+        if let companionFactory {
+            if let companion { companion.reposition(.init(x: frame.left, y: frame.top, width: frame.width, height: frame.height)); return }
+            let presentation = companionFactory(frame)
+            companion = presentation; presentation.show()
+            return
+        }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.left + frame.width / 2, y: top - frame.top - frame.height / 2)) }) ?? NSScreen.main
         let available = screen?.visibleFrame ?? .init(x: frame.left, y: top - frame.top - frame.height, width: frame.width, height: frame.height)

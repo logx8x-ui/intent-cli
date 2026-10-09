@@ -50,6 +50,33 @@ func runBrowserNativeFinderSpecs() throws {
         anchorTabID: 7, finderWindowID: 10, finderTabID: 20)
     let ready = try receipt(observe, extra: ["windowID": 10, "tabID": 20, "readyURL": "https://example.test/path"])
     try expect(observe.isValid && ready.matches(observe), "Observation is bound to the exact owned tab/window/profile")
+    try expect(ready.observationState == .ready("https://example.test/path"), "A legacy ready receipt retains its typed page observation")
+    let waiting = try receipt(observe, extra: ["windowID": 10, "tabID": 20])
+    try expect(waiting.matches(observe) && waiting.observationState == .waiting,
+        "Older Browser Guards without a closure field retain ordinary waiting observations")
+    let closed = try receipt(observe, extra: ["windowID": 10, "tabID": 20, "ownerClosed": true])
+    try expect(closed.matches(observe) && closed.observationState == .closed,
+        "Only an exact owned-window/tab observation releases closed finder input")
+    let encodedClosed = try JSONEncoder().encode(closed)
+    let forwardedClosed = try JSONDecoder().decode(BrowserFinderReceipt.self, from: encodedClosed)
+    try expect(forwardedClosed == closed && forwardedClosed.ownerClosed == true,
+        "The native host decode/encode seam preserves the optional closure acknowledgement")
+    let invalidClosurePatches: [[String: Any]] = [
+        ["windowID": 11], ["tabID": 21], ["finderID": UUID().uuidString], ["browserSessionID": "profile-b"],
+        ["requestID": UUID().uuidString], ["originalWindowID": 5], ["anchorTabID": 8],
+        ["ownerClosed": false], ["readyURL": "https://example.test/path"], ["error": "unavailable"],
+        ["frame": ["left": 100, "top": 120, "width": 720, "height": 520]],
+        ["tab": ["id": 20, "windowID": 10, "index": 0, "title": "Other", "url": "https://example.test", "active": true]]
+    ]
+    let closureFields: [String: Any] = ["windowID": 10, "tabID": 20, "ownerClosed": true]
+    for patch in invalidClosurePatches {
+        let invalidClosure = try receipt(observe, extra: closureFields.merging(patch) { _, rhs in rhs })
+        try expect(!invalidClosure.matches(observe), "Closure cannot mix payloads or replace any immutable finder identity")
+    }
+    for command in [open, commit, cancel] {
+        let invalidClosure = try receipt(command, extra: ["windowID": 10, "tabID": 20, "ownerClosed": true])
+        try expect(!invalidClosure.matches(command), "Only observation may acknowledge externally closed finder ownership")
+    }
     var wrongReady = ready; wrongReady.tabID = 21
     try expect(!wrongReady.matches(observe), "An unrelated tab cannot satisfy automatic observation")
     var oversized = opened; oversized.frame?.width = 1600

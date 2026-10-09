@@ -21,6 +21,20 @@ public struct WorkspaceTabOutlineReader<Element> {
     }
 }
 
+public struct WorkspaceTabOutlineScan {
+    public let regions: [CGRect]
+    public let complete: Bool
+    public let identityContradiction: Bool
+    public init(regions: [CGRect], complete: Bool, identityContradiction: Bool = false) {
+        self.regions = regions; self.complete = complete; self.identityContradiction = identityContradiction
+    }
+    /// Positive identity contradictions invalidate previous coordinates even
+    /// when discovered during a partial read. Ordinary IPC timeouts do not.
+    public func updateContinuity(_ continuity: inout TabBlurContinuity, context: String, now: Date) -> [CGRect] {
+        continuity.update(regions, context: context, complete: complete || identityContradiction, now: now)
+    }
+}
+
 public enum WorkspaceTabOutlineScanner {
     /// Firefox may omit its current standard window from AXWindows while still
     /// exposing that exact object through AXFocusedWindow/AXMainWindow. Union
@@ -56,7 +70,7 @@ public enum WorkspaceTabOutlineScanner {
         var extensionHost: String? = nil
     }
     public static func scan<Element>(root: Element, browser: String, tabs: [BrowserTabItem], selected: Set<Int>,
-                                     reader: WorkspaceTabOutlineReader<Element>, nodeLimit: Int = 1800) -> (regions: [CGRect], complete: Bool) {
+                                     reader: WorkspaceTabOutlineReader<Element>, nodeLimit: Int = 1800) -> WorkspaceTabOutlineScan {
         var pending: [(Element, Sidebar?)] = [(root, nil)]
         var cursor = 0, truncated = false
         var recognizedChrome = false
@@ -72,8 +86,25 @@ public enum WorkspaceTabOutlineScanner {
         func labels(_ node: Element) -> [String] {
             ["AXTitle", "AXValue", "AXDescription"].compactMap { reader.text(node, $0) }
         }
+        func labelMatches(_ label: String, title: String) -> Bool {
+            !title.isEmpty && (label == title || label.hasPrefix(title + " - Memory usage - ")
+                || BrowserWindowMatching.sameWindowTitle(label, title))
+        }
         func matching(_ labels: [String]) -> [BrowserTabItem] {
-            tabs.filter { tab in !tab.title.isEmpty && labels.contains { $0 == tab.title || $0.hasPrefix(tab.title + " - Memory usage - ") } }
+            tabs.filter { tab in labels.contains { labelMatches($0, title: tab.title) } }
+        }
+        func nativeLabel(_ node: Element) -> String? {
+            // A radio button's numeric AXValue is its selected state. Chrome
+            // commonly puts the actual page title in AXDescription instead;
+            // icon-only/pinned tabs may expose only a generic description.
+            for attribute in ["AXTitle", "AXValue", "AXDescription"] {
+                guard reader.hasTime(), let value = reader.text(node, attribute)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !value.isEmpty else { continue }
+                if attribute == "AXValue", ["0", "1", "true", "false"].contains(value.lowercased()) { continue }
+                if attribute == "AXDescription", ["tab", "pinned tab", "selected tab", "radio button"].contains(value.lowercased()) { continue }
+                return value
+            }
+            return nil
         }
         func valid(_ rect: CGRect) -> Bool {
             [rect.minX, rect.minY, rect.width, rect.height].allSatisfy(\.isFinite)
@@ -83,6 +114,31 @@ public enum WorkspaceTabOutlineScanner {
             let room = max(0, nodeLimit - pending.count)
             if children.count > room { truncated = true }
             pending.append(contentsOf: children.prefix(room).map { ($0, sidebar) })
+        }
+        func sidebarTabFrame(_ row: Element, outer: CGRect) -> CGRect {
+            // Sidebery's exact-ID row includes its trailing spacing and left
+            // indentation. The actual painted tab is a direct, empty group:
+            // live AX reports e.g. a 268x38 row with a 268x32 background, or a
+            // 254x32 indented background. Use that live child, not a fixed
+            // subtraction, text-label width or a rectangle inferred from order.
+            let descendants = reader.children(row)
+            guard descendants.count <= 24, reader.hasTime() else { return outer }
+            var backgrounds: [CGRect] = []
+            for child in descendants {
+                guard reader.hasTime() else { return outer }
+                guard reader.text(child, "AXRole") == "AXGroup",
+                      let candidate = reader.frame(child), valid(candidate),
+                      candidate.width >= outer.width / 2, candidate.height >= outer.height / 2,
+                      abs(candidate.minY - outer.minY) <= 1,
+                      abs(candidate.maxX - outer.maxX) <= 1,
+                      candidate.minX >= outer.minX - 1, candidate.maxY <= outer.maxY + 1,
+                      reader.children(child).isEmpty else { continue }
+                if !backgrounds.contains(candidate) { backgrounds.append(candidate) }
+            }
+            // Old sidebar builds may expose only label/icon children. Preserve
+            // their exact row geometry; ambiguous children never choose a new
+            // tab or a guessed shape.
+            return backgrounds.count == 1 ? backgrounds[0] : outer
         }
         func inconsistentFittingCohort(_ parent: Element, children: [Element]) -> Bool {
             // Firefox can expose a stale scroll offset: every regular Sidebery
@@ -137,6 +193,9 @@ public enum WorkspaceTabOutlineScanner {
                     if url.path == "/sidebar/sidebar.html" {
                         sidebar?.exactRows = true
                         sidebar?.extensionHost = url.host
+                        if let previousBounds = sidebar?.bounds, let bounds = reader.frame(element), valid(bounds) {
+                            sidebar?.bounds = bounds.intersection(previousBounds)
+                        }
                     }
                 } else {
                     // A page embedded in an extension sidebar is still page
@@ -151,7 +210,7 @@ public enum WorkspaceTabOutlineScanner {
                let id = rowID(reader.text(element, "AXDOMIdentifier")) {
                 if tabIDs.contains(id), selected.contains(id) {
                     if let frame = reader.frame(element), valid(frame) {
-                        let clipped = frame.intersection(sidebar.bounds)
+                        let clipped = sidebarTabFrame(element, outer: frame).intersection(sidebar.bounds)
                         if valid(clipped) { regions.append(clipped.insetBy(dx: 1, dy: 1)) }
                     } else { truncated = true }
                 }
@@ -189,6 +248,18 @@ public enum WorkspaceTabOutlineScanner {
                 if !nodes.isEmpty || !reader.hasTime() { truncated = true }
                 let ordered = tabs.sorted { $0.index < $1.index }
                 let exactOrder = !truncated && reader.readsComplete() && ordered.count == native.count && ordered.enumerated().allSatisfy { $0.offset == $0.element.index }
+                if exactOrder {
+                    let nativeLabels = native.map(nativeLabel)
+                    guard reader.hasTime(), reader.readsComplete() else { truncated = true; continue }
+                    // A drag/reorder can happen after the discovery receipt but
+                    // before AX traversal. Equal counts and contiguous indices
+                    // do not certify order. Contradictory available identities
+                    // reject this whole snapshot; never paint by stale index or
+                    // fall back to unique titles using that inconsistent cohort.
+                    if zip(nativeLabels, ordered).contains(where: { label, tab in
+                        label.map { !labelMatches($0, title: tab.title) } ?? false
+                    }) { return .init(regions: [], complete: false, identityContradiction: true) }
+                }
                 for (index, node) in native.enumerated() {
                     let matches = exactOrder ? [ordered[index]] : matching(labels(node))
                     if !matches.isEmpty, matches.allSatisfy({ selected.contains($0.id) }),
@@ -198,6 +269,6 @@ public enum WorkspaceTabOutlineScanner {
             }
             enqueue(descendants, sidebar: sidebar)
         }
-        return (regions, recognizedChrome && !truncated && cursor >= pending.count && reader.hasTime() && reader.readsComplete())
+        return .init(regions: regions, complete: recognizedChrome && !truncated && cursor >= pending.count && reader.hasTime() && reader.readsComplete())
     }
 }

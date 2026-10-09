@@ -5,6 +5,12 @@ than a promise of zero bugs. Freeze new features and visual redesigns. Work one
 reproducible defect at a time: reproduce, fix the owner, regression, install,
 repeat the failed flow and adjacent working flow, record source/build identity.
 
+October 10 update: the newer source/build and three Chrome 0.2.43 direct-URL
+T-to-Run checks are recorded in `2026-10-10-browser-start-and-outlines.md`.
+Use `2026-10-10-stabilization-plan.md` for the current ordered gate. The older
+versions and acceptance rows below remain historical evidence; quiet finish is
+still a blocker and the candidate is not yet tester-ready.
+
 ## Release gate
 
 Do not call the build tester-ready with a known crash, data-loss defect, stuck

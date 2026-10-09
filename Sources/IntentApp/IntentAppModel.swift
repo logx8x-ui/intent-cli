@@ -1618,6 +1618,26 @@ final class IntentAppModel: ObservableObject {
                let tab = BrowserWindowCoveragePolicy.startupTab(snapshot: snapshot,
                     expectedSession: expected, selected: Set(selected), preservesForeground: false) {
                 let requestedAt = Date()
+                // T returns keyboard ownership to Intent. Chrome's extension
+                // can focus a browser window without activating its macOS app;
+                // in that case the real inventory correctly remains unfocused.
+                // Run owns this transition, just as overview window resolution
+                // does. Activate only the existing browser process, then let
+                // the exact profile/tab command choose its window. DBT skips
+                // this entire branch and retains its captured foreground.
+                let running = NSRunningApplication.runningApplications(withBundleIdentifier: browser)
+                    .filter { !$0.isTerminated }
+                let processes = running.compactMap { app -> BrowserProcessIdentity? in
+                    guard let launched = app.launchDate else { return nil }
+                    return .init(pid: app.processIdentifier, launched: launched.timeIntervalSinceReferenceDate)
+                }
+                guard let proof = BrowserProfileSnapshots.selectedProcess(
+                    snapshots: BrowserProfileSnapshots.sessions(base: BrowserTabSnapshotStore.fileURL(for: browser)),
+                    browser: browser, expectedSession: expected, tabID: tab.id, windowID: tab.windowID,
+                    liveProcesses: processes),
+                    let runningBrowser = running.first(where: { $0.processIdentifier == proof.pid
+                        && $0.launchDate?.timeIntervalSinceReferenceDate == proof.launched }),
+                    runningBrowser.activate(options: []) else { fail(); return }
                 do {
                     try BrowserTabCommandStore(browserBundleIdentifier: browser).write(
                         .init(tabID: tab.id, windowID: tab.windowID, browserSessionID: expected))

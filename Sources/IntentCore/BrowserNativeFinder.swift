@@ -35,6 +35,12 @@ public struct BrowserFinderCommand: Codable, Equatable {
     }
 }
 
+public enum BrowserFinderObservation: Equatable {
+    case waiting
+    case ready(String)
+    case closed
+}
+
 public struct BrowserFinderReceipt: Codable, Equatable {
     public var requestID: String
     public var finderID: String
@@ -47,11 +53,18 @@ public struct BrowserFinderReceipt: Codable, Equatable {
     public var frame: BrowserWindowFrame?
     public var tab: BrowserTabItem?
     public var readyURL: String?
+    /// Present only after the exact profile confirms that this finder lost its
+    /// owned tab/window. Never mixed with an error or a captured website.
+    public var ownerClosed: Bool?
     public var error: String?
     public func matches(_ command: BrowserFinderCommand) -> Bool {
         guard command.isValid, requestID == command.id, finderID == command.finderID, action == command.action,
               browserSessionID == command.browserSessionID, originalWindowID == command.windowID,
               anchorTabID == command.anchorTabID else { return false }
+        if let ownerClosed {
+            return ownerClosed && action == .observe && error == nil && readyURL == nil && frame == nil && tab == nil
+                && windowID == command.finderWindowID && tabID == command.finderTabID
+        }
         if let error { return !error.isEmpty && error.utf8.count <= 2048 && tab == nil }
         switch action {
         case .open:
@@ -70,6 +83,13 @@ public struct BrowserFinderReceipt: Codable, Equatable {
                 && (readyURL == nil || readyURL.flatMap(WebsiteFinderPolicy.validatedURL) != nil)
         case .cancel: return tab == nil
         }
+    }
+    /// Call only on a receipt validated against its immutable observe command.
+    public var observationState: BrowserFinderObservation? {
+        guard action == .observe, error == nil else { return nil }
+        if ownerClosed == true { return .closed }
+        if let readyURL { return .ready(readyURL) }
+        return .waiting
     }
     public static func fileURL(requestID: String, directory: URL = IntentEnvironment.dataDirectory) -> URL? {
         guard UUID(uuidString: requestID) != nil else { return nil }
@@ -215,8 +235,14 @@ public final class BrowserFinderClient {
     /// Polls only the exact owned tab through its authenticated mailbox. Browser
     /// snapshots/profile enumeration are unnecessary while the user is typing.
     public func observe() async throws -> String? {
-        guard supportsAutomaticSelection else { return nil }
-        return try await request(.observe, validateProfiles: false).readyURL
+        guard case let .ready(url) = try await observeState() else { return nil }
+        return url
+    }
+    public func observeState() async throws -> BrowserFinderObservation {
+        guard supportsAutomaticSelection else { return .waiting }
+        let receipt = try await request(.observe, validateProfiles: false)
+        guard let state = receipt.observationState else { throw BrowserTabCreationError.uncertain }
+        return state
     }
     public func cancel() {
         guard opened, cancellationTask == nil else { return }

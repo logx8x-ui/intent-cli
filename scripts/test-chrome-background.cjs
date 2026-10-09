@@ -39,6 +39,7 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   let interruptReturnWithTab = null;
   const intervals = [];
   const discoveryRetryTimers = new Map();
+  const activationExpiryTimers = new Map();
   let retryTimerID = 0;
   let dynamicRules = [];
   let sessionRules = (options.sessionRules || []).map(rule => ({...rule}));
@@ -54,6 +55,11 @@ function createHarness(nativeRules, initialTabs, options = {}) {
   const nativeMessage = event();
   const nativeDisconnect = event();
   const windowFocus = event();
+  const windowRemoved = event();
+  const tabMoved = event();
+  const tabAttached = event();
+  const tabDetached = event();
+  let focusedWindowID = options.initialFocusedWindowID ?? 1;
 
   function setActive(id) {
     const target = tabs.get(id);
@@ -134,6 +140,9 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       onCreated: tabCreated,
       onRemoved: tabRemoved,
       onHighlighted: tabHighlighted,
+      onMoved: tabMoved,
+      onAttached: tabAttached,
+      onDetached: tabDetached,
       query: async (query = {}) => {
         const beforeQuery = options.beforeTabQuery?.(query);
         if (beforeQuery) await beforeQuery;
@@ -148,7 +157,10 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         const tab = Array.from(tabs.values()).find(tab => tab.windowId === windowId && tab.active);
         return `data:image/jpeg;base64,${Buffer.from(String(tab?.id)).toString("base64")}`;
       },
-      get: async (id) => tabs.has(id) ? { ...tabs.get(id) } : Promise.reject(new Error("missing tab")),
+      get: async (id) => {
+        await options.beforeTabGet?.(id);
+        return tabs.has(id) ? { ...tabs.get(id) } : Promise.reject(new Error("missing tab"));
+      },
       update: async (id, patch) => {
         const tab = tabs.get(id);
         if (!tab) throw new Error("missing tab");
@@ -196,14 +208,17 @@ function createHarness(nativeRules, initialTabs, options = {}) {
         const pending = options.beforeWindowQuery?.(query);
         if (pending) await pending;
         const windows = [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({
-          id, type: "normal", left: id * 20, top: 50, width: 900, height: 700, focused: id === 1,
+          id, type: "normal", left: id * 20, top: 50, width: 900, height: 700, focused: id === focusedWindowID,
           ...(query.populate ? {tabs: Array.from(tabs.values()).filter(tab => tab.windowId === id).map(tab => ({...tab}))} : {})
         }));
         return options.onWindowQuery ? options.onWindowQuery(query, windows) : windows;
       },
       onFocusChanged: windowFocus,
+      onRemoved: windowRemoved,
       update: async (id, patch) => {
         focusedWindows.push({ id, patch });
+        if (patch.focused && !options.delayWindowFocus) focusedWindowID = id;
+        await options.afterWindowUpdate?.(id, patch);
         if (interruptReturnWithTab !== null) {
           const tabId = interruptReturnWithTab; interruptReturnWithTab = null;
           setActive(tabId);
@@ -236,13 +251,14 @@ function createHarness(nativeRules, initialTabs, options = {}) {
     },
     setTimeout: (callback, delay) => {
       if (delay === 100) { const id = ++retryTimerID; discoveryRetryTimers.set(id, callback); return id; }
+      if (delay === 1800) { const id = ++retryTimerID; activationExpiryTimers.set(id, callback); return id; }
       if (delay === 180 && options.onPreviewDelay) options.onPreviewDelay(tabs, { highlight: setHighlighted });
       if (delay === 180 && options.previewDelayGate) {
         Promise.resolve(options.previewDelayGate).then(callback); return 0;
       }
       Promise.resolve().then(callback); return 0;
     },
-    clearTimeout: id => discoveryRetryTimers.delete(id)
+    clearTimeout: id => { discoveryRetryTimers.delete(id); activationExpiryTimers.delete(id); }
   };
   vm.runInNewContext(fs.readFileSync(path.join(root, "chrome-extension/website-playback-intent.js"), "utf8"), context);
   vm.runInNewContext(source, context, { filename: "chrome-extension/background.js" });
@@ -281,11 +297,45 @@ function createHarness(nativeRules, initialTabs, options = {}) {
       for (let i = 0; i < 48; i++) await Promise.resolve();
     },
     async snapshot() { await context.publishTabSnapshot(true, true); await settle(); return nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1); },
+    async forcedIdleSnapshot() { await context.publishTabSnapshot(true, false); await settle(); },
     interruptNextReturn(tabId) { interruptReturnWithTab = tabId; },
     async focusWindow(id) {
+      focusedWindowID = id;
       for (const listener of windowFocus.listeners) await listener(id);
       await settle();
     },
+    activationExpiryCount: () => activationExpiryTimers.size,
+    async expireActivations() {
+      for (const [id, callback] of activationExpiryTimers) { activationExpiryTimers.delete(id); callback(); }
+      await settle();
+    },
+    async moveTab(id, windowId = null) {
+      const tab = tabs.get(id);
+      const previousWindow = tab?.windowId;
+      if (windowId != null && tab) tab.windowId = windowId;
+      for (const listener of (windowId != null ? tabDetached : tabMoved).listeners) await listener(id, { windowId: previousWindow });
+      if (windowId != null) for (const listener of tabAttached.listeners) await listener(id, {newWindowId: windowId});
+      await settle();
+    },
+    async closeWindow(id) {
+      for (const listener of windowRemoved.listeners) await listener(id);
+      await settle();
+    },
+    async disconnect() {
+      // Browser event dispatch snapshots its listener list. Reconnecting adds
+      // a new port listener which cannot receive this old port's disconnect.
+      for (const listener of [...nativeDisconnect.listeners]) await listener();
+      await settle();
+    },
+    async changeBrowserSession(id) {
+      vm.runInNewContext("browserSessionID = " + JSON.stringify(id), context);
+      await settle();
+    },
+    async changeBrowserProfile(id) {
+      vm.runInNewContext("browserProfileID = " + JSON.stringify(id), context);
+      await settle();
+    },
+    async highlight(ids, windowId) { setHighlighted(ids, windowId); await settle(); },
     async activate(id) {
       setActive(id);
       for (const listener of tabActivated.listeners) await listener({ tabId: id });
@@ -364,8 +414,166 @@ async function run() {
     const reply=h.nativeMessages.filter(message=>message.type==='tabsSnapshot').at(-1);
     assert(reply?.allTabs.some(tab=>tab.id===402&&tab.active),
       'An explicit idle activation must publish its actual new active tab without waiting for a second discovery request');
+    assert(reply.allTabs.some(tab=>tab.id===402&&tab.windowFocused===true),
+      'The normal activation acknowledgement must include actual window focus, as startup requires');
     assert(reply.allTabs.some(tab=>tab.id===401&&!tab.active),'The old active tab must no longer be reported as current');
     assert.equal(h.tabs.size,2,'Startup confirmation must never open or reload a replacement tab');
+  }
+  const activationTabs = () => [
+    {id:401,windowId:44,index:0,active:true,url:'chrome://newtab/',title:'New tab'},
+    {id:402,windowId:44,index:1,active:false,url:'https://example.com/t-added',title:'Example'},
+    {id:403,windowId:44,index:2,active:false,url:'https://example.com/other',title:'Other'}
+  ];
+  const snapshotsOf = harness => harness.nativeMessages.filter(message => message.type === 'tabsSnapshot');
+  const gate = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise,resolve}; };
+  {
+    const h=createHarness({active:false},activationTabs(),{delayWindowFocus:true,initialFocusedWindowID:-1});
+    await h.settle(); h.nativeMessages.length=0;
+    await h.command({id:'late-native-focus',action:'activate',browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+    assert.equal(snapshotsOf(h).at(-1).allTabs.find(tab=>tab.id===402).windowFocused,false,
+      'A completed API call must not fabricate native window focus');
+    await h.focusWindow(44);
+    assert(snapshotsOf(h).at(-1).allTabs.some(tab=>tab.id===402&&tab.active&&tab.windowFocused===true),
+      'The actual delayed focus event must acknowledge an idle T-added tab without a manual refresh');
+    assert.equal(h.activationExpiryCount(),0,'An actual active and focused reply retires the activation lease');
+    assert.equal(h.focusedWindows.length,1,'Focus confirmation never repeats the focus effect');
+    assert.equal(h.updates.filter(update=>update.patch.active).length,1,'Focus confirmation never repeats tab activation');
+  }
+  {
+    let pause=true;
+    const oldQuery=gate();
+    const h=createHarness({active:false},activationTabs(),{delayWindowFocus:true,initialFocusedWindowID:-1,
+      onWindowQuery(query,windows) {
+        if(pause&&query.populate) { pause=false; return oldQuery.promise.then(()=>windows); }
+        return windows;
+      }});
+    await h.settle(); h.nativeMessages.length=0;
+    const request=h.command({id:'overlapping-focus',action:'activate',browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+    await h.settle();
+    await h.focusWindow(44);
+    assert(snapshotsOf(h).at(-1).allTabs.some(tab=>tab.id===402&&tab.active&&tab.windowFocused===true));
+    const count=snapshotsOf(h).length;
+    oldQuery.resolve(); await request; await h.settle();
+    assert.equal(snapshotsOf(h).length,count,'A late pre-focus inventory cannot overwrite the focused acknowledgement');
+  }
+  for(const phase of ['before-command','during-validation']) {
+    const oldQuery=gate(), validation=gate(); let pauseQuery=true, pauseValidation=phase==='during-validation';
+    const h=createHarness({active:false},activationTabs(),{initialFocusedWindowID:-1,
+      beforeTabGet() { if(pauseValidation) { pauseValidation=false; return validation.promise; } },
+      onWindowQuery(query,windows) {
+        if(pauseQuery&&query.populate) { pauseQuery=false; return oldQuery.promise.then(()=>windows); }
+        return windows;
+      }});
+    await h.settle(); h.nativeMessages.length=0;
+    let activation;
+    if(phase==='during-validation') {
+      activation=h.command({id:'activation-'+phase,action:'activate',browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+      await h.settle();
+    }
+    const requestID='unowned-discovery-'+phase;
+    const discovery=h.command({id:requestID,action:'snapshot',tabID:-1,windowID:-1});
+    await h.settle();
+    if(phase==='before-command') activation=h.command({id:'activation-'+phase,action:'activate',browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+    else validation.resolve();
+    await activation; await h.settle();
+    assert.equal(h.activationExpiryCount(),0,'The later activation must already be acknowledged and retired');
+    const acknowledged=snapshotsOf(h).at(-1);
+    assert(acknowledged.allTabs.some(tab=>tab.id===402&&tab.active&&tab.windowFocused===true));
+    assert(acknowledged.snapshotRequestIDs.includes(requestID),'Fresh activation inventory also satisfies the outstanding correlated discovery');
+    const count=snapshotsOf(h).length;
+    oldQuery.resolve(); await discovery; await h.settle();
+    assert.equal(snapshotsOf(h).length,count,
+      'An unowned query begun '+phase+' cannot overwrite the later acknowledged activation after its owner retires');
+    assert(snapshotsOf(h).at(-1).allTabs.some(tab=>tab.id===402&&tab.active&&tab.windowFocused===true));
+  }
+  {
+    const oldQuery=gate(); let pause=true;
+    const h=createHarness({active:false},activationTabs(),{onWindowQuery(query,windows) {
+      if(pause&&query.populate) { pause=false; return oldQuery.promise.then(()=>windows); }
+      return windows;
+    }});
+    await h.settle(); h.nativeMessages.length=0;
+    const discovery=h.command({id:'retry-unowned-discovery',action:'snapshot',tabID:-1,windowID:-1});
+    await h.settle();
+    await h.command({id:'unresolved-new-command',action:'activate',browserSessionID:h.browserSessionID(),tabID:999,windowID:44});
+    oldQuery.resolve(); await discovery; await h.settle();
+    assert.equal(snapshotsOf(h).length,1,'An invalidating command must requery outstanding discovery rather than drop its receipt');
+    assert(snapshotsOf(h)[0].snapshotRequestIDs.includes('retry-unowned-discovery'));
+  }
+  for(const cancellation of ['tab-click','highlight-group','window-leave','reorder','detach','tab-close','window-close','new-command','rules','disconnect','session','profile','expiry']) {
+    const focused=gate(); let pause=true;
+    const h=createHarness({active:false},activationTabs(),{delayWindowFocus:true,initialFocusedWindowID:-1,
+      afterWindowUpdate() { if(pause) { pause=false; return focused.promise; } }});
+    await h.settle(); h.nativeMessages.length=0;
+    const request=h.command({id:'cancel-'+cancellation,action:'activate',browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+    await h.settle();
+    if(cancellation==='tab-click') await h.activate(403);
+    else if(cancellation==='highlight-group') await h.highlight([401,402],44);
+    else if(cancellation==='window-leave') await h.focusWindow(-1);
+    else if(cancellation==='reorder') await h.moveTab(402);
+    else if(cancellation==='detach') await h.moveTab(402,45);
+    else if(cancellation==='tab-close') await h.remove(402);
+    else if(cancellation==='window-close') await h.closeWindow(44);
+    else if(cancellation==='new-command') await h.command({id:'newer-request',action:'activate',browserSessionID:h.browserSessionID(),tabID:403,windowID:44});
+    else if(cancellation==='rules') await h.applyRules({active:true,selectedTabIDs:[401,402,403],startupSessionID:'replacement'});
+    else if(cancellation==='disconnect') await h.disconnect();
+    else if(cancellation==='session') await h.changeBrowserSession('new-browser-lifetime');
+    else if(cancellation==='profile') await h.changeBrowserProfile('86c99382-02b8-42dd-a591-c73d08b9ea8a');
+    else await h.expireActivations();
+    focused.resolve(); await request; await h.settle();
+    assert.equal(h.updates.filter(update=>update.tabId===402&&update.patch.active).length,0,
+      cancellation+' must cancel an old activation before its second effect');
+    assert.equal(h.activationExpiryCount(),cancellation==='new-command'?1:0,
+      cancellation+' retires the old lease instead of keeping a delayed correction');
+    if(cancellation==='highlight-group') assert.deepEqual([...h.tabs.values()].filter(tab=>tab.highlighted).map(tab=>tab.id),[401,402],
+      'A user-created native group containing the requested inactive tab must not be collapsed by the old command');
+    if(cancellation!=='new-command'&&cancellation!=='rules'&&cancellation!=='disconnect') {
+      const count=snapshotsOf(h).length;
+      await h.focusWindow(44);
+      assert.equal(snapshotsOf(h).length,count,cancellation+' cannot resurrect acknowledgement on a late focus event');
+    }
+  }
+  {
+    const h=createHarness({active:false},[
+      {...activationTabs()[0],highlighted:true}, {...activationTabs()[1],highlighted:true}, activationTabs()[2]
+    ],{delayWindowFocus:true,initialFocusedWindowID:-1});
+    await h.settle();
+    await h.command({id:'preserve-active-group',action:'activate',browserSessionID:h.browserSessionID(),tabID:401,windowID:44});
+    await h.focusWindow(44);
+    assert.deepEqual([...h.tabs.values()].filter(tab=>tab.highlighted).map(tab=>tab.id),[401,402],
+      'Focusing the already-active selected tab must preserve the native highlighted group');
+    assert.equal(h.updates.filter(update=>update.patch.active).length,0,'An already-active tab requires no activation mutation');
+  }
+  for(const requestedTab of [402,403]) {
+    const capture=gate();
+    const h=createHarness({active:false},activationTabs(),{previewDelayGate:capture.promise});
+    await h.settle(); h.nativeMessages.length=0;
+    const preview=h.command({id:'preview-before-run',action:'preview',browserSessionID:h.browserSessionID(),tabID:402,windowID:44});
+    await h.settle();
+    await h.command({id:'run-after-preview',action:'activate',browserSessionID:h.browserSessionID(),tabID:requestedTab,windowID:44});
+    capture.resolve(); await preview; await h.settle();
+    assert.equal([...h.tabs.values()].find(tab=>tab.active).id,requestedTab,
+      'An explicit activation of '+requestedTab+' supersedes preview restoration even for the same previewed target');
+    assert(snapshotsOf(h).at(-1).allTabs.some(tab=>tab.id===requestedTab&&tab.active&&tab.windowFocused===true),
+      'The deferred post-preview acknowledgement must describe the explicit Run target');
+    assert.equal(h.highlightUpdates.length,0,'A stale preview never restores its original active tab over Run');
+  }
+  {
+    const h=createHarness({active:false},activationTabs());
+    await h.settle();
+    const populated=await h.snapshot();
+    assert.equal(populated.allTabs.length,3);
+    const count=snapshotsOf(h).length;
+    await h.forcedIdleSnapshot();
+    await h.heartbeat(); await h.settle();
+    assert.equal(snapshotsOf(h).length,count,'A forced idle refresh must preserve the previous populated discovery');
+    assert(h.nativeMessages.some(message=>message.type==='heartbeat'),'Suppressing idle substitutes must retain native heartbeats');
+    h.tabs.clear();
+    await h.command({id:'explicit-empty-discovery',action:'snapshot',tabID:-1,windowID:-1});
+    const empty=snapshotsOf(h).at(-1);
+    assert.equal(empty.allTabs.length,0,'A successful explicit inventory may report that all windows closed');
+    assert.equal(empty.completeWindowInventory,true,'Actual empty discovery retains its completeness receipt');
+    assert(empty.snapshotRequestIDs.includes('explicit-empty-discovery'),'Empty inventory is correlated to its own request');
   }
   // The real adapter waits for a receipt inside the serialized rules pipeline.
   // Delivering receipts after awaiting that same pipeline would deadlock setup.

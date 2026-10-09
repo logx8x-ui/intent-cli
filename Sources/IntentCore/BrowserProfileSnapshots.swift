@@ -117,6 +117,33 @@ public enum BrowserProfileSnapshots {
         return Set(selected)
     }
 
+    /// Overview Run may activate an existing browser parent, but a bundle ID
+    /// alone cannot choose it when two profiles have separate parent processes.
+    /// Bind both selected IDs to the native host's exact process lifetime proof.
+    public static func selectedProcess(snapshots: [BrowserTabSnapshot], browser: String,
+                                       expectedSession: String, tabID: Int, windowID: Int,
+                                       liveProcesses: [BrowserProcessIdentity]) -> BrowserProcessIdentity? {
+        guard !expectedSession.isEmpty, tabID >= 0, windowID >= 0,
+              !snapshots.isEmpty, nonce(snapshots) == expectedSession,
+              Set(snapshots.compactMap(\.browserSessionID)).count == snapshots.count,
+              snapshots.allSatisfy({ $0.browserBundleIdentifier == browser }) else { return nil }
+        var matches: [BrowserProcessIdentity] = []
+        for snapshot in snapshots {
+            guard let session = snapshot.browserSessionID else { return nil }
+            for row in snapshot.allTabs ?? snapshot.tabs {
+                let composite = snapshots.count > 1
+                guard (composite ? compositeID(session: session, id: row.id) : row.id) == tabID,
+                      (composite ? compositeID(session: session, id: row.windowID) : row.windowID) == windowID else { continue }
+                guard snapshot.guardEnabled == true,
+                      let proof = snapshot.browserProcessIdentity, proof.isValid,
+                      liveProcesses.filter({ $0 == proof }).count == 1,
+                      liveProcesses.filter({ $0.pid == proof.pid }).count == 1 else { return nil }
+                matches.append(proof)
+            }
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     public static func nonce(_ snapshots: [BrowserTabSnapshot]) -> String? {
         let sessions = snapshots.compactMap(\.browserSessionID).sorted()
         if sessions.count == 1 { return sessions.first }

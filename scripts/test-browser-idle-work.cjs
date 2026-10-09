@@ -101,10 +101,17 @@ async function harness(browserName, connected) {
     assert.equal(idle.queryCount(), queriesBefore, `${name}: inactive events must not enumerate tabs`);
     assert.equal(idle.intervals[0].delay, 3000);
     assert.ok(idle.intervals[0].delay < 5000, "Heartbeat must remain within the app's five-second freshness window");
-    // The forced empty snapshot still clears the native switcher when a session ends.
+    // Chrome keeps its last authoritative inventory at idle. Its inactive
+    // switcher is cleared by the rule/session lifecycle, not a made-up empty
+    // enumeration. Firefox retains its current protocol until separately updated.
+    const snapshotsBeforeForcedIdle = idle.messages.filter(m => m.type === "tabsSnapshot").length;
     idle.context.scheduleTabSnapshot(true);
     await idle.advance(1100);
-    assert.ok(idle.messages.some(m => m.type === "tabsSnapshot" && m.tabs.length === 0));
+    if (name === "chrome") {
+      assert.equal(idle.messages.filter(m => m.type === "tabsSnapshot").length, snapshotsBeforeForcedIdle,
+        "Chrome forced idle refresh cannot replace the last discovery with false emptiness");
+      assert.equal(idle.queryCount(), queriesBefore, "Chrome forced idle refresh performs no inventory query");
+    } else assert.ok(idle.messages.some(m => m.type === "tabsSnapshot" && m.tabs.length === 0));
     idle.disconnects[0]();
     assert.equal(idle.context.guardStatus().connected, false, `${name}: disconnected guard cannot claim connected`);
     await idle.replies[0]({ active: false });

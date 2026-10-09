@@ -7,6 +7,8 @@ const MAX_RECONNECT_MS = 30000;
 // Stay inside Intent's five-second readiness window without waking every two seconds.
 const HEARTBEAT_MS = 3000;
 const TAB_SNAPSHOT_DEBOUNCE_MS = 40;
+// Fits inside the app's existing 25 x 75ms startup confirmation budget.
+const REQUESTED_TAB_ACTIVATION_MS = 1800;
 const NEW_TAB_GRACE_MS = 250;
 const DYNAMIC_RULE_ID_START = 12000;
 const STARTUP_SESSION_RULE_ID_START = 22000;
@@ -237,6 +239,7 @@ function connectNativeHost() {
     });
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) return;
+      cancelRequestedTabActivation();
       nativePort = null;
       nativeWindowVisibility?.disconnected();
       nativeConnectionConfirmed = false;
@@ -247,6 +250,7 @@ function connectNativeHost() {
     postNative({ type: "setGuardEnabled", enabled: guardEnabled });
     requestRules();
   } catch (_) {
+    cancelRequestedTabActivation();
     nativePort = null;
     applyNativeRules(inactiveRules());
     scheduleReconnect();
@@ -276,6 +280,7 @@ function postNative(message) {
     });
     return true;
   } catch (_) {
+    cancelRequestedTabActivation();
     nativePort = null;
     scheduleReconnect();
     return false;
@@ -348,6 +353,37 @@ async function sendHeartbeat() {
 let previewBusy = false;
 let previewSelectionWatch = null;
 let previewGeneration = 0;
+let requestedTabActivation = null;
+let requestedTabCommandRevision = 0;
+let explicitTabActivationRevision = 0;
+function cancelRequestedTabActivation(owner = requestedTabActivation) {
+  if (!owner || requestedTabActivation !== owner) return;
+  if (owner.timer !== null) clearTimeout(owner.timer);
+  requestedTabActivation = null;
+}
+function currentRequestedTabActivation() {
+  const owner = requestedTabActivation;
+  if (owner && (Date.now() >= owner.expiresAt || owner.session !== browserSessionID
+      || owner.profile !== browserProfileID || owner.port !== nativePort || !guardEnabled
+      || owner.rulesRevision !== ruleApplicationRevision)) cancelRequestedTabActivation(owner);
+  return requestedTabActivation;
+}
+function beginRequestedTabActivation(tab, commandRevision) {
+  cancelRequestedTabActivation();
+  const owner = { tabID: tab.id, windowID: tab.windowId, session: browserSessionID,
+    profile: browserProfileID, port: nativePort, rulesRevision: ruleApplicationRevision,
+    commandRevision, highlightedIDs: null, expiresAt: Date.now() + REQUESTED_TAB_ACTIVATION_MS, timer: null };
+  requestedTabActivation = owner;
+  // This lease never repeats an activation. Later focus events only read the
+  // actual browser state; a late event after expiry cannot resurrect the request.
+  owner.timer = setTimeout(() => cancelRequestedTabActivation(owner), REQUESTED_TAB_ACTIVATION_MS);
+  ++explicitTabActivationRevision;
+  if (previewSelectionWatch) previewSelectionWatch.interfered = true;
+  return owner;
+}
+function ownsRequestedTabActivation(owner) {
+  return currentRequestedTabActivation() === owner && owner.commandRevision === requestedTabCommandRevision;
+}
 let deferredSnapshotPending = false;
 let deferredSnapshotDiscovery = false;
 let deferredSnapshotFlight = null;
@@ -393,25 +429,27 @@ function flushDeferredPreviewSnapshot() {
 
 async function captureTabPreview(message) {
   const result = { requestID: message.id };
-  if (previewBusy || rules.active) {
+  if (previewBusy || rules.active || currentRequestedTabActivation()) {
     postNative({ type: "tabPreview", preview: { ...result, error: "Preview unavailable during a session." } });
     return;
   }
   previewBusy = true;
   previewGeneration += 1;
+  const explicitActivation = explicitTabActivationRevision;
   let previous = null;
   let tab = null;
   let originalHighlightedIDs = [];
   let selectionWatch = null;
   try {
     tab = await chrome.tabs.get(message.tabID);
-    if (tab.windowId !== message.windowID || tab.incognito || tab.discarded || !/^https?:\/\//.test(tab.url || "")) {
+    if (explicitActivation !== explicitTabActivationRevision || tab.windowId !== message.windowID
+        || tab.incognito || tab.discarded || !/^https?:\/\//.test(tab.url || "")) {
       throw new Error("This tab cannot be previewed.");
     }
     selectionWatch = { windowID: tab.windowId, targetID: tab.id, activationRequested: false, interfered: false };
     previewSelectionWatch = selectionWatch;
     const originalWindowTabs = await chrome.tabs.query({ windowId: tab.windowId });
-    if (selectionWatch.interfered) throw new Error("Tab selection changed.");
+    if (selectionWatch.interfered || explicitActivation !== explicitTabActivationRevision) throw new Error("Tab selection changed.");
     previous = originalWindowTabs.find(candidate => candidate.active);
     if (previous?.id !== tab.id) {
       originalHighlightedIDs = originalWindowTabs.filter(candidate => candidate.highlighted === true).map(candidate => candidate.id);
@@ -423,7 +461,8 @@ async function captureTabPreview(message) {
     }
     await new Promise(resolve => setTimeout(resolve, 180));
     const current = await chrome.tabs.get(tab.id);
-    if (rules.active || !current.active || current.windowId !== message.windowID || current.url !== tab.url) throw new Error("Tab changed");
+    if (rules.active || explicitActivation !== explicitTabActivationRevision || !current.active
+        || current.windowId !== message.windowID || current.url !== tab.url) throw new Error("Tab changed");
     result.image = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 65 });
   } catch (_) {
     result.error = "Preview unavailable. Open the tab once, then try again.";
@@ -437,7 +476,8 @@ async function captureTabPreview(message) {
       const highlighted = currentWindowTabs.filter(candidate => candidate.highlighted === true);
       const restoreIDs = [previous.id, ...originalHighlightedIDs.filter(id => id !== previous.id)];
       const restoreTabs = restoreIDs.map(id => currentWindowTabs.find(candidate => candidate.id === id));
-      if (!selectionWatch.interfered && current?.active && current.windowId === message.windowID
+      if (!selectionWatch.interfered && explicitActivation === explicitTabActivationRevision
+          && current?.active && current.windowId === message.windowID
           && highlighted.length === 1 && highlighted[0].id === tab.id
           && restoreTabs.every(candidate => candidate?.windowId === message.windowID && Number.isInteger(candidate.index) && candidate.index >= 0)
           && message.browserSessionID === browserSessionID && !rules.active) {
@@ -454,6 +494,9 @@ async function captureTabPreview(message) {
 }
 
 async function handleRequestedTab(message) {
+  const isActivation = message.action == null || message.action === "activate";
+  const commandRevision = isActivation ? ++requestedTabCommandRevision : null;
+  if (isActivation) cancelRequestedTabActivation();
   if (message.action === "create" || message.action === "cancelCreate") {
     await tabCreation?.handle(message); return;
   }
@@ -492,12 +535,30 @@ async function handleRequestedTab(message) {
     if (rules.accessMode !== "blacklist" && !rules.hideDistractions) await chrome.tabs.remove(tab.id).catch(() => {});
     return;
   }
-  if (!isRuntimeAllowedTab(tab)) return;
-  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  if (!isActivation || commandRevision !== requestedTabCommandRevision || !isRuntimeAllowedTab(tab)) return;
+  const owner = beginRequestedTabActivation(tab, commandRevision);
+  const originalTabs = await chrome.tabs.query({ windowId: tab.windowId }).catch(() => null);
+  if (!ownsRequestedTabActivation(owner)) return;
+  if (!originalTabs?.some(candidate => candidate.id === tab.id && candidate.windowId === message.windowID)) {
+    cancelRequestedTabActivation(owner); return;
+  }
+  owner.highlightedIDs = originalTabs.filter(candidate => candidate.highlighted === true).map(candidate => candidate.id);
+  try { await chrome.windows.update(tab.windowId, { focused: true }); }
+  catch (_) { cancelRequestedTabActivation(owner); return; }
   // Focusing a window is asynchronous; a user can move/close the target meanwhile.
+  if (!ownsRequestedTabActivation(owner)) return;
   const current = await chrome.tabs.get(tab.id).catch(() => null);
-  if (current?.windowId !== message.windowID || !isRuntimeAllowedTab(current)) return;
-  await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+  if (!ownsRequestedTabActivation(owner)) return;
+  if (current?.windowId !== message.windowID || !isRuntimeAllowedTab(current)) {
+    cancelRequestedTabActivation(owner); return;
+  }
+  // Asking Chrome to activate an already-active tab collapses highlighted
+  // multi-selection unnecessarily. Window focus needs no such tab mutation.
+  if (!current.active) {
+    try { await chrome.tabs.update(tab.id, { active: true }); }
+    catch (_) { cancelRequestedTabActivation(owner); return; }
+  }
+  if (!ownsRequestedTabActivation(owner)) return;
   // Idle event snapshots deliberately omit tab inventory. Explicit activation
   // still needs a fresh acknowledgement for overview resolution and Run.
   // Read actual browser state after the effect; never synthesize an active row.
@@ -546,11 +607,18 @@ function completeDiscoveryWindows(windows) {
 
 async function publishTabSnapshot(force = false, discovery = false) {
   await ensureInitialized();
+  // Idle events are deliberately not an inventory. Publishing a forced empty
+  // substitute would erase the last real discovery before a Run/outline reads it.
+  // Heartbeats retain the connection; explicit discovery can certify emptiness.
+  if (!rules.active && !discovery) return;
   if (!await ensureBrowserProfileIdentity()) return;
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
   if (previewBusy) { deferSnapshotForPreview(discovery); return; }
   const generation = previewGeneration;
+  const commandRevision = requestedTabCommandRevision;
+  const activationRevision = explicitTabActivationRevision;
+  const activation = currentRequestedTabActivation();
   const snapshotRequestIDs = discovery ? [...pendingSnapshotRequestIDs] : [];
   let windows, tabs;
   if (discovery) {
@@ -568,6 +636,15 @@ async function publishTabSnapshot(force = false, discovery = false) {
   // highlighted state must never be published as a user's fresh selection.
   if (previewBusy || generation !== previewGeneration) {
     deferSnapshotForPreview(discovery, true);
+    return;
+  }
+  // Fence every query, including an unowned query begun before a command or
+  // while its target is still being validated. The later owner can already be
+  // acknowledged and retired when those old rows arrive; null ownership alone
+  // cannot distinguish that stale result from a new post-activation inventory.
+  if (commandRevision !== requestedTabCommandRevision || activationRevision !== explicitTabActivationRevision
+      || (activation && !ownsRequestedTabActivation(activation))) {
+    if (discovery && pendingSnapshotRequestIDs.size) deferSnapshotForPreview(true, true);
     return;
   }
   const windowsByID = new Map(windows.map(window => [window.id, window]));
@@ -615,6 +692,9 @@ async function publishTabSnapshot(force = false, discovery = false) {
     }
     publishedSnapshotGeneration = generation;
     publishedSnapshotDiscovery = discovery;
+    if (activation && ownsRequestedTabActivation(activation)
+        && allSnapshotTabs.some(tab => tab.id === activation.tabID && tab.windowID === activation.windowID
+          && tab.active && tab.windowFocused === true)) cancelRequestedTabActivation(activation);
   } else if (discovery) scheduleDiscoveryRetry();
 }
 
@@ -656,6 +736,7 @@ function applyNativeRules(nativeRules) {
     return ruleApplication.then(() => settleRuleRequests());
   }
   requestedRulesFingerprint = requestedFingerprint;
+  cancelRequestedTabActivation();
   const revision = ++ruleApplicationRevision;
   websitePlayback.clear();
   // Stop enforcement before restoring tabs: restoration emits ordinary tab
@@ -1245,6 +1326,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const enabled = message.enabled !== false;
     chrome.storage.local.set({ guardEnabled: enabled }).then(async () => {
       guardEnabled = enabled;
+      if (!enabled) cancelRequestedTabActivation();
       postNative({ type: "setGuardEnabled", enabled });
       requestRules();
       if (!enabled) await applyNativeRules(inactiveRules());
@@ -1260,6 +1342,11 @@ let windowFocusRevision = 0;
 chrome.windows?.onFocusChanged?.addListener(async (windowId) => {
   // Losing browser focus need not activate another tab. Invalidate pending recovery.
   ++windowFocusRevision;
+  const activation = currentRequestedTabActivation();
+  if (activation) {
+    if (windowId !== activation.windowID) cancelRequestedTabActivation(activation);
+    else void publishTabSnapshot(true, true).catch(() => {});
+  }
   if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;
   const tabs = await chrome.tabs.query({});
@@ -1272,6 +1359,11 @@ let lastActivatedTabId = null;
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   lastActivatedTabId = tabId;
   const activation = ++activationRevision;
+  const requested = currentRequestedTabActivation();
+  if (requested) {
+    if (tabId !== requested.tabID) cancelRequestedTabActivation(requested);
+    else if (!previewBusy) void publishTabSnapshot(true, true).catch(() => {});
+  }
   if (rules.active && Array.isArray(rules.selectedTabIDs) && isRuntimeAllowedTab({id: tabId})) lastAllowedTabId = tabId;
   if (previewBusy && !rules.active) return; // Preview activations are not user browsing history.
   if (rules.active && Array.isArray(rules.selectedTabIDs) && !isRuntimeAllowedTab({id: tabId})) {
@@ -1295,6 +1387,15 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 
 // Selection, pinning and moves can change without navigation or activation.
 chrome.tabs.onHighlighted?.addListener((selection) => {
+  const activation = currentRequestedTabActivation();
+  if (activation && activation.windowID === selection?.windowId) {
+    const ids = selection.tabIds;
+    const original = activation.highlightedIDs;
+    const unchanged = Array.isArray(ids) && Array.isArray(original) && ids.length === original.length
+      && ids.every(id => original.includes(id));
+    const ownActivation = Array.isArray(ids) && ids.length === 1 && ids[0] === activation.tabID;
+    if (!unchanged && !ownActivation) cancelRequestedTabActivation(activation);
+  }
   if (previewSelectionWatch && previewSelectionWatch.windowID === selection?.windowId
       && (!previewSelectionWatch.activationRequested || !Array.isArray(selection.tabIds)
           || selection.tabIds.length !== 1 || selection.tabIds[0] !== previewSelectionWatch.targetID)) {
@@ -1400,10 +1501,21 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 for (const event of [chrome.tabs.onMoved, chrome.tabs.onAttached, chrome.tabs.onDetached]) {
-  event?.addListener(() => { if (rules.active) scheduleTabSnapshot(true); });
+  event?.addListener(tabId => {
+    const activation = currentRequestedTabActivation();
+    if (activation?.tabID === tabId) cancelRequestedTabActivation(activation);
+    if (rules.active) scheduleTabSnapshot(true);
+  });
 }
 
+chrome.windows?.onRemoved?.addListener(windowId => {
+  const activation = currentRequestedTabActivation();
+  if (activation?.windowID === windowId) cancelRequestedTabActivation(activation);
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const activation = currentRequestedTabActivation();
+  if (activation?.tabID === tabId) cancelRequestedTabActivation(activation);
   websitePlayback.forget(tabId);
   searchSessionTabs.delete(tabId); saveSearchLedger(); committedURLByTab.delete(tabId);
   freshBlankTabIds.delete(tabId);

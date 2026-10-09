@@ -3,6 +3,7 @@ import IntentCore
 import IntentLock
 
 func runWorkspaceTabOutlineSpecs() throws {
+    try runWorkspaceOutlineInventorySpecs()
     struct Node {
         var attributes: [String: String]
         var children: [Int] = []
@@ -43,7 +44,7 @@ func runWorkspaceTabOutlineSpecs() throws {
         21: .init("AXGroup", frame: regular, identifier: "tab51")
     ]
     func scan(_ fixture: [Int: Node] = rows, selected: Set<Int>, complete: Bool = true, limit: Int = 1800,
-              browser: String = "org.mozilla.firefox") -> (regions: [CGRect], complete: Bool) {
+              browser: String = "org.mozilla.firefox") -> WorkspaceTabOutlineScan {
         WorkspaceTabOutlineScanner.scan(root: 0, browser: browser, tabs: tabs, selected: selected,
             reader: .init(text: { fixture[$0]?.attributes[$1] }, children: { fixture[$0]?.children ?? [] },
                 frame: { fixture[$0]?.frame }, key: { $0 }, equal: { $0 == $1 },
@@ -89,6 +90,87 @@ func runWorkspaceTabOutlineSpecs() throws {
     ]
     try expect(scan(horizontal, selected: [51], browser: "com.google.Chrome").regions == [regular.insetBy(dx: 1, dy: 1)],
                "Native horizontal/vertical tab groups retain exact ordered mapping alongside the sidebar fix")
+    var labelled = horizontal
+    labelled[2]?.attributes["AXTitle"] = "Pinned"
+    labelled[3]?.attributes["AXTitle"] = "Same title"
+    labelled[4]?.attributes["AXTitle"] = "Same title"
+    try expect(scan(labelled, selected: [51], browser: "com.google.Chrome").complete
+        && scan(labelled, selected: [51], browser: "com.google.Chrome").regions == [regular.insetBy(dx: 1, dy: 1)],
+        "Consistent native labels preserve exact indices even when separate tabs have duplicate titles")
+    var reordered = labelled
+    reordered[2]?.attributes["AXTitle"] = "Same title"
+    reordered[3]?.attributes["AXTitle"] = "Pinned"
+    let staleOrder = scan(reordered, selected: [51], browser: "com.google.Chrome")
+    try expect(!staleOrder.complete && staleOrder.identityContradiction && staleOrder.regions.isEmpty,
+        "A tab reordered between correlated discovery and native AX traversal cannot paint another tab by stale index or title fallback")
+    var orderContinuity = TabBlurContinuity()
+    _ = scan(labelled, selected: [51], browser: "com.google.Chrome").updateContinuity(&orderContinuity, context: "unchanged-receipt", now: now)
+    try expect(staleOrder.updateContinuity(&orderContinuity, context: "unchanged-receipt", now: now.addingTimeInterval(0.1)).isEmpty,
+        "A positively contradicted order immediately removes an already drawn contour rather than retaining wrong coordinates")
+    _ = scan(labelled, selected: [51], browser: "com.google.Chrome").updateContinuity(&orderContinuity, context: "unchanged-receipt", now: now)
+    let unavailable = scan(horizontal, selected: [51], complete: false, browser: "com.google.Chrome")
+    try expect(!unavailable.identityContradiction
+        && !unavailable.updateContinuity(&orderContinuity, context: "unchanged-receipt", now: now.addingTimeInterval(0.1)).isEmpty,
+        "An ordinary incomplete AX read still preserves bounded known-good outline geometry")
+    var navigated = labelled
+    navigated[3]?.attributes["AXTitle"] = "A newly navigated page"
+    try expect(!scan(navigated, selected: [51], browser: "com.google.Chrome").complete
+        && scan(navigated, selected: [51], browser: "com.google.Chrome").regions.isEmpty,
+        "A meaningful native title absent from the discovery cohort requires a fresh receipt instead of assuming positional identity")
+    var descriptions = horizontal
+    descriptions[2]?.attributes["AXDescription"] = "Pinned tab"
+    descriptions[2]?.attributes["AXValue"] = "0"
+    descriptions[3]?.attributes["AXDescription"] = "Same title - Memory usage - 200 MB"
+    descriptions[3]?.attributes["AXValue"] = "1"
+    descriptions[4]?.attributes["AXDescription"] = "Same title — Google Chrome – QA Profile"
+    try expect(scan(descriptions, selected: [6, 51, 52], browser: "com.google.Chrome").complete
+        && scan(descriptions, selected: [6, 51, 52], browser: "com.google.Chrome").regions.count == 3,
+        "Chrome memory descriptions, native title decorations and unlabeled pinned controls do not falsely invalidate an exact cohort")
+    descriptions[3]?.attributes["AXDescription"] = "Pinned - Memory usage - 100 MB"
+    try expect(!scan(descriptions, selected: [51], browser: "com.google.Chrome").complete
+        && scan(descriptions, selected: [51], browser: "com.google.Chrome").regions.isEmpty,
+        "Decorated descriptions still expose a contradictory tab identity and cannot bypass reorder detection")
+    // Deidentified current Sidebery AX: the row owns tab identity, but its
+    // background child owns the painted shape. The row's six-point trailing
+    // padding and tree indentation are outside that shape.
+    var painted = rows
+    let regularBody = CGRect(x: 6, y: 216, width: 268, height: 32)
+    painted[5]?.children = [15, 6]
+    painted[15] = .init("AXGroup", frame: regularBody)
+    try expect(scan(painted, selected: [51]).regions == [regularBody.insetBy(dx: 1, dy: 1)],
+               "A native Sidebery outline follows the actual painted background without including trailing row spacing")
+    let indentedBody = CGRect(x: 20, y: 216, width: 254, height: 32)
+    painted[15]?.frame = indentedBody
+    try expect(scan(painted, selected: [51]).regions == [indentedBody.insetBy(dx: 1, dy: 1)],
+               "Tree-indented tabs retain their native background width and x position instead of boxing the full outer row")
+    let configuredBody = CGRect(x: 26, y: 216, width: 248, height: 29)
+    painted[15]?.frame = configuredBody
+    try expect(scan(painted, selected: [51]).regions == [configuredBody.insetBy(dx: 1, dy: 1)],
+               "Changed sidebar spacing and indentation use current native geometry rather than a hard-coded six-point correction")
+    painted[4]?.children = [16, 10]
+    let pinnedBody = CGRect(x: pinned.minX, y: pinned.minY, width: pinned.width, height: 32)
+    painted[16] = .init("AXGroup", frame: pinnedBody)
+    try expect(scan(painted, selected: [6]).regions == [pinnedBody.insetBy(dx: 1, dy: 1)],
+               "Icon-only pinned tabs also use their exact painted native background")
+    painted[5]?.children = [17, 15, 6]
+    painted[17] = .init("AXGroup", frame: regularBody)
+    try expect(scan(painted, selected: [51]).regions == [regular.insetBy(dx: 1, dy: 1)],
+               "Two distinct candidate background shapes retain the exact row instead of guessing an inner shape")
+    painted[17]?.frame = configuredBody
+    try expect(scan(painted, selected: [51]).regions == [configuredBody.insetBy(dx: 1, dy: 1)],
+               "Repeated AX background geometry yields one outline rather than duplicated contours")
+    painted[5]?.children = [15, 6]
+    painted[15]?.frame = configuredBody.offsetBy(dx: 0, dy: -100)
+    try expect(scan(painted, selected: [51]).regions == [regular.insetBy(dx: 1, dy: 1)],
+               "An unrelated or stale child outside its identified row cannot displace the current tab outline")
+    painted[15]?.frame = configuredBody
+    painted[15]?.children = [6]
+    try expect(scan(painted, selected: [51]).regions == [regular.insetBy(dx: 1, dy: 1)],
+               "A label container with descendants cannot impersonate the empty painted tab background")
+    painted[15]?.children = []
+    painted[3]?.frame = CGRect(x: 0, y: 225, width: 280, height: 300)
+    try expect(scan(painted, selected: [51]).regions == [configuredBody.intersection(painted[3]!.frame!).insetBy(dx: 1, dy: 1)],
+               "A partially scrolled tab outline is clipped to the actual extension viewport, never its browser header")
     var cohort = rows
     cohort[3]?.children = [4, 30]
     cohort[30] = .init("AXGroup", children: [5, 7], frame: CGRect(x: 0, y: 216, width: 280, height: 100))

@@ -195,6 +195,34 @@ func runBrowserWindowCoverageSpecs() throws {
     let combined = [snapshot, profileB], nonce = BrowserProfileSnapshots.nonce(combined)!
     let compositeA = BrowserProfileSnapshots.compositeID(session: "a", id: 1)
     let compositeB = BrowserProfileSnapshots.compositeID(session: "b", id: 1)
+    let secondParent = BrowserProcessIdentity(pid: proof.pid + 1, launched: proof.launched + 4)
+    var separateProfileB = profileB; separateProfileB.browserProcessIdentity = secondParent
+    let separateParents = [snapshot, separateProfileB]
+    let compositeWindowB = BrowserProfileSnapshots.compositeID(session: "b", id: 200)
+    try expect(BrowserProfileSnapshots.selectedProcess(snapshots: separateParents, browser: browser,
+        expectedSession: nonce, tabID: compositeB, windowID: compositeWindowB,
+        liveProcesses: [proof, secondParent]) == secondParent,
+        "T Run activates the selected profile's exact browser parent, not the first application with that bundle")
+    try expect(BrowserProfileSnapshots.selectedProcess(snapshots: Array(separateParents.reversed()), browser: browser,
+        expectedSession: nonce, tabID: compositeB, windowID: compositeWindowB,
+        liveProcesses: [secondParent, proof]) == secondParent,
+        "Profile and native application enumeration order cannot change T Run ownership")
+    try expect(BrowserProfileSnapshots.selectedProcess(snapshots: separateParents, browser: browser,
+        expectedSession: nonce, tabID: compositeB, windowID: BrowserProfileSnapshots.compositeID(session: "a", id: 100),
+        liveProcesses: [proof, secondParent]) == nil,
+        "A selected tab cannot borrow another profile's native window")
+    try expect(BrowserProfileSnapshots.selectedProcess(snapshots: [snapshot], browser: browser,
+        expectedSession: nonce, tabID: compositeB, windowID: compositeWindowB,
+        liveProcesses: [proof, secondParent]) == nil,
+        "An incomplete profile cohort cannot reinterpret the selected process")
+    try expect(BrowserProfileSnapshots.selectedProcess(snapshots: separateParents, browser: browser,
+        expectedSession: nonce, tabID: compositeB, windowID: compositeWindowB,
+        liveProcesses: [proof, .init(pid: secondParent.pid, launched: secondParent.launched + 1)]) == nil,
+        "T Run never activates a recycled browser PID using an old profile proof")
+    try expect(BrowserProfileSnapshots.selectedProcess(snapshots: separateParents, browser: browser,
+        expectedSession: nonce, tabID: compositeB, windowID: compositeWindowB,
+        liveProcesses: [proof]) == nil,
+        "A closed selected parent cannot be substituted with a running sibling")
     try expect(BrowserProfileSnapshots.selectedCoverageWindows(snapshots: combined, browser: browser, expectedSession: nonce,
         selectedTabIDs: [compositeA, compositeB]) == [selected.identity, report(200, "Allowed", profile: "b").identity],
         "Composite selected IDs stay profile scoped when native IDs collide")

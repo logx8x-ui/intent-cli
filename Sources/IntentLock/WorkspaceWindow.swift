@@ -200,7 +200,13 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private var preserveBehindIntentPanels = false
     private var timer: DispatchSourceTimer?
     private var revision = 0
-    private var lastSnapshotRequest = Date.distantPast // worker queue only
+    private struct SnapshotState {
+        var context = ""
+        var request: WorkspaceOutlineInventory.Request?
+        var continuity = WorkspaceOutlineInventory.Continuity()
+    }
+    private var snapshotStates: [String: SnapshotState] = [:] // worker queue only
+    private var diagnosticsSignature = "" // worker queue only
     private var tabContinuity: [UInt32: TabBlurContinuity] = [:] // worker queue only
     private var panels: [NSPanel] = [] // main queue only
     private var scanCache: [UInt32: (key: String, at: Date, regions: [CGRect])] = [:] // worker queue
@@ -221,21 +227,76 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     public func stop() {
         timer?.cancel(); timer = nil
         mutex.lock(); revision += 1; selection = QuickSelection(); preserveBehindIntentPanels = false; mutex.unlock()
+        queue.async { [weak self] in
+            self?.snapshotStates.removeAll(); self?.scanCache.removeAll(); self?.tabContinuity.removeAll()
+        }
         DispatchQueue.main.async { [weak self] in self?.panels.forEach { $0.orderOut(nil) }; self?.panels = [] }
+    }
+    /// Poll our own read-only discovery receipt before issuing its successor.
+    /// A forced idle event can overwrite ordinary inventory with [], so that
+    /// inventory is never evidence for clearing a staged mark.
+    private func inventory(browser: String, selection: QuickSelection, processes: [BrowserProcessIdentity],
+                           now: Date) -> (response: WorkspaceOutlineInventory.Response?, phase: String) {
+        guard let expected = selection.browserSessionIDs[browser] else { return (nil, "selection-unpinned") }
+        let base = BrowserTabSnapshotStore.fileURL(for: browser)
+        let owners = BrowserProfileSnapshots.sessions(base: base, now: now)
+        let proof = owners.compactMap { owner in owner.browserProcessIdentity.map { "\(owner.browserSessionID ?? ""):\($0.pid):\($0.launched)" } }.sorted()
+        let context = "\(expected):\(proof):\(selection.tabs.filter { $0.browser == browser }.map(\.id).sorted())"
+        var state = snapshotStates[browser] ?? SnapshotState()
+        if state.context != context { state = SnapshotState(); state.context = context }
+        var accepted: WorkspaceOutlineInventory.Response?
+        var authoritative = false
+        var phase = "query-pending"
+        if let request = state.request {
+            if !request.isCurrent(owners: owners, processes: processes) {
+                state.request = nil; authoritative = true; phase = "owner-changed"
+            } else {
+                let replies = request.owners.compactMap { owner -> BrowserTabSnapshot? in
+                    guard let session = owner.browserSessionID,
+                          let data = try? Data(contentsOf: BrowserProfileSnapshots.discoveryPartition(base, session: session)) else { return nil }
+                    return try? JSONDecoder().decode(BrowserTabSnapshot.self, from: data)
+                }
+                if let response = request.resolve(replies: replies, current: owners, processes: processes, now: now) {
+                    accepted = response; authoritative = true; state.request = nil
+                    phase = (response.snapshot.allTabs ?? []).isEmpty ? "confirmed-empty" : "confirmed"
+                } else if now.timeIntervalSince(request.requestedAt) >= 2.4 {
+                    state.request = nil; phase = "query-timeout"
+                }
+            }
+        }
+        if state.request == nil {
+            if let request = WorkspaceOutlineInventory.Request(browser: browser, expectedSession: expected,
+                owners: owners, processes: processes, now: now) {
+                do {
+                    // Reuse the existing read-only presence mailbox. It cannot
+                    // replace a pending user activation or preview command.
+                    for command in request.commands {
+                        let path = BrowserSelectedTabPresenceCheck.commandFileURL(
+                            base: BrowserTabCommandStore.fileURL(for: browser), session: command.browserSessionID!)
+                        try JSONEncoder().encode(command).write(to: path, options: .atomic)
+                    }
+                    state.request = request
+                } catch { phase = "query-write-failed" }
+            } else { authoritative = true; accepted = nil; phase = "owner-unavailable" }
+        }
+        let response = state.continuity.update(accepted, context: context, authoritative: authoritative, now: now)
+        snapshotStates[browser] = state
+        return (response, phase)
+    }
+    private func recordDiagnostics(_ values: [String: Any]) {
+        let directory = IntentEnvironment.dataDirectory
+        guard ProcessInfo.processInfo.environment["INTENT_QA_OUTLINE_DIAGNOSTICS"] == "1"
+            || FileManager.default.fileExists(atPath: directory.appendingPathComponent("qa-workspace-outline.enabled").path),
+              let data = try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]),
+              let signature = String(data: data, encoding: .utf8), signature != diagnosticsSignature else { return }
+        diagnosticsSignature = signature
+        try? data.write(to: directory.appendingPathComponent("workspace-outline-diagnostics.json"), options: .atomic)
     }
     private func refresh() {
         mutex.lock()
         let selection = self.selection; let token = revision
         let preserveBehindIntentPanels = self.preserveBehindIntentPanels
         mutex.unlock()
-        // Idle browser extensions intentionally publish no spontaneous snapshots.
-        // While marks are displayed, refresh so the border follows tab changes.
-        if Date().timeIntervalSince(lastSnapshotRequest) >= 0.35 {
-            lastSnapshotRequest = Date()
-            for browser in Set(selection.tabs.map(\.browser)) {
-                try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(.init(tabID: -1, windowID: -1, action: .snapshot))
-            }
-        }
         let windows = WorkspaceWindow.list(onScreen: false)
         var markedRegions: [UInt32: [CGRect]] = [:]
         let focused = WorkspaceWindow.focused()
@@ -252,15 +313,34 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         let overviewVisible = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains {
             $0[kCGWindowOwnerName as String] as? String == "Dock" && $0[kCGWindowLayer as String] as? Int == 20
         }
+        let selectedBrowsers = Set(selection.tabs.map(\.browser))
+        snapshotStates = snapshotStates.filter { selectedBrowsers.contains($0.key) }
+        var inventories: [String: WorkspaceOutlineInventory.Response] = [:]
+        var browserProcesses: [String: [BrowserProcessIdentity]] = [:]
+        var phases: [String: String] = [:]
+        var matchedWindows = 0, completedScans = 0, partialScans = 0, contradictedScans = 0
+        for browser in selectedBrowsers {
+            let processes = NSRunningApplication.runningApplications(withBundleIdentifier: browser).compactMap { app -> BrowserProcessIdentity? in
+                guard let launch = app.launchDate else { return nil }
+                return BrowserProcessIdentity(pid: app.processIdentifier, launched: launch.timeIntervalSinceReferenceDate)
+            }
+            browserProcesses[browser] = processes
+            let result = inventory(browser: browser, selection: selection, processes: processes, now: Date())
+            phases[browser] = result.phase
+            if let response = result.response { inventories[browser] = response }
+        }
         for window in windows {
             if selection.windowIDsByApp[window.bundle]?.contains(window.id) == true {
                 markedRegions[window.id] = [window.frame]
                 continue
             }
             guard QuickSelection.browsers.contains(window.bundle),
-                  let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: window.bundle).load(),
+                  let response = inventories[window.bundle] else { continue }
+            let snapshot = response.snapshot
+            guard let process = browserProcesses[window.bundle]?.first(where: { $0.pid == window.pid }),
                   selection.browserSessionIDs[window.bundle] == snapshot.browserSessionID,
-                  let id = BrowserWindowMatching.match(title: window.title, tabs: snapshot.allTabs ?? snapshot.tabs, nativeWindowCount: windows.filter { $0.bundle == window.bundle }.count, frame: window.frame, isFocused: front?.id == window.id) else { continue }
+                  let id = BrowserWindowMatching.match(title: window.title, tabs: response.tabs(for: process), nativeWindowCount: windows.filter { $0.pid == window.pid }.count, frame: window.frame, isFocused: front?.id == window.id) else { continue }
+            matchedWindows += 1
             let tabs = (snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == id }
             let selectedIDs = Set(selection.tabs.filter { $0.browser == window.bundle }.map(\.id))
             guard tabs.contains(where: { selectedIDs.contains($0.id) }) else { continue }
@@ -271,7 +351,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             }
             // Selection/geometry changes refresh immediately; an unchanged tab strip
             // needs no full accessibility traversal on every animation tick.
-            let key = "\(window.pid):\(snapshot.browserSessionID ?? ""): \(window.frame):\(tabs.map { "\($0.id):\($0.index):\($0.title):\($0.active)" }):\(selectedIDs.sorted())"
+            let key = "\(window.pid):\(process.launched):\(snapshot.browserSessionID ?? ""): \(window.frame):\(tabs.map { "\($0.id):\($0.index):\($0.title):\($0.active)" }):\(selectedIDs.sorted())"
             if let cached = scanCache[window.id], cached.key == key, Date().timeIntervalSince(cached.at) < 1 {
                 markedRegions[window.id] = cached.regions
                 continue
@@ -280,13 +360,23 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                 markedRegions[window.id] = scanCache[window.id].flatMap { $0.key == key ? $0.regions : nil } ?? []
                 continue
             }
-            let scan = WorkspaceTabOutline.scan(window: window, tabs: tabs, selected: selectedIDs)
+            guard let native = response.nativeWindow(id: id, selectedIDs: selectedIDs, process: process) else { continue }
+            let scan = WorkspaceTabOutline.scan(window: window, tabs: native.tabs, selected: native.selected)
+            if scan.complete { completedScans += 1 } else { partialScans += 1 }
+            if scan.identityContradiction {
+                contradictedScans += 1
+                scanCache.removeValue(forKey: window.id)
+                // Requery after the observed reorder/navigation. An already
+                // pending request may have sampled before that change too.
+                snapshotStates.removeValue(forKey: window.bundle)
+                phases[window.bundle] = "native-identity-contradiction"
+            }
             // Favicon bytes, page URLs and snapshot timestamps do not identify
             // tab chrome. Reuse the session-pinned layout key so an icon refresh
             // cannot clear a valid outline during a bounded partial AX read.
             let context = key
             var continuity = tabContinuity[window.id] ?? TabBlurContinuity()
-            let regions = continuity.update(scan.regions, context: context, complete: scan.complete, now: Date())
+            let regions = scan.updateContinuity(&continuity, context: context, now: Date())
             tabContinuity[window.id] = continuity
             markedRegions[window.id] = regions
             if scan.complete { scanCache[window.id] = (key, Date(), regions) }
@@ -307,6 +397,11 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             // behind our staged modifier editor); Mission Control renders all marks.
             rectangles = front.flatMap { markedRegions[$0.id] } ?? []
         }
+        recordDiagnostics(["selectedTabCount": selection.tabs.count, "selectedWindowCount": selection.windowIDsByApp.values.reduce(0) { $0 + $1.count },
+            "selectedBrowserCount": selectedBrowsers.count, "inventoryPhases": phases, "nativeWindowCount": windows.count,
+            "presentationWindowID": presentationID.map { Int($0) } ?? 0, "matchedWindowCount": matchedWindows,
+            "completeScanCount": completedScans, "partialScanCount": partialScans, "identityContradictionCount": contradictedScans,
+            "renderedRegionCount": rectangles.count])
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.mutex.lock(); let current = self.revision == token; self.mutex.unlock()

@@ -8,7 +8,7 @@ const host = process.env.INTENT_NATIVE_HOST_PATH || path.resolve('.build/release
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'intent-native-finder-protocol-'));
 const browser = 'com.google.Chrome', session = 'finder-profile';
 const envelope = { browserBundleIdentifier: browser, browserSessionID: session,
-  extensionCapabilities: ['native-website-finder-v1'], extensionVersion: '0.2.35' };
+  extensionCapabilities: ['native-website-finder-v1', 'native-website-finder-observe-v1'], extensionVersion: '0.2.35' };
 function frame(value) { const data = Buffer.from(JSON.stringify(value)), header = Buffer.alloc(4); header.writeUInt32LE(data.length); return Buffer.concat([header, data]); }
 function call(messages) {
   const result = spawnSync(host, { input: Buffer.concat(messages.map(message => frame({ ...envelope, ...message }))),
@@ -21,16 +21,16 @@ function call(messages) {
 function prepare(action = 'open') {
   const request = { id: crypto.randomUUID(), finderID: crypto.randomUUID(), action, browserSessionID: session,
     anchorTabID: 7, windowID: 4, frame: {left:100, top:100, width:720, height:520}, expiresAtUnixMS: Date.now()+8000,
-    ...(action === 'commit' ? {finderWindowID:10, finderTabID:20} : {}) };
+    ...(['commit','observe'].includes(action) ? {finderWindowID:10, finderTabID:20} : {}) };
   const channel = 'browser-finder-com-google-Chrome-' + crypto.createHash('sha256').update(session).digest('hex').slice(0,24) + '.json';
   fs.writeFileSync(path.join(root, channel), JSON.stringify([request]));
   const receipt = { requestID:request.id, finderID:request.finderID, action, browserSessionID:session, originalWindowID:4, anchorTabID:7,
     ...(action === 'open' ? {windowID:10, tabID:20, frame:request.frame} : action === 'commit' ? {windowID:4, tabID:20,
-      tab:{id:20, windowID:4, index:2, title:'Selected', url:'https://example.test', active:false}} : {}) };
+      tab:{id:20, windowID:4, index:2, title:'Selected', url:'https://example.test', active:false}} : action === 'observe' ? {windowID:10,tabID:20,ownerClosed:true} : {}) };
   return {request, receipt, resultPath:path.join(root, 'browser-finder-result-'+request.id+'.json')};
 }
 try {
-  for (const action of ['open','commit','cancel']) {
+  for (const action of ['open','commit','cancel','observe']) {
     const item=prepare(action);const replies=call([{type:'getRules'},{type:'nativeFinderResult',finder:item.receipt}]);
     assert(replies.some(reply=>reply.finderCommand?.id===item.request.id),'The exact profile host delivers '+action);
     assert.deepEqual(JSON.parse(fs.readFileSync(item.resultPath)),item.receipt,'Matching '+action+' receipt persists');
@@ -38,6 +38,17 @@ try {
   for (const patch of [{browserSessionID:'other'}, {originalWindowID:5}, {anchorTabID:8}, {finderID:crypto.randomUUID()}, {action:'cancel'}, {tabID:21,tab:{id:21,windowID:4,index:2,title:'Other',url:'https://example.test',active:false}}]) {
     const item=prepare('commit');call([{type:'getRules'},{type:'nativeFinderResult',finder:{...item.receipt,...patch}}]);
     assert(!fs.existsSync(item.resultPath),'Wrong ownership cannot acknowledge a finder effect');
+  }
+  for(const patch of [{windowID:11},{tabID:21},{finderID:crypto.randomUUID()},{browserSessionID:'other'},
+    {requestID:crypto.randomUUID()},{originalWindowID:5},{anchorTabID:8},{ownerClosed:false},
+    {readyURL:'https://example.test'},{error:'unavailable'},{frame:{left:100,top:100,width:720,height:520}},
+    {tab:{id:20,windowID:10,index:0,title:'Other',url:'https://example.test',active:true}}]) {
+    const item=prepare('observe');call([{type:'getRules'},{type:'nativeFinderResult',finder:{...item.receipt,...patch}}]);
+    assert(!fs.existsSync(item.resultPath),'Closure cannot replace finder identity or mix with another payload');
+  }
+  for(const action of ['open','commit','cancel']) {
+    const item=prepare(action);call([{type:'getRules'},{type:'nativeFinderResult',finder:{...item.receipt,ownerClosed:true}}]);
+    assert(!fs.existsSync(item.resultPath),'External closure acknowledgement is observe-only');
   }
   let item=prepare();call([{type:'nativeFinderResult',finder:item.receipt}]);
   assert(!fs.existsSync(item.resultPath),'Unissued receipt cannot create an accepted finder');

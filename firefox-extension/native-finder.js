@@ -54,6 +54,20 @@ class IntentNativeFinder {
     if (!frame || frame.errorOccurred || frame.url !== tab.url || (frame.parentFrameId != null && frame.parentFrameId !== -1)) return null;
     return tab.url;
   }
+  async finderOwnerPresent(record) {
+    // A rejected get() is not proof of closure. Only a successful populated
+    // inventory from this extension's profile can prove the owned IDs absent.
+    // Include every window type so a changed type cannot masquerade as absence.
+    const windows = await this.api.windows.getAll({ populate: true });
+    if (!Array.isArray(windows) || !windows.every(win => Number.isSafeInteger(win?.id) && win.id >= 0))
+      throw new Error("Incomplete finder window inventory");
+    const source = windows.find(win => win.id === record.windowID);
+    if (!source) return false;
+    if (!Array.isArray(source.tabs) || !source.tabs.every(tab => Number.isSafeInteger(tab?.id)
+        && tab.id >= 0 && tab.windowId === record.windowID))
+      throw new Error("Incomplete finder tab inventory");
+    return source.tabs.some(tab => tab.id === record.tabID);
+  }
   async perform(command) {
     const reject = error => this.send(command, { error });
     if (!this.api.storage?.session) return reject("Update Browser Guard before opening a website finder.");
@@ -68,25 +82,42 @@ class IntentNativeFinder {
       return reject("The finder tab identity changed. No tab was moved or closed.");
     if (record && !this.sameOwner(record, command)) return reject("The finder no longer belongs to this browser window.");
     if (command.action === "observe") {
-      // Read only the tab this finder created. Observation is not a mutation
-      // claim and never fills the durable request journal while someone browses.
-      if (!record || record.state !== "open" || !this.eligible(command) || this.cancelled.has(command.finderID))
+      // Ordinary observation never fills the request journal. Losing the exact
+      // owned tab retires deletion ownership durably before releasing app input.
+      if (!record || !this.eligible(command) || this.cancelled.has(command.finderID))
         return reject("This finder is no longer available for automatic selection.");
+      const closedReceipt = () => this.send(command, { windowID: record.windowID, tabID: record.tabID, ownerClosed: true });
+      if (record.state === "closed") return closedReceipt();
+      if (record.state !== "open") return reject("This finder is no longer available for automatic selection.");
+      const closeOwner = async () => {
+        if (!this.eligible(command) || this.cancelled.has(command.finderID))
+          return reject("The finder changed before automatic selection.");
+        record.state = "closed"; await save();
+        if (!this.eligible(command) || this.cancelled.has(command.finderID))
+          return reject("The finder changed before automatic selection.");
+        return closedReceipt();
+      };
       try {
         const tab = await this.api.tabs.get(record.tabID);
+        if (tab.windowId !== record.windowID) return await closeOwner();
         const source = await this.api.windows.get(record.windowID);
         const original = await this.api.windows.get(command.windowID);
         const anchor = await this.api.tabs.get(command.anchorTabID);
-        if (tab.windowId !== record.windowID || anchor.windowId !== command.windowID
+        if (anchor.windowId !== command.windowID
             || source.type !== "normal" || original.type !== "normal" || source.incognito !== original.incognito)
           return reject("The finder or its original window changed. Use Add after checking the page.");
         let readyURL = await this.committedWebsiteURL(tab);
         const fresh = await this.api.tabs.get(record.tabID);
-        if (fresh.windowId !== record.windowID || !this.eligible(command) || this.cancelled.has(command.finderID))
+        if (fresh.windowId !== record.windowID) return await closeOwner();
+        if (!this.eligible(command) || this.cancelled.has(command.finderID))
           return reject("The finder changed before automatic selection.");
         if (!fresh.active || fresh.status !== "complete" || fresh.pendingUrl || fresh.url !== readyURL) readyURL = null;
         return this.send(command, { windowID: record.windowID, tabID: record.tabID, ...(readyURL ? { readyURL } : {}) });
-      } catch (_) { return reject("Automatic selection is unavailable. You can still use Add or Cancel."); }
+      } catch (_) {
+        try { if (!await this.finderOwnerPresent(record)) return await closeOwner(); }
+        catch (_) { /* Unknown ownership remains recoverable through Add/Cancel. */ }
+        return reject("Automatic selection is unavailable. You can still use Add or Cancel.");
+      }
     }
     const fingerprint = JSON.stringify(command);
     const previous = record?.requests?.[command.id];
@@ -117,7 +148,7 @@ class IntentNativeFinder {
     };
     try {
       if (command.action === "cancel") {
-        if (["cancelled", "committed"].includes(record.state)) return finish({});
+        if (["cancelled", "committed", "closed"].includes(record.state)) return finish({});
         record.state = "cancelled"; await save();
         // Only the original new tab is owned. Never remove a window, a moved
         // tab, or any extra tabs the user placed into the finder window.

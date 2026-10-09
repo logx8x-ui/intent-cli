@@ -4,7 +4,7 @@ import IntentCore
 
 /// Reads only browser chrome. Web page ARIA tabs must never become workspace marks.
 enum WorkspaceTabOutline {
-    static func scan(window: WorkspaceWindow, tabs: [BrowserTabItem], selected: Set<Int>) -> (regions: [CGRect], complete: Bool) {
+    static func scan(window: WorkspaceWindow, tabs: [BrowserTabItem], selected: Set<Int>) -> WorkspaceTabOutlineScan {
         let deadline = Date(timeIntervalSinceNow: 0.12)
         var readsComplete = true
         func value(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
@@ -43,7 +43,7 @@ enum WorkspaceTabOutline {
         guard let root = WorkspaceTabOutlineScanner.windowRoot(listed: windows,
             focused: windowElement(kAXFocusedWindowAttribute), main: windowElement(kAXMainWindowAttribute),
             targetFrame: window.frame, targetTitle: window.title, reader: reader,
-            isMinimized: { value($0, kAXMinimizedAttribute) as? Bool == true }) else { return ([], false) }
+            isMinimized: { value($0, kAXMinimizedAttribute) as? Bool == true }) else { return .init(regions: [], complete: false) }
         return WorkspaceTabOutlineScanner.scan(root: root, browser: window.bundle, tabs: tabs, selected: selected, reader: reader)
     }
 }

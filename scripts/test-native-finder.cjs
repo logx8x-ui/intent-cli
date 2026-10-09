@@ -11,6 +11,7 @@ function harness(options={}) {
     [8,{id:8,windowId:4,index:1,active:false,highlighted:true,url:'https://second.test'}]]);
   const api={webNavigation:{async getFrame({tabId}){await options.duringFrame?.();return {url:options.frameURL || tabs.get(tabId)?.url,parentFrameId:-1,errorOccurred:!!options.frameError}}},storage:{session:{async get(){if(options.readFails)throw Error();return structuredClone(storage)},async set(v){if(options.writeFails)throw Error();Object.assign(storage,structuredClone(v));await options.afterSave?.();}}},
     windows:{async get(id){if(!windows.has(id))throw Error('closed');return structuredClone(windows.get(id))},
+      async getAll(){await options.duringInventory?.();return [...windows.values()].map(w=>({...structuredClone(w),tabs:[...tabs.values()].filter(t=>t.windowId===w.id).map(t=>structuredClone(t))}))},
       async create(props){calls.push(['create',structuredClone(props)]);await options.duringCreate?.();const id=nextWindow++,tabID=nextTab++;const tab={id:tabID,windowId:id,index:0,active:true,highlighted:true,url:'chrome://newtab/'};const win={...props,...(options.ignoredBounds?{width:1700,height:1100}:{}),id,tabs:[tab]};windows.set(id,win);tabs.set(tabID,tab);return structuredClone(win)},
       async remove(){throw Error('Never delete a window')},async update(id,props){assert.notEqual(id,4,'Never resize original window');calls.push(['resize',id,props]);Object.assign(windows.get(id),props);return structuredClone(windows.get(id))}},
     tabs:{async get(id){if(!tabs.has(id))throw Error('closed');return structuredClone(tabs.get(id))},
@@ -78,5 +79,65 @@ async function opened(options={}){const h=harness(options),open=command();await 
  }
  const compact=await opened({ignoredBounds:true});assert.equal(compact.windows.get(compact.ownedWindow).width,720);assert.equal(compact.calls.filter(c=>c[0]==='resize').length,1);
  const frameMismatch=await opened({frameURL:'https://example.org/other'});frameMismatch.tabs.get(frameMismatch.owned).url='https://example.com/';frameMismatch.tabs.get(frameMismatch.owned).status='complete';await frameMismatch.finder.handle({...next(frameMismatch.open,'observe'),finderWindowID:frameMismatch.ownedWindow,finderTabID:frameMismatch.owned});assert.equal(frameMismatch.receipts.at(-1).readyURL,undefined,'Committed top frame must agree with tab URL');
+ for(const firefox of [true,false]) {
+  const observe=h=>({...next(h.open,'observe'),finderWindowID:h.ownedWindow,finderTabID:h.owned});
+  for(const closed of ['window','tab','moved']) {
+   const h=await opened({firefox});const original=structuredClone(h.tabs.get(7));
+   if(closed==='window'){h.windows.delete(h.ownedWindow);h.tabs.delete(h.owned)}
+   if(closed==='tab'){h.tabs.delete(h.owned);h.tabs.set(90,{id:90,windowId:h.ownedWindow,index:1,url:'https://user-added.test'})}
+   if(closed==='moved')h.tabs.get(h.owned).windowId=4;
+   await h.finder.handle(observe(h));
+   assert.equal(h.receipts.at(-1).ownerClosed,true,'External '+closed+' closure releases the exact finder');
+   assert.equal(h.receipts.at(-1).windowID,h.ownedWindow);assert.equal(h.receipts.at(-1).tabID,h.owned);
+   assert.equal(h.receipts.at(-1).error,undefined);assert.equal(h.receipts.at(-1).readyURL,undefined);
+   assert.equal(Object.values(h.storage.intentNativeFinders)[0].state,'closed','Lost deletion ownership is durable');
+   await h.finder.handle(observe(h));assert.equal(h.receipts.at(-1).ownerClosed,true,'A lost closure receipt may be observed again');
+   // A formerly moved tab may return while cancellation is being delivered.
+   // A terminal observation must not reacquire deletion ownership over it.
+   if(closed==='moved')h.tabs.get(h.owned).windowId=h.ownedWindow;
+   await h.finder.handle(next(h.open,'cancel'));
+   assert.equal(h.calls.filter(c=>c[0]==='remove'||c[0]==='move').length,0,'Closure/cancellation never removes surviving or user-moved tabs');
+   assert.deepEqual(h.tabs.get(7),original,'Existing original selection survives external closure');
+   if(closed==='tab')assert(h.tabs.has(90),'Extra user tab survives closing the owned tab');
+   if(closed==='moved')assert(h.tabs.has(h.owned),'A moved-back tab stays user owned');
+   const reopen=command();await h.finder.handle(reopen);
+   assert.equal(h.calls.filter(c=>c[0]==='create').length,2,'A fresh T attempt opens a distinct finder after external closure');
+   assert.equal(h.receipts.at(-1).finderID,reopen.finderID);
+   await h.finder.handle(observe(h));assert.match(h.receipts.at(-1).error,/no longer available/,'A cancelled old finder stays retired after replacement');
+   assert(h.tabs.has(21),'An old observation cannot remove the replacement finder');
+  }
+  const temporarilyUnavailable=await opened({firefox});temporarilyUnavailable.api.tabs.get=async()=>{throw Error('unavailable')};
+  await temporarilyUnavailable.finder.handle(observe(temporarilyUnavailable));
+  assert.equal(temporarilyUnavailable.receipts.at(-1).ownerClosed,undefined,'An API error with an intact inventory is not closure');
+  assert.match(temporarilyUnavailable.receipts.at(-1).error,/unavailable/);
+  const failedInventory=await opened({firefox});failedInventory.tabs.delete(failedInventory.owned);failedInventory.api.windows.getAll=async()=>{throw Error('unavailable')};
+  await failedInventory.finder.handle(observe(failedInventory));
+  assert.equal(failedInventory.receipts.at(-1).ownerClosed,undefined,'A failed closure proof retains recovery controls');
+  const incomplete=await opened({firefox});incomplete.tabs.delete(incomplete.owned);incomplete.api.windows.getAll=async()=>[{id:incomplete.ownedWindow}];
+  await incomplete.finder.handle(observe(incomplete));
+  assert.equal(incomplete.receipts.at(-1).ownerClosed,undefined,'An unpopulated window does not prove its owned tab disappeared');
+  const originalGone=await opened({firefox});originalGone.windows.delete(4);
+  await originalGone.finder.handle(observe(originalGone));
+  assert.equal(originalGone.receipts.at(-1).ownerClosed,undefined,'Losing the destination does not falsely close an intact finder');
+  const unpersisted=await opened({firefox});unpersisted.tabs.delete(unpersisted.owned);unpersisted.api.storage.session.set=async()=>{throw Error('unavailable')};
+  await unpersisted.finder.handle(observe(unpersisted));
+  assert.equal(unpersisted.receipts.at(-1).ownerClosed,undefined,'Input ownership is not released before lost deletion ownership is durable');
+  assert.equal(Object.values(unpersisted.storage.intentNativeFinders)[0].state,'open');
+  const wrongIdentity=await opened({firefox});wrongIdentity.tabs.delete(wrongIdentity.owned);
+  await wrongIdentity.finder.handle({...observe(wrongIdentity),finderTabID:999});
+  assert.equal(wrongIdentity.receipts.at(-1).ownerClosed,undefined,'A guessed owned tab cannot acknowledge terminal closure');
+  assert.equal(Object.values(wrongIdentity.storage.intentNativeFinders)[0].state,'open');
+  let closingDuringFrame;closingDuringFrame=await opened({firefox,duringFrame:async()=>{closingDuringFrame.tabs.delete(closingDuringFrame.owned);closingDuringFrame.windows.delete(closingDuringFrame.ownedWindow)}});
+  Object.assign(closingDuringFrame.tabs.get(closingDuringFrame.owned),{status:'complete',url:'https://example.com/'});
+  await closingDuringFrame.finder.handle(observe(closingDuringFrame));
+  assert.equal(closingDuringFrame.receipts.at(-1).ownerClosed,true,'Closure while observing navigation cannot leave input owned');
+  let cancelledProbe;cancelledProbe=await opened({firefox,duringInventory:async()=>{void cancelledProbe.finder.handle(next(cancelledProbe.open,'cancel'))}});cancelledProbe.tabs.delete(cancelledProbe.owned);
+  await cancelledProbe.finder.handle(observe(cancelledProbe));await cancelledProbe.finder.queue;
+  assert(!cancelledProbe.receipts.some(r=>r.ownerClosed),'Cancellation during a closure query prevents stale observation acknowledgement');
+  let replacedProfile;replacedProfile=await opened({firefox,duringInventory:async()=>replacedProfile.setSession('profile-b')});replacedProfile.tabs.delete(replacedProfile.owned);
+  await replacedProfile.finder.handle(observe(replacedProfile));
+  assert.equal(replacedProfile.receipts.at(-1).ownerClosed,undefined,'A profile replacement during the closure query cannot acknowledge the old owner');
+  assert.equal(Object.values(replacedProfile.storage.intentNativeFinders)[0].state,'open');
+ }
  console.log('Native finder: real normal windows, exact profile ownership, privacy, group preservation, cancellation races and restart/idempotency checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
