@@ -121,6 +121,25 @@ route timed out. The 0.2.43 signing/install step is incomplete. No login/session
 credentials were guessed or copied to another browser, and the old signed
 extension is not represented as final matching-profile acceptance.
 
+## Source publication verification
+
+Primary fix commit: `036c580`. Its source was cherry-picked as `028663d` onto
+`codex/overview-finder-fixes` without changing the public branch's workflow.
+The only tree differences from the primary commit are that existing workflow
+and the existing source-publication note. Runtime source, tests and manifests
+match. Because the complete tree differs, the publication branch received its
+own eight-suite serial gate: `intent-change-gate-9lQs5b`, fingerprint
+`0e14b8ad8acdfcbaba92a1e5eda943e680c1f230a5077c68e302de464031b08f`,
+2026-10-09 19:07:06–19:08:35 UTC, all passed without source drift.
+
+The first publication run stopped at a missing local `addons-linter` executable
+after seven suites passed. `npm ci --ignore-scripts` installed the locked
+dependencies; the full gate was then rerun, rather than relabeling that failure.
+The npm audit separately reports 16 findings in the existing `web-ext` tooling
+dependency tree (3 critical). These tools are not bundled into the Swift app;
+their maintenance is still open and is not certified by the functional gate.
+No forced dependency upgrade, update feed or public binary release was made.
+
 ## Outstanding acceptance
 
 The current-build physical double-backtick/Caps Lock/held-number path and actual

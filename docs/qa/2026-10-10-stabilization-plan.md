@@ -71,6 +71,9 @@ macOS versions. Supply a permanent Mozilla-signed Firefox extension and a
 persistent Chrome installation route. Replace obsolete tester instructions.
 The old public v0.8.1 release is not the current candidate. Apple notarization
 and the current binary release are separate unfinished distribution work.
+Audit and update the existing `web-ext` tooling dependencies in a separate
+frozen candidate before distribution maintenance is declared complete; the
+October 10 functional gate does not certify dependency security.
 
 The foreground restoration failure documented in the October 9 readiness note
 is still a release blocker until a changed restoration effect passes the strict
