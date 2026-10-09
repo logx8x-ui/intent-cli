@@ -90,4 +90,15 @@ Firefox package, or continuous foreground-restoration acceptance items in
 - Final Firefox setup still reports permanent Guard 0.2.42 rather than embedded
   0.2.43. That pre-existing matching-profile limitation is unchanged by layout.
 
-Publication is recorded after the scoped commit and public-branch gate.
+## Publication
+
+The seven-file scoped change is primary commit
+`8abd1d754e2ecf85072d863963c04b9fa41d73ee` and public commit
+`974eba0c3e3d3c4fd4f50facef224b27c9277a72` on
+`codex/overview-finder-fixes`. The publication checkout passed all five serial
+changed-source suites against `eef49bf8909ce52a0bc5afe1056eea7a396dc1d5`:
+`/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-change-gate-oyVswz`,
+fingerprint `547420ad51bd5b398f7c0611c970584fe6fc694a529fca058041d8fa8225b68b`.
+The normal branch push succeeded and its remote ref matched the public commit.
+This is a source-branch publication, not a new signed binary release or a claim
+that the remaining tester gate passed.
