@@ -115,6 +115,17 @@ foreground before finishing, these are cleanup checks, not quiet-finish passes.
 Only the owned disposable test tabs were closed; user tabs and saved intentions
 were preserved. Intent was left running with inactive rules.
 
+Final cleanup exposed another unverified neighbor: after the explicitly opened
+Settings host was dismissed with Done, the idle overview remained. Synthetic
+Escape, its Close button and the native Quick Focus toggle did not dismiss it
+during automation, including after refreshing the native binding. A read-only
+WindowServer observation confirmed an on-screen Intent window at layer 101;
+this was not inferred from a cached AX tree alone. The cause is unconfirmed and
+this is not a successful overview-close check. Normal Intent → Quit worked;
+the installed candidate was then relaunched in the background with inactive
+rules. Reproduce the Settings/Finish/Done/Close neighbor separately before
+calling the selection/input group complete.
+
 The authenticated Firefox upload page remained accessible, but supported native
 HTML interactions did not open its file chooser; another supported activation
 route timed out. The 0.2.43 signing/install step is incomplete. No login/session

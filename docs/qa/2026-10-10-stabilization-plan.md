@@ -52,6 +52,7 @@ Current evidence as of October 10 (see
 | Final Firefox matching component | NOT EXERCISED / AUTOMATION LIMIT | Daily signed Guard is still 0.2.42; 0.2.43 upload/install remains incomplete. |
 | Actual tab discovery and geometry | Earlier read-only PASS | Production 0.2.42 probe resolved Chrome tabs and painted Firefox Sidebery rows; final physical gesture and rendered border remain unverified. |
 | Quiet finish | FAIL | Native restoration can raise a sibling window; final settled visibility is not continuous foreground preservation. |
+| Settings-host cleanup → overview close | AUTOMATION LIMIT / possible defect | Done returned to an idle overview; supported close actions did not dismiss an independently confirmed on-screen window. Normal Quit/relaunch succeeded. Cause and physical acceptance are unresolved. |
 | Remaining core matrices and soak runs | NOT EXERCISED on final candidate | Search transfer, live preview race/reconnect, saved replay, modifications, Spaces and social controls retain separate rows. |
 
 After the core FAIL rows are cleared, run 20 disposable start/finish cycles
