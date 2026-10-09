@@ -1586,6 +1586,7 @@ final class IntentAppModel: ObservableObject {
         browserCoverageStartTask = Task { [weak self] in
             let deadline = ProcessInfo.processInfo.systemUptime + 5
             guard let self else { return }
+            var failureStage = "activation"
             @MainActor func isCurrent() -> Bool {
                 !Task.isCancelled && self.browserCoverageStartID == token && !self.hasActiveSession
                     && self.quickSelectionIntentionID == intention.id
@@ -1594,6 +1595,11 @@ final class IntentAppModel: ObservableObject {
             }
             @MainActor func fail() {
                 guard isCurrent() else { return }
+                let diagnostic: [String: Any] = ["stage": failureStage, "recordedAt": Date().timeIntervalSince1970]
+                if let data = try? JSONSerialization.data(withJSONObject: diagnostic) {
+                    try? data.write(to: ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent()
+                        .appendingPathComponent("browser-start-failure.json"), options: .atomic)
+                }
                 self.cancelBrowserCoverageStart()
                 self.errorMessage = "Could not confirm Chrome’s current windows. Reload Intent Browser Guard in Chrome and choose your tabs again. This intention has not started."
                 self.releaseWorkPeriodAfterFailedStart()
@@ -1629,6 +1635,7 @@ final class IntentAppModel: ObservableObject {
                 }
                 guard confirmed, isCurrent() else { fail(); return }
             }
+            failureStage = "initial-native-observation"
             let initialObservation: WorkspaceWindow.CoverageObservation? = await withCheckedContinuation { continuation in
                 Self.browserCoverageQueue.async {
                     continuation.resume(returning: WorkspaceWindow.browserCoverageObservation(
@@ -1638,6 +1645,7 @@ final class IntentAppModel: ObservableObject {
             guard isCurrent() else { return }
             guard ProcessInfo.processInfo.systemUptime < deadline, let firstObservation = initialObservation else { fail(); return }
             var before = firstObservation
+            failureStage = "profile-snapshot"
             var command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
             do { try BrowserTabCommandStore(browserBundleIdentifier: browser).write(command) }
             catch { fail(); return }
@@ -1669,13 +1677,16 @@ final class IntentAppModel: ObservableObject {
                         catch { fail(); return }
                         continue
                     }
-                    if ProcessInfo.processInfo.systemUptime < deadline, let after,
-                       case .complete(let coverage) = BrowserWindowCoveragePolicy.evaluate(browserBundleIdentifier: browser,
+                    failureStage = after == nil ? "final-native-observation" : "coverage-evaluation"
+                    if ProcessInfo.processInfo.systemUptime < deadline, let after {
+                       let result = BrowserWindowCoveragePolicy.evaluate(browserBundleIdentifier: browser,
                             native: after.inventory.windows, observedStandard: after.inventory.observedStandard,
                             reported: reports, requiredSelected: required,
                             knownProfiles: Set(snapshots.compactMap(\.browserSessionID)),
                             continuousIdentities: after.continuousIdentities,
-                            witnessedBeforeSnapshot: before.inventory.observedStandard.intersection(after.continuousIdentities)) {
+                            witnessedBeforeSnapshot: before.inventory.observedStandard.intersection(after.continuousIdentities))
+                       if case .incomplete(let reason) = result { failureStage = "coverage-" + reason.rawValue }
+                       if case .complete(let coverage) = result {
                         // No await between the final generation check and the
                         // normal start; Finish/replacement cannot race handoff.
                         self.browserCoverageStartID = nil; self.browserCoverageIntentionID = nil
@@ -1684,6 +1695,7 @@ final class IntentAppModel: ObservableObject {
                                    chromeCoverageObservation: after)
                         if !self.hasActiveSession { self.showOverlay(animated: false) }
                         return
+                       }
                     }
                 }
                 try? await Task.sleep(nanoseconds: 75_000_000)

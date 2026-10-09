@@ -282,16 +282,29 @@ public enum BrowserWindowMatching {
 
     private static func normalize(_ title: String) -> String {
         var value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var chromeWindowDecoration = false
         // Chrome's AX window title may include its profile after the browser name.
         // Without this, multi-window mapping fails even though every tab is present.
         for marker in [" — Google Chrome – ", " - Google Chrome – "] {
             if let range = value.range(of: marker, options: .backwards), !value[range.upperBound...].isEmpty {
                 value = String(value[..<range.lowerBound])
+                chromeWindowDecoration = true
                 break
             }
         }
         for suffix in [" — Mozilla Firefox", " - Mozilla Firefox", " — Google Chrome", " - Google Chrome"] {
-            if value.hasSuffix(suffix) { value.removeLast(suffix.count) }
+            if value.hasSuffix(suffix) {
+                chromeWindowDecoration = chromeWindowDecoration || suffix.contains("Google Chrome")
+                value.removeLast(suffix.count)
+            }
+        }
+        // Chrome's AX title includes the selected tab's group, while CG and
+        // Browser Guard retain the page title. Strip this only from a Chrome
+        // window title, not arbitrary website text containing the same phrase.
+        if chromeWindowDecoration,
+           let group = value.range(of: " – Part of group ", options: .backwards),
+           !value[group.upperBound...].isEmpty {
+            value = String(value[..<group.lowerBound])
         }
         // Chrome adds this audio indicator to its WindowServer title, while
         // both its AX title and Browser Guard report omit it. Keep the existing

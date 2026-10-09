@@ -17,6 +17,14 @@ func runBrowserWindowEnforcementSpecs() throws {
     }
     let unresolved = observation(.unresolved(.windowIdentityUnavailable))
     let hidden = observation(.verifiedMinimized)
+    var whollyHidden = Policy(intentionSessionID: session)
+    _ = whollyHidden.update([unresolved], activeIntentionSessionID: session, now: 1)
+    try expect(whollyHidden.update([observation(.verifiedApplicationHidden)], activeIntentionSessionID: session, now: 5) == nil,
+        "Confirmed whole-app hiding satisfies a blocked browser even when identical windows cannot be individually mapped")
+    try expect(whollyHidden.update([unresolved], activeIntentionSessionID: session, now: 6) == nil,
+        "Revealing a wholly hidden browser requires new live hiding confirmation")
+    try expect(whollyHidden.update([unresolved], activeIntentionSessionID: session, now: 9)?.reason == .windowIdentityUnavailable,
+        "A previous whole-app confirmation cannot conceal a later unresolved visible browser")
     var delayed = Policy(intentionSessionID: session)
     try expect(delayed.update([unresolved], activeIntentionSessionID: session, now: 10) == nil,
         "A new ambiguous claim gets a bounded grace period")

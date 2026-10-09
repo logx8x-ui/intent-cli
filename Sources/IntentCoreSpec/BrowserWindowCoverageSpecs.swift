@@ -51,6 +51,15 @@ func runBrowserWindowCoverageSpecs() throws {
         candidates: [audioCandidate, audioDuplicate]) == nil,
         "Audio title normalization never guesses between two same-looking windows")
     let selected = report(100, "Allowed")
+    let grouped = native(23, "Example Domain")
+    let groupedAX = Policy.StandardWindow(bundleIdentifier: browser, processIdentity: proof,
+        title: "Example Domain – Part of group 🧪 Intent readiness - Google Chrome – Logavix", frame: frame)
+    try expect(Policy.standardIdentities(native: [grouped], standard: [groupedAX]) == [grouped.identity],
+        "A grouped Chrome tab binds its AX window to the undecorated WindowServer title")
+    try expect(Policy.standardIdentities(native: [grouped, native(24, "Example Domain")], standard: [groupedAX]) == nil,
+        "Group decoration normalization never authorizes an ambiguous native window")
+    try expect(!BrowserWindowMatching.sameWindowTitle("Example Domain – Part of group Biology", "Example Domain"),
+        "Ordinary page titles containing group-like text are not shortened")
     guard case .complete(let coverage) = Policy.evaluate(browserBundleIdentifier: browser, native: all,
         observedStandard: observed!, reported: [selected], requiredSelected: [selected.identity], knownProfiles: ["a", "empty-profile"], continuousIdentities: observed!, witnessedBeforeSnapshot: observed!) else {
         throw NSError(domain: "Expected narrow observed Chrome coverage", code: 1)

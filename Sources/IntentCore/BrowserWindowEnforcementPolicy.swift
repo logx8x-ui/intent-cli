@@ -11,6 +11,7 @@ public struct BrowserWindowEnforcementPolicy {
     }
     public enum Outcome: Equatable {
         case verifiedMinimized
+        case verifiedApplicationHidden
         case noLongerExists
         case unresolved(Reason)
     }

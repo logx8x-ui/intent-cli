@@ -62,6 +62,17 @@ public struct WorkspaceWindow {
         var native: [BrowserWindowCoveragePolicy.NativeWindow] = []
         var standard: [BrowserWindowCoveragePolicy.StandardWindow] = []
         var standardElements: [AXUIElement] = []
+        func failed(_ stage: String) -> CoverageObservation? {
+            let diagnostic: [String: Any] = ["stage": stage, "browser": bundleIdentifier,
+                "recordedAt": Date().timeIntervalSince1970, "nativeCount": native.count,
+                "standardCount": standard.count,
+                "candidateCounts": standard.map { BrowserWindowCoveragePolicy.candidates($0, native: native).count }]
+            if let data = try? JSONSerialization.data(withJSONObject: diagnostic) {
+                try? data.write(to: ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent()
+                    .appendingPathComponent("browser-native-observation-failure.json"), options: .atomic)
+            }
+            return nil
+        }
         for app in apps {
             guard hasTime(), let launched = app.launchDate else { return nil }
             let proof = BrowserProcessIdentity(pid: app.processIdentifier, launched: launched.timeIntervalSinceReferenceDate)
@@ -79,17 +90,17 @@ public struct WorkspaceWindow {
                 var result: CFTypeRef?
                 return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
             }
-            guard let elements = attribute(AXUIElementCreateApplication(proof.pid), kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+            guard let elements = attribute(AXUIElementCreateApplication(proof.pid), kAXWindowsAttribute) as? [AXUIElement] else { return failed("window-enumeration") }
             for element in elements {
                 guard hasTime(), let role = attribute(element, kAXRoleAttribute) as? String,
-                      let subrole = attribute(element, kAXSubroleAttribute) as? String else { return nil }
+                      let subrole = attribute(element, kAXSubroleAttribute) as? String else { return failed("window-role") }
                 guard role == kAXWindowRole, subrole == kAXStandardWindowSubrole else { continue }
                 var elementPID: pid_t = 0
                 guard AXUIElementGetPid(element, &elementPID) == .success, elementPID == proof.pid,
                       attribute(element, kAXMinimizedAttribute) as? Bool != nil,
                       let title = attribute(element, kAXTitleAttribute) as? String,
                       let position = attribute(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
-                      let size = attribute(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+                      let size = attribute(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return failed("window-attributes") }
                 var point = CGPoint.zero, dimensions = CGSize.zero
                 guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
                       AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return nil }
@@ -102,8 +113,8 @@ public struct WorkspaceWindow {
         // frame. Only packets created by a previous successful bidirectional
         // match may anchor a row; the general AX cache is not this authority.
         guard hasTime(), let pinned = BrowserWindowCoveragePolicy.continuingAnchors(native: native, standard: standard,
-            previous: prior?.anchors ?? [:], current: standardElements, equal: { CFEqual($0, $1) }) else { return nil }
-        guard hasTime(), let identities = BrowserWindowCoveragePolicy.standardIdentityBindings(native: native, standard: standard, anchors: pinned) else { return nil }
+            previous: prior?.anchors ?? [:], current: standardElements, equal: { CFEqual($0, $1) }) else { return failed("window-continuity") }
+        guard hasTime(), let identities = BrowserWindowCoveragePolicy.standardIdentityBindings(native: native, standard: standard, anchors: pinned) else { return failed("window-identity") }
         let anchors = Dictionary(uniqueKeysWithValues: zip(identities, standardElements))
         return .init(inventory: .init(windows: native, observedStandard: Set(identities)),
             continuousIdentities: Set(pinned.values), sampledAt: sampledAt, anchors: anchors)

@@ -564,6 +564,17 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 guard mayEnforce else { return }
                 var outcome: BrowserWindowEnforcementPolicy.Outcome = .unresolved(.windowIdentityUnavailable)
                 if let liveIdentity, liveIdentity == record.browserProcessIdentity {
+                    // A wholly blocked browser is hidden by the application
+                    // ownership path below. Its windows need no profile-local
+                    // identity guess (two profiles can have identical titles
+                    // and bounds). This is live readback, never a desired plan
+                    // or cached receipt, and is unavailable to allowed browsers.
+                    if !spec.permitsApplication(record.browserBundleIdentifier),
+                       NSRunningApplication(processIdentifier: liveIdentity.pid)?.isHidden == true {
+                        observations.append(.init(record: record, windowID: claim.windowID,
+                            liveProcessIdentity: liveIdentity, outcome: .verifiedApplicationHidden))
+                        continue
+                    }
                     // A bound identity survives navigation and geometry changes.
                     // Never replace it with a new title-based candidate.
                     let owned = entries.first {
@@ -606,7 +617,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
            current.startupSessionID == spec.nativeWindowVisibilitySessionID {
             for record in records {
                 let verified = observations.filter { observation in
-                    observation.record == record && (observation.outcome == .verifiedMinimized || observation.outcome == .noLongerExists)
+                    observation.record == record && (observation.outcome == .verifiedMinimized
+                        || observation.outcome == .verifiedApplicationHidden || observation.outcome == .noLongerExists)
                 }.map(\.windowID)
                 _ = try? BrowserWindowVisibilityStore().writeVerification(for: record, windowIDs: verified)
             }
@@ -635,6 +647,18 @@ public final class FocusVisibilityController: @unchecked Sendable {
                   current.hideDistractions, current.nativeWindowVisibility,
                   current.startupSessionID == currentSession else { return }
             enforcementPolicy = nextPolicy
+            // Keep the exact failure category locally; the user-facing safety
+            // message deliberately contains no window titles or browsing data.
+            let diagnostic: [String: Any] = [
+                "browser": failure.browserBundleIdentifier,
+                "windowID": failure.windowID,
+                "reason": failure.reason.rawValue,
+                "recordedAt": Date().timeIntervalSince1970
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: diagnostic) {
+                try? data.write(to: Self.file.deletingLastPathComponent()
+                    .appendingPathComponent("browser-enforcement-failure.json"), options: .atomic)
+            }
             onEnforcementFailure?(failure)
         } else {
             enforcementPolicy = nextPolicy
