@@ -48,19 +48,19 @@ struct IntentSavedSlotsView: View {
             }
             ForEach(Array(controller.visibleSavedSlots.enumerated()), id: \.element.id) { index, intention in
                 Button { controller.runSavedSlot(index) } label: {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 5) {
                             ForEach(Array(intention.allowedApps.filter { app in !model.isAlwaysAllowed(app.bundleIdentifier) && !model.alwaysBlockedApps.contains(where: { $0.bundleIdentifier == app.bundleIdentifier }) }.prefix(3)), id: \.bundleIdentifier) { app in
                                 if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
-                                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 22, height: 22)
+                                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 20, height: 20)
                                 }
                             }
                             Spacer(minLength: 0)
                             Color.clear.frame(width: 16, height: 20)
                         }
-                        Text(intention.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                        Text(intention.name).font(.system(size: 12, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                             .opacity(intention.nameIsAutomatic ? 0.6 : 1).padding(.trailing, 15).frame(maxWidth: .infinity, alignment: .leading)
-                    }.padding(12).frame(width: 126, height: 88, alignment: .topLeading)
+                    }.padding(10).frame(width: 126, height: 76, alignment: .topLeading)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
                         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(controller.saveFlight?.savedID == intention.id ? 0.8 : 0.2)))
                         .contentShape(RoundedRectangle(cornerRadius: 16))

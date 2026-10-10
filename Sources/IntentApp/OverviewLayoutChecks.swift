@@ -15,6 +15,7 @@ enum OverviewLayoutChecks {
         let items = (1...3).map { AppStackLayout.Item(id: UInt32($0), app: "browser", source: source) }
             + [AppStackLayout.Item(id: 4, app: "notes", source: source)]
         try checkRecentPanelGeometry(check)
+        try checkAddedAppIcon(check)
         try checkProductionHeader(controller: controller, model: model, items: items, check)
         for hasMessage in [false, true] {
             controller.message = hasMessage ? "A saved browser needs attention before this intention can run." : nil
@@ -97,6 +98,43 @@ enum OverviewLayoutChecks {
             "Isolated overview rendering preserves the foreground application")
     }
 
+    private static func checkAddedAppIcon(_ check: (Bool, String) throws -> Void) throws {
+        let icon = NSImage(size: CGSize(width: 128, height: 128), flipped: false) { _ in
+            NSColor.systemBlue.setFill()
+            NSBezierPath(ovalIn: CGRect(x: 12, y: 12, width: 104, height: 104)).fill()
+            return true
+        }
+        for selected in [true, false] {
+            let content = OverviewAddedAppIcon(icon: icon, name: "QA staged app", selected: selected,
+                opening: false, hovered: false, size: 128, select: {}, remove: {})
+                .frame(width: 160, height: 160).background(Color(red: 0, green: 1, blue: 0))
+            let host = NSHostingView(rootView: content)
+            host.sizingOptions = []
+            host.frame = CGRect(x: 0, y: 0, width: 160, height: 160)
+            host.layoutSubtreeIfNeeded()
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                throw failure("No staged app icon bitmap")
+            }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / 160
+            for point in [CGPoint(x: 20, y: 20), CGPoint(x: 140, y: 20), CGPoint(x: 20, y: 140), CGPoint(x: 140, y: 140)] {
+                guard let pixel = bitmap.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))?.usingColorSpace(.deviceRGB) else {
+                    throw failure("Missing staged icon corner")
+                }
+                try check(pixel.greenComponent > 0.8 && pixel.greenComponent - max(pixel.redComponent, pixel.blueComponent) > 0.5,
+                    "Added apps leave the wallpaper visible around the icon without a material card, border or caption")
+            }
+            guard let center = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB) else {
+                throw failure("Missing staged icon artwork")
+            }
+            try check(center.blueComponent > center.redComponent && host.window == nil,
+                "The actual staged artwork remains visible in either selection state without ordering a live window")
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                try png.write(to: IntentEnvironment.dataDirectory.appendingPathComponent("overview-added-icon-\(selected).png"))
+            }
+        }
+    }
+
     private static func checkRecentPanelGeometry(_ check: (Bool, String) throws -> Void) throws {
         for viewport in [CGRect(x: 17, y: 29, width: 800, height: 600),
                          CGRect(x: -1200, y: 51, width: 1280, height: 800),
@@ -143,7 +181,7 @@ enum OverviewLayoutChecks {
             controller.savedSlotCapacity = originalCapacity; controller.savedSlotPage = originalPage
         }
         let fixture = (0..<9).map { index in
-            Intention(id: "qa-overview-slot-\(index)", name: "Study setup \(index + 1)", icon: "book",
+            Intention(id: "qa-overview-slot-\(index)", name: "Biology study session \(index + 1)", icon: "book",
                 colorHex: "#34C759", folder: "", allowedApps: [], allowedWebsites: [], startupActions: [], restrictions: .init())
         }
         for size in [CGSize(width: 800, height: 600), CGSize(width: 1280, height: 800), CGSize(width: 1710, height: 1112)] {

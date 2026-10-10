@@ -247,6 +247,11 @@ final class QuickSelectionController: ObservableObject {
         refresh(); refreshStagedOutlines()
     }
     func isAddedApplication(_ id: String) -> Bool { spotlightApps[id] != nil }
+    func isAddedApplicationIcon(_ window: WindowItem) -> Bool {
+        guard spotlightApps[window.appID] != nil,
+              let app = apps.first(where: { $0.id == window.appID }) else { return false }
+        return window.id == Self.placeholderID(app)
+    }
     func saveRecent(_ record: IntentSessionRecord) {
         let wasSaved = model.savedIntentionID(for: record) != nil
         guard let id = model.saveRecord(record) else { message = model.errorMessage; return }
@@ -1909,7 +1914,13 @@ private struct QuickSelectionView: View {
                     GeometryReader { workspace in
                         let area = CGRect(x: 28, y: 0, width: max(0, workspace.size.width - 56 - tabWidth), height: workspace.size.height)
                         ZStack(alignment: .topLeading) {
-                            AppStackOverview(items: visibleWindows.map { .init(id: $0.id, app: $0.appID, source: $0.sourceFrame, tabCount: controller.tabs(for: $0).count) },
+                            AppStackOverview(items: visibleWindows.map {
+                                .init(id: $0.id, app: $0.appID,
+                                      source: controller.isAddedApplicationIcon($0)
+                                        ? CGRect(x: $0.sourceFrame.midX - 170, y: $0.sourceFrame.midY - 170, width: 340, height: 340)
+                                        : $0.sourceFrame,
+                                      tabCount: controller.tabs(for: $0).count)
+                            },
                                              area: area, obstacle: focused == nil ? panelObstacle : nil,
                                              selected: Set(visibleWindows.filter { controller.isSelected($0) }.map(\.id)),
                                              names: Dictionary(uniqueKeysWithValues: controller.apps.map { ($0.id, $0.app.name) }),
@@ -2013,10 +2024,19 @@ private struct QuickSelectionView: View {
         let title = window.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = title.isEmpty || title == "()" ? (app?.app.name ?? window.appID) : title
         let hovered = hoveredWindow == window.id
+        let iconOnly = controller.isAddedApplicationIcon(window)
         let captionWidth = captionFrame.width
-        let cardBounds = showsCaption ? frame.union(captionFrame) : frame
+        let cardBounds = showsCaption && !iconOnly ? frame.union(captionFrame) : frame
         let radius = min(10, min(frame.width, frame.height) / 8)
         return ZStack(alignment: .topLeading) {
+            if iconOnly, let app {
+                OverviewAddedAppIcon(icon: app.icon, name: app.app.name, selected: selected,
+                    opening: controller.openingApps.contains(window.appID), hovered: hovered,
+                    size: min(128, min(frame.width, frame.height)),
+                    select: { controller.selectWindow(window) },
+                    remove: { controller.removeAddedApplication(window.appID) })
+                    .position(x: frame.midX - cardBounds.minX, y: frame.midY - cardBounds.minY)
+            } else {
             Button { controller.selectWindow(window) } label: {
                 ZStack {
                     if controller.openingApps.contains(window.appID) {
@@ -2051,7 +2071,8 @@ private struct QuickSelectionView: View {
                     }
                 }
                 .position(x: frame.midX - cardBounds.minX, y: frame.midY - cardBounds.minY)
-            if showsCaption { HStack(spacing: 5) {
+            }
+            if showsCaption && !iconOnly { HStack(spacing: 5) {
                 Button { controller.selectWindow(window) } label: {
                     HStack(spacing: 5) {
                         if let app { Image(nsImage: app.icon).resizable().frame(width: 16, height: 16) }

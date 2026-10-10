@@ -34,6 +34,18 @@ private func checkAppStackGeometry(_ items: [AppStackLayout.Item], bounds: CGRec
     return groups
 }
 
+private func appPreviewCenter(_ groups: [AppStackLayout.Group]) -> CGPoint {
+    let windows: [AppStackLayout.WindowPlacement] = groups.flatMap { $0.windows }
+    let total = windows.reduce(CGFloat.zero) { $0 + $1.frame.width * $1.frame.height }
+    let x = windows.reduce(CGFloat.zero) { $0 + $1.frame.midX * $1.frame.width * $1.frame.height }
+    let y = windows.reduce(CGFloat.zero) { $0 + $1.frame.midY * $1.frame.width * $1.frame.height }
+    return CGPoint(x: x / total, y: y / total)
+}
+
+private func appCluster(_ groups: [AppStackLayout.Group]) -> CGRect {
+    groups.reduce(CGRect.null) { $0.union($1.frame) }
+}
+
 func runAppStackPolicySpecs() throws {
     let area = CGRect(x: 20, y: 80, width: 1300, height: 720)
     let panel = CGRect(x: 1050, y: 80, width: 270, height: 260)
@@ -138,6 +150,70 @@ func runAppStackPolicySpecs() throws {
     }
     try expect(AppStackLayout.groups(translated, in: roomy) == spreadGroups,
                "The same desktop moved to another monitor keeps its app arrangement")
+
+    // Native window coordinates describe the desktop the user had open, not
+    // where an app must be pinned in the overview. Widely separated sources
+    // should still form a centered, full-size composition rather than corners.
+    let sparseBounds = CGRect(x: 20, y: 90, width: 2200, height: 1300)
+    let separated: [AppStackLayout.Item] = [
+        .init(id: 1, app: "Browser", source: CGRect(x: -4000, y: -2000, width: 400, height: 240)),
+        .init(id: 2, app: "Editor", source: CGRect(x: 7000, y: 4500, width: 400, height: 240))
+    ]
+    let centeredSparse = try checkAppStackGeometry(separated, bounds: sparseBounds)
+    let sparseCluster = appCluster(centeredSparse), sparseCenter = appPreviewCenter(centeredSparse)
+    try expect(abs(sparseCenter.x - sparseBounds.midX) < sparseBounds.width * 0.035
+               && abs(sparseCenter.y - sparseBounds.midY) < sparseBounds.height * 0.035,
+               "Sparse app windows are the centered primary surface even when source positions span multiple monitors")
+    try expect(sparseCluster.width < sparseBounds.width * 0.60 && sparseCluster.height < sparseBounds.height * 0.60,
+               "Spacious sparse previews gather into a cluster instead of stretching to opposite screen edges")
+    let centeredSparseWindows: [AppStackLayout.WindowPlacement] = centeredSparse.flatMap { $0.windows }
+    try expect(centeredSparseWindows.allSatisfy { $0.frame.width == 400 && $0.frame.height == 240 },
+               "Centering cannot make already-fitting native previews smaller")
+
+    // Mirrors the uneven screenshot: six apps, one portrait browser, and
+    // several large landscape windows whose source centers were on the right.
+    let compositionBounds = CGRect(x: 28, y: 88, width: 1600, height: 850)
+    let compositionSources: [CGRect] = [
+        .init(x: 850, y: 10, width: 780, height: 620), .init(x: 950, y: 200, width: 960, height: 600),
+        .init(x: 1100, y: 700, width: 800, height: 560), .init(x: 1200, y: 10, width: 1200, height: 850),
+        .init(x: 1350, y: 650, width: 520, height: 860), .init(x: 30, y: 600, width: 1100, height: 720)
+    ]
+    let compositionItems: [AppStackLayout.Item] = compositionSources.indices.map { index in
+        .init(id: UInt32(index + 1), app: "composition\(index)", source: compositionSources[index])
+    }
+    for compositionPanel in [CGRect(x: compositionBounds.minX, y: compositionBounds.minY, width: 252, height: 280),
+                             CGRect(x: compositionBounds.maxX - 252, y: compositionBounds.minY, width: 252, height: 280)] {
+        let composition = try checkAppStackGeometry(compositionItems, bounds: compositionBounds, panel: compositionPanel)
+        let center = appPreviewCenter(composition), cluster = appCluster(composition)
+        try expect(abs(center.x - compositionBounds.midX) < compositionBounds.width * 0.13
+                   && abs(center.y - compositionBounds.midY) < compositionBounds.height * 0.13,
+                   "Six mixed app groups stay visually balanced with history in either top corner")
+        let left = cluster.minX - compositionBounds.minX, right = compositionBounds.maxX - cluster.maxX
+        try expect(abs(left - right) < compositionBounds.width * 0.15,
+                   "A corner log cannot leave a wide empty side while app previews crowd the other side")
+        let composedWindows: [AppStackLayout.WindowPlacement] = composition.flatMap { $0.windows }
+        try expect(composedWindows[0].frame.width / compositionSources[0].width > 0.42,
+                   "The centered composition retains the larger Mission Control preview scale")
+    }
+
+    let singleComposition = try checkAppStackGeometry([separated[0]], bounds: sparseBounds)
+    let singleCenter = appPreviewCenter(singleComposition)
+    try expect(abs(singleCenter.x - sparseBounds.midX) < 1 && abs(singleCenter.y - sparseBounds.midY) < 8,
+               "A lone window is centered as the focus of the overview, including its caption clearance")
+    let nineComposition = try checkAppStackGeometry(many, bounds: roomy)
+    let nineCenter = appPreviewCenter(nineComposition)
+    try expect(abs(nineCenter.x - roomy.midX) < roomy.width * 0.04 && abs(nineCenter.y - roomy.midY) < roomy.height * 0.06,
+               "A nine-window app stays centered without changing sibling scale or hiding any window")
+
+    let crowdedComposition: [AppStackLayout.Item] = (0..<36).map { (index: Int) -> AppStackLayout.Item in
+        let width: CGFloat = index % 2 == 0 ? 1100 : 600
+        let source = CGRect(x: CGFloat(index * 40), y: CGFloat(index % 4) * 100, width: width, height: CGFloat(700))
+        return .init(id: UInt32(index + 1), app: "crowded\(index / 3)", source: source)
+    }
+    let crowdedGroups = try checkAppStackGeometry(crowdedComposition, bounds: roomy)
+    let crowdedCenter = appPreviewCenter(crowdedGroups)
+    try expect(abs(crowdedCenter.x - roomy.midX) < roomy.width * 0.15 && abs(crowdedCenter.y - roomy.midY) < roomy.height * 0.15,
+               "A crowded many-window desktop remains centered while every sibling and caption stays exposed")
 
     var selection = QuickSelection()
     selection.toggleWindow(20, app: "com.apple.Notes")

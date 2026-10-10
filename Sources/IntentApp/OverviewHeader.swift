@@ -32,12 +32,12 @@ struct OverviewHeader: View {
                 }
             }.overlay {
                 IntentOptionalNameBar(name: $controller.selection.name)
-                    .frame(width: min(520, max(180, width - 240)))
+                    .frame(width: min(460, max(180, width - 240)))
                     .intentionFrame("overview-name")
             }.padding(.horizontal, 28).frame(height: 48).padding(.top, topSafeInset)
             if !model.savedSlots.isEmpty {
                 IntentSavedSlotsView(controller: controller, model: model)
-                    .frame(height: 94).fixedSize(horizontal: true, vertical: false)
+                    .frame(height: 82).fixedSize(horizontal: true, vertical: false)
                     .intentionFrame("overview-saved")
             }
             if onboarding.isTeaching {
