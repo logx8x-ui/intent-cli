@@ -76,8 +76,9 @@ enum NativeWebsiteFinderCompanionChecks {
         defer { panels.forEach { $0.close() } }
         func makeController(client: RecordingClient, panel: RecordingPanel,
                             onCommit: @escaping (WebsiteFinderTarget, BrowserTabItem) -> Void = { _, _ in },
+                            onBrowserOpened: @escaping () -> Void = {},
                             onCancel: @escaping () -> Void) throws -> NativeWebsiteFinderController {
-            try .init(target: target, onCommit: onCommit, onCancel: onCancel, client: client,
+            try .init(target: target, onCommit: onCommit, onCancel: onCancel, onBrowserOpened: onBrowserOpened, client: client,
                 companionFactory: { _ in .init(panel: panel, notifications: NotificationCenter(), isApplicationActive: { false }, onFocusControls: {}) },
                 observationDelayNanoseconds: 1_000_000)
         }
@@ -96,21 +97,35 @@ enum NativeWebsiteFinderCompanionChecks {
             "A finished finder cannot reopen or dismiss a replacement")
 
         let notOpenedClient = RecordingClient(observation: .pending)
-        var earlyCancel = 0
-        let notOpened = try makeController(client: notOpenedClient, panel: panels[5]) { earlyCancel += 1 }
+        var earlyCancel = 0, earlyActivation = 0
+        let notOpened = try makeController(client: notOpenedClient, panel: panels[5],
+            onBrowserOpened: { earlyActivation += 1 }) { earlyCancel += 1 }
         notOpened.start(frame: frame); notOpened.cancel()
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        try check(notOpenedClient.openCount == 0 && earlyCancel == 1 && panels[5].events == ["show", "hide"],
+        try check(notOpenedClient.openCount == 0 && earlyCancel == 1 && earlyActivation == 0 && panels[5].events == ["show", "hide"],
             "Cancel before the first actor turn prevents the queued open from reaching the browser client")
 
         let recoverableClient = RecordingClient(observation: .failure(.rejected("Temporary browser query failed")))
-        var recoverableCancel = 0
-        let recoverable = try makeController(client: recoverableClient, panel: panels[1]) { recoverableCancel += 1 }
+        var recoverableCancel = 0, openedCallbacks = 0
+        let recoverable = try makeController(client: recoverableClient, panel: panels[1],
+            onBrowserOpened: { openedCallbacks += 1 }) { recoverableCancel += 1 }
+        let compactFrame = NSRect(x: 180, y: 100, width: 580, height: 76)
+        panels[1].installControls(controller: recoverable, frame: compactFrame)
+        try check(panels[1].frame == compactFrame && panels[1].contentView?.bounds.size == compactFrame.size,
+            "The production finder controls retain their compact frame after installing hosted content")
         recoverable.start(frame: frame)
         try check(waitUntil { recoverable.status == "Choose Add to intention when your page is ready." },
             "A generic observation failure retains recovery controls instead of inventing terminal closure")
         try check(recoverableCancel == 0 && recoverableClient.cancelCount == 0 && recoverable.opened && !recoverable.busy
             && recoverable.focusControls(), "An unconfirmed failure keeps Add and explicit Cancel available")
+        try check(openedCallbacks == 1 && recoverableClient.openCount == 1,
+            "Browser activation handoff happens exactly once after a successful authenticated open")
+        panels[1].installControls(controller: recoverable, frame: compactFrame)
+        let positionedFrame = compactFrame
+        panels[1].contentView?.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        try check(panels[1].frame == positionedFrame && panels[1].contentView?.bounds.size == positionedFrame.size,
+            "Live status and enabled-button updates cannot expand or reposition the finder companion")
         recoverable.cancel()
         try check(recoverableCancel == 1 && recoverableClient.cancelCount == 1,
             "Explicit Cancel still releases the finder after a recoverable observation failure")

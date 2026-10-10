@@ -28,6 +28,7 @@ do {
     try runOptionalNamingSpecs()
     try runAppStackPolicySpecs()
     try runRestorationFocusSpecs()
+    try runSelectedResourceLifetimeSpecs()
     try runHabitSessionSpecs()
     try runQuickGestureRegressionSpecs()
     try runWebsiteFinderSpecs()

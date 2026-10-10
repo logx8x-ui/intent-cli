@@ -1370,6 +1370,9 @@ final class QuickSelectionController: ObservableObject {
         resolvingBrowserWindow = false; closeModification()
         hoverTask?.cancel(); hoverTask = nil; tabPreviewLoading = false
         overviewInput = OverviewSearchGesture(); overviewNormalizer = QuickMarkKeyboardNormalizer()
+        let browserPID = WorkspaceWindow.list(onScreen: false).first {
+            $0.id == focusedBrowserWindow && $0.bundle == target.browserBundleIdentifier
+        }?.pid
         do {
             let finder = try NativeWebsiteFinderController(target: target, onCommit: { [weak self] target, tab in
                 self?.completeNativeWebsiteFinder(target: target, tab: tab)
@@ -1382,6 +1385,19 @@ final class QuickSelectionController: ObservableObject {
             }, onTransferFailed: { [weak self] in
                 self?.websiteTransfer = nil
                 self?.panel?.level = .normal
+            }, onBrowserOpened: { [weak self] in
+                guard let self, self.generation == target.overviewGeneration, !self.closing,
+                      self.nativeWebsiteFinder?.target == target,
+                      let browserPID, let browser = NSRunningApplication(processIdentifier: browserPID),
+                      !browser.isTerminated, browser.bundleIdentifier == target.browserBundleIdentifier else { return }
+                let foreground = NSWorkspace.shared.frontmostApplication
+                guard foreground?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+                    || foreground?.processIdentifier == browserPID else { return }
+                // windows.create(focused:) chooses the finder inside Firefox but
+                // does not reliably activate its macOS process above Intent.
+                // Activate only the already-running, selected owner, once its
+                // authenticated finder receipt has arrived. No delayed retry.
+                browser.activate(options: [])
             })
             nativeWebsiteFinder = finder; message = nil
             // The user's real browser must own address-bar typing and Return.
@@ -1839,9 +1855,25 @@ final class QuickSelectionController: ObservableObject {
     }
 }
 
-private final class SelectionPanel: NSPanel {
+class SelectionPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown { dismissTextEditing(at: event.locationInWindow) }
+        super.sendEvent(event)
+    }
+
+    @discardableResult
+    func dismissTextEditing(at point: NSPoint) -> Bool {
+        guard let editor = firstResponder as? NSTextView, editor.window === self else { return false }
+        // Blank wallpaper and non-focusable buttons do not automatically resign
+        // AppKit's field editor. Release it before the clicked control handles
+        // the event, without consuming the click or changing the draft text.
+        let local = editor.convert(point, from: nil)
+        guard !editor.bounds.intersection(editor.visibleRect).contains(local) else { return false }
+        return makeFirstResponder(nil)
+    }
 }
 
 private final class StagedModifierPanel: NSPanel {

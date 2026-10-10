@@ -1934,23 +1934,34 @@ final class IntentAppModel: ObservableObject {
         activeSessionIntention = intention
         activeSessionName = intention.name
         activeSessionIsLeisure = intention.isLeisure
-        if quickSelectionIntentionID == intention.id, !(quickSelectionTabIDs ?? [:]).isEmpty || !quickSelectionWindowIDs.isEmpty {
+        if quickSelectionIntentionID == intention.id, !(quickSelectionTabIDs ?? [:]).isEmpty || !quickSelectionWindowIDs.isEmpty || (intention.accessMode == .whitelist && !intention.allowedApps.isEmpty) {
             let requireSelectedResources = intention.accessMode == .whitelist && !intention.addAsYouGo
             let tabIDs = quickSelectionTabIDs ?? [:]
             let browserSessionIDs = quickSelectionBrowserSessionIDs
-            let windowIDs = Set(quickSelectionWindowIDs.values.flatMap { $0 })
+            let selectedWindows = quickSelectionWindowIDs
+            let wholeApps = SelectedResourceLifetime.wholeAppSelections(
+                allowedAppIDs: Set(intention.allowedApps.map(\.bundleIdentifier)),
+                presetAppIDs: Set((alwaysAllowedApps + alwaysBlockedApps).map(\.bundleIdentifier)),
+                windowSelectionAppIDs: Set(selectedWindows.keys), tabSelectionAppIDs: Set(tabIDs.keys))
             quickSelectionMonitor = Task { [weak self] in
+                var browserPresence = Dictionary(uniqueKeysWithValues: tabIDs.keys.map { ($0, SelectedResourceLifetime.BrowserPresence.unknown) })
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard !Task.isCancelled, let self, self.activeSessionID == intention.id,
                           self.activeSessionOccurrenceID == occurrence,
                           self.activeLock === lock, !lock.isStopRequested else { return }
-                    if requireSelectedResources, !windowIDs.isEmpty, !windowIDs.isSubset(of: Set(WorkspaceWindow.list(onScreen: false).map(\.id))) {
-                        self.activeLock?.stopForSafety()
-                        self.errorMessage = "A marked window closed, so the intention ended safely."
-                        return
-                    }
+                    // Do not mistake an app still launching during startup for
+                    // an exhausted intention. onReady owns session readiness.
+                    guard self.currentRecord?.id == occurrence else { continue }
                     for (browser, selected) in tabIDs {
+                        if browserPresence[browser] == .closed { continue }
+                        // Normal application quit is closure, not an extension
+                        // disconnect. Other explicitly selected resources survive.
+                        if requireSelectedResources,
+                           NSRunningApplication.runningApplications(withBundleIdentifier: browser).isEmpty {
+                            browserPresence[browser] = .closed
+                            continue
+                        }
                         guard !Task.isCancelled, self.activeLock === lock, !lock.isStopRequested else { return }
                         let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
                         guard heartbeat.supports(intention.accessMode == .blacklist ? .blacklistSelection : .quickSelection, maxAge: 5),
@@ -1968,8 +1979,11 @@ final class IntentAppModel: ObservableObject {
                             self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
                             return
                         }
-                        if requireSelectedResources, snapshot.updatedAt > Date().addingTimeInterval(-3),
-                           !(snapshot.allTabs ?? snapshot.tabs).contains(where: { selected.contains($0.id) }) {
+                        if (snapshot.allTabs ?? snapshot.tabs).contains(where: { selected.contains($0.id) }) {
+                            browserPresence[browser] = .present
+                        }
+                        if SelectedResourceLifetime.needsTabConfirmation(restrictive: requireSelectedResources,
+                            snapshot: snapshot, selectedIDs: Set(selected)) {
                             // Idle/query-suppressed snapshots can be empty while
                             // every selected tab is still open. Confirm absence
                             // with a new exact-profile query, never cached rows.
@@ -1983,10 +1997,10 @@ final class IntentAppModel: ObservableObject {
                                     && self.activeLock === lock && !lock.isStopRequested
                             }, didConfirm: { result in
                                 switch result {
-                                case .present: confirmedPresent = true
+                                case .present:
+                                    confirmedPresent = true; browserPresence[browser] = .present
                                 case .closed:
-                                    self.errorMessage = "Quick Focus finished because its selected browser tabs were closed."
-                                    self.activeLock?.stop()
+                                    confirmedPresent = true; browserPresence[browser] = .closed
                                 case .changed:
                                     self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
                                     self.activeLock?.stopForSafety()
@@ -1999,6 +2013,18 @@ final class IntentAppModel: ObservableObject {
                                   self.activeSessionOccurrenceID == occurrence,
                                   self.activeLock === lock, !lock.isStopRequested else { return }
                         }
+                    }
+                    guard !Task.isCancelled, self.activeSessionOccurrenceID == occurrence,
+                          self.activeLock === lock, !lock.isStopRequested else { return }
+                    // Re-read native windows after asynchronous browser queries,
+                    // including replacement windows opened while awaiting them.
+                    let nativeWindows = Dictionary(grouping: WorkspaceWindow.list(onScreen: false), by: \.bundle)
+                        .mapValues { Set($0.map(\.id)) }
+                    if SelectedResourceLifetime.shouldFinish(restrictive: requireSelectedResources,
+                        selectedWindows: selectedWindows, wholeApps: wholeApps,
+                        liveWindows: nativeWindows, browsers: browserPresence) {
+                        self.activeLock?.stop()
+                        return
                     }
                 }
             }

@@ -6,6 +6,7 @@ import IntentCore
 enum QuickSelectionInteractionChecks {
     static func run(_ check: (Bool, String) throws -> Void) throws {
         try WebsiteFinderFocusChecks.run(check)
+        try OptionalNameDismissalChecks.run(check)
         let modifierPanel = QuickSelectionController.makeStagedModifierPanel(frame: .init(x: 0, y: 0, width: 500, height: 70))
         try check(modifierPanel.styleMask.contains(.nonactivatingPanel) && modifierPanel.canBecomeKey && !modifierPanel.canBecomeMain,
             "The real staged editor panel accepts keyboard focus without becoming an activating main window")

@@ -34,9 +34,11 @@ final class NativeWebsiteFinderController: ObservableObject {
     private let onTransferFailed: () -> Void
     private let onCommit: (WebsiteFinderTarget, BrowserTabItem) -> Void
     private let onCancel: () -> Void
+    private let onBrowserOpened: () -> Void
     init(target: WebsiteFinderTarget, onCommit: @escaping (WebsiteFinderTarget, BrowserTabItem) -> Void,
          onCancel: @escaping () -> Void, onTransfer: @escaping (String?) -> Void = { _ in },
          onTransferFailed: @escaping () -> Void = {},
+         onBrowserOpened: @escaping () -> Void = {},
          client: (any NativeWebsiteFinderClient)? = nil,
          companionFactory: ((BrowserWindowFrame) -> NativeWebsiteFinderCompanionPresentation)? = nil,
          observationDelayNanoseconds: UInt64 = 400_000_000) throws {
@@ -46,6 +48,7 @@ final class NativeWebsiteFinderController: ObservableObject {
         self.observationDelayNanoseconds = observationDelayNanoseconds
         self.onCommit = onCommit; self.onCancel = onCancel
         self.onTransfer = onTransfer; self.onTransferFailed = onTransferFailed
+        self.onBrowserOpened = onBrowserOpened
     }
     func start(frame: BrowserWindowFrame) {
         guard !finished, !started else { return }
@@ -57,6 +60,7 @@ final class NativeWebsiteFinderController: ObservableObject {
                 let receipt = try await client.open(frame: frame)
                 guard !finished, !Task.isCancelled else { return }
                 opened = true; busy = false
+                onBrowserOpened()
                 status = client.supportsAutomaticSelection ? "Search here. Visiting a website adds it to your intention." : "Browse in this tab, then add it to Intent."
                 presentCompanion(frame: receipt.frame ?? frame)
                 beginObservation()
@@ -169,7 +173,7 @@ final class NativeWebsiteFinderController: ObservableObject {
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hidesOnDeactivate = false
         panel.level = .floating; panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
-        panel.contentView = NSHostingView(rootView: NativeWebsiteFinderControls(controller: self))
+        panel.installControls(controller: self, frame: rect)
         let presentation = NativeWebsiteFinderCompanionPresentation(panel: panel) { [weak self] in
             self?.controlsFocusRequest = UUID()
         }
@@ -182,6 +186,20 @@ final class NativeWebsiteFinderController: ObservableObject {
 class NativeWebsiteFinderPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    @MainActor
+    func installControls(controller: NativeWebsiteFinderController, frame: NSRect) {
+        // SwiftUI's intrinsic width must not renegotiate this AppKit window.
+        // Status changes and longer browser names stay inside the companion,
+        // rather than expanding it over the overview or moving it offscreen.
+        let host = NSHostingController(rootView: NativeWebsiteFinderControls(controller: controller))
+        host.sizingOptions = []
+        host.view.frame = NSRect(origin: .zero, size: frame.size)
+        host.view.autoresizingMask = [.width, .height]
+        contentViewController = host
+        host.view.layoutSubtreeIfNeeded()
+        setFrame(frame, display: isVisible)
+    }
 }
 
 /// Owns only this companion's presentation. It never activates the application,
@@ -254,7 +272,7 @@ private struct NativeWebsiteFinderControls: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Add from \(controller.target.browserName)").font(.system(size: 12, weight: .semibold))
-                Text(controller.status).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3)
+                Text(controller.status).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
             }.frame(maxWidth: .infinity, alignment: .leading)
             Button("Cancel", action: controller.cancel).buttonStyle(.borderless)
                 .focused($focusedControl, equals: .cancel)
