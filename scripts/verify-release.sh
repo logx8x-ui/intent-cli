@@ -21,6 +21,20 @@ trap cleanup EXIT INT TERM
   exit 2
 }
 
+# Validate channel, disabled experimental feature, hashes, signed Firefox marker
+# and exact archive versions before mounting or executing any release payload.
+ASSET_DIR="$(cd "$(dirname "$MANIFEST")" && pwd)"
+/usr/bin/python3 - "$ROOT/scripts/build-download-kits.py" "$ASSET_DIR" "$MANIFEST" "$DMG" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('intent_download_kits', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    module.verify_release_inputs(sys.argv[2], manifest_path=sys.argv[3], dmg_path=sys.argv[4])
+except (ValueError, OSError, KeyError) as error:
+    sys.exit(str(error))
+PY
+
 NOTARIZED="$(plutil -extract notarized raw -o - "$MANIFEST")"
 TEAM_ID="$(plutil -extract team_id raw -o - "$MANIFEST")"
 EXPECTED_SHA="$(plutil -extract sha256 raw -o - "$MANIFEST")"
@@ -37,8 +51,8 @@ CHROME_EXPECTED_SHA="$(plutil -extract chrome_extension_sha256 raw -o - "$MANIFE
   echo "DMG checksum does not match release-manifest.json." >&2
   exit 4
 }
-FIREFOX_ASSET="$ROOT/dist/release/$FIREFOX_ASSET_NAME"
-CHROME_ASSET="$ROOT/dist/release/$CHROME_ASSET_NAME"
+FIREFOX_ASSET="$ASSET_DIR/$FIREFOX_ASSET_NAME"
+CHROME_ASSET="$ASSET_DIR/$CHROME_ASSET_NAME"
 [[ "$FIREFOX_SIGNED" == "true" && "$FIREFOX_ASSET_NAME" == *.xpi && -f "$FIREFOX_ASSET" ]] || {
   echo "Release does not contain a signed Firefox Browser Guard." >&2
   exit 9
@@ -84,5 +98,20 @@ ARCHS="$(lipo -archs "$APP/Contents/MacOS/IntentApp")"
   echo "IntentApp is not universal: $ARCHS" >&2
   exit 8
 }
+
+# Older Intent executables do not understand this flag and would open their UI.
+# Require launch metadata and the marker in the verified Mach-O before making
+# the bounded, side-effect-free --print-build-channel query.
+/usr/bin/python3 - "$ROOT/scripts/build-download-kits.py" "$APP" "$MANIFEST" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('intent_download_kits', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    module.verify_embedded_browsers(sys.argv[2], json.load(open(sys.argv[3])))
+    module.verify_compiled_launch(sys.argv[2])
+except (ValueError, OSError, KeyError) as error:
+    sys.exit(str(error))
+PY
 
 echo "Intent release verification passed."

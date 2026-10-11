@@ -9,7 +9,10 @@ public struct OverviewSearchGesture {
     private var usedChord = false
     private var runIssued = false
     private var swallowed: Set<Int> = []
-    public init() {}
+    private let websiteFinderEnabled: Bool
+    public init(websiteFinderEnabled: Bool = IntentBuildPolicy.current.includesWebsiteAdder) {
+        self.websiteFinderEnabled = websiteFinderEnabled
+    }
     public mutating func key(code: Int, down: Bool, modified: Bool, repeated: Bool, editing: Bool, capsLockHeld: Bool = false, browserPickerAvailable: Bool = false) -> Result {
         if !down, swallowed.remove(code) != nil { return .init(consume: true, action: nil) }
         if code == 53, down, !modified {
@@ -46,7 +49,7 @@ public struct OverviewSearchGesture {
             if down { swallowed.insert(code) }
             return .init(consume: true, action: down && !repeated ? .savedSlot(index) : nil)
         }
-        if code == 17, down, !held, !modified, !editing, browserPickerAvailable {
+        if code == 17, down, !held, !modified, !editing, browserPickerAvailable, websiteFinderEnabled {
             swallowed.insert(code)
             return .init(consume: true, action: repeated ? nil : .websiteFinder)
         }

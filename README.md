@@ -7,67 +7,15 @@ builder while every generated app and website remains editable before import.
 
 ## Download
 
-**Friends beta:** [Download the current Intent tester](https://github.com/logx8x-ui/intent-cli/releases/download/intent-beta-feed/Intent-Tester-Mac.zip).
+Get the launch version from **[livewithintent.app/download](https://livewithintent.app/download)**, for macOS 13 or newer. Downloads stay unavailable until a tested, Apple-notarized release and its matching browser components pass the release checks; an unsigned beta or development build is never used as a fallback.
 
-Extract the ZIP and open **Install Intent.command**. Apple Silicon Macs, macOS 13+.
-This beta is not yet Apple-notarized; macOS may require approval in Privacy & Security.
-The kit includes matching Chrome and Firefox setup, guided inside Intent.
+Choose Firefox, Chrome, or both when downloads become available. Install the Mac app, then use Intent's browser setup to choose the browser profiles you use, with **Select all** available. Google accounts belong to Chrome profiles; choosing a profile does not sign into an account or install an extension silently. Accept the browser's installation confirmation in each chosen profile and leave Browser Guard enabled.
 
-After this one bootstrap installation, Intent checks the signed beta feed hourly,
-downloads updates automatically, and applies them when it can safely restart.
-Every successful `main` push builds and publishes the next beta through GitHub Actions.
-An active intention delays restart. Failed builds never advance the update feed.
-Normal updates preserve your workspace; reinstalling with the kit after removing Intent
-resets local intentions, account choice and onboarding. Cloud account data is not deleted.
-Firefox's temporary tester extension must be loaded again after restarting Firefox.
+Firefox uses a matching Mozilla-signed extension. Chrome uses the official Chrome Web Store listing only after its approved version matches the release. An unpacked Chrome extension is for local development.
 
-The stable notarized installer below remains separate; it is not the friends beta.
+Intent has two compiled channels in this repository: the owner's **development** build retains the experimental T website adder; the **launch** build excludes it. A tested commit is promoted manually to an immutable `launch-<version>` release. The launch download page does not track `latest` or the old beta feed. App update checks are currently disabled, so there is no promise of hourly or automatic app updates.
 
-### One-command install
-
-Paste this into Terminal, or give the repository link to Codex and say **install the latest Intent release**:
-
-```zsh
-curl -fsSL https://raw.githubusercontent.com/logx8x-ui/intent-cli/main/install.sh | bash
-```
-
-macOS asks once for administrator approval, installs the latest published release, and opens Intent. Future updates appear inside Intent at the bottom left; installing an update keeps every intention, schedule, background, and setting.
-
-The command downloads a small release manifest first, checks the DMG checksum,
-Apple notarization ticket, installer signature, and publisher Team ID, and only
-then asks for installation approval. It never clones the repository and does not
-require Xcode or Command Line Tools.
-
-These are the only three manual downloads:
-
-| Download | Use it for |
-| --- | --- |
-| **[Intent for Mac](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent.dmg)** | The main app. Requires macOS 13 or newer. |
-| **[Firefox Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Firefox-Extension.xpi)** | Website restrictions in Firefox. Mozilla-signed for normal installs. |
-| **[Chrome Browser Guard](https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent-Chrome-Extension.zip)** | Website restrictions in Chrome. |
-
-Install the Mac app first, then install the Browser Guard for the browser you use. Leave its toolbar switch on: it only blocks pages while an intention is running, while local domain history can also improve Purpose Mode and Recording Mode suggestions.
-
-### Firefox
-
-1. Open the Firefox Browser Guard `.xpi` download in Firefox.
-2. Accept the installation prompt.
-3. Keep the Intent Browser Guard toolbar switch on.
-
-Tester releases use Mozilla's unlisted signing, so Browser Guard remains installed after Firefox restarts even before a public Add-ons listing exists.
-
-### Chrome
-
-The Chrome Web Store build is the tester/public channel and receives Chrome's
-automatic extension updates. Until that listing is published, the unpacked ZIP
-below is development-only and must be reloaded after its files change.
-
-1. Unzip the Chrome Browser Guard download.
-2. Open `chrome://extensions` in Chrome.
-3. Turn on **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
-
-See [Browser extension distribution](docs/BROWSER_EXTENSION_DISTRIBUTION.md)
-for the update guarantees and release gates for both browsers.
+See [Launch and development channels](docs/launch-channels.md) for the build, promotion, and installation procedure, and [Browser extension distribution](docs/BROWSER_EXTENSION_DISTRIBUTION.md) for browser distribution requirements.
 
 ## Use Intent
 

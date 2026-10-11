@@ -25,6 +25,7 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 }
 
 do {
+    try runIntentBuildPolicySpecs()
     try runOptionalNamingSpecs()
     try runAppStackPolicySpecs()
     try runRestorationFocusSpecs()

@@ -12,6 +12,21 @@ enum QuickSelectionInteractionChecks {
             "The real staged editor panel accepts keyboard focus without becoming an activating main window")
         modifierPanel.close()
         let controller = QuickSelectionController(model: IntentAppModel())
+        try check(controller.includesWebsiteAdder == IntentBuildPolicy.current.includesWebsiteAdder,
+            "The production overview uses the compiled feature policy, not a persisted user preference")
+        if !controller.includesWebsiteAdder {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let before = try encoder.encode(controller.selection)
+            controller.message = "Existing draft"
+            controller.openWebsiteFinder()
+            let after = try encoder.encode(controller.selection)
+            try check(controller.currentWebsiteFinderTarget == nil && controller.nativeWebsiteFinder == nil
+                && controller.websiteFinder == nil && !controller.creatingWebsiteTab
+                && after == before && controller.message == "Existing draft",
+                "The launch controller refuses a direct website-adder action without altering a draft or starting browser work")
+            controller.message = nil
+        }
         var canceledController: QuickSelectionController?
         canceledController = QuickSelectionController(model: IntentAppModel(), offerExitPasscode: {
             canceledController?.cancelImmediately()

@@ -19,9 +19,9 @@ if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
 fi
 
 cd "$ROOT"
-swift build -c release --product Intent
-swift build -c release --product IntentApp
-swift build -c release --product IntentNativeHost
+swift build -c release -Xswiftc -D -Xswiftc INTENT_DEVELOPMENT --product Intent
+swift build -c release -Xswiftc -D -Xswiftc INTENT_DEVELOPMENT --product IntentApp
+swift build -c release -Xswiftc -D -Xswiftc INTENT_DEVELOPMENT --product IntentNativeHost
 
 atomic_install_executable() {
   local source="$1"

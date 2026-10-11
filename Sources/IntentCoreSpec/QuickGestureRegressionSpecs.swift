@@ -3,7 +3,7 @@ import IntentCore
 
 func runQuickGestureRegressionSpecs() throws {
     try runQuickMarkKeyboardInputSpecs()
-    var finder = OverviewSearchGesture()
+    var finder = OverviewSearchGesture(websiteFinderEnabled: IntentBuildPolicy(channel: .development).includesWebsiteAdder)
     try expect(!finder.key(code: 17, down: true, modified: false, repeated: false, editing: false).consume,
         "T without a browser picker is ordinary input")
     try expect(!finder.key(code: 17, down: true, modified: false, repeated: false, editing: true, browserPickerAvailable: true).consume,

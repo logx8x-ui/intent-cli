@@ -3,8 +3,8 @@ set -euo pipefail
 export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.9.1}"
-BUILD_NUMBER="${2:-29}"
+VERSION="${1:-0.9.3}"
+BUILD_NUMBER="${2:-202610110001}"
 DIST="$ROOT/dist/release"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/intent-release.XXXXXX")"
 PKG_ROOT="$WORK/root"
@@ -27,20 +27,13 @@ if [[ "$TESTER_PRERELEASE" == "1" ]]; then
 fi
 if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
   [[ "$TESTER_PRERELEASE" == "1" ]] || { echo "Existing binaries are allowed only for an explicit tester prerelease." >&2; exit 4; }
-  ARM_BUILD="$ROOT/.build"
+  ARM_BUILD="${INTENT_LAUNCH_BUILD_PATH:-$ROOT/.build-launch}"
   ARCHITECTURES='["arm64"]'
 fi
 MINIMUM_MACOS="13.0"
+BUILD_CHANNEL="launch"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "Use a stable version and numeric build number." >&2; exit 4; }
 GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
-
-if [[ -z "$GOOGLE_CLIENT_SECRET" && "$TESTER_PRERELEASE" != "1" ]]; then
-  GOOGLE_CLIENT_SECRET="$(
-    security find-generic-password \
-      -s "dev.loganmondi.intent.build" \
-      -a "google-oauth-client-secret" \
-      -w 2>/dev/null || true
-  )"
-fi
 
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]] && {
   [[ -z "$APPLICATION_IDENTITY" ]] || [[ -z "$INSTALLER_IDENTITY" ]] || [[ -z "$NOTARY_PROFILE" ]]
@@ -60,6 +53,14 @@ For a clearly labelled, non-distributable local QA build only:
 MSG
   exit 4
 fi
+if [[ -z "$GOOGLE_CLIENT_SECRET" && "$TESTER_PRERELEASE" != "1" ]]; then
+  GOOGLE_CLIENT_SECRET="$(
+    security find-generic-password \
+      -s "dev.loganmondi.intent.build" \
+      -a "google-oauth-client-secret" \
+      -w 2>/dev/null || true
+  )"
+fi
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mkdir -p "$SUPPORT_DIR"
@@ -75,6 +76,20 @@ for product in Intent IntentApp IntentNativeHost; do
   swift build --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
 done
 fi
+if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
+  # Old executables do not recognize this diagnostic and would open the app.
+  # Require the side-effect-free entry point before querying any reused binary.
+  if ! /usr/bin/python3 - "$ARM_BUILD/arm64-apple-macosx/release/IntentApp" <<'MARKER'
+import pathlib, sys
+sys.exit(0 if b'--print-build-channel' in pathlib.Path(sys.argv[1]).read_bytes() else 1)
+MARKER
+  then
+    echo "Refusing an older executable without the safe build-channel diagnostic." >&2; exit 4
+  fi
+  if [[ "$("$ARM_BUILD/arm64-apple-macosx/release/IntentApp" --print-build-channel)" != "$BUILD_CHANNEL" ]]; then
+    echo "Refusing to package a development executable as the launch channel. Build the launch candidate first." >&2; exit 4
+  fi
+fi
 if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
   npm run extension:build
 else
@@ -82,6 +97,31 @@ else
   "$ROOT/scripts/sign-firefox-extension.sh"
 fi
 npm run extension:build:chrome
+FIREFOX_VERSION="$(node -p "require('$ROOT/firefox-extension/manifest.json').version")"
+CHROME_VERSION="$(node -p "require('$ROOT/chrome-extension/manifest.json').version")"
+PUBLISHED_CHROME_VERSION="${INTENT_CHROME_WEB_STORE_VERSION:-}"
+CHROME_STORE_URL="https://chromewebstore.google.com/detail/intent-browser-guard/ffgfjfpkddgimambgmahlodjjojmjnbc"
+CHROME_APPROVED=false
+PUBLISHED_CHROME_SETUP_VERSION=""
+if [[ "${INTENT_CHROME_WEB_STORE_APPROVED:-0}" == "1" && "$PUBLISHED_CHROME_VERSION" == "$CHROME_VERSION" ]]; then
+  CHROME_APPROVED=true
+  PUBLISHED_CHROME_SETUP_VERSION="$PUBLISHED_CHROME_VERSION"
+fi
+if [[ -n "$PUBLISHED_CHROME_VERSION" && "$PUBLISHED_CHROME_VERSION" != "$CHROME_VERSION" ]]; then
+  echo "Release refused: the Chrome store version does not match this build." >&2; exit 6
+fi
+if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
+  FIREFOX_SOURCE="$(find "$ROOT/dist/firefox" -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+  [[ -n "$FIREFOX_SOURCE" ]] || { echo "Release refused: Mozilla did not return a signed Firefox extension." >&2; exit 6; }
+  /usr/bin/python3 - "$FIREFOX_SOURCE" "$FIREFOX_VERSION" <<'CHECK'
+import json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    if json.loads(z.read('manifest.json'))['version'] != sys.argv[2] or 'META-INF/mozilla.rsa' not in z.namelist():
+        sys.exit('Release refused: Firefox signature/version does not match this build.')
+CHECK
+  mkdir -p "$APP/Contents/Resources/BrowserGuard"
+  cp "$FIREFOX_SOURCE" "$APP/Contents/Resources/BrowserGuard/Intent-Firefox-Extension.xpi"
+fi
 
 if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
   cp "$ARM_BUILD/arm64-apple-macosx/release/IntentApp" "$APP/Contents/MacOS/IntentApp"
@@ -139,6 +179,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>dev.loganmondi.intent</string>
   <key>CFBundleName</key><string>Intent</string>
   <key>CFBundleDisplayName</key><string>Intent</string>
+  <key>IntentBuildChannel</key><string>${BUILD_CHANNEL}</string>
+  <key>IntentDevelopmentBuild</key><false/>
+  <key>IntentChromePublishedGuardVersion</key><string>${PUBLISHED_CHROME_SETUP_VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
@@ -226,6 +269,9 @@ SCRIPT
 chmod +x "$PKG_SCRIPTS/preinstall" "$PKG_SCRIPTS/postinstall"
 
 "$ROOT/scripts/embed-update-components.sh" "$APP" "$ARM_BUILD"
+[[ "$("$APP/Contents/MacOS/IntentApp" --print-build-channel)" == "$BUILD_CHANNEL" ]] || {
+  echo "Release refused: compiled executable is not the launch channel." >&2; exit 4;
+}
 cp "$SUPPORT_DIR/IntentNativeHost" "$APP/Contents/Helpers/IntentNativeHost"
 
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
@@ -294,8 +340,6 @@ fi
 
 cp -f "$WORK_DMG" "$DMG"
 
-FIREFOX_VERSION="$(node -p "require('$ROOT/firefox-extension/manifest.json').version")"
-CHROME_VERSION="$(node -p "require('$ROOT/chrome-extension/manifest.json').version")"
 if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
   FIREFOX_ASSET="$DIST/Intent-Firefox-Extension.zip"
   FIREFOX_SOURCE="$ROOT/dist/firefox/intent_browser_guard-${FIREFOX_VERSION}.zip"
@@ -321,19 +365,28 @@ ASSET_URL=""
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
   TEAM_ID="$(codesign -dv --verbose=4 "$APP" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')"
   NOTARIZED=true
-  ASSET_URL="https://github.com/logx8x-ui/intent-cli/releases/latest/download/Intent.dmg"
+  ASSET_URL="https://github.com/logx8x-ui/intent-cli/releases/download/launch-${VERSION}/Intent.dmg"
 fi
 
 cat > "$DIST/release-manifest.json" <<JSON
 {
   "version": "${VERSION}",
   "build": "${BUILD_NUMBER}",
+  "repository": "logx8x-ui/intent-cli",
+  "tag": "launch-${VERSION}",
+  "channel": "${BUILD_CHANNEL}",
+  "website_adder_enabled": false,
+  "automatic_update_checks_enabled": false,
   "asset_url": "${ASSET_URL}",
   "sha256": "${DMG_SHA256}",
   "minimum_macos": "${MINIMUM_MACOS}",
   "architectures": ${ARCHITECTURES},
   "team_id": "${TEAM_ID}",
   "notarized": ${NOTARIZED},
+  "extension_version": "${CHROME_VERSION}",
+  "chrome_web_store_version": "${PUBLISHED_CHROME_VERSION}",
+  "chrome_web_store_approved": ${CHROME_APPROVED},
+  "chrome_store_url": "${CHROME_STORE_URL}",
   "firefox_extension_version": "${FIREFOX_VERSION}",
   "firefox_extension_asset": "$(basename "$FIREFOX_ASSET")",
   "firefox_extension_sha256": "${FIREFOX_SHA256}",

@@ -21,14 +21,15 @@ final class IntentUpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate 
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
     private var isDevelopmentBuild: Bool {
-        Bundle.main.object(forInfoDictionaryKey: "IntentDevelopmentBuild") as? Bool == true
+        IntentBuildChannel.current == .development || Bundle.main.object(forInfoDictionaryKey: "IntentDevelopmentBuild") as? Bool == true
     }
     private var sessionNeedsFinishing: Bool {
         let model = IntentRuntime.shared.model
         return model.hasActiveSession || model.isZeroDriftActive || model.pendingPurposeSessionSave != nil
     }
     func startAutomaticChecks() {
-        guard !IntentEnvironment.isQA, !isDevelopmentBuild else { return }
+        guard !IntentEnvironment.isQA, !isDevelopmentBuild,
+              Bundle.main.object(forInfoDictionaryKey: "SUEnableAutomaticChecks") as? Bool == true else { return }
         guard controller == nil else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         controller?.updater.automaticallyChecksForUpdates = true
@@ -44,6 +45,10 @@ final class IntentUpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate 
         }
         guard !isDevelopmentBuild else {
             errorMessage = "This development build keeps your unreleased changes. Install a published release to return to automatic updates."
+            return
+        }
+        guard Bundle.main.object(forInfoDictionaryKey: "SUEnableAutomaticChecks") as? Bool == true else {
+            errorMessage = "Launch updates will become available after the signed launch release is published."
             return
         }
         startAutomaticChecks()

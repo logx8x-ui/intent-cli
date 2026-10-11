@@ -24,8 +24,10 @@ final class QuickSelectionController: ObservableObject {
     @Published private(set) var openingApps = Set<String>()
     private var spotlightApps: [String: AllowedApp] = [:]
     var onOverviewClosed: (() -> Void)?
+    var includesWebsiteAdder: Bool { IntentBuildPolicy.current.includesWebsiteAdder }
     private var overviewInput = OverviewSearchGesture()
     private var overviewNormalizer = QuickMarkKeyboardNormalizer()
+    private var browserSetupSuspended = false
     var ownsOverviewPrefixInput: Bool { panel?.isVisible == true && overviewInput.isHoldingPrefix }
     // WebKit's page responder is not an NSTextView. Treat the finder as an
     // editing surface so digits, Return, X and Space cannot trigger the overview.
@@ -65,7 +67,7 @@ final class QuickSelectionController: ObservableObject {
         message = text
     }
     func spotlightVisibilityChanged(_ visible: Bool) {
-        guard !nativeFinderOwnsInput, let panel, panel.isVisible else { return }
+        guard !browserSetupSuspended, !nativeFinderOwnsInput, let panel, panel.isVisible else { return }
         panel.level = visible ? .normal : .popUpMenu
         if !visible { NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil) }
     }
@@ -1003,6 +1005,22 @@ final class QuickSelectionController: ObservableObject {
     }
     var isSelectionSurfaceVisible: Bool { panel?.isVisible == true }
     var isStagedModifierSurfaceVisible: Bool { stagedModifiersPanel?.isVisible == true }
+    func suspendForBrowserSetup() {
+        guard panel?.isVisible == true else { return }
+        browserSetupSuspended = true
+        overviewInput = OverviewSearchGesture()
+        overviewNormalizer = QuickMarkKeyboardNormalizer()
+        closeModification()
+        panel?.orderOut(nil)
+    }
+    func resumeAfterBrowserSetup() {
+        guard browserSetupSuspended else { return }
+        browserSetupSuspended = false
+        guard !closing, !model.hasActiveSession, let panel else { return }
+        panel.level = .popUpMenu
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
     func prepareOverviewEntry() {
         // An explicit saved/resume action loads its own configuration. A normal
         // SBT entry is a fresh mode, not a continuation of DBT marks or editors.
@@ -1010,6 +1028,7 @@ final class QuickSelectionController: ObservableObject {
         clearMarks()
     }
     func toggle() {
+        if browserSetupSuspended { return }
         model.cancelBrowserCoverageStart()
         if panel?.isVisible == true { cancel(); return }
         guard !model.hasActiveSession,
@@ -1351,7 +1370,7 @@ final class QuickSelectionController: ObservableObject {
         hoveredTab = nil; tabPreview = nil; tabPreviewError = nil; tabPreviewLoading = false
     }
     var currentWebsiteFinderTarget: WebsiteFinderTarget? {
-        guard !model.hasActiveSession, !closing, panel?.isVisible == true,
+        guard includesWebsiteAdder, !model.hasActiveSession, !closing, panel?.isVisible == true,
               let window = windows.first(where: { $0.id == focusedBrowserWindow }),
               let windowID = displayedBrowserWindowID(for: window),
               let snapshot = snapshots.first(where: { $0.browserBundleIdentifier == window.appID }),
@@ -1364,7 +1383,7 @@ final class QuickSelectionController: ObservableObject {
         return target.isValid ? target : nil
     }
     func openWebsiteFinder() {
-        guard nativeWebsiteFinder == nil, websiteFinder == nil, !creatingWebsiteTab, !restoringSavedWorkspace,
+        guard includesWebsiteAdder, nativeWebsiteFinder == nil, websiteFinder == nil, !creatingWebsiteTab, !restoringSavedWorkspace,
               let target = currentWebsiteFinderTarget else { return }
         windowResolutionID = UUID(); windowResolutionTask?.cancel(); windowResolutionTask = nil
         resolvingBrowserWindow = false; closeModification()
@@ -1623,6 +1642,7 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        browserSetupSuspended = false
         closing = true
         savedRestorationGeneration = UUID()
         savedRestorationTask?.cancel(); savedRestorationTask = nil; restoringSavedWorkspace = false
@@ -2144,10 +2164,12 @@ private struct QuickSelectionView: View {
                 HStack {
                     Text(controller.apps.first { $0.id == window.appID }?.app.name ?? "Browser tabs").font(.headline)
                     Spacer()
-                    Button { controller.openWebsiteFinder() } label: {
-                        Image(systemName: "plus"); Text("T").font(.caption.monospaced())
-                    }.buttonStyle(.plain).accessibilityLabel("Add a website, T")
-                        .disabled(controller.currentWebsiteFinderTarget == nil || controller.creatingWebsiteTab)
+                    if controller.includesWebsiteAdder {
+                        Button { controller.openWebsiteFinder() } label: {
+                            Image(systemName: "plus"); Text("T").font(.caption.monospaced())
+                        }.buttonStyle(.plain).accessibilityLabel("Add a website, T")
+                            .disabled(controller.currentWebsiteFinderTarget == nil || controller.creatingWebsiteTab)
+                    }
                     Button { controller.dismissBrowserPicker() } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Close tabs")
                 }
                 if controller.tabs(for: window).isEmpty {

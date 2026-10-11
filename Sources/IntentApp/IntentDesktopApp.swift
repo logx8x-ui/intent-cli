@@ -42,6 +42,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if IntentBrowserSetup.focusIfPresented() { return false }
         if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return true }
         if IntentRuntime.shared.focusNativeWebsiteFinderIfPresent() { return false }
         IntentRuntime.shared.model.showOverlay()
@@ -64,6 +65,19 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
+@MainActor
+enum IntentAppEntryPoint {
+    static func main() {
+        // Packaging can verify the binary's compiled channel without creating
+        // NSApp, opening data stores or registering a native browser host.
+        if CommandLine.arguments.contains("--print-build-channel") {
+            print(IntentBuildChannel.current.rawValue)
+            return
+        }
+        IntentDesktopApp.main()
+    }
+}
+
 struct IntentDesktopApp: App {
     @NSApplicationDelegateAdaptor(IntentAppDelegate.self) private var appDelegate
 
@@ -76,6 +90,7 @@ struct IntentDesktopApp: App {
                 }
                 CommandGroup(after: .newItem) {
                     Button("Quick Focus") { IntentRuntime.shared.toggleQuickFocus() }
+                    Button("Browser profiles…") { IntentBrowserSetup.open() }
                     Button("Finish Intention") { IntentRuntime.shared.model.endActiveSession() }
                     Button("Safety Stop — Release All Restrictions") { IntentRuntime.shared.model.emergencyStop() }
                         .keyboardShortcut(.escape, modifiers: [.command, .control, .option])
@@ -169,6 +184,9 @@ final class IntentStatusItemController: NSObject {
         selectionItem.target = self
         selectionItem.keyEquivalentModifierMask = []
         menu.addItem(selectionItem)
+        let profilesItem = NSMenuItem(title: "Browser profiles…", action: #selector(openBrowserProfiles), keyEquivalent: "")
+        profilesItem.target = self
+        menu.addItem(profilesItem)
 
         let safetyItem = NSMenuItem(title: "Safety Stop — Release All Restrictions", action: #selector(safetyStop), keyEquivalent: "")
         safetyItem.target = self
@@ -247,6 +265,7 @@ final class IntentStatusItemController: NSObject {
     @objc private func openQuickFocus() {
         IntentRuntime.shared.toggleQuickFocus()
     }
+    @objc private func openBrowserProfiles() { IntentBrowserSetup.open() }
 
     @objc private func safetyStop() { model.emergencyStop() }
 
@@ -294,6 +313,7 @@ final class IntentRuntime {
     private var showOverlayObserver: NSObjectProtocol?
     private var becomeActiveObserver: NSObjectProtocol?
     private var hasStarted = false
+    private var browserSetupHandoffActive = false
     private var gestureSessionObserver: AnyCancellable?
 
     init() {
@@ -334,10 +354,24 @@ final class IntentRuntime {
 
     func beginOnboardingSelectionScope() { quickSelectionController.beginOnboardingSelectionScope() }
     func endOnboardingSelectionScope() { quickSelectionController.endOnboardingSelectionScope() }
+    func beginBrowserSetupHandoff() {
+        guard !browserSetupHandoffActive else { return }
+        browserSetupHandoffActive = true
+        quickSelectionController.suspendForBrowserSetup()
+        model.onboarding.beginPermissionHandoff()
+        overlayController.hideOverlay(animated: false)
+    }
+    func endBrowserSetupHandoff() {
+        guard browserSetupHandoffActive else { return }
+        browserSetupHandoffActive = false
+        model.onboarding.resumePermissionHandoff()
+        quickSelectionController.resumeAfterBrowserSetup()
+        if model.onboarding.isPresented { model.onboarding.requestPresentation() }
+    }
 
     @discardableResult
     func resumeOnboardingPermissionHandoffIfNeeded() -> Bool {
-        guard model.onboarding.isPresented, model.onboarding.permissionHandoffActive else { return false }
+        guard !browserSetupHandoffActive, model.onboarding.isPresented, model.onboarding.permissionHandoffActive else { return false }
         model.onboarding.requestPresentation()
         return true
     }
