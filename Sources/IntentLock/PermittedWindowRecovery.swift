@@ -32,7 +32,7 @@ struct PermittedWindowBinding: @unchecked Sendable {
                 launched: identity.launched, windowID: $0.id), title: $0.title, frame: $0.frame)
         }
         guard native.contains(where: { $0.identity == identity }),
-              let windows = attribute(AXUIElementCreateApplication(identity.pid), kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+              let windows = PublicAccessibilityWindowInventory.read(pid: identity.pid, deadline: deadline) else { return nil }
         var candidates: [AXUIElement] = []
         for element in windows {
             var pid: pid_t = 0

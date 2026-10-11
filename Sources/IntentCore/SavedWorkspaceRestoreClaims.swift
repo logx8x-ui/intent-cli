@@ -41,6 +41,18 @@ public final class SavedWorkspaceRestoreClaims {
         requests.removeAll { $0.sourceID == sourceID }
         try save(requests)
     }
+    /// Retire only this attempt's exact claims that never reached a mailbox
+    /// write attempt. Written or ambiguous effects stay durable, even when the
+    /// remaining batch was cancelled, disconnected, or never started. A crash
+    /// cannot execute this cleanup and therefore retains every original claim.
+    public func retireUndispatched(_ attempt: [Request], dispatchAttempted: Set<String>) throws {
+        let undispatched = attempt.filter { !dispatchAttempted.contains($0.requestID) }
+        guard !undispatched.isEmpty else { return }
+        var requests = try load()
+        let count = requests.count
+        requests.removeAll { undispatched.contains($0) }
+        if requests.count != count { try save(requests) }
+    }
     private func save(_ requests: [Request]) throws {
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(requests).write(to: fileURL, options: .atomic)

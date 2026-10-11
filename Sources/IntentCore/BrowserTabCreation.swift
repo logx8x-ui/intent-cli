@@ -105,6 +105,8 @@ public enum BrowserTabCreationError: LocalizedError {
 @MainActor
 public enum BrowserTabCreationService {
     public static func create(target: WebsiteFinderTarget, url: URL, requestID: String = UUID().uuidString,
+                              onDispatchAttempt: @MainActor () -> Void = {},
+                              onDispatched: @MainActor () -> Void = {},
                               isCurrent: @escaping @MainActor () -> Bool) async throws -> BrowserTabItem {
         guard UUID(uuidString: requestID) != nil, target.isValid, let destination = WebsiteFinderPolicy.validatedURL(url.absoluteString) else { throw BrowserTabCreationError.invalidURL }
         guard isCurrent(), !Task.isCancelled else { throw BrowserTabCreationError.cancelled }
@@ -133,7 +135,12 @@ public enum BrowserTabCreationService {
         let store = BrowserTabCreationMailbox(browser: browser, session: ownerSession)
         let receiptURL = BrowserTabCreationReceipt.fileURL(requestID: command.id)!
         defer { try? FileManager.default.removeItem(at: receiptURL) }
+        // Preflight failures have no browser effect. Once the durable write is
+        // attempted, even a thrown I/O error cannot certify that it was absent.
+        // There is no suspension between these callbacks and the atomic write.
+        onDispatchAttempt()
         try store.write(command)
+        onDispatched()
         do {
             for _ in 0..<100 {
                 guard isCurrent(), !Task.isCancelled else { throw BrowserTabCreationError.cancelled }

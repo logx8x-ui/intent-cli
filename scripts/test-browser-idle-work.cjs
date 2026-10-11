@@ -7,6 +7,7 @@ async function harness(browserName, connected) {
   let now = 0;
   let nextID = 1;
   let queries = 0;
+  const windowQueries = [];
   const timers = new Map();
   const intervals = [];
   const attempts = [];
@@ -29,6 +30,15 @@ async function harness(browserName, connected) {
     tabs: {
       query: async () => { queries++; return []; },
       onActivated: event(), onUpdated: event(), onCreated: event(), onRemoved: event()
+    },
+    windows: {
+      getAll: async query => {
+        windowQueries.push(query);
+        // A successful real empty profile enumeration is distinct from a
+        // failed API or an idle event inventing an empty substitute.
+        return [];
+      },
+      onFocusChanged: event(), onRemoved: event()
     },
     webRequest: { onBeforeRequest: event() },
     webNavigation: { onBeforeNavigate: event() },
@@ -64,7 +74,8 @@ async function harness(browserName, connected) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, `../${browserName}-extension/background.js`), "utf8"), context);
   await drain();
   await advance(100);
-  return { context, intervals, attempts, messages, timers, replies, disconnects, advance, drain, queryCount: () => queries };
+  return { context, intervals, attempts, messages, timers, replies, disconnects, advance, drain,
+    storage, windowQueries, queryCount: () => queries };
 }
 
 (async () => {
@@ -89,7 +100,20 @@ async function harness(browserName, connected) {
     const idle = await harness(name, true);
     assert.equal(idle.context.guardStatus().connected, false, `${name}: open port alone does not prove connection`);
     await idle.replies[0]({ active: false });
+    await idle.drain();
     assert.equal(idle.context.guardStatus().connected, true, `${name}: native reply confirms connection`);
+    const bootstrap = idle.messages.filter(m => m.type === "tabsSnapshot");
+    assert.equal(idle.windowQueries.length, 1, `${name}: first connection reads the real populated window inventory once`);
+    assert.equal(idle.windowQueries[0].populate, true);
+    assert.deepEqual(Array.from(idle.windowQueries[0].windowTypes), ["normal", "popup"]);
+    assert.equal(bootstrap.length, 1, `${name}: successful empty enumeration publishes one profile metadata snapshot`);
+    assert.deepEqual(Array.from(bootstrap[0].tabs), []);
+    assert.deepEqual(Array.from(bootstrap[0].allTabs), []);
+    assert.deepEqual(Array.from(bootstrap[0].snapshotRequestIDs), []);
+    assert.equal(bootstrap[0].completeWindowInventory === true, false,
+      `${name}: unrequested bootstrap is not authority for correlated profile absence`);
+    assert.equal(bootstrap[0].browserProfileID, idle.storage.intentBrowserProfileID,
+      `${name}: bootstrap uses the durable verified profile identity`);
     const connectedAttempts = idle.attempts.length;
     idle.context.recoverForegroundConnection();
     assert.equal(idle.attempts.length, connectedAttempts, `${name}: healthy port must stay intact`);
@@ -99,19 +123,22 @@ async function harness(browserName, connected) {
     assert.equal(idle.timers.size, timersBefore, `${name}: inactive tab events should schedule no snapshot work`);
     await idle.advance(1000);
     assert.equal(idle.queryCount(), queriesBefore, `${name}: inactive events must not enumerate tabs`);
+    assert.equal(idle.windowQueries.length, 1, `${name}: inactive events must not repeat window bootstrap`);
     assert.equal(idle.intervals[0].delay, 3000);
     assert.ok(idle.intervals[0].delay < 5000, "Heartbeat must remain within the app's five-second freshness window");
-    // Chrome keeps its last authoritative inventory at idle. Its inactive
-    // switcher is cleared by the rule/session lifecycle, not a made-up empty
-    // enumeration. Firefox retains its current protocol until separately updated.
+    // Both browsers retain their last real inventory at idle. Session lifecycle
+    // clears the inactive switcher; idle events do not manufacture empty rows.
     const snapshotsBeforeForcedIdle = idle.messages.filter(m => m.type === "tabsSnapshot").length;
     idle.context.scheduleTabSnapshot(true);
     await idle.advance(1100);
-    if (name === "chrome") {
-      assert.equal(idle.messages.filter(m => m.type === "tabsSnapshot").length, snapshotsBeforeForcedIdle,
-        "Chrome forced idle refresh cannot replace the last discovery with false emptiness");
-      assert.equal(idle.queryCount(), queriesBefore, "Chrome forced idle refresh performs no inventory query");
-    } else assert.ok(idle.messages.some(m => m.type === "tabsSnapshot" && m.tabs.length === 0));
+    assert.equal(idle.messages.filter(m => m.type === "tabsSnapshot").length, snapshotsBeforeForcedIdle,
+      `${name}: forced idle refresh cannot replace real inventory with false emptiness`);
+    assert.equal(idle.queryCount(), queriesBefore, `${name}: forced idle refresh performs no tab inventory query`);
+    assert.equal(idle.windowQueries.length, 1, `${name}: forced idle refresh performs no window inventory query`);
+    await idle.context.sendHeartbeat(); await idle.drain();
+    assert.equal(idle.messages.filter(m => m.type === "tabsSnapshot").length, 1,
+      `${name}: successful bootstrap keeps later idle heartbeats quiet`);
+    assert.equal(idle.windowQueries.length, 1);
     idle.disconnects[0]();
     assert.equal(idle.context.guardStatus().connected, false, `${name}: disconnected guard cannot claim connected`);
     await idle.replies[0]({ active: false });

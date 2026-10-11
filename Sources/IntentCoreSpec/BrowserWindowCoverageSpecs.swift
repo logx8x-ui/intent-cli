@@ -4,6 +4,24 @@ import IntentCore
 func runBrowserWindowCoverageSpecs() throws {
     typealias Policy = BrowserWindowCoveragePolicy
     let browser = "com.google.Chrome", proof = BrowserProcessIdentity(pid: 401, launched: 900)
+    for state in BrowserWindowState.allCases {
+        let row = BrowserTabItem(id: 1, windowID: 10, index: 0, title: "Fixture", url: "https://example.test",
+            active: true, windowState: state)
+        let value = BrowserTabSnapshot(browserBundleIdentifier: browser, tabs: [row], allTabs: [row])
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(BrowserTabSnapshot.self, from: encoded)
+        try expect(decoded.tabs[0].windowState == state && decoded.allTabs?[0].windowState == state,
+            "Actual browser window state \(state.rawValue) survives both snapshot arrays")
+        var wire = try JSONSerialization.jsonObject(with: JSONEncoder().encode(row)) as! [String: Any]
+        wire.removeValue(forKey: "windowState")
+        let legacy = try JSONDecoder().decode(BrowserTabItem.self, from: JSONSerialization.data(withJSONObject: wire))
+        try expect(legacy.windowState == nil && legacy.id == row.id && legacy.windowID == row.windowID,
+            "An older missing window-state field remains unknown and preserves exact IDs")
+        wire["windowState"] = "hidden"
+        let invalidWire = try JSONSerialization.data(withJSONObject: wire)
+        try expect((try? JSONDecoder().decode(BrowserTabItem.self, from: invalidWire)) == nil,
+            "Unknown window-state strings cannot decode as positive minimized readback")
+    }
     let frame = CGRect(x: 0, y: 30, width: 1000, height: 700)
     let oldActive = BrowserTabItem(id: 1, windowID: 10, index: 0, title: "New tab", url: "chrome://newtab/", active: true, windowFocused: true)
     let added = BrowserTabItem(id: 2, windowID: 10, index: 1, title: "Example", url: "https://example.com", active: false)

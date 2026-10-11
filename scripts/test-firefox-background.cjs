@@ -26,8 +26,15 @@ function createHarness(activeRules, initialTabs, options = {}) {
   const reloads = [];
   const removals = [];
   const nativeMessages = [];
+  const websiteMessages = [];
   const profileWrites = [];
   const nativeReceivers = [];
+  const nativePorts = [];
+  let nativeHostAvailable = options.hostAvailable !== false;
+  let nativeConnectAttempts = 0;
+  const timeouts = new Map();
+  let timeoutSerial = 0;
+  const sessionStorage = { ...(options.sessionStorage || {}) };
   const intervals = [];
   const storage = {
     guardEnabled: options.guardEnabled !== false,
@@ -72,15 +79,23 @@ function createHarness(activeRules, initialTabs, options = {}) {
     },
     tabs: {
       executeScript: async () => { options.onWebsiteInject?.(); },
-      sendMessage: async (id, message) => options.websiteReceipt ? options.websiteReceipt(id,message)
-        : options.rejectWebsiteGuard ? {} : ({websiteFeatures:true, websiteRequestID:message.websiteRequestID,
-          websitePolicyKey:require("../firefox-extension/website-features.js").policyKey(message.rules),
-          startupSessionID:message.rules?.startupSessionID || null}),
+      sendMessage: async (id, message) => {
+        websiteMessages.push({id,message});
+        return options.websiteReceipt ? options.websiteReceipt(id,message)
+          : options.rejectWebsiteGuard ? {} : ({websiteFeatures:true, websiteRequestID:message.websiteRequestID,
+            websitePolicyKey:require("../firefox-extension/website-features.js").policyKey(message.rules),
+            startupSessionID:message.rules?.startupSessionID || null});
+      },
       onActivated: { addListener: (listener) => listeners.onActivated.push(listener) },
       onUpdated: { addListener: (listener) => listeners.onUpdated.push(listener) },
       onCreated: { addListener: (listener) => listeners.onCreated.push(listener) },
       onRemoved: { addListener: (listener) => listeners.onRemoved.push(listener) },
-      get: async (tabId) => tabs.get(tabId) ? { ...tabs.get(tabId) } : Promise.reject(new Error("missing tab")),
+      get: async (tabId) => {
+        if (!tabs.has(tabId)) throw new Error("missing tab");
+        const result = { ...tabs.get(tabId) };
+        await options.afterTabGet?.(result);
+        return result;
+      },
       query: async () => {
         if (options.failTabQuery) throw new Error("tabs unavailable");
         const result = Array.from(tabs.values()).map((tab) => ({ ...tab }));
@@ -133,7 +148,11 @@ function createHarness(activeRules, initialTabs, options = {}) {
       }
     },
     windows: {
-      getAll: async () => [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({ id, left: id * 20, top: 50, width: 900, height: 700, focused: id === 1 })),
+      getAll: async (query) => {
+        const windows = [...new Set(Array.from(tabs.values(), tab => tab.windowId).filter(Number.isInteger))].map(id => ({ id, type:"normal", left: id * 20, top: 50, width: 900, height: 700, focused: id === 1,
+          ...(query.populate ? {tabs:Array.from(tabs.values()).filter(tab => tab.windowId === id).map(tab => ({...tab}))} : {})}));
+        return options.onWindowQuery ? options.onWindowQuery(query, windows) : windows;
+      },
       onFocusChanged: { addListener: listener => listeners.onWindowFocus.push(listener) },
       update: async (id, patch) => { focusedWindows.push(id); return { id, ...patch }; }
     },
@@ -146,24 +165,31 @@ function createHarness(activeRules, initialTabs, options = {}) {
   };
 
   if (options.nativeVisibility) {
-    const session = {};
-    browser.storage.session = {get: async () => ({...session}), set: async value => Object.assign(session, value)};
+    browser.storage.session = {get: async () => ({...sessionStorage}), set: async value => Object.assign(sessionStorage, value)};
   }
   if (options.withCommandPort) {
-    const messages = nativeReceivers;
-    browser.runtime.connectNative = () => ({
-      onMessage: { addListener: listener => messages.push(listener) },
-      onDisconnect: { addListener() {} },
-      postMessage(message) {
-        nativeMessages.push(message);
-        // Real native host suppresses unchanged state pushes for snapshots and
-        // heartbeats. Do not let automatic fixture replies repair stale rules.
-        if (options.requestOnlyNativeReplies && !["getRules","setGuardEnabled"].includes(message.type)) return;
-        const response = message.type === "windowVisibilityPlan"
-          ? {...activeRules, visibilityPlanReceipt: {revision: message.visibilityPlan.revision, accepted: true}} : null;
-        Promise.resolve().then(() => messages.forEach(listener => listener(response || activeRules)));
-      }
-    });
+    browser.runtime.connectNative = () => {
+      nativeConnectAttempts++;
+      if (!nativeHostAvailable) throw new Error("native host unavailable");
+      const messages = [], disconnects = [];
+      const port = {
+        messages, disconnects,
+        onMessage: { addListener(listener) { messages.push(listener); nativeReceivers.push(listener); } },
+        onDisconnect: { addListener: listener => disconnects.push(listener) },
+        postMessage(message) {
+          if (!nativeHostAvailable) throw new Error("native host unavailable");
+          nativeMessages.push(message);
+          // Real native host suppresses unchanged state pushes for snapshots and
+          // heartbeats. Do not let automatic fixture replies repair stale rules.
+          if (options.requestOnlyNativeReplies && !["getRules","setGuardEnabled"].includes(message.type)) return;
+          const response = message.type === "windowVisibilityPlan"
+            ? {...activeRules, visibilityPlanReceipt: {revision: message.visibilityPlan.revision, accepted: true}} : null;
+          Promise.resolve().then(() => messages.forEach(listener => listener(response || activeRules)));
+        }
+      };
+      nativePorts.push(port);
+      return port;
+    };
   }
   const context = {
     crypto: options.crypto === undefined ? require("node:crypto").webcrypto : options.crypto,
@@ -187,10 +213,18 @@ function createHarness(activeRules, initialTabs, options = {}) {
       intervals.push({ callback, delay });
       return intervals.length;
     },
-    setTimeout: (fn) => {
-      Promise.resolve().then(fn);
-      return 0;
-    }
+    setTimeout: (fn, delay = 0) => {
+      const id = ++timeoutSerial;
+      timeouts.set(id, { fn, delay });
+      if (!(options.controlReconnectTimers && delay >= 1000)) {
+        Promise.resolve().then(() => {
+          if (!timeouts.has(id)) return;
+          timeouts.delete(id); fn();
+        });
+      }
+      return id;
+    },
+    clearTimeout: id => timeouts.delete(id)
   };
 
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../firefox-extension/website-playback-intent.js"),"utf8"), context);
@@ -221,6 +255,22 @@ function createHarness(activeRules, initialTabs, options = {}) {
     browserSessionID: () => vm.runInNewContext("browserSessionID", context),
     browserProfileID: () => vm.runInNewContext("browserProfileID", context),
     profileWrites,
+    setHostAvailable(value) { nativeHostAvailable = value; },
+    nativeConnectAttempts: () => nativeConnectAttempts,
+    nativePorts,
+    disconnectPort(index = nativePorts.length - 1) {
+      for (const listener of nativePorts[index].disconnects) listener();
+    },
+    reconnectTimers: () => [...timeouts.entries()].filter(([_id, timer]) => timer.delay >= 1000),
+    async runReconnectTimer() {
+      const next = [...timeouts.entries()].find(([_id, timer]) => timer.delay >= 1000);
+      assert(next, "Expected a scheduled reconnect timer");
+      timeouts.delete(next[0]); next[1].fn();
+      for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+    },
+    activeRules: () => vm.runInNewContext("rules", context),
+    nativeWindowOwner: () => vm.runInNewContext("nativeWindowVisibility", context),
+    sessionStorage,
     async heartbeat() { await context.sendHeartbeat(); },
     async command(message) {
       await context.handleRequestedTab(message);
@@ -240,6 +290,7 @@ function createHarness(activeRules, initialTabs, options = {}) {
     reloads,
     removals,
     nativeMessages,
+    websiteMessages,
     intervals,
     storage,
     async message(message, sender = {}) {
@@ -318,9 +369,9 @@ function createHarness(activeRules, initialTabs, options = {}) {
         await Promise.resolve();
       }
     },
-    async receiveNative(message) {
+    async receiveNative(message, portIndex) {
       if (options.withCommandPort) {
-        for (const listener of nativeReceivers) await listener(message);
+        for (const listener of portIndex === undefined ? nativeReceivers : nativePorts[portIndex].messages) await listener(message);
         return;
       }
       if (message?.tabCommand) {
@@ -331,7 +382,214 @@ function createHarness(activeRules, initialTabs, options = {}) {
   };
 }
 
+async function nativeProfileBootstrapRegression() {
+  const initial = [{id:101,windowId:1,index:0,active:true,url:"https://example.test/",title:"Bootstrap actual tab"},
+    {id:102,windowId:2,index:0,active:true,url:"https://second.example/"}];
+  const snapshots = h => h.nativeMessages.filter(message => message.type === "tabsSnapshot");
+  const settle = async () => { for (let i = 0; i < 4; ++i) await new Promise(setImmediate); };
+  const base = {withCommandPort:true,controlReconnectTimers:true,requestOnlyNativeReplies:true};
+  {
+    let reads = 0;
+    const h = createHarness({active:false}, initial, {...base,
+      onWindowQuery(_query, windows) { reads += 1; return windows; }}); await h.ready(); await settle();
+    assert.equal(snapshots(h).length, 1, "A fresh confirmed idle Firefox connection bootstraps its real profile inventory once");
+    const first = snapshots(h)[0];
+    assert.deepEqual(Array.from(first.allTabs, tab => tab.id), [101,102]);
+    assert.deepEqual(Array.from(first.snapshotRequestIDs), []);
+    assert.equal(first.completeWindowInventory === true, false, "Bootstrap cannot certify correlated profile absence");
+    assert.equal(first.browserProfileID, h.browserProfileID());
+    await h.heartbeat(); await h.update(101,{title:"Idle update"}); await settle();
+    assert.equal(snapshots(h).length, 1, "Idle heartbeats/events remain quiet after one bootstrap");
+    assert.equal(reads, 1, "Successful Firefox bootstrap prevents further idle inventory reads");
+    assert.equal(h.updates.length + h.focusedWindows.length + h.removals.length, 0,
+      "Bootstrap cannot activate, hide or close tabs/windows");
+  }
+  for (const failure of ["query-rejected", "transition-empty-tabs", "malformed-window"]) {
+    const options = {...base, onWindowQuery(_query, windows) {
+      if (failure === "query-rejected") throw new Error("fixture: populated windows unavailable");
+      if (failure === "transition-empty-tabs") return windows.map(window => ({...window,tabs:[]}));
+      return windows.map(window => ({...window,width:NaN}));
+    }};
+    const h = createHarness({active:false}, initial, options); await h.ready(); await settle();
+    assert.equal(snapshots(h).length, 0, failure + " cannot publish an invented empty bootstrap");
+    options.onWindowQuery = (_query, windows) => windows;
+    const port = h.nativePorts.at(-1);
+    await h.heartbeat(); await settle();
+    assert.equal(snapshots(h).length, 1, "A same-port heartbeat recovers failed bootstrap with a fresh inventory");
+    assert.equal(h.nativePorts.at(-1), port, "Firefox bootstrap recovery must not replace a healthy profile connection");
+    assert.equal(snapshots(h)[0].browserProfileID, h.browserProfileID());
+    assert.deepEqual(Array.from(snapshots(h)[0].snapshotRequestIDs), []);
+    assert.equal(snapshots(h)[0].completeWindowInventory === true, false);
+    await h.heartbeat(); await settle();
+    assert.equal(snapshots(h).length, 1, "Successful same-port recovery stops further idle bootstrap reads");
+  }
+  for (const failure of ["failProfileRead", "failProfileWrite", "dropProfileWrite"]) {
+    const options = {...base,[failure]:true};
+    const h = createHarness({active:false}, initial, options); await h.ready(); await settle();
+    const port = h.nativePorts.at(-1);
+    assert(port, "Firefox may establish a port before durable profile storage recovers");
+    assert.equal(h.browserProfileID(), null);
+    assert.equal(snapshots(h).length, 0);
+    options[failure] = false;
+    await h.heartbeat(); await settle();
+    assert.equal(h.nativePorts.at(-1), port);
+    assert.equal(snapshots(h).length, 1, failure + " recovers Firefox bootstrap on the same port after durable UUID persistence");
+    assert.equal(snapshots(h)[0].browserProfileID, h.storage.intentBrowserProfileID);
+    assert.deepEqual(Array.from(snapshots(h)[0].snapshotRequestIDs), []);
+    assert.equal(snapshots(h)[0].completeWindowInventory === true, false);
+  }
+  {
+    let release, started, reads = 0;
+    const heldRead = new Promise(resolve => { release = resolve; });
+    const captured = new Promise(resolve => { started = resolve; });
+    const options = {...base, onWindowQuery() { throw new Error("fixture: initial bootstrap unavailable"); }};
+    const h = createHarness({active:false}, initial, options); await h.ready(); await settle();
+    options.onWindowQuery = async (_query, windows) => { reads += 1; started(); await heldRead; return windows; };
+    await h.heartbeat(); await captured;
+    await h.heartbeat(); await h.heartbeat(); await settle();
+    assert.equal(reads, 1, "Firefox same-port heartbeat retries coalesce while the inventory read is pending");
+    h.disconnectPort(0);
+    options.onWindowQuery = () => { throw new Error("fixture: replacement inventory unavailable"); };
+    await h.runReconnectTimer(); await settle();
+    release(); await settle();
+    assert.equal(snapshots(h).length, 0, "Retired Firefox retry cannot consume the replacement profile's pending bootstrap");
+    options.onWindowQuery = (_query, windows) => windows;
+    h.tabs.set(103,{id:103,windowId:1,index:1,active:false,url:"https://replacement.example/"});
+    await h.heartbeat(); await settle();
+    assert.equal(snapshots(h).length, 1);
+    assert(snapshots(h)[0].allTabs.some(tab => tab.id === 103));
+    assert.equal(snapshots(h)[0].browserProfileID, h.browserProfileID());
+  }
+  {
+    const h = createHarness({active:true,accessMode:"whitelist",selectedTabIDs:[101],allowedWebsites:[],startupWebsites:[],
+      startupSessionID:"bootstrap-active-policy"}, initial, base); await h.ready(); await settle();
+    assert(snapshots(h).some(message => message.allTabs.length === 2));
+    assert(snapshots(h).every(message => message.tabs.every(tab => tab.id === 101)),
+      "Active Firefox bootstrap cannot admit excluded tabs into the allowed inventory");
+  }
+  {
+    const h = createHarness({active:false}, [], base); await h.ready(); await settle();
+    assert.equal(snapshots(h).length, 1, "Actual successful empty Firefox enumeration may identify a connected profile");
+    assert.equal(snapshots(h)[0].completeWindowInventory === true, false);
+    assert.deepEqual(Array.from(snapshots(h)[0].snapshotRequestIDs), []);
+  }
+  {
+    let release, started, held = true;
+    const read = new Promise(resolve => { release = resolve; });
+    const captured = new Promise(resolve => { started = resolve; });
+    const h = createHarness({active:false}, initial, {...base, async onWindowQuery(_query, windows) {
+      if (held) { held = false; started(); await read; }
+      return windows;
+    }});
+    await captured; h.disconnectPort(0);
+    h.tabs.set(103,{id:103,windowId:1,index:1,active:false,url:"https://replacement.example/"});
+    await h.runReconnectTimer(); await settle();
+    assert.equal(snapshots(h).length, 1);
+    assert(snapshots(h)[0].allTabs.some(tab => tab.id === 103));
+    release(); await settle();
+    assert.equal(snapshots(h).length, 1, "A retired Firefox port query cannot overwrite its replacement profile sidecar");
+    assert.equal(h.updates.length + h.focusedWindows.length, 0);
+  }
+  console.log("Firefox one-time read-only profile bootstrap, quiet idle, failures and retired-port fences: passed");
+}
+
 async function run() {
+  {
+    const active = {active:true,accessMode:"whitelist",selectedTabIDs:[71],allowedWebsites:[],startupWebsites:[],
+      startupSessionID:"disconnect-current",blockNavigation:true,hideDistractions:true,nativeWindowVisibility:true,
+      browserProcessIdentity:{pid:321,launched:800001000},hostCapabilities:["native-window-visibility-host-v1"],
+      websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:["messages"]}}};
+    const parked = {windowID:2,title:"Fixture parked window",frame:{left:40,top:50,width:900,height:700},state:"minimized"};
+    const h = createHarness(active,[
+      {id:71,windowId:1,index:0,active:true,url:"https://www.instagram.com/"},
+      {id:72,windowId:2,index:0,active:false,url:"https://example.org/"}
+    ],{withCommandPort:true,controlReconnectTimers:true,nativeVisibility:true,
+      async onVisibilitySync(rules,owner) { if (rules.active) await owner.publishPlan(rules,[],[parked]); }});
+    await h.ready();
+    for (let i=0;i<8;i++) await new Promise(setImmediate);
+    const request = (id,url) => h.listeners.onBeforeRequest[0]({tabId:id,url,type:"main_frame"});
+    assert.equal(request(72,"https://example.org/").cancel,true,"The live exact-tab rule blocks an unselected tab before loss");
+    assert.equal(request(71,"https://www.instagram.com/").redirectUrl,"https://www.instagram.com/direct/inbox/",
+      "The current Instagram messages policy is active before host loss");
+    const ownership = JSON.stringify(h.sessionStorage.intentNativeWindowVisibilityV1.plans);
+    const parkingProof = JSON.stringify(h.storage.intentNativeParkingClosureV1);
+    assert(h.sessionStorage.intentNativeWindowVisibilityV1.plans[active.startupSessionID].parkingWindows.length,
+      "A real native-owner accepted parking plan exists before transport loss");
+    h.updates.length=0;h.focusedWindows.length=0;
+    h.setHostAvailable(false);h.disconnectPort();
+    assert.equal(h.activeRules().active,false,"Current-port disconnect releases browser enforcement synchronously");
+    assert.equal(request(72,"https://example.org/").cancel,undefined,"A disconnected exact-tab rule cannot keep blocking requests");
+    assert.equal(request(71,"https://www.instagram.com/").redirectUrl,undefined,"A disconnected Instagram rule cannot keep redirecting requests");
+    await h.activate(72);
+    for (let i=0;i<8;i++) await new Promise(setImmediate);
+    assert.equal(h.tabs.get(72).active,true,"Ordinary tab clicks remain where the user puts them after disconnect");
+    assert.equal(h.updates.some(update=>update.patch.active===true),false,"Disconnect never activates a fallback tab");
+    assert.deepEqual(h.focusedWindows,[],"Disconnect does not focus an arbitrary browser window");
+    assert.equal(JSON.stringify(h.sessionStorage.intentNativeWindowVisibilityV1.plans),ownership,
+      "Disconnect retains accepted native window ownership for durable recovery");
+    assert.equal(JSON.stringify(h.storage.intentNativeParkingClosureV1),parkingProof,
+      "Disconnect cannot discard or invent closure of a parked-window proof");
+    assert.equal(await h.nativeWindowOwner().revealWindows(active.startupSessionID,[parked]),false,
+      "A missing host cannot acknowledge release of an owned native window");
+    assert.equal(JSON.stringify(h.sessionStorage.intentNativeWindowVisibilityV1.plans),ownership,
+      "Failed reveal keeps the original ownership plan rather than blindly unhiding a window");
+    assert.equal(h.reconnectTimers().length,1,"Only one bounded reconnect is pending");
+    await h.runReconnectTimer();
+    assert.equal(h.activeRules().active,false,"Failed reconnection leaves all browser rules inactive");
+    assert.equal(h.reconnectTimers()[0][1].delay,2000,"An unavailable host retains exponential reconnect backoff");
+    const newer = h.setNativeRules({...active,startupSessionID:"disconnect-new",selectedTabIDs:[72]});
+    h.setHostAvailable(true);await h.runReconnectTimer();
+    assert.equal(h.activeRules().active,true,"A confirmed newer connection can apply the host's current intention");
+    assert.deepEqual(Array.from(h.activeRules().selectedTabIDs),[72]);
+    const currentPort=h.nativePorts.length-1;
+    assert(currentPort>0);
+    h.disconnectPort(0);await h.receiveNative({...active,selectedBrowserSessionID:h.browserSessionID()},0);
+    assert.equal(h.activeRules().active,true,"An obsolete port disconnect cannot disable a newer connection");
+    assert.equal(h.activeRules().startupSessionID,newer.startupSessionID,"An obsolete port message cannot restore the previous session");
+    assert.deepEqual(Array.from(h.activeRules().selectedTabIDs),[72]);
+  }
+  {
+    const h=createHarness({active:false},[{id:71,windowId:1,index:0,active:true,url:"https://www.instagram.com/"}],
+      {withCommandPort:true,controlReconnectTimers:true,hostAvailable:false});
+    await h.ready();
+    await h.applyRules({active:true,accessMode:"whitelist",startupSessionID:"cached-before-retry",selectedTabIDs:[71],
+      startupWebsites:[],websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:["messages"]}}});
+    assert.equal(h.activeRules().active,true);
+    await h.runReconnectTimer();
+    assert.equal(h.activeRules().active,false,"A failed connectNative attempt clears any retained active policy");
+    assert.equal(h.nativeConnectAttempts(),2,"The controlled timer performs exactly one failed reconnect attempt");
+  }
+  {
+    const h=createHarness({active:true,accessMode:"whitelist",startupSessionID:"disconnect-write",selectedTabIDs:[71],
+      allowedWebsites:[],startupWebsites:[],websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:["messages"]}}},[
+      {id:71,windowId:1,index:0,active:true,url:"https://www.instagram.com/"}
+    ],{withCommandPort:true,controlReconnectTimers:true,requestOnlyNativeReplies:true});
+    await h.ready();await new Promise(setImmediate);
+    assert.equal(h.activeRules().active,true);
+    h.setHostAvailable(false);await h.heartbeat();
+    assert.equal(h.activeRules().active,false,"A current-port postMessage failure releases the same stale browser policy");
+    assert.equal((await h.message({type:"getGuardStatus"})).connected,false,"Write failure revokes connected readiness");
+    assert.equal(h.reconnectTimers().length,1,"A write failure and any later disconnect share one reconnect attempt");
+    h.disconnectPort();
+    assert.equal(h.reconnectTimers().length,1,"A repeated retired-port disconnect cannot duplicate retries");
+  }
+  {
+    let hold=false, captured, release;
+    const started=new Promise(resolve=>captured=resolve), gate=new Promise(resolve=>release=resolve);
+    const h=createHarness({active:true,accessMode:"whitelist",startupSessionID:"disconnect-command",selectedTabIDs:[71],
+      allowedWebsites:[],startupWebsites:[]},[
+      {id:71,windowId:1,index:0,active:true,url:"https://example.com/"},
+      {id:72,windowId:1,index:1,active:false,url:"https://example.org/"}
+    ],{withCommandPort:true,controlReconnectTimers:true,requestOnlyNativeReplies:true,
+      async afterTabGet() { if(hold){hold=false;captured();await gate;} }});
+    await h.ready();await new Promise(setImmediate);
+    h.updates.length=0;h.focusedWindows.length=0;hold=true;
+    const pending=h.command({browserSessionID:h.browserSessionID(),tabID:71,windowID:1});
+    await started;h.setHostAvailable(false);h.disconnectPort();await h.activate(72);release();await pending;
+    assert.equal(h.tabs.get(72).active,true,"A command from a disconnected port cannot undo the user's next tab click");
+    assert.equal(h.updates.some(update=>update.patch.active===true),false,"Old-port pending activation is canceled before dispatch");
+    assert.deepEqual(h.focusedWindows,[],"Old-port pending activation cannot focus a window after transport loss");
+  }
   {
     const h=createHarness({active:false},[
       {id:401,windowId:44,index:0,active:true,url:'about:blank',title:'New tab'},
@@ -620,12 +878,18 @@ async function run() {
   // Old blank/result tabs must not inherit the fresh-search allowance.
   {
     const searchRules = {active: true, hideDistractions: true, accessMode: 'whitelist', selectedTabIDs: [1], allowedWebsites: [], startupWebsites: [], startupSessionID: 'fresh-search-regression', blockTabSwitching: true, blockNavigation: true, blockNewTabs: true, allowGoogleSearchTabs: true};
+    const domains = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/google-search-domains.json'), 'utf8')).hosts;
+    assert.deepEqual([...helpers.supportedGoogleSearchHosts].sort(), [...domains].sort(), 'Firefox exact search domains cannot drift from the verified native/Chrome fixture');
+    for (const host of domains) {
+      assert.equal(helpers.isGoogleSearchURL('https://www.' + host + '/search?q=study'), true, 'Verified regional search remains allowed: ' + host);
+      assert.equal(helpers.isGoogleSearchURL('https://' + host + '.evil.example/search'), false, 'Attacker suffix cannot become search: ' + host);
+    }
     const sessionStorage = {};
     const freshSearch = createHarness(searchRules, [
       {id: 1, windowId: 1, active: true, url: 'https://example.com/work'},
       {id: 2, windowId: 1, active: false, url: 'about:blank'},
       {id: 3, windowId: 1, active: false, url: 'https://www.google.com/search?q=old'}
-    ], {sessionStorage});
+    ], {sessionStorage, withCommandPort: true});
     await freshSearch.ready();
     assert.deepEqual(freshSearch.allowedTabIDs(), [1], 'Existing blank/search tabs stay outside the intention');
     await freshSearch.activate(3);
@@ -634,6 +898,13 @@ async function run() {
     assert.deepEqual(freshSearch.allowedTabIDs(), [1,9], 'A tab created during the intention can search');
     await freshSearch.update(9, {url: 'https://www.google.com/search?q=focus'});
     assert.equal(freshSearch.tabs.get(9).url, 'https://www.google.com/search?q=focus');
+    let searchSnapshot = await freshSearch.snapshot();
+    assert.equal(searchSnapshot.allTabs.find(tab => tab.id === 9).searchSessionID, searchRules.startupSessionID, 'A live fresh search exposes the exact rules occurrence to native lifetime checks');
+    for (const id of [2, 3]) assert.equal(searchSnapshot.allTabs.find(tab => tab.id === id).searchSessionID, null, 'An old unselected blank/Google tab never exposes search membership');
+    freshSearch.tabs.get(9).url = 'https://blocked.example/';
+    searchSnapshot = await freshSearch.snapshot();
+    assert.equal(searchSnapshot.allTabs.find(tab => tab.id === 9).searchSessionID, null, 'A blocked destination observed before recovery cannot count as live allowed search work');
+    freshSearch.tabs.get(9).url = 'https://www.google.com/search?q=focus';
     const blocked = await freshSearch.update(9, {url: 'https://example.org/'}); assert.equal(blocked.cancel, true);
     assert.equal(freshSearch.tabs.get(9).url, 'https://www.google.com/search?q=focus', 'Fresh search tabs cannot leave search results');
     await freshSearch.create({id: 10, windowId: 2, active: false, url: 'about:blank'});
@@ -642,7 +913,13 @@ async function run() {
     await freshSearch.commit(10, 'extension://intent/parked.html#intent-12345678-abcd-1234-abcd-123456789012', 'auto_toplevel');
     assert.equal(freshSearch.tabs.get(10).url, 'extension://intent/parked.html#intent-12345678-abcd-1234-abcd-123456789012', 'Nonce-bound holding page must remain outside fresh search allowance');
     assert(!freshSearch.allowedTabIDs().includes(10), 'Holding sentinel never becomes search-authorized');
-
+    assert.equal((await freshSearch.snapshot()).allTabs.find(tab => tab.id === 10).searchSessionID, null, 'The holding page cannot keep a native session alive');
+    freshSearch.tabs.delete(1);
+    assert.equal((await freshSearch.snapshot()).allTabs.find(tab => tab.id === 9).searchSessionID, searchRules.startupSessionID, 'Closing the original selected tab retains live search membership');
+    await freshSearch.applyRules({...searchRules, accessMode: 'blacklist'});
+    assert.equal((await freshSearch.snapshot()).allTabs.find(tab => tab.id === 9).searchSessionID, null, 'Blacklist rules cannot donate a retained search ledger to whitelist lifetime');
+    await freshSearch.applyRules({...searchRules, allowGoogleSearchTabs: false});
+    assert.equal((await freshSearch.snapshot()).allTabs.find(tab => tab.id === 9).searchSessionID, null, 'Disabled Tab searches removes runtime lifetime authority');
   }
 
   for (const searches of [false, true]) {
@@ -706,6 +983,28 @@ async function run() {
   assert.equal(metadata.tabs[0].cookieStoreID, null, "Missing container metadata is not invented");
   assert.equal(metadata.tabs[0].windowFrame.left, 20, "Window geometry identifies same-title browser windows");
   assert.equal(metadata.tabs[0].windowFocused, true, "Browser focus disambiguates overlapping windows");
+  {
+    const states = new Map([[1, "normal"], [2, "minimized"], [3, "maximized"], [4, "fullscreen"], [5, "hidden"]]);
+    const stateTabs = [...states.keys()].map(id => ({id, windowId: id, index: 0, active: true,
+      title: "State fixture", url: "https://example.test", windowState: "minimized"}));
+    const stateReader = createHarness({active: false}, stateTabs, {withCommandPort: true,
+      onWindowQuery: (_query, windows) => windows.map(window => ({...window, state: states.get(window.id)}))});
+    await stateReader.ready();
+    let stateSnapshot = await stateReader.snapshot();
+    assert.deepEqual(Array.from(stateSnapshot.allTabs, tab => tab.windowState),
+      ["normal", "minimized", "maximized", "fullscreen", null],
+      "Actual Firefox window API states, never tab hints or inferred visibility, reach the snapshot");
+    assert.deepEqual(Array.from(stateSnapshot.tabs, tab => tab.windowState), Array.from(stateSnapshot.allTabs, tab => tab.windowState),
+      "Allowed and full Firefox snapshots retain identical window readback");
+    states.set(2, "normal"); states.delete(3);
+    stateSnapshot = await stateReader.snapshot();
+    assert.equal(stateSnapshot.allTabs.find(tab => tab.windowID === 2).windowState, "normal",
+      "A later actual Firefox restore replaces the earlier minimized readback");
+    assert.equal(stateSnapshot.allTabs.find(tab => tab.windowID === 3).windowState, null,
+      "Unavailable Firefox state stays unknown rather than preserving an old minimized/maximized value");
+    assert.equal(stateReader.focusedWindows.length + stateReader.updates.length + stateReader.removals.length, 0,
+      "Window-state reporting cannot change Firefox focus, tabs or visibility");
+  }
   await discovery.command({action: "snapshot", id: "firefox-discovery-one", tabID: -1, windowID: -1});
   const requestedDiscovery = discovery.nativeMessages.filter(message => message.type === "tabsSnapshot").at(-1);
   assert.deepEqual(Array.from(requestedDiscovery.snapshotRequestIDs), ["firefox-discovery-one"],
@@ -1257,7 +1556,7 @@ async function run() {
   );
 }
 
-run()
+(process.env.INTENT_FIREFOX_BOOTSTRAP_ONLY ? nativeProfileBootstrapRegression() : nativeProfileBootstrapRegression().then(run))
   .then(websiteRegression)
   .then(async () => {
     {
@@ -1289,6 +1588,70 @@ async function websiteRegression() {
   const reply = m => ({websiteFeatures:true,websiteRequestID:m.websiteRequestID,
     websitePolicyKey:engine.policyKey(m.rules),startupSessionID:m.rules?.startupSessionID || null});
   const baseOptions = {withCommandPort:true};
+  {
+    let holdRestore=false, restoreEntered, releaseRestore;
+    const entered=new Promise(resolve=>restoreEntered=resolve);
+    const restoreGate=new Promise(resolve=>releaseRestore=resolve);
+    const h=createHarness({active:false},initial,{...baseOptions,
+      async onVisibilitySync(current){
+        if(!current.active && holdRestore){restoreEntered();await restoreGate;}
+      }});
+    await h.ready();await h.applyRules(active);
+    h.websiteMessages.length=0;h.updates.length=0;h.focusedWindows.length=0;
+    holdRestore=true;
+    let finished=false;
+    const ending=h.applyRules({active:false}).then(()=>{finished=true;});
+    await entered;
+    for(let i=0;i<24;i++)await Promise.resolve();
+    assert.equal(finished,false,"Fixture actually holds native visibility restoration unfinished");
+    for(const tab of initial){
+      const message=h.websiteMessages.filter(entry=>entry.id===tab.id).at(-1)?.message;
+      assert.equal(message?.type,"rulesUpdated","Finish reaches each loaded website while tab restoration is held");
+      assert.equal(message.rules.active,false,"Finish releases site DOM rules before parked-tab restoration completes");
+    }
+    assert.equal(h.focusedWindows.length,0,"Early DOM release does not focus a restored window");
+    assert.equal(h.updates.some(update=>update.patch.active===true),false,"Early DOM release does not activate a restored tab");
+    const replacement={...active,startupSessionID:"website-replacement",
+      websiteFeaturePolicies:{instagram:{version:1,allowedFeatures:["stories"]}}};
+    const starting=h.applyRules(replacement);
+    releaseRestore();await Promise.all([ending,starting]);
+    for(let i=0;i<24;i++)await Promise.resolve();
+    for(const tab of initial){
+      const message=h.websiteMessages.filter(entry=>entry.id===tab.id).at(-1)?.message;
+      assert.equal(message.rules.startupSessionID,replacement.startupSessionID,
+        "Late inactive restoration cannot overwrite a replacement intention's DOM policy");
+      assert.equal(message.rules.active,true);
+    }
+  }
+  {
+    let holdQuery=false, holdRestore=false, queryEntered, releaseQuery, restoreEntered, releaseRestore;
+    const entered=new Promise(resolve=>queryEntered=resolve);
+    const queryGate=new Promise(resolve=>releaseQuery=resolve);
+    const restoreStarted=new Promise(resolve=>restoreEntered=resolve);
+    const restoreGate=new Promise(resolve=>releaseRestore=resolve);
+    const h=createHarness({active:false},initial,{...baseOptions,async afterTabQuery(){
+      if(holdQuery){holdQuery=false;queryEntered();await queryGate;}
+    },async onVisibilitySync(current){
+      if(!current.active && holdRestore){restoreEntered();await restoreGate;}
+    }});
+    await h.ready();await h.applyRules(active);
+    holdQuery=true;holdRestore=true;
+    const ending=h.applyRules({active:false});
+    await Promise.all([entered,restoreStarted]);
+    const replacement={...active,startupSessionID:"website-after-delayed-finish-query"};
+    const starting=h.applyRules(replacement);
+    assert.equal(h.activeRules().active,false,"Replacement application is still queued behind old restoration");
+    const sent=h.websiteMessages.length;
+    releaseQuery();for(let i=0;i<24;i++)await Promise.resolve();
+    assert.equal(h.websiteMessages.length,sent,
+      "An old inactive tab query cannot broadcast after a newer active revision is requested");
+    releaseRestore();await Promise.all([ending,starting]);
+    for(let i=0;i<24;i++)await Promise.resolve();
+    for(const tab of initial){
+      assert.equal(h.websiteMessages.filter(entry=>entry.id===tab.id).at(-1).message.rules.startupSessionID,
+        replacement.startupSessionID);
+    }
+  }
   {
     let injections=0, stale=true;
     const h=createHarness({active:false},initial,{...baseOptions,onWebsiteInject(){injections++;},

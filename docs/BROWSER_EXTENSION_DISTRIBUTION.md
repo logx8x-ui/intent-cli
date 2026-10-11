@@ -9,11 +9,11 @@ distribution channel serves that version.
 - Firefox Browser Guard is submitted to Mozilla as a self-hosted, unlisted add-on.
 - `firefox-extension/manifest.json` points to the stable HTTPS update feed in
   `firefox-updates.json`.
-- The feed points to the stable, Mozilla-signed
-  `Intent-Firefox-Extension.xpi` asset on the latest GitHub release.
-- Every new release must update the extension version and feed together, obtain
-  Mozilla's signature, replace the GitHub XPI, and verify the public asset before
-  merging the feed to `main`.
+- The feed pins an immutable, versioned Mozilla-signed XPI asset. A moving
+  `latest` URL or replacement of an existing version's XPI is not a promotion.
+- Every new release must obtain Mozilla's signature, verify the version and
+  bytes of its immutable public asset, and pass matching installed-profile
+  restart checks before promoting the corresponding feed entry to `main`.
 - Builds older than 0.2.5 do not contain the feed URL and require one final manual
   install. Builds starting at 0.2.5 discover later versions automatically.
 
@@ -47,3 +47,7 @@ Before a browser release is called ready:
 5. Confirm the Chrome Web Store item serves the same version as the source ZIP.
 6. Install each released package in a clean browser profile, restart the browser,
    and verify the native heartbeat reports the released version and capability.
+
+Disabling Intent's app updates does not disable browser extension updates.
+Promote compatible app and extension versions together, retain rollback assets,
+and recheck each browser profile used by the tester cohort.

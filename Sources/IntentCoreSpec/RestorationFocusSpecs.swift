@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ApplicationServices
 import IntentCore
 import IntentLock
 
@@ -346,4 +347,80 @@ func runRestorationFocusSpecs() throws {
     try expect(!unavailable.shouldPreserveOwnedVisibilityChange(targetExists: nil, targetOnScreen: false, frontmostPID: 9)
         && !unavailable.shouldPreserveOwnedVisibilityChange(targetExists: true, targetOnScreen: true, frontmostPID: 1),
         "Unrelated activation still cancels when the native inventory is temporarily unavailable")
+
+    // Exercise the production effect boundary with injected observations and
+    // inert callbacks. No live desktop inventory or AX effect is consulted.
+    let targetRows: [[String: Any]] = [[kCGWindowNumber as String: UInt32(123), kCGWindowOwnerPID as String: Int32(42)]]
+    try expect(RestorationFocusCorrectionEffects.onScreen(rows: targetRows, windowID: 123, pid: 42) == true
+        && RestorationFocusCorrectionEffects.onScreen(rows: [], windowID: 123, pid: 42) == false
+        && RestorationFocusCorrectionEffects.onScreen(rows: targetRows, windowID: 123, pid: 43) == false,
+        "Only the exact current native window and process in a successful onscreen inventory authorize correction")
+    try expect(RestorationFocusCorrectionEffects.onScreen(rows: nil, windowID: 123, pid: 42) == nil
+        && RestorationFocusCorrectionEffects.onScreen(rows: [[:]], windowID: 123, pid: 42) == nil
+        && RestorationFocusCorrectionEffects.onScreen(rows: targetRows + targetRows, windowID: 123, pid: 42) == nil,
+        "Unavailable, malformed or duplicate native inventory stays unknown at the real correction boundary")
+    try expect(RestorationFocusCorrectionEffects.minimized(status: .success, value: kCFBooleanFalse) == false
+        && RestorationFocusCorrectionEffects.minimized(status: .success, value: kCFBooleanTrue) == true,
+        "Correction accepts an actual successful AX Boolean minimized readback")
+    let malformedMinimized: [CFTypeRef?] = [NSNumber(value: 0), NSNumber(value: 1), NSString(string: "false"), nil]
+    for value in malformedMinimized {
+        try expect(RestorationFocusCorrectionEffects.minimized(status: .success, value: value) == nil,
+            "A numeric, textual or absent AX minimized attribute is not a Boolean false")
+    }
+    try expect(RestorationFocusCorrectionEffects.minimized(status: .cannotComplete, value: kCFBooleanFalse) == nil,
+        "A failed AX read cannot reuse a supplied Boolean value as current visibility")
+    typealias CorrectionObservation = RestorationFocusCorrectionEffects.Observation
+    let visibleTarget = CorrectionObservation(exists: true, onScreen: true, minimized: false)
+    let rejectedTargets = [
+        CorrectionObservation(exists: nil, onScreen: true, minimized: false),
+        CorrectionObservation(exists: false, onScreen: true, minimized: false),
+        CorrectionObservation(exists: true, onScreen: nil, minimized: false),
+        CorrectionObservation(exists: true, onScreen: false, minimized: false),
+        CorrectionObservation(exists: true, onScreen: true, minimized: nil),
+        CorrectionObservation(exists: true, onScreen: true, minimized: true)
+    ]
+    for target in rejectedTargets {
+        var effects = 0
+        let result = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
+            permitsForeground: { true }, effect: { effects += 1; return AXError.success })
+        try expect(result == nil && effects == 0,
+            "Unknown, closed, offscreen or minimized targets never dispatch the production corrective effect")
+    }
+    do {
+        var target = visibleTarget
+        var effects: [String] = []
+        let main = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
+            permitsForeground: { true }, effect: {
+                effects.append("main"); target.onScreen = false; return AXError.success
+            })
+        let raise = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
+            permitsForeground: { true }, effect: { effects.append("raise"); return AXError.success })
+        let activate = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
+            permitsForeground: { true }, effect: { effects.append("activate"); return true })
+        try expect(main == .success && raise == nil && activate == nil && effects == ["main"],
+            "A Space move between Main and Raise cancels both later effects; a previous main request is not permission")
+    }
+    do {
+        var current = true
+        var effects = 0
+        let canceledDuringRead = RestorationFocusCorrectionEffects.perform(isCurrent: { current }, readTarget: {
+            current = false; return visibleTarget
+        }, permitsForeground: { true }, effect: { effects += 1; return true })
+        current = true
+        let canceledDuringForeground = RestorationFocusCorrectionEffects.perform(isCurrent: { current }, readTarget: { visibleTarget },
+            permitsForeground: { current = false; return true }, effect: { effects += 1; return true })
+        let stale = RestorationFocusCorrectionEffects.perform(isCurrent: { false }, readTarget: { visibleTarget },
+            permitsForeground: { true }, effect: { effects += 1; return true })
+        try expect(canceledDuringRead == nil && canceledDuringForeground == nil && stale == nil && effects == 0,
+            "Input, Space, deadline or new-transaction cancellation before an effect cannot replay corrective focus")
+    }
+    do {
+        var effects = 0
+        let rejectedForeground = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { visibleTarget },
+            permitsForeground: { false }, effect: { effects += 1; return true })
+        let accepted = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { visibleTarget },
+            permitsForeground: { true }, effect: { effects += 1; return AXError.success })
+        try expect(rejectedForeground == nil && accepted == .success && effects == 1,
+            "The production boundary permits a live visible target only within the original restoration foreground policy")
+    }
 }

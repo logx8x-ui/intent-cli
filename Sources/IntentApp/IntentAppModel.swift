@@ -1594,6 +1594,8 @@ final class IntentAppModel: ObservableObject {
             let deadline = ProcessInfo.processInfo.systemUptime + 5
             guard let self else { return }
             var failureStage = "activation"
+            var activationDiagnostic: [String: Any]?
+            var coverageDiagnostic: [String: Any]?
             @MainActor func isCurrent() -> Bool {
                 !Task.isCancelled && self.browserCoverageStartID == token && !self.hasActiveSession
                     && self.quickSelectionIntentionID == intention.id
@@ -1602,7 +1604,9 @@ final class IntentAppModel: ObservableObject {
             }
             @MainActor func fail() {
                 guard isCurrent() else { return }
-                let diagnostic: [String: Any] = ["stage": failureStage, "recordedAt": Date().timeIntervalSince1970]
+                var diagnostic: [String: Any] = ["stage": failureStage, "recordedAt": Date().timeIntervalSince1970]
+                if let activationDiagnostic { diagnostic["activation"] = activationDiagnostic }
+                if let coverageDiagnostic { diagnostic["coverage"] = coverageDiagnostic }
                 if let data = try? JSONSerialization.data(withJSONObject: diagnostic) {
                     try? data.write(to: ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent()
                         .appendingPathComponent("browser-start-failure.json"), options: .atomic)
@@ -1638,25 +1642,41 @@ final class IntentAppModel: ObservableObject {
                     guard let launched = app.launchDate else { return nil }
                     return .init(pid: app.processIdentifier, launched: launched.timeIntervalSinceReferenceDate)
                 }
+                failureStage = "activation-selected-process"
+                activationDiagnostic = ["tabID": tab.id, "windowID": tab.windowID,
+                    "profileComponent": BrowserProfileSnapshots.component(expected), "liveProcessCount": processes.count]
                 guard let proof = BrowserProfileSnapshots.selectedProcess(
                     snapshots: BrowserProfileSnapshots.sessions(base: BrowserTabSnapshotStore.fileURL(for: browser)),
                     browser: browser, expectedSession: expected, tabID: tab.id, windowID: tab.windowID,
                     liveProcesses: processes),
                     let runningBrowser = running.first(where: { $0.processIdentifier == proof.pid
-                        && $0.launchDate?.timeIntervalSinceReferenceDate == proof.launched }),
-                    runningBrowser.activate(options: []) else { fail(); return }
+                        && $0.launchDate?.timeIntervalSinceReferenceDate == proof.launched }) else { fail(); return }
+                activationDiagnostic?["pid"] = proof.pid
+                activationDiagnostic?["launched"] = proof.launched
+                failureStage = "activation-application"
+                guard runningBrowser.activate(options: []) else { fail(); return }
+                let activationCommand = BrowserTabCommand(tabID: tab.id, windowID: tab.windowID, browserSessionID: expected)
+                activationDiagnostic?["commandID"] = activationCommand.id
+                failureStage = "activation-dispatch"
                 do {
-                    try BrowserTabCommandStore(browserBundleIdentifier: browser).write(
-                        .init(tabID: tab.id, windowID: tab.windowID, browserSessionID: expected))
+                    try BrowserTabCommandStore(browserBundleIdentifier: browser).write(activationCommand)
                 } catch { fail(); return }
                 var confirmed = false
+                failureStage = "activation-confirmation"
                 for _ in 0..<25 {
                     guard isCurrent() else { return }
-                    if let current = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
-                       current.browserSessionID == expected, current.updatedAt >= requestedAt,
-                       (current.allTabs ?? current.tabs).contains(where: { $0.id == tab.id
-                           && $0.windowID == tab.windowID && $0.active && $0.windowFocused == true }) {
-                        confirmed = true; break
+                    if let current = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load() {
+                        let target = (current.allTabs ?? current.tabs).first { $0.id == tab.id && $0.windowID == tab.windowID }
+                        activationDiagnostic?["lastObservation"] = [
+                            "sessionMatches": current.browserSessionID == expected,
+                            "fresh": current.updatedAt >= requestedAt,
+                            "targetPresent": target != nil,
+                            "active": target?.active as Any? ?? NSNull(),
+                            "windowFocused": target?.windowFocused as Any? ?? NSNull()]
+                        if current.browserSessionID == expected, current.updatedAt >= requestedAt,
+                           target?.active == true, target?.windowFocused == true {
+                            confirmed = true; break
+                        }
                     }
                     try? await Task.sleep(nanoseconds: 75_000_000)
                 }
@@ -1712,7 +1732,50 @@ final class IntentAppModel: ObservableObject {
                             knownProfiles: Set(snapshots.compactMap(\.browserSessionID)),
                             continuousIdentities: after.continuousIdentities,
                             witnessedBeforeSnapshot: before.inventory.observedStandard.intersection(after.continuousIdentities))
-                       if case .incomplete(let reason) = result { failureStage = "coverage-" + reason.rawValue }
+                       if case .incomplete(let reason) = result {
+                        failureStage = "coverage-" + reason.rawValue
+                        // Diagnose the actual rejected observation bracket,
+                        // without recording page titles, URLs or profile names.
+                        func identities(_ values: Set<BrowserWindowCoveragePolicy.NativeIdentity>) -> [[String: Any]] {
+                            values.sorted { ($0.pid, $0.windowID) < ($1.pid, $1.windowID) }.map {
+                                ["pid": $0.pid, "launched": $0.launched, "windowID": $0.windowID]
+                            }
+                        }
+                        let witnessed = before.inventory.observedStandard.intersection(after.continuousIdentities)
+                        let continuity = after.continuousIdentities.intersection(after.inventory.observedStandard)
+                        coverageDiagnostic = [
+                            "reason": reason.rawValue,
+                            "native": identities(Set(after.inventory.windows.map(\.identity))),
+                            "observedStandard": identities(after.inventory.observedStandard),
+                            "beforeObservedStandard": identities(before.inventory.observedStandard),
+                            "continuousIdentities": identities(after.continuousIdentities),
+                            "witnessedBeforeSnapshot": identities(witnessed),
+                            "reports": reports.map { report -> [String: Any] in
+                                let candidates = BrowserWindowCoveragePolicy.candidates(.init(
+                                    bundleIdentifier: report.identity.bundleIdentifier, processIdentity: report.processIdentity,
+                                    title: report.title, frame: report.frame), native: after.inventory.windows)
+                                let eligible = candidates.intersection(witnessed).intersection(continuity)
+                                let states = snapshots.filter { $0.browserSessionID == report.identity.browserSessionID }
+                                    .flatMap { $0.allTabs ?? [] }.filter { $0.windowID == report.identity.windowID }
+                                    .compactMap { $0.windowState?.rawValue }
+                                return ["profileComponent": BrowserProfileSnapshots.component(report.identity.browserSessionID),
+                                    "windowID": report.identity.windowID, "pid": report.processIdentity.pid,
+                                    "launched": report.processIdentity.launched, "candidateCount": candidates.count,
+                                    "candidateIdentities": identities(candidates), "eligibleContinuousCount": eligible.count,
+                                    "eligibleIdentities": identities(eligible), "reportedStates": Array(Set(states)).sorted()]
+                            }
+                        ]
+                        // A window may enter AX after the first observation.
+                        // The old reply cannot earn a new lifetime witness;
+                        // bracket a new correlated query without extending the
+                        // original deadline or accepting the rejected packet.
+                        guard isCurrent(), ProcessInfo.processInfo.systemUptime < deadline else { fail(); return }
+                        before = after
+                        command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
+                        do { try BrowserTabCommandStore(browserBundleIdentifier: browser).write(command) }
+                        catch { fail(); return }
+                        continue
+                       }
                        if case .complete(let coverage) = result {
                         // No await between the final generation check and the
                         // normal start; Finish/replacement cannot race handoff.
@@ -1943,6 +2006,7 @@ final class IntentAppModel: ObservableObject {
         activeSessionIsLeisure = intention.isLeisure
         if quickSelectionIntentionID == intention.id, !(quickSelectionTabIDs ?? [:]).isEmpty || !quickSelectionWindowIDs.isEmpty || (intention.accessMode == .whitelist && !intention.allowedApps.isEmpty) {
             let requireSelectedResources = intention.accessMode == .whitelist && !intention.addAsYouGo
+            let searchSessionID = requireSelectedResources && intention.browserSearchesAllowed ? rules?.startupSessionID : nil
             let tabIDs = quickSelectionTabIDs ?? [:]
             let browserSessionIDs = quickSelectionBrowserSessionIDs
             let selectedWindows = quickSelectionWindowIDs
@@ -1961,7 +2025,9 @@ final class IntentAppModel: ObservableObject {
                     // an exhausted intention. onReady owns session readiness.
                     guard self.currentRecord?.id == occurrence else { continue }
                     for (browser, selected) in tabIDs {
-                        if browserPresence[browser] == .closed { continue }
+                        // New permitted searches may appear while other apps
+                        // keep this occurrence alive, after older work closes.
+                        if browserPresence[browser] == .closed && searchSessionID == nil { continue }
                         // Normal application quit is closure, not an extension
                         // disconnect. Other explicitly selected resources survive.
                         if requireSelectedResources,
@@ -1986,16 +2052,17 @@ final class IntentAppModel: ObservableObject {
                             self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
                             return
                         }
-                        if (snapshot.allTabs ?? snapshot.tabs).contains(where: { selected.contains($0.id) }) {
+                        if SelectedResourceLifetime.hasRemainingTabs(snapshot: snapshot,
+                            selectedIDs: Set(selected), searchSessionID: searchSessionID) {
                             browserPresence[browser] = .present
                         }
                         if SelectedResourceLifetime.needsTabConfirmation(restrictive: requireSelectedResources,
-                            snapshot: snapshot, selectedIDs: Set(selected)) {
+                            snapshot: snapshot, selectedIDs: Set(selected), searchSessionID: searchSessionID) {
                             // Idle/query-suppressed snapshots can be empty while
                             // every selected tab is still open. Confirm absence
                             // with a new exact-profile query, never cached rows.
                             let check = BrowserSelectedTabPresenceCheck(browser: browser,
-                                expectedSession: expected, selectedIDs: selected)
+                                expectedSession: expected, selectedIDs: selected, searchSessionID: searchSessionID)
                             var confirmedPresent = false
                             // Finish requests stop before teardown clears the
                             // occurrence or cancels this task. Respect that gap.
@@ -2025,8 +2092,8 @@ final class IntentAppModel: ObservableObject {
                           self.activeLock === lock, !lock.isStopRequested else { return }
                     // Re-read native windows after asynchronous browser queries,
                     // including replacement windows opened while awaiting them.
-                    let nativeWindows = Dictionary(grouping: WorkspaceWindow.list(onScreen: false), by: \.bundle)
-                        .mapValues { Set($0.map(\.id)) }
+                    let nativeWindows = WorkspaceWindow.lifetimeInventory(
+                        selectedWindows: selectedWindows, wholeApps: wholeApps)
                     if SelectedResourceLifetime.shouldFinish(restrictive: requireSelectedResources,
                         selectedWindows: selectedWindows, wholeApps: wholeApps,
                         liveWindows: nativeWindows, browsers: browserPresence) {

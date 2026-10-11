@@ -1584,6 +1584,8 @@ final class QuickSelectionController: ObservableObject {
                     self.restoringSavedWorkspace = false; self.savedRestorationTask = nil
                 }
             }
+            var restoreRequests: [SavedWorkspaceRestoreClaims.Request] = []
+            var dispatchAttempted: Set<String> = []
             do {
                 let defaults = Set((self.model.alwaysAllowedApps + self.model.alwaysBlockedApps).map(\.bundleIdentifier))
                 let browsers = Set(workspace.tabs.map(\.browser)).subtracting(defaults)
@@ -1602,6 +1604,7 @@ final class QuickSelectionController: ObservableObject {
                 // Claim every effect before the first create. Repeated Run, a
                 // lost receipt, or an app restart cannot mint replacement IDs.
                 let requests = try self.savedRestoreClaims.begin(sourceID: intention.id, tabs: resolved.pendingTabs)
+                restoreRequests = requests
                 for (pending, request) in zip(resolved.pendingTabs, requests) {
                     guard isCurrent(), configuration.accessMode == .whitelist else { throw BrowserTabCreationError.cancelled }
                     let profiles = initialProfiles.filter { $0.browserBundleIdentifier == pending.descriptor.browser }
@@ -1613,7 +1616,8 @@ final class QuickSelectionController: ObservableObject {
                         browserWindowID: profiles.count > 1 ? BrowserProfileSnapshots.compositeID(session: pending.ownerSessionID, id: pending.windowID) : pending.windowID,
                         anchorTabID: profiles.count > 1 ? BrowserProfileSnapshots.compositeID(session: pending.ownerSessionID, id: pending.anchorTabID) : pending.anchorTabID,
                         overviewGeneration: token)
-                    let tab = try await BrowserTabCreationService.create(target: target, url: url, requestID: request.requestID, isCurrent: isCurrent)
+                    let tab = try await BrowserTabCreationService.create(target: target, url: url, requestID: request.requestID,
+                        onDispatchAttempt: { dispatchAttempted.insert(request.requestID) }, isCurrent: isCurrent)
                     guard isCurrent(), draft.pinBrowserSession(pending.descriptor.browser, sessionID: nonce) else { throw BrowserTabCreationError.changed }
                     draft.toggleTab(.init(browser: pending.descriptor.browser, id: tab.id), browserSessionID: nonce)
                 }
@@ -1649,6 +1653,10 @@ final class QuickSelectionController: ObservableObject {
                 guard isCurrent() else { return }
                 self.runSelection()
             } catch {
+                // Run cancellation can replace the overview generation before
+                // this catch. Clean only never-written IDs from this attempt
+                // regardless; never retire an older or possibly written claim.
+                try? self.savedRestoreClaims.retireUndispatched(restoreRequests, dispatchAttempted: dispatchAttempted)
                 guard self.savedRestorationGeneration == token, self.generation == overview else { return }
                 self.message = error.localizedDescription
             }

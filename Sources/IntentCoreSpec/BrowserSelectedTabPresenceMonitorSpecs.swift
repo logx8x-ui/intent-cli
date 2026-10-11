@@ -38,10 +38,10 @@ private func exercisePresenceMonitor() async throws {
     try BrowserTabSnapshotStore(fileURL: ownerPath).write(owner)
     try JSONEncoder().encode(Date()).write(to: ownerPath.appendingPathExtension("heartbeat"))
 
-    @MainActor func makeCheck() throws -> BrowserSelectedTabPresenceCheck {
+    @MainActor func makeCheck(searchSessionID: String? = nil) throws -> BrowserSelectedTabPresenceCheck {
         try? FileManager.default.removeItem(at: requestPath)
         guard let value = BrowserSelectedTabPresenceCheck(browser: browser, expectedSession: session,
-            selectedIDs: [8,9], snapshotURL: snapshotURL, commandURL: commandURL) else {
+            selectedIDs: [8,9], searchSessionID: searchSessionID, snapshotURL: snapshotURL, commandURL: commandURL) else {
             throw SpecFailure(description: "The isolated monitor has its exact live owner")
         }
         return value
@@ -73,6 +73,22 @@ private func exercisePresenceMonitor() async throws {
         await phase.value
         try expect(decisions == [tabs.isEmpty ? .closed : .present],
             "Only the correlated delayed inventory reaches the monitor decision callback, exactly once")
+    }
+
+    let searchSession = "monitor-current-rules"
+    let search = BrowserTabItem(id: 19, windowID: 344, index: 1, title: "Study search",
+        url: "https://www.google.com/search?q=study", active: true, searchSessionID: searchSession)
+    for searchesEnabled in [true, false] {
+        let check = try makeCheck(searchSessionID: searchesEnabled ? searchSession : nil)
+        var decisions: [BrowserSelectedTabPresenceCheck.Result] = []
+        let phase = Task { @MainActor in
+            await BrowserSelectedTabPresenceMonitor.confirm(check, isCurrent: { true }, didConfirm: { decisions.append($0) })
+        }
+        let command = try await awaitRequest()
+        try reply(command, tabs: [search])
+        await phase.value
+        try expect(decisions == [searchesEnabled ? .present : .closed],
+            "The actual asynchronous closure callback counts current search work only when its modification is enabled")
     }
 
     for cancel in [false, true] {

@@ -602,7 +602,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
         detail["onScreenInventoryAvailable"] = true; detail["onScreen"] = visible
         guard !visible, mayEnforce else { return false }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.25
-        guard let accessible = Self.completeAccessibilityWindows(pid: window.pid, deadline: deadline, detail: &detail) else {
+        guard let accessible = Self.completeAccessibilityWindows(pid: window.pid, deadline: deadline, detail: &detail,
+            requiresPrimaryEnumeration: true) else {
             detail["accessibilityInventoryComplete"] = false; return false
         }
         let matchingGeometry = accessible.contains { Self.sameFrame($0.frame, window.frame) }
@@ -1192,8 +1193,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
     /// be readable and this uniquely CG-bound target must be absent.
     private static func missingFromSuccessfulAXEnumeration(_ window: WorkspaceWindow) -> Bool {
         guard AXIsProcessTrusted() else { return false }
-        let app = AXUIElementCreateApplication(window.pid)
-        guard let elements = value(app, kAXWindowsAttribute) as? [AXUIElement], !elements.isEmpty else { return false }
+        guard let inventory = PublicAccessibilityWindowInventory.readObservation(pid: window.pid,
+            deadline: ProcessInfo.processInfo.systemUptime + 0.25),
+              !inventory.primaryWasSupplemented, !inventory.primaryWindows.isEmpty else { return false }
+        // Only the original primary enumeration can supply this negative
+        // evidence. Newly discovered public roots prove it was incomplete.
+        let elements = inventory.primaryWindows
         for element in elements {
             guard let title = value(element, kAXTitleAttribute) as? String,
                   let position = value(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
@@ -1570,14 +1575,20 @@ public final class FocusVisibilityController: @unchecked Sendable {
         abs(first.minX - second.minX) <= 3 && abs(first.minY - second.minY) <= 3
             && abs(first.width - second.width) <= 3 && abs(first.height - second.height) <= 3
     }
-    /// Complete AX inventory includes dialogs and minimized/off-Space windows.
-    /// Geometry is independent of minimization support. A panel which cannot
-    /// minimize still has a usable exact geometry/parent/type identity.
-    private static func completeAccessibilityWindows(pid: pid_t, deadline: TimeInterval, detail: inout [String: Any]) -> [AccessibleNativeWindow]? {
-        let inventory = attribute(AXUIElementCreateApplication(pid), kAXWindowsAttribute)
-        guard let elements = inventory.value as? [AXUIElement], elements.count <= 64 else {
-            detail["geometryFailureStage"] = "windowsInventory"; detail["geometryFailureStatus"] = inventory.status.rawValue; return nil
+    /// Positive public AX roots include dialogs and readable minimized windows.
+    /// This is not proof that every native window was exposed: callers retain
+    /// unmatched native obligations even after successful AX enumeration.
+    private static func completeAccessibilityWindows(pid: pid_t, deadline: TimeInterval, detail: inout [String: Any],
+                                                      requiresPrimaryEnumeration: Bool = false) -> [AccessibleNativeWindow]? {
+        guard let inventory = PublicAccessibilityWindowInventory.readObservation(pid: pid, deadline: deadline) else {
+            detail["geometryFailureStage"] = "publicWindowsInventory"; return nil
         }
+        // Classification supplies negative absence evidence, unlike exact
+        // positive bindings. Never let supplemental roots earn that authority.
+        guard !requiresPrimaryEnumeration || !inventory.primaryWasSupplemented else {
+            detail["geometryFailureStage"] = "primaryWindowsOmittedExposedRoot"; return nil
+        }
+        let elements = requiresPrimaryEnumeration ? inventory.primaryWindows : inventory.windows
         var windows: [AccessibleNativeWindow] = []
         for (index, element) in elements.enumerated() {
             guard let window = accessibleWindow(element, pid: pid, deadline: deadline, detail: &detail) else {
@@ -1665,20 +1676,33 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private static func element(_ window: WorkspaceWindow, launched: Date) -> AXUIElement? {
         let identity = WindowIdentity(pid: window.pid, launched: launched, window: window.id)
         if let cached = accessibilityWindows[identity] { return cached }
-        let app = AXUIElementCreateApplication(window.pid)
-        guard let elements = value(app, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
-        let matches = elements.filter { element in
-            guard let title = value(element, kAXTitleAttribute) as? String,
-                  (browsers.contains(window.bundle) ? BrowserWindowMatching.sameWindowTitle(title, window.title) : title == window.title),
-                  let position = value(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
-                  let size = value(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return false }
-            var point = CGPoint.zero, dimensions = CGSize.zero
-            return AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point)
-                && AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions)
-                && abs(point.x - window.frame.minX) <= 3 && abs(point.y - window.frame.minY) <= 3
-                && abs(dimensions.width - window.frame.width) <= 3 && abs(dimensions.height - window.frame.height) <= 3
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+        guard let app = NSRunningApplication(processIdentifier: window.pid), !app.isTerminated,
+              app.bundleIdentifier == window.bundle, app.launchDate == launched,
+              let elements = PublicAccessibilityWindowInventory.read(pid: window.pid, deadline: deadline),
+              let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let native = nativeWindows(rows: rows, app: app) else { return nil }
+        func sameTitle(_ first: String, _ second: String) -> Bool {
+            browsers.contains(window.bundle) ? BrowserWindowMatching.sameWindowTitle(first, second) : first == second
         }
-        guard matches.count == 1 else { return nil }
+        var matches: [AXUIElement] = []
+        for element in elements {
+            guard ProcessInfo.processInfo.systemUptime < deadline,
+                  let title = value(element, kAXTitleAttribute) as? String else { return nil }
+            guard sameTitle(title, window.title) else { continue }
+            guard let position = value(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
+                  let size = value(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+            var point = CGPoint.zero, dimensions = CGSize.zero
+            guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
+                  AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return nil }
+            let frame = CGRect(origin: point, size: dimensions)
+            guard sameFrame(frame, window.frame) else { continue }
+            let counterparts = native.filter { sameTitle(title, $0.title) && sameFrame(frame, $0.frame) }
+            guard counterparts.count == 1, counterparts[0].id == window.id else { return nil }
+            matches.append(element)
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline, matches.count == 1,
+              !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
         accessibilityWindows[identity] = matches[0]
         return matches[0]
     }

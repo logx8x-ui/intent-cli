@@ -49,10 +49,12 @@ PY
   exit 0
 fi
 
-require_idle_engines() {
-  /usr/bin/python3 "$ROOT/scripts/check-local-channel-idle.py" "$HOME"
+require_closed_engines() {
+  # The shipped CLI can enforce app-only restrictions without a durable lease.
+  # Refuse it as well as either app; installation never terminates those engines.
+  /usr/bin/python3 "$ROOT/scripts/check-local-channel-idle.py" "$HOME" --require-closed
 }
-require_idle_engines
+require_closed_engines
 
 GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
 if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
@@ -66,35 +68,15 @@ BUILD_BIN="$(swift build -c release --jobs 2 --scratch-path "$BUILD" ${SWIFT_FLA
 [[ "$("$BUILD_BIN/IntentApp" --print-build-channel)" == "$CHANNEL" ]] || {
   echo 'Refusing an executable compiled for another channel.' >&2; exit 4;
 }
-require_idle_engines
+require_closed_engines
 
-# Stop only the exact target bundle, after the idle checks. Never kill the other
-# channel, publish a host manifest, or seize a browser connection in the installer.
-/usr/bin/python3 - "$APP_BUNDLE/Contents/MacOS/IntentApp" <<'PY'
-import os,signal,subprocess,sys,time
-expected=sys.argv[1]
-pids=[]
-for line in subprocess.check_output(['/bin/ps','-axo','pid=,command='],text=True).splitlines():
-    columns=line.strip().split(None,1)
-    if len(columns)==2 and (columns[1]==expected or columns[1].startswith(expected+' ')):
-        pids.append(int(columns[0]))
-for pid in pids:
-    try: os.kill(pid,signal.SIGTERM)
-    except ProcessLookupError: pass
-for _ in range(50):
-    live=[]
-    for pid in pids:
-        try: os.kill(pid,0); live.append(pid)
-        except ProcessLookupError: pass
-    if not live: break
-    time.sleep(.1)
-else: sys.exit('The previous app has not stopped. Installation was not changed.')
-PY
+commit_installation() {
+# The transaction wrapper holds engine.lock throughout this function. It refuses
+# either running app, including selection/preparation, without terminating it.
 
 # A running pre-lease helper still executes its old memory-mapped code after
 # atomic file replacement. Retire this idle target only, before replacing it;
 # the owner startup hook then reconnects browsers through the selected channel.
-require_idle_engines
 /usr/bin/python3 "$ROOT/scripts/retire-local-channel-hosts.py" \
   "$APP_BUNDLE/Contents/Helpers/IntentNativeHost" "$APP_DIR/IntentNativeHost"
 
@@ -155,7 +137,6 @@ PLIST
 codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/IntentNativeHost"
 codesign --force --sign - --identifier "$BUNDLE_ID" \
   --requirements "=designated => identifier \"$BUNDLE_ID\"" "$APP_BUNDLE" >/dev/null
-mdimport "$APP_BUNDLE" 2>/dev/null || true
 ln -sf "$APP_DIR/Intent" "$BIN_DIR/$CLI_NAME"
 ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/$CLI_APP_NAME"
 cat > "$BIN_DIR/$LAUNCHER_NAME" <<LAUNCHER
@@ -169,6 +150,16 @@ if [[ -w /opt/homebrew/bin ]]; then
   ln -sf "$APP_DIR/IntentApp" "/opt/homebrew/bin/$CLI_APP_NAME"
   ln -sf "$BIN_DIR/$LAUNCHER_NAME" "/opt/homebrew/bin/$LAUNCHER_NAME"
 fi
+}
+
+export ROOT CHANNEL APP_NAME BUNDLE_ID AUTH_SCHEME DATA_NAME BUILD APP_DIR APP_BUNDLE
+export BIN_DIR BUILD_BIN DEVELOPMENT_PLIST CLI_NAME CLI_APP_NAME LAUNCHER_NAME GOOGLE_CLIENT_SECRET
+export -f commit_installation
+/usr/bin/python3 "$ROOT/scripts/local-channel-install-transaction.py" "$HOME" -- \
+  "$BASH" -c 'set -euo pipefail; commit_installation'
+# Opening is deliberately outside the lease; the installed app owns its normal
+# channel handoff and native-host registration only after commit finishes.
+mdimport "$APP_BUNDLE" 2>/dev/null || true
 printf 'Installed %s to %s (%s, local QA only).\n' "$APP_NAME" "$APP_BUNDLE" "$CHANNEL"
 if [[ "${INTENT_LOCAL_INSTALL_NO_OPEN:-0}" == 1 ]]; then exit 0; fi
 open "$APP_BUNDLE"

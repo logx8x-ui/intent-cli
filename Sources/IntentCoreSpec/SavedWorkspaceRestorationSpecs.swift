@@ -256,5 +256,229 @@ func runSavedWorkspaceRestorationSpecs() throws {
         throw SpecFailure(description: "Completing one preset must not retire another uncertain claim")
     } catch BrowserTabCreationError.uncertain { }
     _ = try claims.begin(sourceID: "preset-a", tabs: partial.pendingTabs)
+    let oldAttempt = try claims.begin(sourceID: "preset-cleanup", tabs: partial.pendingTabs)
+    try claims.complete(sourceID: "preset-cleanup")
+    let replacementAttempt = try claims.begin(sourceID: "preset-cleanup", tabs: partial.pendingTabs)
+    try claims.retireUndispatched(oldAttempt, dispatchAttempted: [])
+    let afterStaleCleanup = try JSONDecoder().decode([SavedWorkspaceRestoreClaims.Request].self, from: Data(contentsOf: file))
+    try expect(afterStaleCleanup.contains(replacementAttempt[0]) && afterStaleCleanup.contains(other[0]),
+        "A late cancelled attempt's cleanup cannot erase a newer claim with the same source or another preset's claim")
+    try claims.retireUndispatched(replacementAttempt, dispatchAttempted: [])
+    _ = try claims.begin(sourceID: "preset-cleanup", tabs: partial.pendingTabs)
+    try runSavedRestoreCreationServiceSpecs()
     print("Saved workspace restoration specs passed")
+}
+
+/// Exercise the production preflight, mailbox write and receipt loop, using only
+/// the marked isolated runner's files. No browser process or desktop UI is used.
+private func runSavedRestoreCreationServiceSpecs() throws {
+    let completion = SavedRestoreServiceSpecCompletion()
+    let task = Task { @MainActor in
+        do { try await exerciseSavedRestoreCreationService(); completion.finish(nil) }
+        catch { completion.finish(error) }
+    }
+    let deadline = Date().addingTimeInterval(18)
+    while !completion.isFinished && Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    guard completion.isFinished else {
+        task.cancel()
+        throw SpecFailure(description: "The isolated saved-restore creation service regression timed out")
+    }
+    if let error = completion.error { throw error }
+}
+
+@MainActor
+private func exerciseSavedRestoreCreationService() async throws {
+    guard IntentEnvironment.isQA else {
+        throw SpecFailure(description: "Production creation service fixtures require the marked isolated QA runner")
+    }
+    let directory = IntentEnvironment.dataDirectory
+    let rulesURL = ActiveBrowserRulesStore.defaultFileURL()
+    for browser in ["org.mozilla.firefox", "com.google.Chrome"] {
+        let session = "saved-restore-spec-\(UUID())", profile = UUID().uuidString
+        let snapshotBase = BrowserTabSnapshotStore.fileURL(for: browser)
+        let ownerURL = BrowserProfileSnapshots.partition(snapshotBase, session: session)
+        let ownerHeartbeatURL = ownerURL.appendingPathExtension("heartbeat")
+        let heartbeatURL = BrowserGuardHeartbeatStore.fileURL(for: browser)
+        let stateURL = BrowserGuardStateStore.fileURL(for: browser)
+        let prefix = snapshotBase.deletingPathExtension().lastPathComponent + ".profile-"
+        let priorProfiles = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+        let ownedGlobals = [rulesURL, heartbeatURL, stateURL]
+        var originals: [URL: Data] = [:]
+        for path in priorProfiles + ownedGlobals where FileManager.default.fileExists(atPath: path.path) {
+            originals[path] = try Data(contentsOf: path)
+        }
+        let mailbox = BrowserTabCreationMailbox(browser: browser, session: session)
+        let claimsURL = directory.appendingPathComponent("saved-restore-service-spec-\(UUID()).json")
+        var receiptURLs: [URL] = []
+        defer {
+            for path in ownedGlobals + [ownerURL, ownerHeartbeatURL, mailbox.fileURL,
+                mailbox.fileURL.appendingPathExtension("lock"), claimsURL] + receiptURLs {
+                try? FileManager.default.removeItem(at: path)
+            }
+            for (path, data) in originals { try? data.write(to: path, options: .atomic) }
+        }
+        for path in priorProfiles { try FileManager.default.removeItem(at: path) }
+        let claims = SavedWorkspaceRestoreClaims(fileURL: claimsURL)
+        let anchor = BrowserTabItem(id: 7, windowID: 10, index: 0, title: "Anchor", url: "https://anchor.example/", active: true)
+        let capability = BrowserGuardCapability.backgroundTabCreation.rawValue
+        let owner = BrowserTabSnapshot(browserBundleIdentifier: browser, browserSessionID: session, browserProfileID: profile,
+            tabs: [anchor], allTabs: [anchor], guardEnabled: true, guardCapabilities: [capability])
+        let target = WebsiteFinderTarget(browserBundleIdentifier: browser, browserSessionID: session,
+            browserWindowID: 10, anchorTabID: 7, overviewGeneration: UUID())
+        let pending = [0, 1].map { index in
+            SessionWorkspace.PendingTab(descriptor: .init(browser: browser, url: "https://example.test/work-\(index)",
+                title: "Work", profileID: profile, sessionID: session, nativeID: index + 1, windowID: 10),
+                descriptorIndex: index, ownerSessionID: session, anchorTabID: 7, windowID: 10)
+        }
+        func prepare() throws {
+            try ActiveBrowserRulesStore().clear()
+            try BrowserGuardHeartbeatStore(fileURL: heartbeatURL).write(capabilities: [capability])
+            try BrowserGuardStateStore(fileURL: stateURL).write(enabled: true)
+            try BrowserTabSnapshotStore(fileURL: ownerURL).write(owner)
+            try JSONEncoder().encode(Date()).write(to: ownerHeartbeatURL, options: .atomic)
+            try? FileManager.default.removeItem(at: mailbox.fileURL)
+        }
+        func durableClaims() throws -> [SavedWorkspaceRestoreClaims.Request] {
+            try JSONDecoder().decode([SavedWorkspaceRestoreClaims.Request].self, from: Data(contentsOf: claimsURL))
+        }
+        func confirmCreated(_ request: SavedWorkspaceRestoreClaims.Request) throws {
+            guard let command = mailbox.take() else { throw SpecFailure(description: "Successful dispatch must write the actual creation mailbox before its callback") }
+            try expect(command.id == request.requestID && command.action == .create && command.browserSessionID == session
+                && command.windowID == 10 && command.tabID == 7 && command.url == request.url,
+                "A repaired saved run dispatches exactly its new claim to the verified browser/profile/window")
+            let receipt: [String: Any] = ["requestID": command.id, "browserSessionID": session, "windowID": 10,
+                "anchorTabID": 7, "url": request.url, "tab": ["id": 90, "windowID": 10, "index": 1,
+                "title": "Created", "url": request.url, "active": false]]
+            try JSONSerialization.data(withJSONObject: receipt).write(to: BrowserTabCreationReceipt.fileURL(requestID: command.id)!, options: .atomic)
+        }
+
+        // Every failure below occurs in the actual creation service before a
+        // dispatch attempt. After repairing it, the same preset can Run again.
+        for failure in ["heartbeat-capability", "owner-capability", "active", "owner-changed", "cancelled", "invalid-url"] {
+            try prepare()
+            var current = true
+            switch failure {
+            case "heartbeat-capability": try BrowserGuardHeartbeatStore(fileURL: heartbeatURL).write(capabilities: [])
+            case "owner-capability":
+                var incapable = owner; incapable.guardCapabilities = []
+                try BrowserTabSnapshotStore(fileURL: ownerURL).write(incapable)
+            case "active": try ActiveBrowserRulesStore().write(.init(active: true, allowedWebsites: [],
+                blockTabSwitching: false, blockNavigation: false, blockNewTabs: false))
+            case "owner-changed":
+                var changed = owner; changed.tabs = []; changed.allTabs = []
+                try BrowserTabSnapshotStore(fileURL: ownerURL).write(changed)
+            case "cancelled": current = false
+            default: break
+            }
+            let source = "preflight-\(failure)"
+            let attempt = try claims.begin(sourceID: source, tabs: pending)
+            receiptURLs.append(contentsOf: attempt.map { BrowserTabCreationReceipt.fileURL(requestID: $0.requestID)! })
+            var attempted: Set<String> = [], dispatched = false
+            let url = URL(string: failure == "invalid-url" ? "file:///not-a-web-tab" : attempt[0].url)!
+            do {
+                _ = try await BrowserTabCreationService.create(target: target, url: url, requestID: attempt[0].requestID,
+                    onDispatchAttempt: { attempted.insert(attempt[0].requestID) }, onDispatched: { dispatched = true },
+                    isCurrent: { current })
+                throw SpecFailure(description: "Expected production preflight rejection: \(browser) \(failure)")
+            } catch is BrowserTabCreationError { }
+            try claims.retireUndispatched(attempt, dispatchAttempted: attempted)
+            let afterPreflight = try durableClaims()
+            try expect(attempted.isEmpty && !dispatched && !FileManager.default.fileExists(atPath: mailbox.fileURL.path)
+                && afterPreflight.isEmpty,
+                "\(browser) \(failure): preflight leaves no create effect or permanently blocking claim, including unstarted siblings")
+            try prepare(); current = true
+            let retry = try claims.begin(sourceID: source, tabs: pending)
+            receiptURLs.append(contentsOf: retry.map { BrowserTabCreationReceipt.fileURL(requestID: $0.requestID)! })
+            var callbackError: Error?
+            let created = try await BrowserTabCreationService.create(target: target, url: URL(string: retry[0].url)!, requestID: retry[0].requestID,
+                onDispatchAttempt: { attempted.insert(retry[0].requestID) }, onDispatched: {
+                    do { try confirmCreated(retry[0]) } catch { callbackError = error; current = false }
+                }, isCurrent: { current })
+            if let callbackError { throw callbackError }
+            try claims.retireUndispatched(retry, dispatchAttempted: attempted)
+            let afterConfirmedCreate = try durableClaims()
+            try expect(retry[0].requestID != attempt[0].requestID && created.id == 90 && !created.active
+                && afterConfirmedCreate == [retry[0]],
+                "\(browser) \(failure): repaired preflight reaches the actual receipt loop; the confirmed effect remains claimed until replay binding is saved")
+            try claims.complete(sourceID: source)
+        }
+
+        // Cancellation, disconnect, rejected/lost receipts and uncertain writes
+        // cannot mint replacement IDs. Only the unstarted sibling is retired.
+        let postWriteFailures = browser == "com.google.Chrome"
+            ? ["cancelled", "disconnected", "rejected", "timeout", "write-error"]
+            : ["cancelled", "disconnected", "rejected", "write-error"]
+        for failure in postWriteFailures {
+            try prepare()
+            let source = "dispatched-\(failure)"
+            let attempt = try claims.begin(sourceID: source, tabs: pending)
+            receiptURLs.append(contentsOf: attempt.map { BrowserTabCreationReceipt.fileURL(requestID: $0.requestID)! })
+            var attempted: Set<String> = [], dispatched = false, current = true, callbackError: Error?
+            if failure == "write-error" { try Data("not a mailbox queue".utf8).write(to: mailbox.fileURL, options: .atomic) }
+            do {
+                _ = try await BrowserTabCreationService.create(target: target, url: URL(string: attempt[0].url)!, requestID: attempt[0].requestID,
+                    onDispatchAttempt: { attempted.insert(attempt[0].requestID) }, onDispatched: {
+                        dispatched = true
+                        do {
+                            let rows = try JSONDecoder().decode([BrowserTabCommand].self, from: Data(contentsOf: mailbox.fileURL))
+                            try expect(rows.count == 1 && rows[0].id == attempt[0].requestID,
+                                "Post-write callback is evidence of the exact durable production request")
+                            if failure == "cancelled" { current = false }
+                            if failure == "disconnected" { try FileManager.default.removeItem(at: ownerHeartbeatURL) }
+                            if failure == "timeout" { _ = mailbox.take() } // Effect consumed, receipt lost.
+                            if failure == "rejected" {
+                                _ = mailbox.take()
+                                let receipt: [String: Any] = ["requestID": attempt[0].requestID, "browserSessionID": session,
+                                    "windowID": 10, "anchorTabID": 7, "url": attempt[0].url, "error": "Browser rejected the request"]
+                                try JSONSerialization.data(withJSONObject: receipt).write(to: BrowserTabCreationReceipt.fileURL(requestID: attempt[0].requestID)!, options: .atomic)
+                            }
+                        } catch { callbackError = error; current = false }
+                    }, isCurrent: {
+                        // Keep this synthetic owner live while the production
+                        // bounded receipt timeout runs; no browser is contacted.
+                        if failure == "timeout" {
+                            do { try JSONEncoder().encode(Date()).write(to: ownerHeartbeatURL, options: .atomic) }
+                            catch { callbackError = error; return false }
+                        }
+                        return current
+                    })
+                throw SpecFailure(description: "Expected production post-write failure: \(browser) \(failure)")
+            } catch let failureError as BrowserTabCreationError {
+                switch (failure, failureError) {
+                case ("cancelled", .cancelled), ("disconnected", .changed), ("rejected", .rejected(_)), ("timeout", .uncertain): break
+                default: throw SpecFailure(description: "Wrong production failure for \(browser) \(failure): \(failureError)")
+                }
+            } catch {
+                guard failure == "write-error", !(error is SpecFailure) else { throw error }
+            }
+            if let callbackError { throw callbackError }
+            try claims.retireUndispatched(attempt, dispatchAttempted: attempted)
+            let retained = try durableClaims().filter { $0.sourceID == source }
+            try expect(attempted == [attempt[0].requestID] && dispatched == (failure != "write-error") && retained == [attempt[0]],
+                "\(browser) \(failure): written/uncertain request survives while the guaranteed unstarted sibling is retired")
+            let beforeRetry = try Data(contentsOf: claimsURL)
+            do {
+                _ = try SavedWorkspaceRestoreClaims(fileURL: claimsURL).begin(sourceID: source, tabs: pending)
+                throw SpecFailure(description: "A dispatched or uncertain create must remain protected against duplicate retry")
+            } catch BrowserTabCreationError.uncertain { }
+            let afterRetry = try Data(contentsOf: claimsURL)
+            try expect(afterRetry == beforeRetry,
+                "\(browser) \(failure): restarting claims keeps the original request UUID after a possibly completed effect")
+        }
+    }
+}
+
+private final class SavedRestoreServiceSpecCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    private var failure: Error?
+    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return finished }
+    var error: Error? { lock.lock(); defer { lock.unlock() }; return failure }
+    func finish(_ error: Error?) {
+        lock.lock(); defer { lock.unlock() }
+        failure = error; finished = true
+    }
 }

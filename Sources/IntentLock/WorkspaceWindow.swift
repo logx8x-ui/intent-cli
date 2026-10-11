@@ -26,6 +26,40 @@ public struct WorkspaceWindow {
         }
     }
 
+    /// Closure needs complete identities, not overview preview candidates.
+    /// Tiny, minimized and offscreen windows still count; missing process
+    /// metadata or a failed WindowServer query means retry, never completion.
+    public static func lifetimeInventory(selectedWindows: [String: Set<UInt32>], wholeApps: Set<String>,
+        copyInfo: (CGWindowListOption, CGWindowID) -> CFArray? = CGWindowListCopyWindowInfo,
+        resolveApplication: (pid_t) -> (bundleIdentifier: String?, isRegular: Bool)? = { pid in
+            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return nil }
+            return (app.bundleIdentifier, app.activationPolicy == .regular)
+        }) -> [String: Set<UInt32>]? {
+        guard let rows = copyInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        var seen: Set<UInt32> = []
+        var inventory: [String: Set<UInt32>] = [:]
+        let selectedIDs = Set(selectedWindows.values.flatMap { $0 })
+        let relevantApps = Set(selectedWindows.keys).union(wholeApps)
+        for row in rows {
+            guard let id = row[kCGWindowNumber as String] as? UInt32, id > 0,
+                  let pid = row[kCGWindowOwnerPID as String] as? pid_t, pid > 0,
+                  let layer = row[kCGWindowLayer as String] as? Int,
+                  seen.insert(id).inserted else { return nil }
+            // A changed or unclassified selected surface is not positive
+            // absence, even if it no longer qualifies for an overview card.
+            if layer != 0 {
+                if selectedIDs.contains(id) { return nil }
+                continue
+            }
+            guard let app = resolveApplication(pid) else { return nil }
+            let relevant = selectedIDs.contains(id) || app.bundleIdentifier.map { relevantApps.contains($0) } == true
+            guard app.isRegular || relevant else { continue }
+            guard let bundle = app.bundleIdentifier, !bundle.isEmpty else { return nil }
+            inventory[bundle, default: []].insert(id)
+        }
+        return inventory
+    }
+
     /// Positive AX standard windows only: CG also contains Chrome auxiliary
     /// backing surfaces. Unreported AX-absent windows are outside this narrowly
     /// observable cohort; the browser bridge still owns all reported windows.
@@ -90,7 +124,9 @@ public struct WorkspaceWindow {
                 var result: CFTypeRef?
                 return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
             }
-            guard let elements = attribute(AXUIElementCreateApplication(proof.pid), kAXWindowsAttribute) as? [AXUIElement] else { return failed("window-enumeration") }
+            guard let elements = PublicAccessibilityWindowInventory.read(pid: proof.pid,
+                deadline: min(deadline ?? ProcessInfo.processInfo.systemUptime + 0.25,
+                              ProcessInfo.processInfo.systemUptime + 0.25)) else { return failed("window-enumeration") }
             for element in elements {
                 guard hasTime(), let role = attribute(element, kAXRoleAttribute) as? String,
                       let subrole = attribute(element, kAXSubroleAttribute) as? String else { return failed("window-role") }

@@ -56,6 +56,38 @@ func runBrowserSelectedTabPresenceSpecs() throws {
     try expect(check.poll(now: now.addingTimeInterval(0.1)) == .closed, "An exact fresh full inventory with no selected IDs proves real closure")
     reply.allTabs = [tab,tab]; try writeReply(reply)
     try expect(check.poll(now: now.addingTimeInterval(0.1)) == .pending, "Duplicate malformed rows cannot certify presence or absence")
+
+    let searchSession = "current-rules-occurrence"
+    guard let searches = BrowserSelectedTabPresenceCheck(browser: browser, expectedSession: "session-a", selectedIDs: [8,9],
+        searchSessionID: searchSession, snapshotURL: snapshotURL, commandURL: commandURL, now: now) else {
+        throw SpecFailure(description: "A selected owner can include its current allowed runtime search cohort")
+    }
+    try searches.request()
+    let searchRequest = try command(owner)
+    var search = BrowserTabItem(id: 19, windowID: 344, index: 1, title: "Study search",
+        url: "https://www.google.com/search?q=study", active: true, searchSessionID: searchSession)
+    reply.tabs = [search]; reply.allTabs = [search]
+    try writeReply(reply)
+    try expect(searches.poll(now: now.addingTimeInterval(0.1)) == .pending,
+        "Even a current search marker needs the exact fresh all-owner query receipt before a closure decision")
+    reply.profileDiscoveryRequestIDs = [searchRequest.id]; try writeReply(reply)
+    try expect(searches.poll(now: now.addingTimeInterval(0.1)) == .present,
+        "Production closure confirmation preserves a live allowed search after every original tab closes")
+    search.searchSessionID = "previous-rules-occurrence"; reply.tabs = [search]; reply.allTabs = [search]; try writeReply(reply)
+    try expect(searches.poll(now: now.addingTimeInterval(0.1)) == .closed,
+        "A previous search occurrence cannot stand in for the exhausted selected work")
+    search.searchSessionID = nil; reply.tabs = [search]; reply.allTabs = [search]; try writeReply(reply)
+    try expect(searches.poll(now: now.addingTimeInterval(0.1)) == .closed,
+        "An old unselected Google tab cannot survive a selected-resource closure check")
+    search.searchSessionID = searchSession
+    for url in ["moz-extension://intent/parked.html", "https://blocked.example/"] {
+        search.url = url; reply.tabs = [search]; reply.allTabs = [search]; try writeReply(reply)
+        try expect(searches.poll(now: now.addingTimeInterval(0.1)) == .closed,
+            "A holding or blocked destination is outside current runtime search work")
+    }
+    reply.tabs = []; reply.allTabs = []; try writeReply(reply)
+    try expect(searches.poll(now: now.addingTimeInterval(0.1)) == .closed,
+        "Closing the final runtime search produces confirmed ordinary completion")
     var wrongProfile = owner; wrongProfile.browserProfileID = "replacement-profile"
     try writeOwner(wrongProfile)
     try expect(check.poll(now: now.addingTimeInterval(0.1)) == .changed, "A different profile cannot borrow the previous browser lifetime")

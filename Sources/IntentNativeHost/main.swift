@@ -77,6 +77,7 @@ struct HostTab: Codable {
     var groupID: Int?
     var windowFrame: BrowserWindowFrame?
     var windowFocused: Bool?
+    var windowState: BrowserWindowState?
     var searchSessionID: String?
     var cookieStoreID: String?
     var faviconURL: String?
@@ -237,7 +238,7 @@ struct HostResponse: Codable {
     var addAsYouGo: Bool
     var hideDistractions: Bool
     var nativeWindowVisibility: Bool = false
-    var bundledExtensionVersion: String = "0.2.43"
+    var bundledExtensionVersion: String = "0.2.46"
     var hostCapabilities: [String] = ["quick-selection-host-v1", "tab-preview-host-v1", "native-tab-groups-host-v1", "tab-session-identity-host-v1", "native-window-visibility-host-v1", "firefox-window-minimize-bootstrap-host-v1", "background-tab-create-host-v1", "native-website-finder-host-v1", "native-website-finder-observe-host-v1"]
     var selectedTabIDs: [Int]?
     var selectedBrowserSessionID: String?
@@ -385,6 +386,7 @@ private final class HostRuntime {
     private var lastMessageReceivedAt: Date?
     private var lastSnapshotTabs: [BrowserTabItem]?
     private var requestedSnapshotRefresh = false
+    private var requestedActivationRefreshAt: Date?
     private var issuedSnapshotRequests: [String: Date] = [:]
     private var issuedTabCreations: [String: BrowserTabCommand] = [:]
     private var issuedFinderCommands: [String: BrowserFinderCommand] = [:]
@@ -927,6 +929,12 @@ private final class HostRuntime {
         requireConnectionOwnership()
         let now = Date()
         issuedSnapshotRequests = issuedSnapshotRequests.filter { now.timeIntervalSince($0.value) <= 3 }
+        if let requested = requestedActivationRefreshAt, now.timeIntervalSince(requested) > 3 {
+            requestedActivationRefreshAt = nil
+        }
+        let activationRefresh = self.browserBundleIdentifier == browserBundleIdentifier
+            && browserSessionID != nil && self.profileSessionID == browserSessionID
+            && requestedActivationRefreshAt.map { now.timeIntervalSince($0) >= 0 && now.timeIntervalSince($0) <= 3 } == true
         let proof = self.browserBundleIdentifier == browserBundleIdentifier && self.profileSessionID == browserSessionID
             ? currentBrowserProcessIdentity : nil
         let profileAnswered = self.browserBundleIdentifier == browserBundleIdentifier && self.profileSessionID == browserSessionID
@@ -942,13 +950,14 @@ private final class HostRuntime {
                 title: $0.title,
                 url: $0.url,
                 active: $0.active,
-                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID
+                faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, windowState: $0.windowState, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID
             )
         }
-        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID) }
-        // Explicit discovery is also a freshness acknowledgment. Preserve idle
-        // deduplication, but refresh the timestamp even if requested tabs did not change.
-        guard !profileAnswered.isEmpty || !answered.isEmpty || requestedSnapshotRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID || browserProfileID != lastSnapshotProfileID else { return }
+        let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, windowState: $0.windowState, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID) }
+        // Explicit discovery and a recent delivered activation need fresh
+        // observations even if the requested tab was already active. Activation
+        // renews only ordinary freshness, never full-inventory request authority.
+        guard !profileAnswered.isEmpty || !answered.isEmpty || requestedSnapshotRefresh || activationRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID || browserProfileID != lastSnapshotProfileID else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
             browserSessionID: browserSessionID,
@@ -977,6 +986,7 @@ private final class HostRuntime {
                 maybeWriteHeartbeat(force: true)
             }
             requestedSnapshotRefresh = false
+            if activationRefresh { requestedActivationRefreshAt = nil }
             metrics.snapshotWrites += 1
             lastSnapshotSessionID = browserSessionID
             lastSnapshotProfileID = browserProfileID
@@ -1176,6 +1186,16 @@ private final class HostRuntime {
         response.minimizeBootstrapResultReceipt = minimizeBootstrapResultReceipt
         if (try? writeMessage(response)) != nil {
             lastPushedOffers = offers; lastPushedEnforcement = enforcement
+            if let command = tabCommand, command.action == .activate,
+               let session = profileSessionID, command.browserSessionID == session,
+               !command.id.isEmpty, command.id.utf8.count <= 128,
+               command.tabID >= 0, command.windowID >= 0,
+               Date().timeIntervalSince(command.createdAt) >= -0.25,
+               Date().timeIntervalSince(command.createdAt) <= 3 {
+                // Set only after successful transport dispatch. This is separate
+                // from issuedSnapshotRequests, which alone can earn discovery.
+                requestedActivationRefreshAt = Date()
+            }
             if let command = tabCommand, command.action == .snapshot {
                 requestedSnapshotRefresh = true
                 issuedSnapshotRequests = issuedSnapshotRequests.filter { Date().timeIntervalSince($0.value) <= 3 }

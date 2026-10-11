@@ -16,6 +16,8 @@ const STARTUP_SESSION_RULE_ID_END = 22999;
 // Reserve the entire feature namespace, including IDs leaked by older builds.
 const WEBSITE_SESSION_RULE_ID_START = 24000;
 const WEBSITE_SESSION_RULE_ID_COUNT = 1000;
+const GOOGLE_SEARCH_SESSION_RULE_ID_START = 23002;
+const GOOGLE_SEARCH_SESSION_RULE_ID_COUNT = 32;
 const SITE_RECORD_THROTTLE_MS = 30000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_CAPABILITIES = ["single-startup-launch-v1", "hide-distractions-v1", "add-as-you-go-v1", "website-features-v1"];
@@ -97,6 +99,7 @@ let nativePort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
 let nativeConnectionConfirmed = false;
+let profileBootstrap = null;
 let lastForegroundReconnectAt = -Infinity;
 function guardStatus() {
   return { enabled: guardEnabled, connected: Boolean(nativePort && nativeConnectionConfirmed) };
@@ -146,6 +149,7 @@ const pendingRuleRequests = new Set();
 let synchronizingStartupTabs = false;
 let completedStartupSessionID = null;
 let completedStartupFingerprint = null;
+let startupLaunchProgress = null;
 let ruleRefreshPromise = null;
 let snapshotTimer = null;
 let snapshotForcePending = false;
@@ -197,13 +201,16 @@ async function ensureInitialized() {
 function connectNativeHost() {
   if (!initialized) { void ensureInitialized(); return; }
   if (nativePort || reconnectTimer !== null) return;
+  let port = null;
   try {
-    const port = chrome.runtime.connectNative(HOST_NAME);
+    port = chrome.runtime.connectNative(HOST_NAME);
     nativePort = port;
+    profileBootstrap = {port, profileID:browserProfileID, ready:false, flight:null};
     hostSupportsQuickSelection = false;
     nativeConnectionConfirmed = false;
     port.onMessage.addListener((message) => {
       if (nativePort !== port) return;
+      const firstResponse = !nativeConnectionConfirmed;
       const visibilityWasReady = Boolean(nativeWindowVisibility?.identity());
       nativeWindowVisibility?.receive(message);
       nativeConnectionConfirmed = true;
@@ -235,26 +242,49 @@ function connectNativeHost() {
       }
       if (message?.finderCommand) void nativeFinder?.handle(message.finderCommand);
       if (message?.tabCommand) handleRequestedTab(message.tabCommand);
-      applyNativeRules(message).catch(() => {});
+      const application = applyNativeRules(message).catch(() => {});
+      // A new profile needs one real sidecar before Intent can route correlated
+      // discovery to it. This bootstrap is metadata, never an absence receipt.
+      if (firstResponse) void application.then(() => {
+        requestProfileBootstrap(port, true);
+      }).catch(() => {});
     });
     port.onDisconnect.addListener(() => {
-      if (nativePort !== port) return;
-      cancelRequestedTabActivation();
-      nativePort = null;
-      nativeWindowVisibility?.disconnected();
-      nativeConnectionConfirmed = false;
-      settleRuleRequests();
-      applyNativeRules(inactiveRules());
-      scheduleReconnect();
+      loseNativePort(port);
     });
     postNative({ type: "setGuardEnabled", enabled: guardEnabled });
     requestRules();
   } catch (_) {
-    cancelRequestedTabActivation();
-    nativePort = null;
-    applyNativeRules(inactiveRules());
-    scheduleReconnect();
+    loseNativePort(port);
   }
+}
+
+function requestProfileBootstrap(port, firstResponse = false) {
+  const owner = profileBootstrap;
+  if (!owner || owner.port !== port || nativePort !== port || !nativeConnectionConfirmed) return;
+  if (firstResponse) owner.ready = true;
+  if (!owner.ready || !browserProfileID) return;
+  // A storage outage may establish the port before its durable UUID exists.
+  // Bind only that unbound token; a known profile can never silently retarget.
+  if (owner.profileID === null) owner.profileID = browserProfileID;
+  if (owner.profileID !== browserProfileID || owner.flight
+      || deferredSnapshotBootstrapPort === port || deferredSnapshotFlight?.bootstrapPort === port) return;
+  const flight = publishTabSnapshot(true, false, port).catch(() => {});
+  owner.flight = flight;
+  void flight.finally(() => { if (owner.flight === flight) owner.flight = null; });
+}
+
+function loseNativePort(port) {
+  if (nativePort !== port) return;
+  cancelRequestedTabActivation();
+  nativePort = null;
+  nativeConnectionConfirmed = false;
+  profileBootstrap = null;
+  // Release policy immediately; restoration retains its exact durable owner.
+  void applyNativeRules(inactiveRules()).catch(() => {});
+  nativeWindowVisibility?.disconnected();
+  settleRuleRequests();
+  scheduleReconnect();
 }
 
 function scheduleReconnect() {
@@ -268,9 +298,10 @@ function scheduleReconnect() {
 }
 
 function postNative(message) {
-  if (!nativePort) return false;
+  const port = nativePort;
+  if (!port) return false;
   try {
-    nativePort.postMessage({
+    port.postMessage({
       ...message,
       browserSessionID,
       ...(browserProfileID ? { browserProfileID } : {}),
@@ -280,9 +311,7 @@ function postNative(message) {
     });
     return true;
   } catch (_) {
-    cancelRequestedTabActivation();
-    nativePort = null;
-    scheduleReconnect();
+    loseNativePort(port);
     return false;
   }
 }
@@ -348,6 +377,9 @@ async function sendHeartbeat() {
   }
   if (!nativePort) connectNativeHost();
   postNative({ type: "heartbeat" });
+  // Retry unknown inventory at heartbeat pace, with one read in flight. A
+  // successful bootstrap clears its token and ordinary idle events stay quiet.
+  requestProfileBootstrap(nativePort);
 }
 
 let previewBusy = false;
@@ -386,6 +418,7 @@ function ownsRequestedTabActivation(owner) {
 }
 let deferredSnapshotPending = false;
 let deferredSnapshotDiscovery = false;
+let deferredSnapshotBootstrapPort = null;
 let deferredSnapshotFlight = null;
 let publishedSnapshotGeneration = -1;
 let publishedSnapshotDiscovery = false;
@@ -404,24 +437,26 @@ function scheduleDiscoveryRetry() {
   }, 100);
 }
 
-function deferSnapshotForPreview(discovery, overlapping = false) {
+function deferSnapshotForPreview(discovery, overlapping = false, bootstrapPort = null) {
   // A fresh post-preview reply already satisfies older overlapping requests.
-  if (pendingSnapshotRequestIDs.size === 0 && overlapping && !previewBusy && publishedSnapshotGeneration === previewGeneration
+  if (!bootstrapPort && pendingSnapshotRequestIDs.size === 0 && overlapping && !previewBusy && publishedSnapshotGeneration === previewGeneration
       && (!discovery || publishedSnapshotDiscovery)) return;
-  if (pendingSnapshotRequestIDs.size === 0 && !previewBusy && deferredSnapshotFlight?.generation === previewGeneration
+  if (!bootstrapPort && pendingSnapshotRequestIDs.size === 0 && !previewBusy && deferredSnapshotFlight?.generation === previewGeneration
       && (!discovery || deferredSnapshotFlight.discovery)) return;
   deferredSnapshotPending = true;
   deferredSnapshotDiscovery ||= discovery;
+  if (bootstrapPort === nativePort) deferredSnapshotBootstrapPort = bootstrapPort;
   flushDeferredPreviewSnapshot();
 }
 
 function flushDeferredPreviewSnapshot() {
   if (previewBusy || !deferredSnapshotPending || deferredSnapshotFlight) return;
-  const flight = { generation: previewGeneration, discovery: deferredSnapshotDiscovery };
+  const flight = { generation: previewGeneration, discovery: deferredSnapshotDiscovery, bootstrapPort: deferredSnapshotBootstrapPort };
   deferredSnapshotPending = false;
   deferredSnapshotDiscovery = false;
+  deferredSnapshotBootstrapPort = null;
   deferredSnapshotFlight = flight;
-  publishTabSnapshot(true, flight.discovery).catch(() => {}).finally(() => {
+  publishTabSnapshot(true, flight.discovery, flight.bootstrapPort).catch(() => {}).finally(() => {
     if (deferredSnapshotFlight === flight) deferredSnapshotFlight = null;
     flushDeferredPreviewSnapshot();
   });
@@ -605,37 +640,43 @@ function completeDiscoveryWindows(windows) {
   return true;
 }
 
-async function publishTabSnapshot(force = false, discovery = false) {
+async function publishTabSnapshot(force = false, discovery = false, bootstrapPort = null) {
   await ensureInitialized();
   // Idle events are deliberately not an inventory. Publishing a forced empty
   // substitute would erase the last real discovery before a Run/outline reads it.
   // Heartbeats retain the connection; explicit discovery can certify emptiness.
-  if (!rules.active && !discovery) return;
+  if (!rules.active && !discovery && !bootstrapPort) return;
   if (!await ensureBrowserProfileIdentity()) return;
+  const bootstrapOwner = bootstrapPort ? profileBootstrap : null;
+  if (bootstrapPort && (nativePort !== bootstrapPort || bootstrapOwner?.port !== bootstrapPort
+      || bootstrapOwner.profileID !== browserProfileID)) return;
   if (!nativePort) connectNativeHost();
   if (!nativePort) return;
-  if (previewBusy) { deferSnapshotForPreview(discovery); return; }
+  const snapshotPort = nativePort, snapshotProfile = browserProfileID;
+  if (previewBusy) { deferSnapshotForPreview(discovery, false, bootstrapPort); return; }
   const generation = previewGeneration;
   const commandRevision = requestedTabCommandRevision;
   const activationRevision = explicitTabActivationRevision;
   const activation = currentRequestedTabActivation();
   const snapshotRequestIDs = discovery ? [...pendingSnapshotRequestIDs] : [];
   let windows, tabs;
-  if (discovery) {
+  if (discovery || bootstrapPort) {
     windows = await chrome.windows?.getAll({ populate: true, windowTypes: ["normal", "popup"] }).catch(() => null);
     // Retain pending request IDs on failures and zero-tab transition windows.
     // Neither an empty substitute nor a filtered snapshot certifies absence.
-    if (!completeDiscoveryWindows(windows)) { scheduleDiscoveryRetry(); return; }
+    if (!completeDiscoveryWindows(windows)) { if (discovery) scheduleDiscoveryRetry(); return; }
     tabs = windows.flatMap(window => window.tabs);
   } else {
     tabs = rules.active ? await chrome.tabs.query({}) : [];
     windows = tabs.length && chrome.windows?.getAll
       ? await chrome.windows.getAll({ populate: false, windowTypes: ["normal", "popup"] }).catch(() => []) : [];
   }
+  if (nativePort !== snapshotPort || browserProfileID !== snapshotProfile
+      || (bootstrapPort && profileBootstrap !== bootstrapOwner)) return;
   // Even if capture finished during an API await, its temporary active/native
   // highlighted state must never be published as a user's fresh selection.
   if (previewBusy || generation !== previewGeneration) {
-    deferSnapshotForPreview(discovery, true);
+    deferSnapshotForPreview(discovery, true, bootstrapPort);
     return;
   }
   // Fence every query, including an unowned query begun before a command or
@@ -644,7 +685,8 @@ async function publishTabSnapshot(force = false, discovery = false) {
   // cannot distinguish that stale result from a new post-activation inventory.
   if (commandRevision !== requestedTabCommandRevision || activationRevision !== explicitTabActivationRevision
       || (activation && !ownsRequestedTabActivation(activation))) {
-    if (discovery && pendingSnapshotRequestIDs.size) deferSnapshotForPreview(true, true);
+    if (bootstrapPort) deferSnapshotForPreview(discovery, true, bootstrapPort);
+    else if (discovery && pendingSnapshotRequestIDs.size) deferSnapshotForPreview(true, true);
     return;
   }
   const windowsByID = new Map(windows.map(window => [window.id, window]));
@@ -668,7 +710,11 @@ async function publishTabSnapshot(force = false, discovery = false) {
             ? { left: window.left, top: window.top, width: window.width, height: window.height } : null;
         })(),
         windowFocused: windowsByID.get(tab.windowId)?.focused ?? null,
-        searchSessionID: rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab.id) ? rules.startupSessionID : null
+        windowState: ["normal", "minimized", "maximized", "fullscreen"].includes(windowsByID.get(tab.windowId)?.state)
+          ? windowsByID.get(tab.windowId).state : null,
+        searchSessionID: rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist"
+          && typeof rules.startupSessionID === "string" && rules.startupSessionID.length > 0
+          && searchSessionTabs.has(tab.id) && isRuntimeAllowedTab(tab) && !isHoldingPage(tab.url) ? rules.startupSessionID : null
     }))
     .sort((left, right) =>
       (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id)
@@ -686,6 +732,7 @@ async function publishTabSnapshot(force = false, discovery = false) {
     snapshotRequestIDs,
     completeWindowInventory: discovery && snapshotRequestIDs.length > 0
   })) {
+    if (bootstrapPort && profileBootstrap === bootstrapOwner) profileBootstrap = null;
     for (const id of snapshotRequestIDs) pendingSnapshotRequestIDs.delete(id);
     if (!pendingSnapshotRequestIDs.size && snapshotDiscoveryRetryTimer !== null) {
       clearTimeout(snapshotDiscoveryRetryTimer); snapshotDiscoveryRetryTimer = null;
@@ -733,6 +780,9 @@ function applyNativeRules(nativeRules) {
   const nextRules = effectiveRules(nativeRules);
   const requestedFingerprint = fingerprintRules(nextRules);
   if (requestedFingerprint === requestedRulesFingerprint) {
+    // Retry failed policy release without waiting for an unrelated held restore.
+    // Active refreshes keep the existing startup/application transaction intact.
+    if (!nextRules.active && !rules.active) void updateNetworkRules().catch(() => {});
     return ruleApplication.then(() => settleRuleRequests());
   }
   requestedRulesFingerprint = requestedFingerprint;
@@ -741,7 +791,12 @@ function applyNativeRules(nativeRules) {
   websitePlayback.clear();
   // Stop enforcement before restoring tabs: restoration emits ordinary tab
   // events, which must not activate anything using the old session's policy.
-  if (!nextRules.active) rules = nextRules;
+  if (!nextRules.active) {
+    rules = nextRules;
+    broadcastRules();
+    // DNR must stop independently of a held or rejected window restoration.
+    void updateNetworkRules().catch(() => {});
+  }
   const apply = async () => {
     if (revision !== ruleApplicationRevision) return;
     await applyEffectiveRules(nextRules, revision);
@@ -830,11 +885,19 @@ function allowedRuleRegex(rawRule) {
   return `^https?://${hostRegex}${escapeRegex(path)}(?:[/?#]|$)`;
 }
 
-function desiredNetworkRules() {
-  if (!rules.active || !rules.blockNavigation || Array.isArray(rules.selectedTabIDs)) return [];
+// Small exact-host partitions keep every emitted RE2 expression bounded. The
+// host list is shared with native/Firefox search policy; no wildcard suffixes.
+const googleSearchNetworkFilters = [];
+for (let offset = 0; offset < IntentBrowserRules.supportedGoogleSearchHosts.length; offset += 12) {
+  const hosts = IntentBrowserRules.supportedGoogleSearchHosts.slice(offset, offset + 12).map(escapeRegex);
+  googleSearchNetworkFilters.push(`^https?://(?:www\\.)?(?:${hosts.join("|")})(?::[0-9]+)?/(?:search/*|/*)(?:[?#].*)?$`);
+}
+
+function desiredNetworkRules(current = rules) {
+  if (!current.active || !current.blockNavigation || Array.isArray(current.selectedTabIDs)) return [];
   const dynamicRules = [];
   let nextID = DYNAMIC_RULE_ID_START;
-  if (rules.accessMode === "whitelist") {
+  if (current.accessMode === "whitelist") {
     dynamicRules.push({
       id: nextID++,
       priority: 1,
@@ -843,24 +906,24 @@ function desiredNetworkRules() {
     });
   }
 
-  for (const website of rules.allowedWebsites) {
+  for (const website of current.allowedWebsites) {
     const regexFilter = allowedRuleRegex(website);
     if (!regexFilter) continue;
     dynamicRules.push({
       id: nextID++,
-      priority: rules.accessMode === "blacklist" ? 1 : 2,
-      action: { type: rules.accessMode === "blacklist" ? "block" : "allow" },
+      priority: current.accessMode === "blacklist" ? 1 : 2,
+      action: { type: current.accessMode === "blacklist" ? "block" : "allow" },
       condition: { regexFilter, resourceTypes: ["main_frame"] }
     });
   }
 
-  if (rules.accessMode === "whitelist" && rules.allowGoogleSearchTabs) {
-    dynamicRules.push({
-      id: nextID,
+  if (current.accessMode === "whitelist" && current.allowGoogleSearchTabs) {
+    for (const regexFilter of googleSearchNetworkFilters) dynamicRules.push({
+      id: nextID++,
       priority: 2,
       action: { type: "allow" },
       condition: {
-        regexFilter: "^https?://(?:[^/]+\\.)?google\\.[^/]+(?::[0-9]+)?/(?:search(?:[?#]|$)|(?:[?#]|$))",
+        regexFilter,
         resourceTypes: ["main_frame"]
       }
     });
@@ -868,45 +931,61 @@ function desiredNetworkRules() {
   return dynamicRules;
 }
 
-async function updateNetworkRules() {
+let networkRuleApplication = Promise.resolve();
+function updateNetworkRules() {
+  const current = rules, revision = ruleApplicationRevision;
+  const apply = () => applyNetworkRules(current, revision);
+  const request = networkRuleApplication.then(apply, apply);
+  networkRuleApplication = request.catch(() => {});
+  return request;
+}
+
+async function applyNetworkRules(current, revision) {
+  const stillCurrent = () => rules === current && ruleApplicationRevision === revision;
+  if (!stillCurrent()) return;
   // Tab-scoped DNR conditions are session rules, not dynamic rules. This also
   // blocks new, unselected tabs before their first document loads.
   if (typeof chrome.declarativeNetRequest.updateSessionRules === "function") {
-    const selected = rules.active && !rules.addAsYouGo && Array.isArray(rules.selectedTabIDs) ? rules.selectedTabIDs : null;
-    const sessionRules = selected === null || (rules.accessMode === "blacklist" && selected.length === 0) ? [] : [{
+    const selected = current.active && !current.addAsYouGo && Array.isArray(current.selectedTabIDs) ? current.selectedTabIDs : null;
+    const sessionRules = selected === null || (current.accessMode === "blacklist" && selected.length === 0) ? [] : [{
       id: 23000, priority: 1000, action: { type: "block" },
       condition: { regexFilter: "^https?://", resourceTypes: ["main_frame"],
-        ...(rules.accessMode === "blacklist" ? { tabIds: selected } : (selected.length ? { excludedTabIds: selected } : {})) }
+        ...(current.accessMode === "blacklist" ? { tabIds: selected } : (selected.length ? { excludedTabIds: selected } : {})) }
     }];
-    if (rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist") {
+    if (current.active && current.allowGoogleSearchTabs && current.accessMode !== "blacklist") {
       if (searchSessionTabs.size) sessionRules.push({id: 23001, priority: 1001, action: {type: "block"},
         condition: {regexFilter: "^https?://", resourceTypes: ["main_frame"], tabIds: [...searchSessionTabs]}});
       const searchAllowedIDs = [...new Set([...searchSessionTabs, ...(selected || [])])];
-      if (searchAllowedIDs.length) sessionRules.push({id: 23002, priority: 1002, action: {type: "allow"}, condition: {
+      if (searchAllowedIDs.length) googleSearchNetworkFilters.forEach((regexFilter, index) => sessionRules.push({id: GOOGLE_SEARCH_SESSION_RULE_ID_START + index, priority: 1002, action: {type: "allow"}, condition: {
         tabIds: searchAllowedIDs,
-        regexFilter: "^https?://(www\\.)?google\\.[a-z.]+/(search([?].*)?|([?].*)?)$", resourceTypes: ["main_frame"]}});
+        regexFilter, resourceTypes: ["main_frame"]}}));
     }
-    const exactWebsiteSelection = rules.accessMode !== "blacklist" && selected !== null;
-    const instagramDestination = IntentWebsiteFeatures.landingDestination("instagram", rules.websiteFeaturePolicies);
-    const destinationAllowed = instagramDestination && (exactWebsiteSelection || isAllowedURL(instagramDestination, rules));
+    const exactWebsiteSelection = current.accessMode !== "blacklist" && selected !== null;
+    const instagramDestination = IntentWebsiteFeatures.landingDestination("instagram", current.websiteFeaturePolicies);
+    const destinationAllowed = instagramDestination && (exactWebsiteSelection || isAllowedURL(instagramDestination, current));
     const instagramRouting = destinationAllowed ? {
-      sources: exactWebsiteSelection || rules.addAsYouGo || rules.accessMode === "blacklist" ? ["instagram.com"] : rules.allowedWebsites,
-      excludedSources: rules.accessMode === "blacklist" ? rules.allowedWebsites : []
+      sources: exactWebsiteSelection || current.addAsYouGo || current.accessMode === "blacklist" ? ["instagram.com"] : current.allowedWebsites,
+      excludedSources: current.accessMode === "blacklist" ? current.allowedWebsites : []
     } : null;
-    if (rules.active) sessionRules.push(...IntentWebsiteFeatures.networkRules(rules.websiteFeaturePolicies,
-      rules.accessMode === "blacklist" ? null : selected, instagramRouting));
+    if (current.active) sessionRules.push(...IntentWebsiteFeatures.networkRules(current.websiteFeaturePolicies,
+      current.accessMode === "blacklist" ? null : selected, instagramRouting));
     await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [23000, 23001, 23002, ...Array.from({length: WEBSITE_SESSION_RULE_ID_COUNT}, (_, i) => WEBSITE_SESSION_RULE_ID_START + i)], addRules: sessionRules});
+      removeRuleIds: [23000, 23001, ...Array.from({length: GOOGLE_SEARCH_SESSION_RULE_ID_COUNT}, (_, i) => GOOGLE_SEARCH_SESSION_RULE_ID_START + i), ...Array.from({length: WEBSITE_SESSION_RULE_ID_COUNT}, (_, i) => WEBSITE_SESSION_RULE_ID_START + i)], addRules: sessionRules});
   }
-  const nextRules = desiredNetworkRules();
+  if (!stillCurrent()) return;
+  const nextRules = desiredNetworkRules(current);
   const nextFingerprint = JSON.stringify(nextRules);
   if (nextFingerprint === dnrFingerprint) return;
-  const current = await chrome.declarativeNetRequest.getDynamicRules().catch(() => []);
+  const installed = await chrome.declarativeNetRequest.getDynamicRules();
+  if (!stillCurrent()) return;
+  // An API call can take effect before its promise settles. A superseded or
+  // rejected call must not leave a cached empty fingerprint hiding live rules.
+  dnrFingerprint = "";
   await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: current.map((rule) => rule.id),
+    removeRuleIds: installed.map((rule) => rule.id),
     addRules: nextRules
   });
-  dnrFingerprint = nextFingerprint;
+  if (stillCurrent()) dnrFingerprint = nextFingerprint;
 }
 
 async function clearStaleStartupNavigationRules() {
@@ -924,10 +1003,12 @@ async function clearStaleStartupNavigationRules() {
 }
 
 function broadcastRules() {
+  const current = rules, revision = ruleApplicationRevision;
   chrome.tabs.query({}).then((tabs) => {
+    if (rules !== current || revision !== ruleApplicationRevision) return;
     for (const tab of tabs) {
       if (tab.id == null) continue;
-      chrome.tabs.sendMessage(tab.id, { type: "rulesUpdated", rules }).catch(() => {});
+      chrome.tabs.sendMessage(tab.id, { type: "rulesUpdated", rules: current }).catch(() => {});
     }
   }).catch(() => {});
 }
@@ -1076,25 +1157,27 @@ function sameNavigationURL(existingURL, requestedURL) {
   }
 }
 
-async function beginStartupNavigation(tabId, startupURL) {
+async function beginStartupNavigation(tabId, startupURL, stillCurrent) {
   await endStartupNavigation(tabId);
+  if (!stillCurrent()) return null;
   const ruleID = nextStartupSessionRuleID;
   nextStartupSessionRuleID = nextStartupSessionRuleID >= STARTUP_SESSION_RULE_ID_END
     ? STARTUP_SESSION_RULE_ID_START
     : nextStartupSessionRuleID + 1;
-  startupNavigationURLByTab.set(tabId, {
+  const pending = {
     startupURL,
     lastNavigationURL: null,
     ruleID
-  });
+  };
+  startupNavigationURLByTab.set(tabId, pending);
 
   let host;
   try {
     host = new URL(startupURL).hostname.toLowerCase();
   } catch (_) {
-    return;
+    return pending;
   }
-  if (typeof chrome.declarativeNetRequest.updateSessionRules !== "function") return;
+  if (typeof chrome.declarativeNetRequest.updateSessionRules !== "function") return pending;
 
   // Path-specific starts such as Outlook messages can redirect to a same-host
   // shell while booting. A high-priority, tab-scoped session rule lets only
@@ -1113,10 +1196,12 @@ async function beginStartupNavigation(tabId, startupURL) {
       }
     }]
   }).catch(() => {});
+  return pending;
 }
 
-async function endStartupNavigation(tabId) {
+async function endStartupNavigation(tabId, expectedPending = null) {
   const pending = startupNavigationURLByTab.get(tabId);
+  if (expectedPending && pending !== expectedPending) return;
   startupNavigationURLByTab.delete(tabId);
   if (!pending?.ruleID || typeof chrome.declarativeNetRequest.updateSessionRules !== "function") return;
   await chrome.declarativeNetRequest.updateSessionRules({
@@ -1154,66 +1239,107 @@ function startupLaunchPending() {
 }
 
 async function synchronizeStartupTabs() {
-  const startupFingerprint = JSON.stringify(rules.startupWebsites);
+  const startupRules = rules;
+  const revision = ruleApplicationRevision;
+  const stillCurrent = () => rules === startupRules && startupRules.active && revision === ruleApplicationRevision;
+  const startupFingerprint = JSON.stringify(startupRules.startupWebsites);
   if (
     synchronizingStartupTabs ||
     !startupLaunchPending()
   ) return;
 
   synchronizingStartupTabs = true;
+  const progressKey = JSON.stringify([startupRules.startupSessionID, startupFingerprint]);
+  if (startupLaunchProgress?.key !== progressKey) {
+    startupLaunchProgress = { key: progressKey, urls: new Map(), activationTabID: null };
+  }
+  const progress = startupLaunchProgress;
+  const ownedNavigations = new Map();
+  const prepareNavigation = async (tabId, startupURL) => {
+    const pending = await beginStartupNavigation(tabId, startupURL, stillCurrent);
+    if (pending) ownedNavigations.set(tabId, pending);
+    return stillCurrent();
+  };
   try {
     const tabs = await chrome.tabs.query({});
-    if (tabs.length === 0) return;
-
-    completedStartupFingerprint = startupFingerprint;
-    if (rules.startupSessionID) {
-      completedStartupSessionID = rules.startupSessionID;
-      await chrome.storage.local.set({ completedStartupSessionID }).catch(() => {});
-    }
+    if (!stillCurrent() || tabs.length === 0) return;
 
     const claimedTabIds = new Set();
     let stagingTabs = tabs.filter((tab) => isSearchStagingURL(tab.url));
     let firstStartupTab = null;
 
-    for (const startupURL of uniqueStartupURLs(rules.startupWebsites)) {
-      let tab = tabs.find((candidate) =>
-        !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL)
-      );
+    for (const startupURL of uniqueStartupURLs(startupRules.startupWebsites)) {
+      if (!stillCurrent()) return;
+      const previous = progress.urls.get(startupURL);
+      let tab = previous && tabs.find(candidate => candidate.id === previous.tabID);
+      let reuse = false;
       if (tab) {
-        await beginStartupNavigation(tab.id, startupURL);
-        if (sameNavigationURL(tab.url || "", startupURL)) {
-          await chrome.tabs.reload(tab.id);
-        } else {
-          tab = await chrome.tabs.update(tab.id, {
-            url: startupURL,
-            active: Boolean(tab.active)
-          });
-        }
-      } else {
-        const staging = stagingTabs.shift();
-        if (staging) {
-          await beginStartupNavigation(staging.id, startupURL);
-          tab = await chrome.tabs.update(staging.id, {
-            url: startupURL,
-            active: Boolean(staging.active)
-          });
-        } else {
-          tab = await chrome.tabs.create({ url: "chrome://newtab/", active: false });
-          await beginStartupNavigation(tab.id, startupURL);
-          tab = await chrome.tabs.update(tab.id, { url: startupURL, active: false });
+        const destinationObserved = sameNavigationURL(tab.url || "", startupURL)
+          || sameNavigationURL(tab.pendingUrl || "", startupURL);
+        reuse = destinationObserved && (previous.confirmed ||
+          (previous.kind === "update" && !sameNavigationURL(previous.priorURL, startupURL)));
+        if (reuse) {
+          previous.confirmed = true;
+          if (previous.pending) ownedNavigations.set(tab.id, previous.pending);
+        } else if (previous.confirmed || previous.kind === "reload" ||
+            !sameNavigationURL(tab.url || "", previous.priorURL)) {
+          // An unchanged URL cannot prove whether a rejected reload ran.
+          // Keep that attempt unresolved instead of blindly repeating it.
+          throw previous.error || new Error("Startup navigation could not be confirmed");
         }
       }
+      if (!reuse) tab = tabs.find(candidate =>
+        !claimedTabIds.has(candidate.id) && startupURLMatches(candidate.url || "", startupURL));
+      if (!tab) {
+        const staging = stagingTabs.shift();
+        tab = staging || await chrome.tabs.create({ url: "chrome://newtab/", active: false });
+        if (!stillCurrent()) return;
+      }
+      if (!reuse) {
+        if (!await prepareNavigation(tab.id, startupURL)) return;
+        const attempt = {
+          tabID: tab.id, priorURL: tab.url || "",
+          kind: sameNavigationURL(tab.url || "", startupURL) ? "reload" : "update",
+          confirmed: false, pending: ownedNavigations.get(tab.id), error: null
+        };
+        progress.urls.set(startupURL, attempt);
+        try {
+          if (attempt.kind === "reload") await chrome.tabs.reload(tab.id);
+          else tab = await chrome.tabs.update(tab.id, { url: startupURL, active: Boolean(tab.active) });
+          attempt.confirmed = true;
+        } catch (error) {
+          attempt.error = error;
+          throw error;
+        }
+      }
+      if (!stillCurrent()) return;
       claimedTabIds.add(tab.id);
       freshBlankTabIds.delete(tab.id);
       lastAllowedURLByTab.set(tab.id, startupURL);
       firstStartupTab ||= tab;
     }
 
-    if (firstStartupTab) {
+    if (stillCurrent() && firstStartupTab &&
+        !(progress.activationTabID === firstStartupTab.id && firstStartupTab.active)) {
       lastAllowedTabId = firstStartupTab.id;
+      progress.activationTabID = firstStartupTab.id;
       await chrome.tabs.update(firstStartupTab.id, { active: true });
     }
+    if (!stillCurrent()) return;
+    if (startupRules.startupSessionID) {
+      await chrome.storage.local.set({ completedStartupSessionID: startupRules.startupSessionID });
+      if (!stillCurrent()) return;
+      completedStartupSessionID = startupRules.startupSessionID;
+    }
+    completedStartupFingerprint = startupFingerprint;
   } finally {
+    // A replaced launch owns only its exact pending navigation entries. In
+    // particular, an active replacement must not inherit their DNR allows.
+    if (!stillCurrent()) {
+      for (const [tabId, pending] of ownedNavigations) {
+        await endStartupNavigation(tabId, pending);
+      }
+    }
     synchronizingStartupTabs = false;
   }
 }
@@ -1344,8 +1470,11 @@ chrome.windows?.onFocusChanged?.addListener(async (windowId) => {
   ++windowFocusRevision;
   const activation = currentRequestedTabActivation();
   if (activation) {
-    if (windowId !== activation.windowID) cancelRequestedTabActivation(activation);
-    else void publishTabSnapshot(true, true).catch(() => {});
+    // WINDOW_ID_NONE can be an intermediate native focus transition. It proves
+    // neither target focus nor a different user window; retain only this bounded
+    // request until a positive focus event, cancellation, or its existing expiry.
+    if (windowId === activation.windowID) void publishTabSnapshot(true, true).catch(() => {});
+    else if (Number.isInteger(windowId) && windowId >= 0) cancelRequestedTabActivation(activation);
   }
   if (windowId >= 0) recoverForegroundConnection();
   if (!rules.active || !Array.isArray(rules.selectedTabIDs) || windowId < 0) return;

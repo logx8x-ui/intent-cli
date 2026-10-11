@@ -11,12 +11,14 @@ public struct BrowserSelectedTabPresenceCheck {
     private let browser: String
     private let expectedSession: String
     private let selectedIDs: Set<Int>
+    private let searchSessionID: String?
     private let snapshotURL: URL
     private let commandURL: URL
     private let requestedAt: Date
     private let queries: [Query]
 
     public init?(browser: String, expectedSession: String, selectedIDs: [Int],
+                 searchSessionID: String? = nil,
                  snapshotURL: URL? = nil, commandURL: URL? = nil, now: Date = Date()) {
         let snapshotURL = snapshotURL ?? BrowserTabSnapshotStore.fileURL(for: browser)
         let owners = BrowserProfileSnapshots.sessions(base: snapshotURL, now: now)
@@ -26,6 +28,7 @@ public struct BrowserSelectedTabPresenceCheck {
               Set(owners.compactMap(\.browserSessionID)).count == owners.count else { return nil }
         self.browser = browser; self.expectedSession = expectedSession
         self.selectedIDs = Set(selectedIDs); self.snapshotURL = snapshotURL
+        self.searchSessionID = searchSessionID
         self.commandURL = commandURL ?? BrowserTabCommandStore.fileURL(for: browser)
         self.requestedAt = now
         self.queries = owners.map { owner in
@@ -65,6 +68,7 @@ public struct BrowserSelectedTabPresenceCheck {
         // All owners must reply before absence has meaning. Reuse the same ID
         // representation as selection: native for one owner, composite for many.
         guard let snapshot = BrowserProfileSnapshots.merged(replies) else { return .pending }
-        return (snapshot.allTabs ?? []).contains { selectedIDs.contains($0.id) } ? .present : .closed
+        return SelectedResourceLifetime.hasRemainingTabs(snapshot: snapshot, selectedIDs: selectedIDs,
+            searchSessionID: searchSessionID) ? .present : .closed
     }
 }

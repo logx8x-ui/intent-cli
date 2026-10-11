@@ -112,6 +112,7 @@ let commandPort = null;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MS;
 let nativeConnectionConfirmed = false;
+let profileBootstrap = null;
 let lastForegroundReconnectAt = -Infinity;
 function guardStatus() {
   return { enabled: guardEnabled, connected: Boolean(commandPort && nativeConnectionConfirmed) };
@@ -181,13 +182,16 @@ function connectCommandPort() {
   if (!initialized) { void ensureInitialized(); return; }
   if (commandPort || reconnectTimer !== null) return;
   if (typeof browser.runtime.connectNative !== "function") return;
+  let port = null;
   try {
-    const port = browser.runtime.connectNative(HOST_NAME);
+    port = browser.runtime.connectNative(HOST_NAME);
     commandPort = port;
+    profileBootstrap = {port, profileID:browserProfileID, ready:false, flight:null};
     hostSupportsQuickSelection = false;
     nativeConnectionConfirmed = false;
     port.onMessage.addListener(async (message) => {
       if (commandPort !== port) return;
+      const firstResponse = !nativeConnectionConfirmed;
       const refreshResolver = resolvePendingRuleRefresh;
       const visibilityWasReady = Boolean(nativeWindowVisibility?.identity());
       nativeWindowVisibility?.receive(message);
@@ -221,25 +225,48 @@ function connectCommandPort() {
       await application;
       if (commandPort === port && ruleApplicationRevision === applicationRevision
           && refreshResolver && resolvePendingRuleRefresh === refreshResolver) settlePendingRuleRefresh();
+      if (firstResponse) requestProfileBootstrap(port, true);
     });
     port.onDisconnect.addListener(() => {
-      if (commandPort !== port) return;
-      commandPort = null;
-      nativeWindowVisibility?.disconnected();
-      minimizeBootstrap?.disconnected();
-      nativeConnectionConfirmed = false;
-      settlePendingRuleRefresh();
-      scheduleCommandReconnect();
+      loseCommandPort(port);
     });
     postCommandPort({ type: "getRules" });
   } catch (_) {
-    commandPort = null;
-    scheduleCommandReconnect();
+    loseCommandPort(port);
   }
 }
 
+function requestProfileBootstrap(port, firstResponse = false) {
+  const owner = profileBootstrap;
+  if (!owner || owner.port !== port || commandPort !== port || !nativeConnectionConfirmed) return;
+  if (firstResponse) owner.ready = true;
+  if (!owner.ready || !browserProfileID) return;
+  if (owner.profileID === null) owner.profileID = browserProfileID;
+  if (owner.profileID !== browserProfileID || owner.flight) return;
+  const flight = publishTabSnapshot(true, false, null, port).catch(() => {});
+  owner.flight = flight;
+  void flight.finally(() => { if (owner.flight === flight) owner.flight = null; });
+}
+
+function loseCommandPort(port) {
+  // Delayed disconnects and failed writes from a retired port cannot release
+  // the rules of a newer confirmed connection.
+  if (commandPort !== port) return;
+  commandPort = null;
+  nativeConnectionConfirmed = false;
+  profileBootstrap = null;
+  // applyNativeRules releases enforcement synchronously, before any awaited
+  // tab restoration. Native ownership remains durable: loss is not permission
+  // to discard a parked-window plan or reveal an unverified native window.
+  void applyNativeRules(inactiveRules()).catch(() => {});
+  nativeWindowVisibility?.disconnected();
+  minimizeBootstrap?.disconnected();
+  settlePendingRuleRefresh();
+  scheduleCommandReconnect();
+}
+
 function scheduleCommandReconnect() {
-  if (reconnectTimer) return;
+  if (reconnectTimer !== null) return;
   const delay = reconnectDelayMs;
   reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_MS);
   reconnectTimer = setTimeout(() => {
@@ -250,8 +277,9 @@ function scheduleCommandReconnect() {
 
 function postCommandPort(message) {
   if (!commandPort) return false;
+  const port = commandPort;
   try {
-    commandPort.postMessage({
+    port.postMessage({
       ...message,
       browserSessionID,
       ...(browserProfileID ? { browserProfileID } : {}),
@@ -261,8 +289,7 @@ function postCommandPort(message) {
     });
     return true;
   } catch (_) {
-    commandPort = null;
-    scheduleCommandReconnect();
+    loseCommandPort(port);
     return false;
   }
 }
@@ -324,6 +351,8 @@ async function captureTabPreview(message) {
 }
 
 async function handleRequestedTab(message) {
+  const originatingPort = commandPort;
+  const connectionCurrent = () => !originatingPort || commandPort === originatingPort;
   if (message.action === "create" || message.action === "cancelCreate") {
     await tabCreation?.handle(message); return;
   }
@@ -339,6 +368,7 @@ async function handleRequestedTab(message) {
     const current = await browser.tabs.get(message.tabID).catch(() => null);
     if (current?.windowId === message.windowID) tab = current;
   }
+  if (!connectionCurrent()) return;
   if (!tab) {
     if (message.action === "preview") postCommandPort({
       type: "tabPreview",
@@ -355,10 +385,11 @@ async function handleRequestedTab(message) {
     return;
   }
   if (!isRuntimeAllowedTab(tab)) return;
+  if (!connectionCurrent()) return;
   await browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
   // Focusing a window is asynchronous; a user can move/close the target meanwhile.
   const current = await browser.tabs.get(tab.id).catch(() => null);
-  if (current?.windowId !== message.windowID || !isRuntimeAllowedTab(current)) return;
+  if (!connectionCurrent() || current?.windowId !== message.windowID || !isRuntimeAllowedTab(current)) return;
   await browser.tabs.update(tab.id, { active: true }).catch(() => {});
   // Idle event snapshots deliberately omit tab inventory. Explicit activation
   // still needs a fresh acknowledgement for overview resolution and Run.
@@ -378,21 +409,61 @@ function scheduleTabSnapshot(force = false) {
   }, TAB_SNAPSHOT_DEBOUNCE_MS);
 }
 
-async function publishTabSnapshot(force = false, discovery = false, requestID = null) {
+function completeBootstrapWindows(windows) {
+  if (!Array.isArray(windows)) return false;
+  const windowIDs = new Set(), tabIDs = new Set();
+  for (const window of windows) {
+    if (!window || !Number.isSafeInteger(window.id) || window.id < 0 || windowIDs.has(window.id)
+        || !["normal", "popup"].includes(window.type)
+        || ![window.left, window.top, window.width, window.height].every(Number.isFinite)
+        || window.width <= 0 || window.height <= 0 || window.width > 100_000 || window.height > 100_000
+        || Math.abs(window.left) > 100_000 || Math.abs(window.top) > 100_000
+        || !Array.isArray(window.tabs) || !window.tabs.length) return false;
+    windowIDs.add(window.id);
+    let active = 0;
+    const indices = new Set();
+    for (const tab of window.tabs) {
+      if (!tab || !Number.isSafeInteger(tab.id) || tab.id < 0 || tabIDs.has(tab.id)
+          || tab.windowId !== window.id || !Number.isInteger(tab.index) || tab.index < 0
+          || indices.has(tab.index) || typeof tab.active !== "boolean") return false;
+      indices.add(tab.index); tabIDs.add(tab.id);
+      if (tab.active) active += 1;
+    }
+    if (active !== 1 || !window.tabs.every(tab => tab.index < window.tabs.length)) return false;
+  }
+  return true;
+}
+
+async function publishTabSnapshot(force = false, discovery = false, requestID = null, bootstrapPort = null) {
   await ensureInitialized();
+  // Idle events do not erase the last real inventory. Only an explicit query
+  // or a new confirmed connection performs a read-only profile enumeration.
+  if (!rules.active && !discovery && !bootstrapPort) return;
   if (!await ensureBrowserProfileIdentity()) return;
+  const bootstrapOwner = bootstrapPort ? profileBootstrap : null;
+  if (bootstrapPort && (commandPort !== bootstrapPort || bootstrapOwner?.port !== bootstrapPort
+      || bootstrapOwner.profileID !== browserProfileID)) return;
   if (!commandPort) connectCommandPort();
   if (!commandPort) return;
+  const snapshotPort = commandPort, snapshotProfile = browserProfileID;
   // The receipt belongs only to this request's own query. Never lend a later
   // request ID to an ordinary or already in-flight inventory.
   const snapshotRequestIDs = discovery && typeof requestID === "string" && requestID.length > 0 && requestID.length <= 256
     ? [requestID] : [];
-  const tabs = rules.active || discovery ? await browser.tabs.query({}).catch(() => null) : [];
-  if (!Array.isArray(tabs)) return;
-  // Window identity is supplied by the browser; bounds disambiguate equal titles
-  // when matching these IDs to macOS WindowServer preview windows.
-  const windows = tabs.length && browser.windows?.getAll
-    ? await browser.windows.getAll({ populate: false, windowTypes: ["normal", "popup"] }).catch(() => []) : [];
+  let tabs, windows;
+  if (bootstrapPort) {
+    windows = await browser.windows?.getAll({populate:true, windowTypes:["normal", "popup"]}).catch(() => null);
+    if (!completeBootstrapWindows(windows)) return;
+    tabs = windows.flatMap(window => window.tabs);
+  } else {
+    tabs = rules.active || discovery ? await browser.tabs.query({}).catch(() => null) : [];
+    if (!Array.isArray(tabs)) return;
+    // Browser bounds disambiguate equal titles against WindowServer previews.
+    windows = tabs.length && browser.windows?.getAll
+      ? await browser.windows.getAll({populate:false, windowTypes:["normal", "popup"]}).catch(() => []) : [];
+  }
+  if (commandPort !== snapshotPort || browserProfileID !== snapshotProfile
+      || (bootstrapPort && profileBootstrap !== bootstrapOwner)) return;
   const windowsByID = new Map(windows.map(window => [window.id, window]));
   const allSnapshotTabs = tabs
     .filter(tab => Number.isInteger(tab.id) && tab.id >= 0 && Number.isInteger(tab.windowId))
@@ -415,7 +486,11 @@ async function publishTabSnapshot(force = false, discovery = false, requestID = 
             ? { left: window.left, top: window.top, width: window.width, height: window.height } : null;
         })(),
         windowFocused: windowsByID.get(tab.windowId)?.focused ?? null,
-        searchSessionID: rules.active && rules.allowGoogleSearchTabs && searchSessionTabs.has(tab.id) ? rules.startupSessionID : null
+        windowState: ["normal", "minimized", "maximized", "fullscreen"].includes(windowsByID.get(tab.windowId)?.state)
+          ? windowsByID.get(tab.windowId).state : null,
+        searchSessionID: rules.active && rules.allowGoogleSearchTabs && rules.accessMode !== "blacklist"
+          && typeof rules.startupSessionID === "string" && rules.startupSessionID.length > 0
+          && searchSessionTabs.has(tab.id) && isRuntimeAllowedTab(tab) && !isHoldingPage(tab.url) ? rules.startupSessionID : null
       }))
       .sort((left, right) => (left.windowID - right.windowID) || (left.index - right.index) || (left.id - right.id));
   const allowedIDs = new Set(tabs.filter(tab => discovery || isRuntimeAllowedTab(tab)).map(tab => tab.id));
@@ -423,6 +498,7 @@ async function publishTabSnapshot(force = false, discovery = false, requestID = 
   const nextFingerprint = JSON.stringify({ tabs: snapshotTabs, allTabs: allSnapshotTabs });
   if (!force && nextFingerprint === lastSnapshotFingerprint) return;
   if (postCommandPort({ type: "tabsSnapshot", browserSessionID, tabs: snapshotTabs, allTabs: allSnapshotTabs, snapshotRequestIDs })) {
+    if (bootstrapPort && profileBootstrap === bootstrapOwner) profileBootstrap = null;
     lastSnapshotFingerprint = nextFingerprint;
   }
 }
@@ -520,6 +596,9 @@ async function sendHeartbeat() {
   }
   if (!commandPort) connectCommandPort();
   postCommandPort({ type: "heartbeat" });
+  // A failed inventory stays pending; existing heartbeats retry one coalesced
+  // read without reconnects, rapid timers or fabricated empty snapshots.
+  requestProfileBootstrap(commandPort);
 }
 
 let ruleApplication = Promise.resolve();
@@ -535,7 +614,12 @@ function applyNativeRules(nativeRules) {
   websitePlayback.clear();
   // Stop enforcement before restoring tabs: restoration emits ordinary tab
   // events, which must not activate anything using the old session's policy.
-  if (!nextRules.active) rules = nextRules;
+  if (!nextRules.active) {
+    rules = nextRules;
+    // Site controls must release even while owned parked-tab restoration is
+    // pending. The restore still runs in order and retains its native proof.
+    broadcastRules(nextRules, revision);
+  }
   const apply = async () => {
     if (revision !== ruleApplicationRevision) return;
     await applyEffectiveRules(nextRules, revision);
@@ -548,6 +632,16 @@ function applyNativeRules(nativeRules) {
     throw error;
   });
   return ruleApplication;
+}
+function broadcastRules(currentRules, revision) {
+  const stillCurrent = () => revision === ruleApplicationRevision && rules === currentRules;
+  if (!stillCurrent()) return;
+  browser.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (!stillCurrent()) return;
+      browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules: currentRules}).catch(() => {});
+    }
+  }).catch(() => {});
 }
 async function applyEffectiveRules(nextRules, revision) {
   const previousFingerprint = rulesFingerprint;
@@ -566,9 +660,7 @@ async function applyEffectiveRules(nextRules, revision) {
     try { await installWebsiteGuards(); } catch (error) { rulesFingerprint = ""; throw error; }
   }
 
-  browser.tabs.query({}).then(tabs => {
-    for (const tab of tabs) browser.tabs.sendMessage(tab.id, {type: "rulesUpdated", rules}).catch(() => {});
-  }).catch(() => {});
+  if (nextRules.active) broadcastRules(nextRules, revision);
 
   if (revision !== ruleApplicationRevision) return;
   if (rules.active) {

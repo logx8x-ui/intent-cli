@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
-const {createHash} = require('node:crypto');
+const {createHash, randomUUID} = require('node:crypto');
 const host = path.resolve(__dirname, '../.build/release/IntentNativeHost');
 function frame(message) {
   const body = Buffer.from(JSON.stringify(message)), header = Buffer.alloc(4);
@@ -50,10 +50,66 @@ async function check(browser, suffix) {
     assert.ok(read().updatedAt >= requested, 'An explicit unchanged snapshot acknowledges this request, not an old one');
     assert.equal(read().tabs[0].id, 1);
 
-    // A background presence query gets its own channel and cannot overwrite
-    // a user command waiting for this same browser/profile.
     const component = createHash('sha256').update(session).digest('hex').slice(0,24);
     const normalPath = path.join(directory, `browser-tab-command${suffix}.profile-${component}.json`);
+    const profileFile = path.join(directory, `browser-tabs${suffix}.profile-${component}.json`);
+    const readProfile = () => JSON.parse(fs.readFileSync(profileFile));
+    const issueActivation = async overrides => {
+      const command = {id:randomUUID(),action:'activate',tabID:1,windowID:7,browserSessionID:session,
+        createdAt:Date.now()/1000-978307200,...overrides};
+      fs.writeFileSync(normalPath,JSON.stringify(command));
+      await until(()=>replies.some(reply=>reply.tabCommand?.id===command.id),`${browser}: activation did not reach this host`);
+      return command;
+    };
+    const beforeActivation = readProfile().updatedAt;
+    await new Promise(resolve=>setTimeout(resolve,40));
+    const activation = await issueActivation();
+    child.stdin.write(frame(snapshot));
+    await until(()=>readProfile().updatedAt>beforeActivation,
+      `${browser}: unchanged current-profile snapshot did not acknowledge activation freshness`);
+    assert.ok(readProfile().updatedAt>=activation.createdAt,'A no-op activation gets a current observation even when active/focused rows already match');
+
+    // Ordinary activation may request one timestamp renewal. It never issues
+    // a full-discovery request, even if the browser echoes the activation ID.
+    const activationSnapshot={...snapshot,allTabs:snapshot.tabs,snapshotRequestIDs:[activation.id],completeWindowInventory:true};
+    child.stdin.write(frame(activationSnapshot));
+    await until(()=>readProfile().allTabs?.length===1);
+    for(const key of ['snapshotRequestIDs','profileDiscoveryRequestIDs','completeWindowInventory']) {
+      assert.equal(readProfile()[key],undefined,`${browser}: activation must not grant ${key}`);
+    }
+    assert.equal(fs.existsSync(path.join(directory,`browser-tabs${suffix}.coverage-profile-${component}.json`)),false,
+      'Activation creates no authoritative coverage sidecar');
+    assert.equal(fs.existsSync(path.join(directory,`browser-tabs${suffix}.discovery-profile-${component}.json`)),false,
+      'Activation creates no authoritative profile-discovery sidecar');
+    const activationFreshness=readProfile().updatedAt;
+    child.stdin.write(frame(activationSnapshot));
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(readProfile().updatedAt,activationFreshness,'The one activation refresh is consumed; idle dedup remains silent');
+
+    for(const [label,overrides] of [
+      ['foreign profile',{browserSessionID:'other-profile'}],
+      ['expired command',{createdAt:Date.now()/1000-978307200-4}],
+      ['future command',{createdAt:Date.now()/1000-978307200+10}],
+      ['invalid tab identity',{tabID:-1}],
+      ['invalid window identity',{windowID:-1}],
+      ['empty command identity',{id:''}],
+      ['oversized command identity',{id:'x'.repeat(129)}]
+    ]) {
+      const before=readProfile().updatedAt;
+      await issueActivation(overrides);
+      child.stdin.write(frame(activationSnapshot));
+      await new Promise(resolve=>setTimeout(resolve,100));
+      assert.equal(readProfile().updatedAt,before,`${browser}: ${label} cannot earn an unchanged-snapshot freshness renewal`);
+    }
+    const beforeExpiry=readProfile().updatedAt;
+    await issueActivation();
+    await new Promise(resolve=>setTimeout(resolve,3100));
+    child.stdin.write(frame(activationSnapshot));
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(readProfile().updatedAt,beforeExpiry,'An unanswered activation refresh expires instead of granting arbitrarily late freshness');
+
+    // A background presence query gets its own channel and cannot overwrite
+    // a user command waiting for this same browser/profile.
     const presencePath = path.join(directory, `browser-tab-command${suffix}.presence-profile-${component}.json`);
     const queuedAt = Date.now() / 1000 - 978307200;
     const normal = {id:'user-activate',action:'activate',tabID:1,windowID:7,browserSessionID:session,createdAt:queuedAt};

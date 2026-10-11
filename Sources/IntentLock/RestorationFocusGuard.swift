@@ -2,6 +2,48 @@ import AppKit
 import ApplicationServices
 import IntentCore
 
+/// The actual corrective-effect boundary, shared by the native controller and
+/// injected specs. Unknown visibility never authorizes bringing a window back.
+public enum RestorationFocusCorrectionEffects {
+    public struct Observation {
+        public var exists: Bool?
+        public var onScreen: Bool?
+        public var minimized: Bool?
+        public init(exists: Bool?, onScreen: Bool?, minimized: Bool?) {
+            self.exists = exists; self.onScreen = onScreen; self.minimized = minimized
+        }
+    }
+
+    public static func minimized(status: AXError, value: CFTypeRef?) -> Bool? {
+        guard status == .success, let value, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+        return CFBooleanGetValue(unsafeBitCast(value, to: CFBoolean.self))
+    }
+
+    public static func onScreen(rows: [[String: Any]]?, windowID: UInt32, pid: pid_t) -> Bool? {
+        guard let rows, windowID > 0, pid > 0 else { return nil }
+        var identities = Set<UInt32>()
+        var found = false
+        for row in rows {
+            guard let id = row[kCGWindowNumber as String] as? UInt32, id > 0,
+                  let owner = row[kCGWindowOwnerPID as String] as? pid_t, owner > 0,
+                  identities.insert(id).inserted else { return nil }
+            if id == windowID && owner == pid { found = true }
+        }
+        return found
+    }
+
+    /// Re-probe immediately before each distinct effect. A previous main-window
+    /// request is not permission to raise after the target or input changes.
+    public static func perform<Result>(isCurrent: () -> Bool, readTarget: () -> Observation,
+                                       permitsForeground: () -> Bool, effect: () -> Result) -> Result? {
+        guard isCurrent() else { return nil }
+        let target = readTarget()
+        guard target.exists == true, target.onScreen == true, target.minimized == false,
+              isCurrent(), permitsForeground(), isCurrent() else { return nil }
+        return effect()
+    }
+}
+
 /// A short-lived exact-window restoration transaction. Never opens an app or
 /// follows a stale session-start window. Observed input ends preservation.
 final class RestorationFocusGuard {
@@ -125,6 +167,37 @@ final class RestorationFocusGuard {
         return false
     }
 
+    private func correctionIsCurrent() -> Bool {
+        guard !inputCancelled() else { return false }
+        guard ProcessInfo.processInfo.systemUptime - beganUptime <= 5,
+              Date().timeIntervalSince(beganAt) <= 5 else {
+            Self.cancel(reason: "complete"); return false
+        }
+        return !application.isTerminated && !application.isHidden
+    }
+
+    private func correctionObservation(_ window: AXUIElement) -> RestorationFocusCorrectionEffects.Observation {
+        // AX IPC may block while the user changes Spaces. Sample native
+        // visibility after that read, nearest to the corrective dispatch.
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &value)
+        let minimized = RestorationFocusCorrectionEffects.minimized(status: status, value: value)
+        guard minimized == false else { return .init(exists: nil, onScreen: nil, minimized: minimized) }
+        let exists = WorkspaceWindow.exists(id: visibleWindowID, pid: application.processIdentifier)
+        let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        let onScreen = RestorationFocusCorrectionEffects.onScreen(rows: rows,
+            windowID: visibleWindowID, pid: application.processIdentifier)
+        return .init(exists: exists, onScreen: onScreen, minimized: minimized)
+    }
+
+    private func correctiveEffect<Result>(_ window: AXUIElement, effect: () -> Result) -> Result? {
+        RestorationFocusCorrectionEffects.perform(isCurrent: { self.correctionIsCurrent() }, readTarget: {
+            self.correctionObservation(window)
+        }, permitsForeground: {
+            self.policy.shouldPreserve(frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        }, effect: effect)
+    }
+
     private func preserveOwnedVisibilityChange() {
         guard !observationOnly, let window else { return }
         func nativePermission() -> (permitted: Bool, wasFront: Bool) {
@@ -144,12 +217,12 @@ final class RestorationFocusGuard {
         let before = nativePermission()
         guard before.permitted else { return }
         // AXMinimized=false may enqueue an asynchronous deminiaturization that
-        // raises its window. Queue the already-bound work window behind that
-        // operation immediately. Waiting for AXMinimized/AXFocusedWindow reads
-        // first left Chrome displaced for a second while those reads timed out.
-        // Never guess a window, deminiaturize it or launch an app. Fresh native
-        // checks narrow (but cannot eliminate) cross-process timing races.
-        let mainStatus = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        // raises its window. Correct only the bound work window, with fresh
+        // visibility after AX reads. This cannot guarantee quiet sibling
+        // deminiaturization; never trade input/Space safety for a faster raise.
+        guard let mainStatus = correctiveEffect(window, effect: {
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        }) else { return }
         let beforeRaise = nativePermission()
         guard beforeRaise.permitted else {
             observe("ownedRestorePreservationCancelled", details: ["mainStatus": mainStatus.rawValue,
@@ -159,7 +232,9 @@ final class RestorationFocusGuard {
         // cannotComplete means dispatch may still be pending, not that a second
         // independent AX action must be suppressed. The bounded timer remains
         // a fallback, and input/new-session/Space cancellation still owns it.
-        let raiseStatus = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        guard let raiseStatus = correctiveEffect(window, effect: {
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }) else { return }
         observe("ownedRestorePreservation", details: ["mainStatus": mainStatus.rawValue, "raiseStatus": raiseStatus.rawValue,
             "targetWasFront": before.wasFront, "targetWasFrontBeforeRaise": beforeRaise.wasFront])
     }
@@ -215,9 +290,9 @@ final class RestorationFocusGuard {
                 return (hit, "visibleHit")
             }
         }
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement], windows.count <= 32 else { return (nil, "unavailable") }
+        guard let windows = PublicAccessibilityWindowInventory.read(pid: visible.pid,
+            deadline: ProcessInfo.processInfo.systemUptime + max(0, deadline.timeIntervalSinceNow),
+            maximumCount: 32) else { return (nil, "unavailable") }
         let matches = windows.filter(matchesVisible)
         return Date() < deadline && matches.count == 1 && stillFront()
             ? (matches[0], "uniqueMatch") : (nil, "unresolvedMatches-\(matches.count)")
@@ -282,22 +357,28 @@ final class RestorationFocusGuard {
         // This finite observer is diagnostic only, with no AX calls, activation
         // or window raising; exact-window acceptance is independently sampled.
         if observationOnly { return }
+        // A still-live window on another Space is not a correction target.
+        // The effect boundary below also re-reads native visibility because AX
+        // probes can delay the queued Space/input cancellation notification.
+        guard onScreen, correctionIsCurrent() else { return }
         guard policy.shouldPreserve(frontmostPID: foreground.processIdentifier) else { Self.cancel(reason: "unrelatedActivation"); return }
         // Restore only the existing focused window. No launch, unhide, or
         // activateAllWindows: those would bring unrelated windows forward.
         if let window {
             var minimized: CFTypeRef?
             let status = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized)
+            let isMinimized = RestorationFocusCorrectionEffects.minimized(status: status, value: minimized)
             // Firefox can briefly stop answering AX while its tabs/windows
             // return. A timeout is not evidence that the target closed; retry
             // on the bounded timer without activating a guessed replacement.
             if status == .cannotComplete { observe("windowProbeDeferred"); return }
-            if status == .success, let isMinimized = minimized as? Bool, lastTargetMinimized != isMinimized {
+            if let isMinimized, lastTargetMinimized != isMinimized {
                 lastTargetMinimized = isMinimized
                 observe("windowMinimized", details: ["minimized": isMinimized])
             }
-            guard status == .success, minimized as? Bool != true else {
-                observe("windowState", details: ["AXStatus": status.rawValue, "minimized": minimized as? Bool ?? false])
+            guard isMinimized == false else {
+                observe("windowState", details: ["AXStatus": status.rawValue, "minimizedKnown": isMinimized != nil,
+                    "minimized": isMinimized ?? false])
                 Self.cancel(reason: "windowClosedOrMinimized"); return
             }
             var focused: CFTypeRef?
@@ -308,11 +389,16 @@ final class RestorationFocusGuard {
             if !application.isActive || focused.map({ !CFEqual($0, window) }) != false {
                 guard !inputCancelled() else { return }
                 observe("preserveWindow")
-                if AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue) == .cannotComplete { return }
-                guard !inputCancelled() else { return }
-                guard AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success else { return }
+                guard let mainStatus = correctiveEffect(window, effect: {
+                    AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                }), mainStatus != .cannotComplete else { return }
+                guard correctiveEffect(window, effect: {
+                    AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                }) == .success else { return }
+            }
+            if !application.isActive {
+                _ = correctiveEffect(window, effect: { application.activate(options: []) })
             }
         }
-        if !application.isActive, !inputCancelled() { application.activate(options: []) }
     }
 }

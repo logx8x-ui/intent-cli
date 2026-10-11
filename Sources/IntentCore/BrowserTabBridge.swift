@@ -1,5 +1,10 @@
 import Foundation
 
+/// Browser API readback, independent of native visibility or desired plans.
+public enum BrowserWindowState: String, Codable, CaseIterable, Sendable {
+    case normal, minimized, maximized, fullscreen
+}
+
 public struct BrowserWindowFrame: Codable, Equatable {
     public var left: Double
     public var top: Double
@@ -26,6 +31,8 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
     public var groupID: Int?
     public var windowFrame: BrowserWindowFrame?
     public var windowFocused: Bool?
+    /// Nil means an older bridge or unavailable browser window readback.
+    public var windowState: BrowserWindowState?
     public var searchSessionID: String?
     public var cookieStoreID: String?
 
@@ -48,6 +55,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         groupID: Int? = nil,
         windowFrame: BrowserWindowFrame? = nil,
         windowFocused: Bool? = nil,
+        windowState: BrowserWindowState? = nil,
         searchSessionID: String? = nil,
         cookieStoreID: String? = nil
     ) {
@@ -64,6 +72,7 @@ public struct BrowserTabItem: Codable, Equatable, Identifiable {
         self.groupID = groupID
         self.windowFrame = windowFrame
         self.windowFocused = windowFocused
+        self.windowState = windowState
         self.searchSessionID = searchSessionID
         self.cookieStoreID = cookieStoreID
     }
