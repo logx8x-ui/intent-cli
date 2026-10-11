@@ -122,8 +122,8 @@ public enum IntentAccountCallbackKind: Equatable {
     case authentication
     case passwordReset
 
-    public static func classify(_ url: URL) -> IntentAccountCallbackKind? {
-        guard url.scheme?.lowercased() == "intent" else { return nil }
+    public static func classify(_ url: URL, scheme: String = IntentBuildChannel.current.authScheme) -> IntentAccountCallbackKind? {
+        guard url.scheme?.lowercased() == scheme else { return nil }
 
         switch url.host?.lowercased() {
         case "auth-callback":

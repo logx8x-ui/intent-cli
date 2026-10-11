@@ -21,6 +21,13 @@ enum IntentPersistenceChecks {
             try TabSiteIconChecks.run(check)
             try OverviewLayoutChecks.run(check)
             let model = IntentAppModel()
+            try check(model.canYieldEngine, "An idle model can yield its channel engine")
+            model.activeSessionName = "QA active"
+            try check(!model.canYieldEngine, "A running intention cannot yield its engine")
+            model.activeSessionName = nil
+            model.purposeModeIsResolving = true
+            try check(!model.canYieldEngine, "An in-progress start cannot yield its engine")
+            model.purposeModeIsResolving = false
             let presentation = SessionDismissalProbe()
             model.overlayPresenter = presentation
             model.dismissSessionPresentation()
@@ -32,6 +39,15 @@ enum IntentPersistenceChecks {
             try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry", "complete-blacklist"],
                 "Completion dismisses all controls before requesting nonactivating mode-aware feedback")
             try check(presentation.completionID == completionID, "Completion feedback carries its occurrence identity")
+            for failure in [FocusLockError.inputProtectionInterrupted(.inputTapTimeout),
+                            .nativeWindowEnforcementFailed(.init(reason: .hidingUnconfirmed))] {
+                presentation.events = []
+                model.presentEnforcementFailure(occurrenceID: completionID, error: failure)
+                try check(presentation.events == ["hide-immediately", "hide-controls", "hide-expiry", "failure"],
+                    "A loss of native enforcement receives a finite failure notice rather than successful completion")
+                try check(model.errorMessage == failure.description,
+                    "The native enforcement failure remains available for diagnosis")
+            }
             let process = BrowserProcessIdentity(pid: 42, launched: 100)
             let visibilityRecord = BrowserWindowVisibilityRecord(browserBundleIdentifier: "com.google.Chrome",
                 browserSessionID: "qa-profile", receivedAt: Date(timeIntervalSinceReferenceDate: 200),

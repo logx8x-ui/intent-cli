@@ -1,4 +1,6 @@
 .build/
+.build-development/
+.build-launch/
 .swiftpm/
 .DS_Store
 *.xcodeproj/

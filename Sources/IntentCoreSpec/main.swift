@@ -26,6 +26,7 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 
 do {
     try runIntentBuildPolicySpecs()
+    try runIntentPermissionInstructionsSpecs()
     try runOptionalNamingSpecs()
     try runAppStackPolicySpecs()
     try runRestorationFocusSpecs()
@@ -42,8 +43,10 @@ do {
     try runBrowserWindowVisibilitySpecs()
     try runBrowserWindowBootstrapSpecs()
     try runBrowserWindowCoverageSpecs()
+    try runNativeVisibilityCoverageSpecs()
     try runBrowserWindowVisibilityCacheSpecs()
     try runBrowserWindowEnforcementSpecs()
+    try runPermittedWindowRecoverySpecs()
     try runSessionFailureNoticeSpecs()
     try runOnboardingSpecs()
     try runOnboardingSavePlanSpecs()

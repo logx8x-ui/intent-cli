@@ -107,6 +107,7 @@ public struct ActivityRecordingState: Codable, Equatable {
 
     private static let excludedBundleIdentifiers: Set<String> = [
         "dev.loganmondi.intent",
+        "dev.loganmondi.intent.test",
         "com.apple.dock",
         "com.apple.finder",
         "com.apple.loginwindow",

@@ -18,6 +18,14 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
             exit(IntentPersistenceChecks.run())
         }
         if !IntentEnvironment.isQA {
+        guard IntentChannelRuntimeCoordinator.shared.acquireBeforeRuntime() else {
+            NSApp.terminate(nil); return
+        }
+        do { try IntentChannelSeed.prepareDevelopment() } catch {
+            let alert = NSAlert(); alert.messageText = "Test workspace needs attention"
+            alert.informativeText = error.localizedDescription; alert.runModal()
+            NSApp.terminate(nil); return
+        }
         do { try IntentFreshInstallation.prepare() } catch {
             let alert = NSAlert(); alert.messageText = "Fresh setup needs attention"; alert.informativeText = error.localizedDescription; alert.runModal()
             NSApp.terminate(nil); return
@@ -29,6 +37,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.setActivationPolicy(.accessory)
         SpotlightAppPreparation.shared.recover()
+        IntentChannelRuntimeCoordinator.shared.observe(IntentRuntime.shared.model)
         IntentRuntime.shared.start()
         statusItemController = IntentStatusItemController(
             model: IntentRuntime.shared.model,
@@ -42,6 +51,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard IntentEnvironment.isQA || IntentChannelRuntimeCoordinator.shared.acquired else { return false }
         if IntentBrowserSetup.focusIfPresented() { return false }
         if IntentRuntime.shared.resumeOnboardingPermissionHandoffIfNeeded() { return true }
         if IntentRuntime.shared.focusNativeWebsiteFinderIfPresent() { return false }
@@ -50,6 +60,7 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard IntentEnvironment.isQA || IntentChannelRuntimeCoordinator.shared.acquired else { return }
         for url in urls where IntentRuntime.shared.accountManager.handleAuthCallback(url) {
             IntentRuntime.shared.model.showOverlay()
             return
@@ -57,10 +68,18 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard IntentEnvironment.isQA || IntentChannelRuntimeCoordinator.shared.acquired else { return .terminateNow }
         // Never veto a Mac shutdown/restart to enforce a focus commitment.
         SpotlightAppPreparation.shared.release()
         IntentRuntime.shared.model.emergencyStop(showMessage: false)
         return .terminateNow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if IntentChannelRuntimeCoordinator.shared.acquired {
+            IntentRuntime.shared.stopInputForChannelExit()
+        }
+        IntentChannelRuntimeCoordinator.shared.release()
     }
 }
 
@@ -157,8 +176,8 @@ final class IntentStatusItemController: NSObject {
         button.image = IntentMenuBarIcon.makeImage()
         button.imagePosition = .imageOnly
         button.title = ""
-        button.toolTip = "Intent"
-        button.setAccessibilityLabel("Intent")
+        button.toolTip = IntentBuildChannel.current.appName
+        button.setAccessibilityLabel(IntentBuildChannel.current.appName)
         button.target = self
         button.action = #selector(statusItemPressed(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -296,6 +315,23 @@ final class IntentStatusItemController: NSObject {
 @MainActor
 final class IntentRuntime {
     static let shared = IntentRuntime()
+
+    var canYieldEngine: Bool {
+        model.canYieldEngine && !quickSelectionController.isSelectionSurfaceVisible
+            && !quickSelectionController.restoringSavedWorkspace
+            && quickSelectionController.nativeWebsiteFinder == nil
+            && quickSelectionController.openingApps.isEmpty
+    }
+
+    func stopInputForChannelExit() {
+        hotKeyManager = nil // Releases Carbon shortcuts and the gesture tap.
+        gestureSessionObserver = nil
+        if let showOverlayObserver { DistributedNotificationCenter.default().removeObserver(showOverlayObserver) }
+        showOverlayObserver = nil
+        if let becomeActiveObserver { NotificationCenter.default.removeObserver(becomeActiveObserver) }
+        becomeActiveObserver = nil
+        hasStarted = false
+    }
 
     /// An explicit return to Intent should expose the current finder controls,
     /// without replacing the browser-owned draft with another overview.

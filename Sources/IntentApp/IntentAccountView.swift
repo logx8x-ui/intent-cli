@@ -1,4 +1,5 @@
 import SwiftUI
+import IntentCore
 
 struct IntentAccountGate: View {
     @EnvironmentObject private var accountManager: IntentAccountManager
@@ -126,12 +127,16 @@ struct IntentAccountGate: View {
     }
 
     private var accountTitle: String {
+        if !IntentBuildPolicy.current.includesCloudAccountSync { return "Local test workspace" }
         if accountManager.isRedirectingToGoogle { return "Signing in with Google" }
         if accountManager.isResettingPassword { return "Choose a new password" }
         return emailMode == nil ? "Your Intent workspace" : emailMode!.rawValue
     }
 
     private var accountSubtitle: String {
+        if !IntentBuildPolicy.current.includesCloudAccountSync {
+            return "Test Intent saves separately on this Mac. Cloud sign-in is disabled to protect your Intent workspace."
+        }
         if accountManager.isRedirectingToGoogle {
             return "Intent will close, then your default browser will open."
         }
@@ -343,7 +348,7 @@ struct IntentAccountSettingsSection: View {
                     .font(.system(size: 22))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(accountManager.accountEmail ?? "Guest")
+                    Text(IntentBuildPolicy.current.includesCloudAccountSync ? (accountManager.accountEmail ?? "Guest") : "Local test workspace")
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                     Text(accountManager.syncStatusText)
@@ -383,6 +388,14 @@ struct IntentAccountSettingsSection: View {
                     accountManager.presentAccount()
                 }
                 .buttonStyle(.plain)
+                .disabled(!IntentBuildPolicy.current.includesCloudAccountSync || !accountManager.isConfigured)
+            }
+
+            if !IntentBuildPolicy.current.includesCloudAccountSync {
+                Text("Test Intent saves separately on this Mac. Cloud sign-in is disabled to protect your Intent workspace.")
+                    .font(.caption2)
+                    .foregroundStyle(GraphTheme.muted(colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let message = accountManager.errorMessage {

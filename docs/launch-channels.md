@@ -4,25 +4,38 @@ Intent uses one source repository and two compiled build channels. Work on and t
 
 | Channel | Build policy | Intended use |
 | --- | --- | --- |
-| Development | Compiled with `INTENT_DEVELOPMENT`; T website adder available | Logan's personal development and acceptance testing |
-| Launch | Default compilation without that definition; T website adder unavailable | Verified downloads from `https://livewithintent.app/download` |
+| Development — Test Intent | Compiled with `INTENT_DEVELOPMENT`; T website adder available | Logan's personal development and acceptance testing |
+| Launch — Intent | Default compilation without that definition; T website adder unavailable | Verified downloads from `https://livewithintent.app/download` |
 
 The launch policy removes the T keyboard route, the add-tab entry control, and the direct website-adder action. A preference or a relabelled plist cannot enable it. Saved intentions, ordinary browser selection, modifications, Spotlight app selection, and the other current features share the same code and data format. Changing channel does not convert or delete intentions.
 
 ## Installation ownership
 
-Both channels keep the stable bundle identity `dev.loganmondi.intent`, data under `~/.intent`, and native-host identity `intent_native_host`. Only one channel may be active on a Mac at a time. They are not independent side-by-side applications: browser native-host registration and macOS permissions belong to that stable identity. Stop the current app before switching channels, and verify the chosen app path and native-host connection afterwards. Do not run a copy from each installation directory concurrently.
+Both apps can be installed together. Their app identities, preferences, keychain services, URL callbacks and writable workspaces are separate:
+
+| App | Bundle identifier | Local data | Local source install |
+| --- | --- | --- | --- |
+| Intent | `dev.loganmondi.intent` | `~/.intent` | `~/Applications/Intent.app` |
+| Test Intent | `dev.loganmondi.intent.test` | `~/.intent-test` | `~/Applications/Test Intent.app` |
+
+The launch identity preserves the existing Intent permissions and data. Test Intent requires its own macOS Accessibility, Input Monitoring and Screen Recording grants through onboarding. On its first launch, Test takes a one-time copy of durable saved intentions, completed recent history, saved-slot order, replay workspaces and selected visual/shortcut preferences. It excludes authentication, active-session recovery, browser transport, window effects and login state. Later edits remain independent; nothing is continuously mirrored back into Intent. Test currently uses a local guest workspace with cloud sign-in disabled, so a test change cannot overwrite the launch account's remote workspace.
+
+Only one **running engine** may control global input, window effects or Browser Guard. The apps coordinate through an exclusive advisory lock and a small owner record in `~/.intent-engine`; this directory stores no intentions or credentials. Opening the other app requests an idle handoff. An active intention or selection workflow refuses the switch until it is finished or closed. A crash releases the lock, and stale owner metadata cannot authorize a connection.
+
+Browser Guard still connects to the fixed native-host name `intent_native_host`. Only the running lease owner registers its bundled helper. Each helper verifies the owner's compiled channel and generation before transport and effects; an old connection exits when the owner changes. The installer never registers a helper or steals the active browser connection. Verify the chosen app path, matching extension version and exact profile connection after a handoff.
 
 For an explicitly authorized development install from this checkout:
 
 ```bash
 ./scripts/install-dev.sh
-"$HOME/Applications/Intent.app/Contents/MacOS/IntentApp" --print-build-channel
+"$HOME/Applications/Test Intent.app/Contents/MacOS/IntentApp" --print-build-channel
 ```
 
 The diagnostic should print `development`. It exits before app initialization, preferences, saved data, or native-host registration. The release verifier requires this diagnostic's marker and metadata before querying a candidate executable; do not send this flag to an arbitrary older app, which might open normally.
 
-The development installer preserves existing user data. Use the matching browser components and the exact selected profiles for acceptance testing. A development build does not consume public launch or beta updates.
+For an explicitly authorized **local launch-policy QA build**, use `./scripts/install-launch-local.sh`; its diagnostic prints `launch`. Both local installers build distinct scratch directories, use distinct CLI aliases (`test-intent` and `intent`), and refuse to replace an active engine, including an older app-only intention that has no browser rules. Set `INTENT_LOCAL_INSTALL_NO_OPEN=1` when intentionally installing both before choosing which to open. These local ad-hoc-signed builds are not public notarized downloads.
+
+Use the matching browser components and the exact selected profiles for acceptance testing. A development build does not consume public launch or beta updates. Compilation tests prove the feature policy, not physical keyboard input, browser routing or macOS permissions; those require installed acceptance checks for each app and a channel handoff.
 
 Standalone installation of a published app uses `install.sh`, not a source build. For a release audit, pin the verified tag explicitly rather than relying on the installer's generic `latest` default:
 

@@ -6,17 +6,21 @@ import IntentCore
 public enum FocusLockError: Error, CustomStringConvertible {
     case accessibilityPermissionRequired
     case eventTapUnavailable
+    case inputProtectionInterrupted(FocusLockSafetyStopCause)
     case unableToOpen(String)
     case quickSelectionStartChanged
     case browserWindowEnforcementFailed(BrowserWindowEnforcementPolicy.Failure)
     case browserWindowCoverageFailed(BrowserWindowCoveragePolicy.Failure)
+    case nativeWindowEnforcementFailed(NativeVisibilityCoveragePolicy.Failure)
 
     public var description: String {
         switch self {
         case .accessibilityPermissionRequired:
-            return "Intent needs Accessibility permission. Open System Settings > Privacy & Security > Accessibility and enable Intent, then start the intention again."
+            return IntentPermissionInstructions.current.accessibility
         case .eventTapUnavailable:
-            return "Intent could not start the keyboard lock. Enable Accessibility/Input Monitoring for Intent, then start the intention again."
+            return IntentPermissionInstructions.current.keyboardLock
+        case .inputProtectionInterrupted:
+            return "This intention stopped because macOS interrupted its input protection. Intent has released its restrictions. Start the intention again to continue."
         case .unableToOpen(let name):
             return "Intent could not open \(name)."
         case .quickSelectionStartChanged:
@@ -24,6 +28,8 @@ public enum FocusLockError: Error, CustomStringConvertible {
         case .browserWindowCoverageFailed(let failure):
             return failure.message
         case .browserWindowEnforcementFailed(let failure):
+            return failure.message
+        case .nativeWindowEnforcementFailed(let failure):
             return failure.message
         }
     }
@@ -133,6 +139,9 @@ public final class FocusLock {
     }
 
     private let spec: FocusSessionSpec
+    private static let healthDiagnostics = FocusEnforcementDiagnosticSink(fileURL:
+        ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("focus-enforcement-diagnostics.json"))
+    private let healthOwner: UUID
     private var shouldStop = false
     private var safetyStop = false
     private var safetyFailure: FocusLockError?
@@ -148,7 +157,7 @@ public final class FocusLock {
     private let nativeTabClickGuard = NativeBrowserTabClickGuard()
     private let visibilityController: FocusVisibilityController
     private lazy var blurController = FocusBlurController(spec: spec, tabGuard: nativeTabClickGuard)
-    private let permittedWindowRecovery = PermittedWindowRecovery()
+    private let permittedWindowRecovery: PermittedWindowRecovery
     private var eventTap: CFMachPort?
     private var suppressedTabButtons: Set<Int64> = []
     private var runLoopSource: CFRunLoopSource?
@@ -158,6 +167,8 @@ public final class FocusLock {
     private var activationObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
     private var pendingSpaceRecovery: DispatchWorkItem?
+    private let inputRecovery = FocusInputRecoveryQueue()
+    private let selectedWindowRecovery = FocusSelectedWindowRecoveryPolicy()
     private var baselinePids = Set<pid_t>()
     private var returnApplication: NSRunningApplication?
     private var lastPermittedApplication: NSRunningApplication?
@@ -168,6 +179,10 @@ public final class FocusLock {
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        permittedWindowRecovery = PermittedWindowRecovery(spec: spec)
+        healthOwner = Self.healthDiagnostics.begin(.init(accessMode: spec.accessMode.rawValue,
+            requiresEnforcement: spec.requiresEnforcement, hideDistractions: spec.hideDistractions,
+            selectedWindowGroupCount: spec.selectedWindowIDsByApp.count))
         visibilityController = FocusVisibilityController(spec: spec)
         currentFinishShortcut = spec.finishShortcut
         allowedAppSwitcher = AllowedAppSwitcher(
@@ -180,12 +195,16 @@ public final class FocusLock {
         visibilityController.onCoverageFailure = { [weak self] failure in
             self?.stopForSafety(failure: .browserWindowCoverageFailed(failure))
         }
+        visibilityController.onNativeCoverageFailure = { [weak self] failure in
+            self?.stopForSafety(failure: .nativeWindowEnforcementFailed(failure))
+        }
         visibilityController.enforcementIsCurrent = { [weak self] in self?.isStopRequested == false }
     }
 
     public func stop() {
         stopStateLock.lock()
         shouldStop = true
+        recordHealth(.finished(.manual))
         stopStateLock.unlock()
         cancelPendingFocusActions()
         visibilityController.stop()
@@ -197,6 +216,7 @@ public final class FocusLock {
         stopStateLock.lock()
         suppressReturnActivation = true
         shouldStop = true
+        recordHealth(.finished(.expiry))
         stopStateLock.unlock()
         cancelPendingFocusActions()
         visibilityController.stop()
@@ -214,20 +234,54 @@ public final class FocusLock {
         return currentFinishShortcut
     }
 
-    public func stopForSafety(failure: FocusLockError? = nil) {
+    public func stopForSafety(failure: FocusLockError? = nil, cause: FocusLockSafetyStopCause = .requested) {
+        requestSafetyStop(failure: failure, cause: cause, releaseSynchronously: true)
+    }
+
+    private func requestSafetyStop(failure: FocusLockError?, cause: FocusLockSafetyStopCause,
+                                   releaseSynchronously: Bool) {
         stopStateLock.lock()
         // A delayed failure must not turn manual/expiry completion into an
         // error, nor affect a replacement occurrence. Never hold this mutex
         // while synchronously entering the main-thread visibility controller.
-        if failure != nil && shouldStop { stopStateLock.unlock(); return }
+        if shouldStop { stopStateLock.unlock(); return }
         if let failure { safetyFailure = failure; suppressReturnActivation = true }
         safetyStop = true
         shouldStop = true
+        let resolvedCause: FocusLockSafetyStopCause
+        switch failure {
+        case .browserWindowEnforcementFailed?: resolvedCause = .browserWindowEnforcementFailure
+        case .browserWindowCoverageFailed?: resolvedCause = .browserWindowCoverageFailure
+        case .nativeWindowEnforcementFailed?: resolvedCause = .nativeWindowEnforcementFailure
+        default: resolvedCause = cause
+        }
+        recordHealth(.safetyStopped(resolvedCause))
         stopStateLock.unlock()
         cancelPendingFocusActions()
         // Quit can terminate the process before run-loop cleanup executes.
         // Release owned visibility synchronously before returning to AppKit.
-        visibilityController.stop(restorationPolicyOverride: .automatic)
+        if releaseSynchronously { visibilityController.stop(restorationPolicyOverride: .automatic) }
+        else {
+            // The input callback must return before AppKit/AX cleanup, which can
+            // otherwise block it long enough for macOS to disable the tap again.
+            DispatchQueue.main.async { [visibilityController] in
+                visibilityController.stop(restorationPolicyOverride: .automatic)
+            }
+        }
+    }
+
+    private func recordHealth(_ event: FocusEnforcementHealth.Event) {
+        Self.healthDiagnostics.record(event, owner: healthOwner)
+    }
+
+    private func scheduleInputRefocus() {
+        inputRecovery.request { [weak self] in
+            guard let self else { return }
+            // Rejection happened synchronously. Only activation/AX recovery is
+            // deferred, and the existing stop gate fences every resulting effect.
+            guard !self.isStopped else { return }
+            self.refocus()
+        }
     }
 
     private func cancelPendingFocusActions() {
@@ -235,6 +289,8 @@ public final class FocusLock {
         // cleanup: queued Cmd-Tab and AX work can otherwise steal focus
         // after the session has already ended.
         focusActions.invalidate()
+        inputRecovery.stop()
+        selectedWindowRecovery.stop()
         permittedWindowRecovery.stop()
         allowedAppSwitcher.stop()
     }
@@ -249,6 +305,8 @@ public final class FocusLock {
     }
 
     public func run(onReady: (@Sendable () -> Void)? = nil) throws {
+        recordHealth(.starting)
+        defer { recordHealth(.completed) }
         try throwSafetyFailureIfNeeded()
         guard !isStopped else { return }
         try validateStartupAnchor()
@@ -263,6 +321,7 @@ public final class FocusLock {
         allowedAppSwitcher.recordActivation(bundleIdentifier: returnApplication?.bundleIdentifier)
 
         guard !spec.requiresEnforcement || requestAccessibilityIfNeeded() else {
+            recordHealth(.safetyStopped(.accessibilityPermissionRequired))
             throw FocusLockError.accessibilityPermissionRequired
         }
         guard !isStopped else { return }
@@ -273,7 +332,8 @@ public final class FocusLock {
 
         // Leisure is a launch-only session. It must not install a blocking input tap.
         if spec.requiresEnforcement {
-            try installEventTap()
+            do { try installEventTap(); recordHealth(.inputTapInstalled) }
+            catch { recordHealth(.safetyStopped(.inputTapUnavailable)); throw error }
             installLaunchObserver()
             installActivationObserver()
             installActiveSpaceObserver()
@@ -291,7 +351,7 @@ public final class FocusLock {
                     Thread.sleep(forTimeInterval: 0.01)
                 }
             }
-            if !isStopped { didBecomeReady = true; onReady?() }
+            if !isStopped { didBecomeReady = true; recordHealth(.ready); onReady?() }
             while !isStopped {
                 if !RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2)) {
                     Thread.sleep(forTimeInterval: 0.02)
@@ -341,7 +401,7 @@ public final class FocusLock {
             bundleIdentifier: currentWindow?.bundle, controllerBundleIdentifier: Bundle.main.bundleIdentifier) {
             // Do not call NSRunningApplication.activate for an already-active
             // browser: macOS may select a different window in the same process.
-            if let app = NSWorkspace.shared.frontmostApplication { permittedWindowRecovery.remember(app) }
+            if let app = NSWorkspace.shared.frontmostApplication { permittedWindowRecovery.remember(app, verifiedWindow: currentWindow) }
             return
         }
         guard !spec.fallbackBundleIdentifier.isEmpty else { return }
@@ -476,16 +536,22 @@ public final class FocusLock {
             return false
         }
 
-        return focusActions.perform(ifCurrent: 0) {
-            _ = app.activate(options: [.activateIgnoringOtherApps])
-            return app.isActive
-        } ?? false
+        return activateApp(processIdentifier: app.processIdentifier)
     }
 
     @discardableResult
     private func activateApp(processIdentifier: pid_t) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: processIdentifier) else {
+        guard !isStopped, let app = NSRunningApplication(processIdentifier: processIdentifier), !app.isTerminated,
+              let bundle = app.bundleIdentifier, spec.permitsApplication(bundle) else {
             return false
+        }
+
+        if spec.selectedWindowIDsByApp[bundle] != nil {
+            let candidates = Set(WorkspaceWindow.list(onScreen: false).filter {
+                $0.pid == processIdentifier && $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle)
+            }.map(\.id))
+            // A remembered app or startup fallback cannot bypass window scope.
+            return WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions)
         }
 
         return focusActions.perform(ifCurrent: 0) {
@@ -532,7 +598,8 @@ public final class FocusLock {
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             // Never repeatedly re-enable an input tap that macOS disabled as unhealthy.
-            stopForSafety()
+            let cause: FocusLockSafetyStopCause = type == .tapDisabledByTimeout ? .inputTapTimeout : .inputTapDisabled
+            requestSafetyStop(failure: .inputProtectionInterrupted(cause), cause: cause, releaseSynchronously: false)
             return Unmanaged.passUnretained(event)
         }
         if isStopped { return Unmanaged.passUnretained(event) }
@@ -578,6 +645,7 @@ public final class FocusLock {
                     isSpaceNavigation: target.isSpaceNavigation
                 ) else {
                     // Keep Mission Control open; a known forbidden tile is a no-op.
+                    recordHealth(.blockedClick)
                     return nil
                 }
                 return Unmanaged.passUnretained(event)
@@ -597,12 +665,14 @@ public final class FocusLock {
             if spec.blockFirefoxChromeClicks,
                isFirefoxFrontmost(),
                isProtectedFirefoxChromeClick(event.location) {
-                refocus()
+                recordHealth(.blockedClick)
+                scheduleInputRefocus()
                 return nil
             }
 
             guard shouldAllowMouseDown(at: event.location) else {
-                refocus()
+                recordHealth(.blockedClick)
+                scheduleInputRefocus()
                 return nil
             }
 
@@ -633,7 +703,7 @@ public final class FocusLock {
         }
 
         if command && control && option && keyCode == KeyCode.escape {
-            stopForSafety()
+            requestSafetyStop(failure: nil, cause: .emergencyShortcut, releaseSynchronously: false)
             return nil
         }
 
@@ -671,7 +741,7 @@ public final class FocusLock {
         }
 
         if command && shouldBlockSystemCommand && isBlockedSystemCommand(keyCode) {
-            refocus()
+            scheduleInputRefocus()
             return nil
         }
 
@@ -701,7 +771,7 @@ public final class FocusLock {
         if spec.accessMode == .whitelist,
            spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
             if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {
-                refocus()
+                scheduleInputRefocus()
                 return nil
             }
         }
@@ -823,18 +893,27 @@ public final class FocusLock {
         ) {
             return
         }
-        if let id = app.bundleIdentifier, spec.selectedWindowIDsByApp[id] != nil,
-           let window = WorkspaceWindow.focused(), window.bundle == id,
-           !spec.permitsWindow(window.id, bundleIdentifier: id) {
-            // Let the window-scoped focus pass restore a permitted target; never
-            // remember this blocked window as our recovery destination.
+        let verifiedWindow = WorkspaceWindow.focused()
+        if let window = verifiedWindow, window.pid == app.processIdentifier, window.bundle == app.bundleIdentifier,
+           visibilityController.permitsAuxiliaryWindow(id: window.id, pid: window.pid,
+                bundleIdentifier: window.bundle, launched: app.launchDate) == true {
+            // Utility permission is derived and short-lived. Do not remember
+            // the panel as selected work or change the normal recovery target.
             return
+        }
+        if let id = app.bundleIdentifier, spec.selectedWindowIDsByApp[id] != nil {
+            guard let window = verifiedWindow, window.bundle == id, window.pid == app.processIdentifier,
+                  spec.permitsWindow(window.id, bundleIdentifier: id) else {
+                // Let the window-scoped focus pass restore a permitted target;
+                // never remember a blocked or unknown sibling.
+                return
+            }
         }
         if let id = app.bundleIdentifier, app.activationPolicy == .regular,
            spec.permitsApplication(id),
            id != "com.spotify.client" || spec.allowSpotifyForeground || spec.accessMode == .blacklist {
             lastPermittedApplication = app
-            permittedWindowRecovery.remember(app)
+            permittedWindowRecovery.remember(app, verifiedWindow: verifiedWindow)
             allowedAppSwitcher.recordActivation(bundleIdentifier: id)
             return
         }
@@ -845,6 +924,7 @@ public final class FocusLock {
             controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             isRegularApplication: app.activationPolicy == .regular
         ) {
+            recordHealth(.blockedActivation)
             refocus(ignoreSystemTransitionGrace: true)
             return
         }
@@ -955,29 +1035,54 @@ public final class FocusLock {
             return
         }
 
-        if let bundle = frontmost.bundleIdentifier, spec.selectedWindowIDsByApp[bundle] != nil,
-           let window = WorkspaceWindow.focused(), !spec.permitsWindow(window.id, bundleIdentifier: bundle) {
-            let candidates: Set<UInt32>
-            if spec.accessMode == .whitelist { candidates = spec.selectedWindowIDsByApp[bundle] ?? [] }
-            else { candidates = Set(WorkspaceWindow.list().filter { $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle) }.map(\.id)) }
-            if WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions) { return }
-            // A blacklist may exclude the only window in this application.
-            // Recover to another permitted application without ending the lock.
-            if let fallback = WorkspaceWindow.list(onScreen: false).first(where: {
-                $0.bundle != Bundle.main.bundleIdentifier && $0.id != window.id
-                    && spec.permitsWindow($0.id, bundleIdentifier: $0.bundle)
-            }), WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle, actionGate: focusActions) { return }
-            // No usable destination: release instead of trapping the computer.
-            stopForSafety()
-            return
+        let selectedScopeBundle = frontmost.bundleIdentifier.flatMap {
+            spec.selectedWindowIDsByApp[$0] != nil ? $0 : nil
         }
+        let focusedScopeWindow = selectedScopeBundle != nil ? WorkspaceWindow.focused() : nil
+        if let bundle = selectedScopeBundle {
+            // A different foreground sample is a transition, not evidence that
+            // this app is showing an excluded window or has recovered already.
+            guard let window = focusedScopeWindow, window.bundle == bundle else { return }
+            if window.pid == frontmost.processIdentifier,
+               visibilityController.permitsAuxiliaryWindow(id: window.id, pid: window.pid,
+                    bundleIdentifier: bundle, launched: frontmost.launchDate) == true {
+                selectedWindowRecovery.recovered()
+                return
+            }
+            if !spec.permitsWindow(window.id, bundleIdentifier: bundle) {
+                // AX/WindowServer reads can disagree briefly during a transition.
+                // Coalesce retries without changing which windows are permitted.
+                guard selectedWindowRecovery.beginAttempt(now: ProcessInfo.processInfo.systemUptime) else { return }
+                let candidates: Set<UInt32>
+                if spec.accessMode == .whitelist { candidates = spec.selectedWindowIDsByApp[bundle] ?? [] }
+                else { candidates = Set(WorkspaceWindow.list().filter { $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle) }.map(\.id)) }
+                if WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions) {
+                    selectedWindowRecovery.recovered(); return
+                }
+                // A blacklist may exclude the only window in this application.
+                // Recover to another permitted application without ending the lock.
+                if let fallback = WorkspaceWindow.list(onScreen: false).first(where: {
+                    $0.bundle != Bundle.main.bundleIdentifier && $0.id != window.id
+                        && spec.permitsWindow($0.id, bundleIdentifier: $0.bundle)
+                }), WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle, actionGate: focusActions) {
+                    selectedWindowRecovery.recovered(); return
+                }
+                // A single timeout or title/position mismatch must not release a
+                // valid intention. Unknown inventory does not establish closure.
+                let decision = selectedWindowRecovery.failed(now: ProcessInfo.processInfo.systemUptime,
+                    resources: selectedNativeResourcePresence())
+                if decision == .safetyStop { stopForSafety(cause: .selectedWindowRecoveryUnavailable) }
+                return
+            }
+        }
+        selectedWindowRecovery.recovered()
 
         if spec.strictSingleApp {
             guard frontmost.bundleIdentifier == spec.fallbackBundleIdentifier else {
                 refocus()
                 return
             }
-            permittedWindowRecovery.remember(frontmost)
+            permittedWindowRecovery.remember(frontmost, verifiedWindow: focusedScopeWindow ?? WorkspaceWindow.focused())
             return
         }
 
@@ -994,8 +1099,39 @@ public final class FocusLock {
         }
 
         lastPermittedApplication = frontmost
-        permittedWindowRecovery.remember(frontmost)
+        permittedWindowRecovery.remember(frontmost, verifiedWindow: focusedScopeWindow ?? WorkspaceWindow.focused())
         allowedAppSwitcher.recordActivation(bundleIdentifier: bundleIdentifier)
+    }
+
+    private func selectedNativeResourcePresence() -> FocusSelectedWindowRecoveryPolicy.ResourcePresence {
+        guard spec.accessMode == .whitelist else { return .unknown }
+        guard let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return .unknown
+        }
+        let windows = WorkspaceWindow.list(records: rows)
+        let liveWindows = Dictionary(grouping: windows, by: \.bundle).mapValues { Set($0.map(\.id)) }
+        // A still-present selected WindowServer row which cannot be resolved
+        // into this inventory is uncertainty, not positive window closure.
+        let selectedIDs = Set(spec.selectedWindowIDsByApp.values.flatMap { $0 })
+        let observedIDs = Set(windows.map(\.id))
+        if rows.contains(where: {
+            guard let id = $0[kCGWindowNumber as String] as? UInt32 else { return false }
+            return selectedIDs.contains(id) && !observedIDs.contains(id)
+        }) { return .unknown }
+        let browsers = Set(spec.allowedWebsitesByBrowser.keys)
+        let wholeApps = SelectedResourceLifetime.wholeAppSelections(
+            allowedAppIDs: spec.allowedBundleIdentifiers,
+            presetAppIDs: spec.presetAllowedBundleIdentifiers.union(spec.presetBlockedBundleIdentifiers),
+            windowSelectionAppIDs: Set(spec.selectedWindowIDsByApp.keys), tabSelectionAppIDs: browsers)
+        let browserPresence = Dictionary(uniqueKeysWithValues: browsers.map { ($0, SelectedResourceLifetime.BrowserPresence.unknown) })
+        if SelectedResourceLifetime.shouldFinish(restrictive: true,
+            selectedWindows: spec.selectedWindowIDsByApp, wholeApps: wholeApps,
+            liveWindows: liveWindows, browsers: browserPresence) { return .closed }
+        if wholeApps.contains(where: { !(liveWindows[$0] ?? []).isEmpty })
+            || spec.selectedWindowIDsByApp.contains(where: { !($0.value.isDisjoint(with: liveWindows[$0.key] ?? [])) }) {
+            return .present
+        }
+        return .unknown
     }
 
     private func refocus(ignoreSystemTransitionGrace: Bool = false, restoreWindow: Bool = false) {

@@ -10,8 +10,8 @@ final class SessionCompletionLight {
     private var dismissal: DispatchWorkItem?
     private var lastOccurrence: UUID?
     private var generation = UUID()
-    static let duration: TimeInterval = 1.05
-    static let travelDuration: TimeInterval = 0.76
+    static let duration: TimeInterval = 1.18
+    static let travelDuration: TimeInterval = 0.86
     static let edgeInset: CGFloat = 3
 
     func show(occurrenceID: UUID, mode: IntentionAccessMode, screen: NSScreen) {
@@ -97,15 +97,15 @@ final class SessionCompletionLight {
             }
 
             // A longer, brighter cutting trace stays visible during the quick
-            // sweep without widening the 1-point core. Length is in screen
+            // sweep with a restrained 1.2-point core. Length is in screen
             // points, not a broad fraction of the display perimeter. The small
             // leading tip and faint trailing halo retain the exact mode hue;
             // there is no white core or full-screen wash.
             let length = pathLength(path)
             let styles: [(name: String, width: CGFloat, tail: CGFloat, opacity: Double, glow: CGFloat)] = [
-                ("glow", 2.2, 220, 0.30, 2.2),
-                ("core", 1, 180, 0.96, 0.8),
-                ("tip", 1.35, 12, 1, 1.3)
+                ("glow", 2.5, 250, 0.33, 2.5),
+                ("core", 1.2, 210, 0.96, 0.9),
+                ("tip", 1.5, 14, 1, 1.4)
             ]
             for style in styles {
                 let line = makeLine(path: path, colour: colour, name: "laser.\(side).\(style.name)", width: style.width)
@@ -119,7 +119,7 @@ final class SessionCompletionLight {
                     keyframes("strokeEnd", values: samples.head, times: samples.times),
                     keyframes("strokeStart", values: samples.tail, times: samples.times),
                     keyframes("opacity", values: [0, style.opacity, style.opacity, 0, 0],
-                        times: [0, 0.045 / duration, travelDuration / duration, 0.89 / duration, 1])
+                        times: [0, 0.045 / duration, travelDuration / duration, 1.00 / duration, 1])
                 ]
                 group.duration = duration
                 line.add(group, forKey: "completion")
@@ -130,18 +130,18 @@ final class SessionCompletionLight {
         let spark = CALayer()
         spark.name = "laser.meeting"
         spark.contentsScale = root.contentsScale
-        spark.bounds = CGRect(x: 0, y: 0, width: 2.5, height: 2.5)
-        spark.position = CGPoint(x: size.width / 2, y: edgeInset); spark.cornerRadius = 1.25
+        spark.bounds = CGRect(x: 0, y: 0, width: 2.8, height: 2.8)
+        spark.position = CGPoint(x: size.width / 2, y: edgeInset); spark.cornerRadius = 1.4
         spark.backgroundColor = colour.cgColor; spark.opacity = 0
-        spark.shadowColor = colour.cgColor; spark.shadowRadius = 2.5
+        spark.shadowColor = colour.cgColor; spark.shadowRadius = 2.8
         spark.shadowOpacity = 0.65; spark.shadowOffset = .zero
         root.addSublayer(spark)
         let meeting = CAAnimationGroup()
         meeting.animations = [
             keyframes("opacity", values: [0, 0, 0.95, 0.32, 0],
-                times: [0, travelDuration / duration, 0.79 / duration, 0.87 / duration, 1]),
+                times: [0, travelDuration / duration, 0.90 / duration, 0.99 / duration, 1]),
             keyframes("transform.scale", values: [0.7, 0.7, 1.8, 0.8],
-                times: [0, travelDuration / duration, 0.84 / duration, 1])
+                times: [0, travelDuration / duration, 0.95 / duration, 1])
         ]
         meeting.duration = duration
         spark.add(meeting, forKey: "meeting")

@@ -45,6 +45,15 @@ public struct QuickSelection: Codable {
     public var apps: Set<String> = []
     public var tabs: Set<QuickSelectionTab> = []
     public var windowIDsByApp: [String: Set<UInt32>] = [:]
+    /// Visual membership for whole apps and explicitly selected native windows.
+    /// Partial browser tabs still require their separate session/window proof.
+    public func marksNativeWindow(_ id: UInt32, app: String) -> Bool {
+        guard apps.contains(app) else { return false }
+        if let ids = windowIDsByApp[app] { return ids.contains(id) }
+        if !Self.browsers.contains(app) { return true }
+        return wholeBrowserApps?.contains(app) == true
+            || (accessMode == .blacklist && !tabs.contains(where: { $0.browser == app }))
+    }
     public mutating func toggleWindow(_ id: UInt32, app: String) {
         var ids = windowIDsByApp[app] ?? []
         if ids.remove(id) == nil { ids.insert(id) }

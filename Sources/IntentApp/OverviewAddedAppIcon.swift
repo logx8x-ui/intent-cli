@@ -7,6 +7,7 @@ struct OverviewAddedAppIcon: View {
     let icon: NSImage
     let name: String
     let selected: Bool
+    let selectionColor: Color
     let opening: Bool
     let hovered: Bool
     let size: CGFloat
@@ -20,6 +21,13 @@ struct OverviewAddedAppIcon: View {
                 .opacity(selected ? 1 : 0.55)
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: min(24, size * 0.19))
+                        .strokeBorder(selectionColor, lineWidth: 3)
+                        .allowsHitTesting(false)
+                }
+            }
             .accessibilityLabel("\(name), \(selected ? "selected" : "not selected")")
             .accessibilityAction(named: Text("Remove added app"), remove)
             .help(name)

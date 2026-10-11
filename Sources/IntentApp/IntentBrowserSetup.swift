@@ -30,6 +30,7 @@ enum IntentBrowserSetup {
     static var root: URL { IntentEnvironment.dataDirectory.appendingPathComponent("browser-guard") }
     static func register() throws {
         guard !IntentEnvironment.isQA else { return }
+        guard IntentEngineLease.nativeHostOwner() != nil else { throw IntentEngineLeaseError.lostOwnership }
         let fm = FileManager.default
         let host = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/IntentNativeHost")
         guard fm.isExecutableFile(atPath: host.path) else { return }
@@ -66,12 +67,15 @@ enum IntentBrowserSetup {
             if (try? Data(contentsOf: destination)) != data { changed = true; try data.write(to: destination, options: .atomic) }
         }
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        if changed || UserDefaults.standard.string(forKey: "intentBrowserHostBuild") != version {
+        let ownerGeneration = IntentEngineLease.nativeHostOwner()?.generation.uuidString ?? ""
+        if changed || UserDefaults.standard.string(forKey: "intentBrowserHostBuild") != version
+            || UserDefaults.standard.string(forKey: "intentBrowserHostOwnerGeneration") != ownerGeneration {
             let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
             process.arguments = ["-u", String(getuid()), "-x", "IntentNativeHost"]
             process.standardError = FileHandle.nullDevice
             do { try process.run(); process.waitUntilExit() } catch { NSLog("Browser reconnect will occur when the browser restarts") }
             UserDefaults.standard.set(version, forKey: "intentBrowserHostBuild")
+            UserDefaults.standard.set(ownerGeneration, forKey: "intentBrowserHostOwnerGeneration")
         }
     }
     static func open(_ browserID: String? = nil) {
@@ -90,7 +94,7 @@ enum IntentBrowserSetup {
         let controller = NSHostingController(rootView: view)
         let window = setupWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Intent · Browser profiles"
+        window.title = IntentBuildChannel.current.appName + " · Browser profiles"
         window.isReleasedWhenClosed = false
         window.delegate = setupWindowDelegate
         window.contentViewController = controller

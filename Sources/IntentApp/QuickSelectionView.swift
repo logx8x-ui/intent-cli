@@ -82,9 +82,9 @@ final class QuickSelectionController: ObservableObject {
         close()
         if previous?.bundleIdentifier != Bundle.main.bundleIdentifier { previous?.activate(options: []) }
     }
-    private func preserveAddedAppIcons(in items: [WindowItem]) -> [WindowItem] {
+    func preserveAddedAppIcons(in items: [WindowItem]) -> [WindowItem] {
         var result = items
-        for app in apps where spotlightApps[app.id] != nil && selection.apps.contains(app.id)
+        for app in apps where spotlightApps[app.id] != nil
             && !result.contains(where: { $0.appID == app.id }) {
             result.append(.init(id: Self.placeholderID(app), appID: app.id, title: app.app.name,
                 sourceFrame: CGRect(x: 0, y: 0, width: 640, height: 420), preview: nil))
@@ -112,14 +112,8 @@ final class QuickSelectionController: ObservableObject {
         let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent
         let app = AllowedApp(name: name, bundleIdentifier: id)
-        spotlightApps[id] = app; selection.apps.insert(id); hasStagedSelection = true
-        selection.windowIDsByApp.removeValue(forKey: id)
-        if QuickSelection.browsers.contains(id) {
-            selection.wholeBrowserApps = (selection.wholeBrowserApps ?? []).union([id])
-            selection.tabs = selection.tabs.filter { $0.browser != id }
-        }
+        stageSpotlightApplication(app)
         if selection.accessMode == .whitelist {
-            selection.startupAppIDs = (selection.startupAppIDs ?? []).union([id])
             if NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty {
                 SpotlightAppPreparation.shared.prepare(url) { [weak self] failure in
                     if let failure { self?.message = failure }
@@ -133,6 +127,20 @@ final class QuickSelectionController: ObservableObject {
         }
         refreshStagedOutlines()
         if panel?.isVisible != true { showStagedModifiers() }
+    }
+    /// Commit the selection before preparation or any preview refresh returns.
+    /// Kept independent of windows/focus so async inventories cannot undo it.
+    func stageSpotlightApplication(_ app: AllowedApp) {
+        let id = app.bundleIdentifier
+        spotlightApps[id] = app; selection.apps.insert(id); hasStagedSelection = true
+        selection.windowIDsByApp.removeValue(forKey: id)
+        if QuickSelection.browsers.contains(id) {
+            selection.wholeBrowserApps = (selection.wholeBrowserApps ?? []).union([id])
+            selection.tabs = selection.tabs.filter { $0.browser != id }
+        }
+        if selection.accessMode == .whitelist {
+            selection.startupAppIDs = (selection.startupAppIDs ?? []).union([id])
+        }
     }
     @Published var windows: [WindowItem] = []
     @Published var snapshots: [BrowserTabSnapshot] = []
@@ -1041,7 +1049,7 @@ final class QuickSelectionController: ObservableObject {
             let screenMissing = !CGPreflightScreenCaptureAccess()
             let alert = NSAlert()
             alert.messageText = screenMissing ? "One step before `: show your windows" : "One step before `: allow Accessibility"
-            alert.informativeText = "In System Settings, turn on Intent. If it is missing, use + and choose Intent from Applications. Return here and press ` again. If macOS asks to quit and reopen, accept it. Your selections and saved intentions stay safe."
+            alert.informativeText = IntentPermissionInstructions.current.overview
             alert.addButton(withTitle: "Open System Settings"); alert.addButton(withTitle: "Later")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             if screenMissing { _ = CGRequestScreenCaptureAccess() }
@@ -1143,7 +1151,7 @@ final class QuickSelectionController: ObservableObject {
             return AppItem(app: .init(name: app.localizedName ?? id, bundleIdentifier: id),
                            icon: app.icon ?? NSImage(named: NSImage.applicationIconName)!, pid: app.processIdentifier)
         }.sorted { $0.app.name.localizedCaseInsensitiveCompare($1.app.name) == .orderedAscending }
-        for (id, app) in spotlightApps where selection.apps.contains(id) && !apps.contains(where: { $0.id == id }) {
+        for (id, app) in spotlightApps where !apps.contains(where: { $0.id == id }) {
             let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { NSWorkspace.shared.icon(forFile: $0.path) }
             apps.append(.init(app: app, icon: icon ?? NSImage(named: NSImage.applicationIconName)!, pid: 0))
         }
@@ -1276,8 +1284,9 @@ final class QuickSelectionController: ObservableObject {
         return (snapshots.first { $0.browserBundleIdentifier == window.appID }.map { $0.allTabs ?? $0.tabs } ?? []).filter { $0.windowID == id }.sorted { $0.index < $1.index }
     }
     func isSelected(_ window: WindowItem) -> Bool {
-        guard QuickSelection.browsers.contains(window.appID) else { return selection.windowIDsByApp[window.appID].map { $0.contains(window.id) } ?? selection.apps.contains(window.appID) }
-        if selection.accessMode == .blacklist, selection.apps.contains(window.appID), !selection.tabs.contains(where: { $0.browser == window.appID }) { return true }
+        if isAddedApplicationIcon(window) { return selection.apps.contains(window.appID) }
+        if selection.marksNativeWindow(window.id, app: window.appID) { return true }
+        guard QuickSelection.browsers.contains(window.appID) else { return false }
         // An explicitly chosen browser list is not proof that its native preview
         // is this ambiguous window, so never outline the wrong preview.
         guard let id = browserWindowID(for: window) else { return false }
@@ -1294,8 +1303,10 @@ final class QuickSelectionController: ObservableObject {
         // independently of the browser tabs already selected for the draft.
         dismissBrowserPicker()
         if let app = apps.first(where: { $0.id == window.appID }), window.id == Self.placeholderID(app),
-           spotlightApps[window.appID] != nil && selection.apps.contains(window.appID) {
-            selection.toggleApp(window.appID, snapshots: snapshots); return
+           spotlightApps[window.appID] != nil {
+            if selection.apps.contains(window.appID) { selection.toggleApp(window.appID, snapshots: snapshots) }
+            else { stageSpotlightApplication(app.app) }
+            return
         }
         if let app = apps.first(where: { $0.id == window.appID }), window.id == Self.placeholderID(app),
            !QuickSelection.browsers.contains(window.appID) {
@@ -1674,7 +1685,7 @@ final class QuickSelectionController: ObservableObject {
             panel?.orderOut(nil)
             onboarding.selectionVisible = false
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
-            message = "Turn on Intent in Screen Recording, then reopen `."
+            message = IntentPermissionInstructions.current.screenRecording
         }
     }
     func hoverTab(_ tab: BrowserTabItem, browser: String, entered: Bool) {
@@ -2083,6 +2094,7 @@ private struct QuickSelectionView: View {
         return ZStack(alignment: .topLeading) {
             if iconOnly, let app {
                 OverviewAddedAppIcon(icon: app.icon, name: app.app.name, selected: selected,
+                    selectionColor: accent,
                     opening: controller.openingApps.contains(window.appID), hovered: hovered,
                     size: min(128, min(frame.width, frame.height)),
                     select: { controller.selectWindow(window) },

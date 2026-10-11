@@ -159,11 +159,11 @@ final class PurposeSpeechRecognizer: ObservableObject {
         errorMessage = nil
 
         guard await requestSpeechPermission() else {
-            errorMessage = "Allow Speech Recognition for Intent in System Settings to use voice."
+            errorMessage = IntentPermissionInstructions.current.speechRecognition
             return
         }
         guard await requestMicrophonePermission() else {
-            errorMessage = "Allow Microphone access for Intent in System Settings to use voice."
+            errorMessage = IntentPermissionInstructions.current.microphone
             return
         }
         guard let recognizer, recognizer.isAvailable else {

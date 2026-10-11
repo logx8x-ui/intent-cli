@@ -17,7 +17,7 @@ enum SecureTokenStoreError: LocalizedError {
 final class KeychainTokenStore: SecureTokenStoring {
     private let service: String
 
-    init(service: String = "dev.loganmondi.intent.calendar.v3") {
+    init(service: String = IntentBuildChannel.current.calendarKeychainService) {
         self.service = service
     }
 

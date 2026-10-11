@@ -179,7 +179,7 @@ public enum CalendarSyncConflictResolution: Equatable {
 }
 
 public enum CalendarSyncMapper {
-    public static let intentURLScheme = "intent"
+    public static var intentURLScheme: String { IntentBuildChannel.current.authScheme }
     public static let scheduleHost = "schedule"
 
     public static func intentURL(for scheduleID: String) -> URL {
@@ -199,7 +199,8 @@ public enum CalendarSyncMapper {
 
     public static func scheduleID(fromNotes notes: String?) -> String? {
         guard let notes else { return nil }
-        if let urlMatch = notes.range(of: #"intent://schedule/[A-Za-z0-9._-]+"#, options: .regularExpression) {
+        let pattern = NSRegularExpression.escapedPattern(for: intentURLScheme) + #"://schedule/[A-Za-z0-9._-]+"#
+        if let urlMatch = notes.range(of: pattern, options: .regularExpression) {
             return scheduleID(from: String(notes[urlMatch]))
         }
         return nil

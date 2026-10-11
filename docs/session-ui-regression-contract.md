@@ -94,8 +94,10 @@ with another delayed activation or an independent copy of session state.
   across expand/collapse, not only NSHostingView bitmap renders. Cropped-away
   content must not expose invisible Accessibility controls in the other panel.
 - Whitelist/blacklist dots and completion use one resolved dark-mode accent.
-  The completion core is 1 point with bounded 180-point tails, never a white flash
-  or a persistent whole-screen animation timer. Inspect real header/control
+  The completion core is 1.2 points with bounded 210-point tails, a restrained
+  250-point halo, and a finite 1.18-second lifetime, never a white flash or a
+  persistent whole-screen animation timer. Reduce Motion retains its static
+  1-point fade. Inspect real header/control
   crops as well as the combined preview whenever their geometry changes.
 - The same completion path handles normal timer, end-time, checklist and manual
   finish. It cancels old focus work before clearing session ownership. Failures

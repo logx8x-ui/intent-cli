@@ -1,12 +1,13 @@
 import AppKit
 import Security
+import IntentCore
 
 /// Only the installer creates this marker, after observing that Intent was removed.
 /// Sparkle and development updates never create it.
 @MainActor
 enum IntentFreshInstallation {
     static func prepare() throws {
-        try prepare(root: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".intent"), defaults: .standard, clearAccount: clearAccount)
+        try prepare(root: IntentEnvironment.dataDirectory, defaults: .standard, clearAccount: clearAccount)
     }
     static func prepare(root: URL, defaults: UserDefaults, clearAccount: () throws -> Void) throws {
         let fm = FileManager.default
@@ -23,7 +24,7 @@ enum IntentFreshInstallation {
     }
     private static func clearAccount() throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "dev.loganmondi.intent.account", kSecUseDataProtectionKeychain as String: true]
+            kSecAttrService as String: IntentBuildChannel.current.accountKeychainService, kSecUseDataProtectionKeychain as String: true]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Couldn’t clear the previous Intent sign-in. Restart Intent to finish the fresh installation."])

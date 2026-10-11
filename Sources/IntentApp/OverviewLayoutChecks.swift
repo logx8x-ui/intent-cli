@@ -106,6 +106,7 @@ enum OverviewLayoutChecks {
         }
         for selected in [true, false] {
             let content = OverviewAddedAppIcon(icon: icon, name: "QA staged app", selected: selected,
+                selectionColor: .green,
                 opening: false, hovered: false, size: 128, select: {}, remove: {})
                 .frame(width: 160, height: 160).background(Color(red: 0, green: 1, blue: 0))
             let host = NSHostingView(rootView: content)
@@ -122,7 +123,7 @@ enum OverviewLayoutChecks {
                     throw failure("Missing staged icon corner")
                 }
                 try check(pixel.greenComponent > 0.8 && pixel.greenComponent - max(pixel.redComponent, pixel.blueComponent) > 0.5,
-                    "Added apps leave the wallpaper visible around the icon without a material card, border or caption")
+                    "Added apps leave the wallpaper visible beyond the icon outline without a material card or caption")
             }
             guard let center = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB) else {
                 throw failure("Missing staged icon artwork")

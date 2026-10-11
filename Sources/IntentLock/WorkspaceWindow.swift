@@ -158,36 +158,17 @@ public struct WorkspaceWindow {
     }
     public static func raise(ids: Set<UInt32>, bundle: String, actionGate: DeferredSessionActionGate? = nil) -> Bool {
         guard let target = list(onScreen: false).first(where: { ids.contains($0.id) && $0.bundle == bundle }),
-              let app = NSRunningApplication(processIdentifier: target.pid) else { return false }
-        let element = AXUIElementCreateApplication(target.pid)
-        AXUIElementSetMessagingTimeout(element, 0.03)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return false }
-        for window in windows {
-            AXUIElementSetMessagingTimeout(window, 0.02)
-            var title: CFTypeRef?
-            if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title) == .success,
-               title as? String == target.title {
-                var position: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position) == .success,
-                      let position, CFGetTypeID(position) == AXValueGetTypeID() else { continue }
-                var point = CGPoint.zero
-                guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
-                      abs(point.x - target.frame.minX) < 3, abs(point.y - target.frame.minY) < 3 else { continue }
-                // Focus enforcement may end while the AX queries above wait.
-                // Session callers fence each side effect against that stop.
-                if let actionGate {
-                    guard actionGate.perform(ifCurrent: 0, { app.activate(options: []) }) != nil else { return false }
-                    return actionGate.perform(ifCurrent: 0) {
-                        AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
-                    } ?? false
-                }
-                app.activate(options: [])
-                return AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
-            }
-        }
-        return false
+              let app = NSRunningApplication(processIdentifier: target.pid),
+              let identity = PermittedWindowBinding.identity(window: target, app: app),
+              let binding = PermittedWindowBinding.resolve(identity) else { return false }
+        return PermittedWindowRecoveryPolicy.restore(perform: { effect in
+            if let actionGate { return actionGate.perform(ifCurrent: 0, effect) }
+            return effect()
+        }, validate: { ids.contains(identity.windowID) && identity.bundleIdentifier == bundle && binding.isLive() },
+            setMain: { AXUIElementSetAttributeValue(binding.element, kAXMainAttribute as CFString, kCFBooleanTrue) },
+            raise: { AXUIElementPerformAction(binding.element, kAXRaiseAction as CFString) == .success },
+            activationTargetCurrent: { binding.isMainWindow() },
+            activate: { app.activate(options: []) }) == .restored
     }
 }
 
@@ -330,7 +311,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             if let response = result.response { inventories[browser] = response }
         }
         for window in windows {
-            if selection.windowIDsByApp[window.bundle]?.contains(window.id) == true {
+            if selection.marksNativeWindow(window.id, app: window.bundle) {
                 markedRegions[window.id] = [window.frame]
                 continue
             }

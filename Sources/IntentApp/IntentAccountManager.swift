@@ -24,8 +24,8 @@ enum IntentAccountSyncState: Equatable {
 final class IntentAccountManager: ObservableObject {
     private static let accountChoiceKey = "intentAccountChoiceMade"
     private static let cloudTable = "intent_user_state"
-    private static let redirectURL = URL(string: "intent://auth-callback")!
-    private static let passwordResetURL = URL(string: "intent://password-reset")!
+    private static let redirectURL = URL(string: "\(IntentBuildChannel.current.authScheme)://auth-callback")!
+    private static let passwordResetURL = URL(string: "\(IntentBuildChannel.current.authScheme)://password-reset")!
 
     @Published private(set) var phase: IntentAccountPhase = .loading
     @Published private(set) var syncState: IntentAccountSyncState = .localOnly
@@ -54,7 +54,8 @@ final class IntentAccountManager: ObservableObject {
     private var logicalWorkspaceUpdatedAt = Date()
 
     init() {
-        configuration = IntentEnvironment.isQA ? nil : IntentSupabaseConfiguration.load()
+        configuration = IntentEnvironment.isQA || !IntentBuildPolicy.current.includesCloudAccountSync
+            ? nil : IntentSupabaseConfiguration.load()
         if let configuration {
             client = SupabaseClient(
                 supabaseURL: configuration.url,
@@ -107,6 +108,9 @@ final class IntentAccountManager: ObservableObject {
     var configurationMessage: String? {
         guard client == nil else { return nil }
         if IntentEnvironment.isQA { return "Account connections are disabled in the isolated QA app." }
+        if !IntentBuildPolicy.current.includesCloudAccountSync {
+            return "Test Intent saves changes separately on this Mac. Account sync is disabled so testing cannot change your Intent cloud workspace."
+        }
         return "Account sync is not configured in this build yet. Guest mode remains fully available."
     }
 
@@ -135,7 +139,7 @@ final class IntentAccountManager: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
-        if IntentEnvironment.isQA {
+        if IntentEnvironment.isQA || !IntentBuildPolicy.current.includesCloudAccountSync {
             prepareGuestProfile()
             phase = .guest
             return
@@ -955,7 +959,7 @@ private enum IntentAccountError: LocalizedError {
 }
 
 private final class IntentAuthSessionStorage: AuthLocalStorage, @unchecked Sendable {
-    private let service = "dev.loganmondi.intent.account"
+    private let service = IntentBuildChannel.current.accountKeychainService
 
     func store(key: String, value: Data) throws {
         guard !IntentEnvironment.isQA else { return }

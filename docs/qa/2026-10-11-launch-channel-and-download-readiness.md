@@ -2,9 +2,9 @@
 
 ## Result
 
-Intent now has compiled development and launch channels in one repository. Development retains the experimental T website adder; launch excludes its UI, keyboard route, and direct controller entry. The installed personal app is development. No public launch artifact or download catalog has been enabled.
+Intent has compiled development and launch channels in one repository. Development retains the experimental T website adder; launch excludes its UI, keyboard route, and direct controller entry. The initial installation described below predates Logan's later request for two separate installed apps. No public launch artifact or download catalog has been enabled.
 
-Both channels preserve the stable app/native-host identity and existing data. Only one channel may run on a Mac at a time. The download page is public at `https://livewithintent.app/download`; the development page at `/download/test` requires the owner identity. The website catalog remains empty until a signed, notarized and acceptance-tested release can be pinned.
+The later two-app implementation keeps Intent's stable identity and existing data; Test Intent has its own bundle identity, preferences and data directory. A process lease and generation checks allow one focus engine and browser transport owner at a time. See `2026-10-11-native-restriction-and-dual-apps.md` for current installation evidence. The download page is public at `https://livewithintent.app/download`; the development page at `/download/test` requires the owner identity. The website catalog remains empty until a signed, notarized and acceptance-tested release can be pinned.
 
 ## Automated verification
 
@@ -15,6 +15,8 @@ Release checks include compiled-channel fixtures, profile discovery/queue/launch
 Website per-browser availability tests passed all 11 cases, and its production build passed. Firefox-only qualified releases enable Firefox alone; Chrome and Both remain unavailable until the exact official Chrome version and all three verified kits qualify. With the current empty catalog, valid download API choices return 503 rather than falling back to another release.
 
 ## Installed app and native UI evidence
+
+Historical evidence for the earlier single-app development installation; superseded by the separate Test Intent/Intent installation described in the newer QA note.
 
 After the final source gate, `./scripts/install-dev.sh` completed successfully. The installed app is `/Users/loganmondi/Applications/Intent.app`, bundle ID `dev.loganmondi.intent`, arm64 UUID `C57E1AFE-DC7C-3CEB-B9D0-72BFADEA1115`. Its safe `--print-build-channel` query returns `development`; its development metadata is true, automatic updates are false, and strict deep code-sign verification passed. Chrome and Firefox native-host manifests point to this installed app's helper.
 

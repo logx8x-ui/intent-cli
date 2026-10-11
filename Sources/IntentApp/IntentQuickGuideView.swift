@@ -19,7 +19,7 @@ struct IntentQuickGuidePresenter: NSViewRepresentable {
             if !model.onboarding.isPresented { model.onboarding.present() }
             let panel = GuidePanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
                                    styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
-            panel.title = "Intent · Get started"
+            panel.title = "\(IntentBuildChannel.current.appName) · Get started"
             panel.identifier = NSUserInterfaceItemIdentifier("dev.loganmondi.intent.onboarding.guide")
             panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
@@ -127,7 +127,7 @@ struct IntentQuickGuideView: View {
     private var purposeLabel: String { purpose.count > 100 ? String(purpose.prefix(97)) + "…" : purpose }
     private var overviewKey: String { OverlayShortcut.quickSelectionShortcut.displayName }
     private var finishKey: String { FinishShortcutStore.load().displayName }
-    private var appName: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Intent" }
+    private var appName: String { IntentBuildChannel.current.appName }
     private var permissionsReady: Bool { accessibilityReady && previewsReady }
     private var hasRun: Bool { guide.state.evidence.contains(.overviewRun) || guide.state.evidence.contains(.quickMarkRun) }
 
@@ -333,8 +333,8 @@ struct IntentQuickGuideView: View {
     }
     private var permissionRows: some View {
         VStack(alignment: .leading, spacing: 12) {
-            permission("Accessibility", ready: accessibilityReady, explanation: "Lets Intent use your focus shortcuts and protect your chosen setup.", pane: "Privacy_Accessibility")
-            permission("Screen & System Audio Recording", ready: previewsReady, explanation: "Lets Intent show local window previews and blur; this guide doesn’t record or upload your screen.", pane: "Privacy_ScreenCapture")
+            permission("Accessibility", ready: accessibilityReady, explanation: IntentPermissionInstructions.current.onboardingAccessibility, pane: "Privacy_Accessibility")
+            permission("Screen & System Audio Recording", ready: previewsReady, explanation: IntentPermissionInstructions.current.onboardingPreviews, pane: "Privacy_ScreenCapture")
             HStack(spacing: 10) {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)).resizable().frame(width: 32, height: 32)
                     .onDrag { NSItemProvider(object: Bundle.main.bundleURL as NSURL) }
@@ -342,9 +342,9 @@ struct IntentQuickGuideView: View {
                 Text("Turn on \(appName). If it’s missing, drag this icon into the list, or use + and choose this app; macOS may require your password and a restart.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("The guide waits while Settings is open. Return to Intent when you’re done.")
+            Text(IntentPermissionInstructions.current.onboardingReturn)
                 .font(.caption).foregroundStyle(.secondary)
-            Text("Safety Stop: Control + Option + Command + Esc. Also available from Intent’s menu-bar menu.").font(.caption.weight(.medium))
+            Text("Safety Stop: Control + Option + Command + Esc. Also available from \(appName)’s menu-bar menu.").font(.caption.weight(.medium))
         }
     }
     private func permission(_ title: String, ready: Bool, explanation: String, pane: String) -> some View {

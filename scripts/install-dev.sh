@@ -1,209 +1,186 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Explicit local source installs. Neither branch creates a public release.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CHANNEL=development
+PRINT_PLAN=0
+for argument in "$@"; do
+  case "$argument" in
+    --launch-local) CHANNEL=launch ;;
+    --print-plan) PRINT_PLAN=1 ;;
+    *) echo "Usage: scripts/install-dev.sh [--launch-local] [--print-plan]" >&2; exit 64 ;;
+  esac
+done
+if [[ "$CHANNEL" == development ]]; then
+  APP_NAME='Test Intent'
+  BUNDLE_ID='dev.loganmondi.intent.test'
+  AUTH_SCHEME='intent-test'
+  DATA_NAME='.intent-test'
+  BUILD="$ROOT/.build-development"
+  DEVELOPMENT_PLIST='<true/>'
+  CLI_NAME='test-intent'
+  CLI_APP_NAME='TestIntentApp'
+  LAUNCHER_NAME='test-intent-app'
+  SWIFT_FLAGS=(-Xswiftc -D -Xswiftc INTENT_DEVELOPMENT)
+else
+  APP_NAME='Intent'
+  BUNDLE_ID='dev.loganmondi.intent'
+  AUTH_SCHEME='intent'
+  DATA_NAME='.intent'
+  BUILD="$ROOT/.build-launch"
+  DEVELOPMENT_PLIST='<false/>'
+  CLI_NAME='intent'
+  CLI_APP_NAME='IntentApp'
+  LAUNCHER_NAME='intent-app'
+  SWIFT_FLAGS=()
+fi
+APP_DIR="${HOME}/${DATA_NAME}/bin"
+APP_BUNDLE="${HOME}/Applications/${APP_NAME}.app"
 BIN_DIR="${HOME}/.local/bin"
-APP_DIR="${HOME}/.intent/bin"
-APPLICATIONS_DIR="${HOME}/Applications"
-APP_BUNDLE="${APPLICATIONS_DIR}/Intent.app"
-LAUNCH_AGENT_FILE="${HOME}/Library/LaunchAgents/dev.loganmondi.intent.plist"
-GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
 
-if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
-  GOOGLE_CLIENT_SECRET="$(
-    security find-generic-password \
-      -s "dev.loganmondi.intent.build" \
-      -a "google-oauth-client-secret" \
-      -w 2>/dev/null || true
-  )"
+# A side-effect-free plan is also used by installer regression fixtures.
+if [[ "$PRINT_PLAN" == 1 ]]; then
+  /usr/bin/python3 - "$CHANNEL" "$APP_NAME" "$BUNDLE_ID" "$AUTH_SCHEME" "$DATA_NAME" "$BUILD" "$APP_BUNDLE" "$APP_DIR" "$CLI_NAME" <<'PY'
+import json,sys
+keys=('channel','app_name','bundle_identifier','auth_scheme','data_directory_name','build_path','app_bundle','binary_directory','cli_name')
+print(json.dumps(dict(zip(keys,sys.argv[1:]))))
+PY
+  exit 0
 fi
 
+require_idle_engines() {
+  /usr/bin/python3 "$ROOT/scripts/check-local-channel-idle.py" "$HOME"
+}
+require_idle_engines
+
+GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
+if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
+  GOOGLE_CLIENT_SECRET="$(security find-generic-password -s 'dev.loganmondi.intent.build' -a 'google-oauth-client-secret' -w 2>/dev/null || true)"
+fi
 cd "$ROOT"
-swift build -c release -Xswiftc -D -Xswiftc INTENT_DEVELOPMENT --product Intent
-swift build -c release -Xswiftc -D -Xswiftc INTENT_DEVELOPMENT --product IntentApp
-swift build -c release -Xswiftc -D -Xswiftc INTENT_DEVELOPMENT --product IntentNativeHost
+for product in Intent IntentApp IntentNativeHost; do
+  swift build -c release --jobs 2 --scratch-path "$BUILD" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"} --product "$product"
+done
+BUILD_BIN="$(swift build -c release --jobs 2 --scratch-path "$BUILD" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"} --show-bin-path)"
+[[ "$("$BUILD_BIN/IntentApp" --print-build-channel)" == "$CHANNEL" ]] || {
+  echo 'Refusing an executable compiled for another channel.' >&2; exit 4;
+}
+require_idle_engines
+
+# Stop only the exact target bundle, after the idle checks. Never kill the other
+# channel, publish a host manifest, or seize a browser connection in the installer.
+/usr/bin/python3 - "$APP_BUNDLE/Contents/MacOS/IntentApp" <<'PY'
+import os,signal,subprocess,sys,time
+expected=sys.argv[1]
+pids=[]
+for line in subprocess.check_output(['/bin/ps','-axo','pid=,command='],text=True).splitlines():
+    columns=line.strip().split(None,1)
+    if len(columns)==2 and (columns[1]==expected or columns[1].startswith(expected+' ')):
+        pids.append(int(columns[0]))
+for pid in pids:
+    try: os.kill(pid,signal.SIGTERM)
+    except ProcessLookupError: pass
+for _ in range(50):
+    live=[]
+    for pid in pids:
+        try: os.kill(pid,0); live.append(pid)
+        except ProcessLookupError: pass
+    if not live: break
+    time.sleep(.1)
+else: sys.exit('The previous app has not stopped. Installation was not changed.')
+PY
+
+# A running pre-lease helper still executes its old memory-mapped code after
+# atomic file replacement. Retire this idle target only, before replacing it;
+# the owner startup hook then reconnects browsers through the selected channel.
+require_idle_engines
+/usr/bin/python3 "$ROOT/scripts/retire-local-channel-hosts.py" \
+  "$APP_BUNDLE/Contents/Helpers/IntentNativeHost" "$APP_DIR/IntentNativeHost"
 
 atomic_install_executable() {
-  local source="$1"
-  local destination="$2"
-  local temporary="${destination}.new.$$"
+  local source="$1" destination="$2" temporary="${2}.new.$$"
   cp "$source" "$temporary"
   chmod +x "$temporary"
   mv -f "$temporary" "$destination"
 }
-
-pkill -x IntentApp 2>/dev/null || true
-
-mkdir -p "$BIN_DIR"
-mkdir -p "$APP_DIR"
-chmod 700 "${HOME}/.intent"
-atomic_install_executable "$ROOT/.build/release/Intent" "$APP_DIR/Intent"
-atomic_install_executable "$ROOT/.build/release/IntentApp" "$APP_DIR/IntentApp"
-atomic_install_executable "$ROOT/.build/release/IntentNativeHost" "$APP_DIR/IntentNativeHost"
-pkill -f "^${APP_DIR}/IntentNativeHost" 2>/dev/null || true
-
-ln -sf "$APP_DIR/Intent" "$BIN_DIR/Intent"
-ln -sf "$APP_DIR/Intent" "$BIN_DIR/intent"
-ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/IntentApp"
-
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$APP_BUNDLE/Contents/Resources"
-atomic_install_executable "$APP_DIR/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
-/usr/bin/ditto "$ROOT/.build/release/Intent_IntentApp.bundle" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle"
+mkdir -p "$BIN_DIR" "$APP_DIR" "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+chmod 700 "${HOME}/${DATA_NAME}"
+for product in Intent IntentApp IntentNativeHost; do
+  atomic_install_executable "$BUILD_BIN/$product" "$APP_DIR/$product"
+done
+atomic_install_executable "$BUILD_BIN/IntentApp" "$APP_BUNDLE/Contents/MacOS/IntentApp"
+/usr/bin/ditto "$BUILD_BIN/Intent_IntentApp.bundle" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle"
 "$ROOT/scripts/configure-supabase-bundle.sh" "$APP_BUNDLE/Contents/Resources/Intent_IntentApp.bundle" 0
 cp "$ROOT/Assets/Intent.icns" "$APP_BUNDLE/Contents/Resources/Intent.icns"
 if [[ -n "$GOOGLE_CLIENT_SECRET" ]]; then
   GOOGLE_CONFIG="$APP_BUNDLE/Contents/Resources/GoogleCalendarConfig.plist"
   cp "$ROOT/Sources/IntentApp/Resources/GoogleCalendarConfig.plist" "$GOOGLE_CONFIG"
-  /usr/libexec/PlistBuddy -c "Delete :CLIENT_SECRET" "$GOOGLE_CONFIG" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c 'Delete :CLIENT_SECRET' "$GOOGLE_CONFIG" >/dev/null 2>&1 || true
   /usr/libexec/PlistBuddy -c "Add :CLIENT_SECRET string $GOOGLE_CLIENT_SECRET" "$GOOGLE_CONFIG"
 fi
-# Keep the embedded helper and extension sources in lockstep with this build.
-# App startup registers this helper path, so leaving a prior release here silently
-# reconnects browsers to old code even when ~/.intent/bin has been updated.
-mkdir -p "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Resources/BrowserGuard"
-atomic_install_executable "$APP_DIR/IntentNativeHost" "$APP_BUNDLE/Contents/Helpers/IntentNativeHost"
-/usr/bin/ditto "$ROOT/chrome-extension" "$APP_BUNDLE/Contents/Resources/BrowserGuard/Chrome"
-/usr/bin/ditto "$ROOT/firefox-extension" "$APP_BUNDLE/Contents/Resources/BrowserGuard/Firefox"
-codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/IntentNativeHost"
-chmod +x "$APP_BUNDLE/Contents/MacOS/IntentApp"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key>
-  <string>IntentApp</string>
-  <key>CFBundleIdentifier</key>
-  <string>dev.loganmondi.intent</string>
-  <key>CFBundleName</key>
-  <string>Intent</string>
-  <key>CFBundleDisplayName</key>
-  <string>Intent</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleIconFile</key>
-  <string>Intent</string>
-  <key>CFBundleURLTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleURLName</key>
-      <string>dev.loganmondi.intent.auth</string>
-      <key>CFBundleURLSchemes</key>
-      <array>
-        <string>intent</string>
-      </array>
-    </dict>
-  </array>
-  <key>IntentDevelopmentBuild</key>
-  <true/>
-  <key>CFBundleShortVersionString</key>
-  <string>0.9.3-beta</string>
-  <key>CFBundleVersion</key>
-  <string>202609140001</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
-  <key>LSUIElement</key>
-  <true/>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-  <key>NSPrincipalClass</key>
-  <string>NSApplication</string>
-  <key>NSMicrophoneUsageDescription</key>
-  <string>Intent uses the microphone only while you speak your purpose in Purpose Mode.</string>
-  <key>NSSpeechRecognitionUsageDescription</key>
-  <string>Intent turns your spoken purpose into text so it can start the right focused session.</string>
-  <key>NSCalendarsUsageDescription</key>
-  <string>Intent can show your calendars beside local schedules and optionally mirror linked Intent sessions. Calendar access is requested only when you choose Connect.</string>
-  <key>NSCalendarsFullAccessUsageDescription</key>
-  <string>Intent can show your calendars beside local schedules and optionally mirror linked Intent sessions. Calendar access is requested only when you choose Connect.</string>
-  <key>NSRemindersUsageDescription</key>
-  <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
-  <key>NSRemindersFullAccessUsageDescription</key>
-  <string>Intent can optionally show Reminders in a separate area of the scheduler. Reminder access is requested only when you enable it.</string>
-</dict>
-</plist>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>IntentApp</string>
+<key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+<key>CFBundleName</key><string>${APP_NAME}</string>
+<key>CFBundleDisplayName</key><string>${APP_NAME}</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>Intent</string>
+<key>IntentBuildChannel</key><string>${CHANNEL}</string>
+<key>IntentDevelopmentBuild</key>${DEVELOPMENT_PLIST}
+<key>IntentLocalQABuild</key><true/>
+<key>IntentChromePublishedGuardVersion</key><string></string>
+<key>CFBundleShortVersionString</key><string>0.9.3-local</string>
+<key>CFBundleVersion</key><string>202610110001</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>${BUNDLE_ID}.auth</string>
+<key>CFBundleURLSchemes</key><array><string>${AUTH_SCHEME}</string></array>
+</dict></array>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSMicrophoneUsageDescription</key><string>${APP_NAME} uses the microphone only while you speak your purpose in Purpose Mode.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>${APP_NAME} turns your spoken purpose into text so it can start the right focused session.</string>
+<key>NSCalendarsUsageDescription</key><string>${APP_NAME} can show calendars when you choose Connect.</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>${APP_NAME} can show calendars when you choose Connect.</string>
+<key>NSRemindersUsageDescription</key><string>${APP_NAME} can show Reminders when you enable it.</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>${APP_NAME} can show Reminders when you enable it.</string>
+</dict></plist>
 PLIST
-
-"$ROOT/scripts/embed-update-components.sh" "$APP_BUNDLE"
-
-codesign \
-  --force \
-  --sign - \
-  --identifier dev.loganmondi.intent \
-  --requirements '=designated => identifier "dev.loganmondi.intent"' \
-  "$APP_BUNDLE" >/dev/null
+"$ROOT/scripts/embed-update-components.sh" "$APP_BUNDLE" "$BUILD"
+codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/IntentNativeHost"
+codesign --force --sign - --identifier "$BUNDLE_ID" \
+  --requirements "=designated => identifier \"$BUNDLE_ID\"" "$APP_BUNDLE" >/dev/null
 mdimport "$APP_BUNDLE" 2>/dev/null || true
-
-rm -f "$BIN_DIR/intent-app"
-cat > "$BIN_DIR/intent-app" <<LAUNCHER
+ln -sf "$APP_DIR/Intent" "$BIN_DIR/$CLI_NAME"
+ln -sf "$APP_DIR/IntentApp" "$BIN_DIR/$CLI_APP_NAME"
+cat > "$BIN_DIR/$LAUNCHER_NAME" <<LAUNCHER
 #!/usr/bin/env bash
 open "$APP_BUNDLE"
 LAUNCHER
-chmod +x "$BIN_DIR/intent-app"
-
-launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT_FILE" 2>/dev/null || true
-rm -f "$LAUNCH_AGENT_FILE"
-
-HOST_DIR="${HOME}/Library/Application Support/Mozilla/NativeMessagingHosts"
-HOST_FILE="${HOST_DIR}/intent_native_host.json"
-mkdir -p "$HOST_DIR"
-cat > "$HOST_FILE" <<JSON
-{
-  "name": "intent_native_host",
-  "description": "Intent browser rules native host",
-  "path": "${APP_DIR}/IntentNativeHost",
-  "type": "stdio",
-  "allowed_extensions": [
-    "intent-firefox@loganmondi.dev"
-  ]
-}
-JSON
-
-echo "Installed Intent, IntentApp, and intent-app to $BIN_DIR"
-echo "Installed Intent.app to $APP_BUNDLE"
-echo "Intent runs as a menu-bar app and manages Open at Login from its settings."
-echo "Installed Firefox native host manifest to $HOST_FILE"
-
-CHROME_HOST_DIR="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"
-CHROME_HOST_FILE="${CHROME_HOST_DIR}/intent_native_host.json"
-mkdir -p "$CHROME_HOST_DIR"
-cat > "$CHROME_HOST_FILE" <<JSON
-{
-  "name": "intent_native_host",
-  "description": "Intent browser rules native host",
-  "path": "${APP_DIR}/IntentNativeHost",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/",
-    "chrome-extension://ffgfjfpkddgimambgmahlodjjojmjnbc/"
-  ]
-}
-JSON
-echo "Installed Chrome native host manifest to $CHROME_HOST_FILE"
-
+chmod +x "$BIN_DIR/$LAUNCHER_NAME"
+if [[ "$CHANNEL" == launch ]]; then ln -sf "$APP_DIR/Intent" "$BIN_DIR/Intent"; fi
 if [[ -w /opt/homebrew/bin ]]; then
-  ln -sf "$APP_DIR/Intent" /opt/homebrew/bin/Intent
-  ln -sf "$APP_DIR/Intent" /opt/homebrew/bin/intent
-  ln -sf "$APP_DIR/IntentApp" /opt/homebrew/bin/IntentApp
-  ln -sf "$BIN_DIR/intent-app" /opt/homebrew/bin/intent-app
-  echo "Also linked Intent, intent, IntentApp, and intent-app to /opt/homebrew/bin"
-elif [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-  echo "Make sure $BIN_DIR is on your PATH."
+  ln -sf "$APP_DIR/Intent" "/opt/homebrew/bin/$CLI_NAME"
+  ln -sf "$APP_DIR/IntentApp" "/opt/homebrew/bin/$CLI_APP_NAME"
+  ln -sf "$BIN_DIR/$LAUNCHER_NAME" "/opt/homebrew/bin/$LAUNCHER_NAME"
 fi
-
+printf 'Installed %s to %s (%s, local QA only).\n' "$APP_NAME" "$APP_BUNDLE" "$CHANNEL"
+if [[ "${INTENT_LOCAL_INSTALL_NO_OPEN:-0}" == 1 ]]; then exit 0; fi
 open "$APP_BUNDLE"
-for _ in {1..30}; do
-  if pgrep -f "^${APP_BUNDLE}/Contents/MacOS/IntentApp$" >/dev/null; then
-    echo "Intent is running in the menu bar."
-    if ! python3 "$ROOT/scripts/check-firefox-installation.py"; then
-      echo "Firefox setup remains incomplete: install the matching Mozilla-signed XPI and verify tabs after restarting Firefox." >&2
-      echo "A temporary about:debugging add-on is session-only recovery, not a permanent fix." >&2
-    fi
-    exit 0
-  fi
-  sleep 0.1
-done
-
-echo "Intent was installed but did not stay running: $APP_BUNDLE" >&2
-exit 1
+echo 'The app acquires engine ownership before registering Browser Guard. Only one channel controls the Mac at a time.'
+/usr/bin/python3 - "$APP_BUNDLE/Contents/MacOS/IntentApp" "$APP_NAME" <<'PY'
+import subprocess,sys,time
+expected,name=sys.argv[1:]
+for _ in range(50):
+    commands=subprocess.check_output(['/bin/ps','-axo','command='],text=True).splitlines()
+    if any(command==expected or command.startswith(expected+' ') for command in commands):
+        print(f'{name} is running in the menu bar.')
+        break
+    time.sleep(.1)
+else: sys.exit(f'{name} was installed but did not stay running. Check engine ownership and macOS permissions.')
+PY

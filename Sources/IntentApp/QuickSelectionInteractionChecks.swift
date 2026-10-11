@@ -7,6 +7,8 @@ enum QuickSelectionInteractionChecks {
     static func run(_ check: (Bool, String) throws -> Void) throws {
         try WebsiteFinderFocusChecks.run(check)
         try OptionalNameDismissalChecks.run(check)
+        try OverviewAddedAppIconChecks.run(check)
+        try checkSpotlightMarks(check)
         let modifierPanel = QuickSelectionController.makeStagedModifierPanel(frame: .init(x: 0, y: 0, width: 500, height: 70))
         try check(modifierPanel.styleMask.contains(.nonactivatingPanel) && modifierPanel.canBecomeKey && !modifierPanel.canBecomeMain,
             "The real staged editor panel accepts keyboard focus without becoming an activating main window")
@@ -170,5 +172,52 @@ enum QuickSelectionInteractionChecks {
         RunLoop.current.run(until: Date().addingTimeInterval(0.03))
         try check(isDismissed() && controller.selection.tabs.count == 1,
             "A canceled pending browser resolution cannot reenter loading or revive picker state after a native click")
+    }
+    private static func checkSpotlightMarks(_ check: (Bool, String) throws -> Void) throws {
+        for mode in IntentionAccessMode.allCases {
+            for id in ["qa.spotlight.native", "org.mozilla.firefox", "com.google.Chrome"] {
+                let controller = QuickSelectionController(model: IntentAppModel())
+                controller.selection.accessMode = mode
+                controller.selection.windowIDsByApp[id] = [41]
+                let app = AllowedApp(name: "QA Spotlight", bundleIdentifier: id)
+                controller.apps = [.init(app: app, icon: NSImage(size: CGSize(width: 128, height: 128)), pid: 0)]
+                let oldInventory = controller.windows
+                controller.stageSpotlightApplication(app)
+                controller.windows = controller.preserveAddedAppIcons(in: oldInventory)
+                guard let icon = controller.windows.first(where: { $0.appID == id }) else {
+                    throw NSError(domain: "SpotlightMarkChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Spotlight did not preserve its icon"])
+                }
+                try check(controller.isAddedApplicationIcon(icon) && controller.isSelected(icon)
+                    && controller.selection.apps.contains(id) && controller.selection.windowIDsByApp[id] == nil,
+                    "Native and browser Spotlight additions are selected before icon preparation returns")
+                try check(controller.selection.marksNativeWindow(42, app: id),
+                    "A whole-app Spotlight selection also authorizes its native selection outline")
+                try check((controller.selection.startupAppIDs?.contains(id) == true) == (mode == .whitelist),
+                    "Allow additions stage startup; block additions never stage launching")
+                controller.windows = controller.preserveAddedAppIcons(in: oldInventory)
+                try check(controller.windows.count == 1 && controller.isSelected(controller.windows[0]),
+                    "An older async preview inventory cannot erase or unselect the Spotlight icon")
+                controller.selectWindow(icon)
+                controller.windows = controller.preserveAddedAppIcons(in: oldInventory)
+                try check(controller.windows.count == 1 && !controller.isSelected(controller.windows[0])
+                    && !controller.selection.marksNativeWindow(42, app: id),
+                    "Deselecting an added icon removes its outline while keeping it available for reselection")
+                controller.selectWindow(icon)
+                try check(controller.isSelected(icon)
+                    && (controller.selection.startupAppIDs?.contains(id) == true) == (mode == .whitelist),
+                    "A second icon click reselects native apps and browsers without tab-identity errors or premature launching")
+                controller.removeAddedApplication(id)
+                controller.windows = controller.preserveAddedAppIcons(in: oldInventory)
+                try check(controller.windows.isEmpty && !controller.selection.marksNativeWindow(42, app: id),
+                    "Removing the selection prevents a late preview inventory from reviving its icon or border")
+            }
+        }
+        var tabs = QuickSelection()
+        tabs.toggleTab(.init(browser: "org.mozilla.firefox", id: 7), browserSessionID: "qa-outline")
+        try check(!tabs.marksNativeWindow(42, app: "org.mozilla.firefox"),
+            "Selecting one browser tab never becomes a whole-app outline")
+        tabs.toggleWindow(42, app: "qa.exact.window")
+        try check(tabs.marksNativeWindow(42, app: "qa.exact.window") && !tabs.marksNativeWindow(43, app: "qa.exact.window"),
+            "Exact native selections never outline an unselected sibling")
     }
 }

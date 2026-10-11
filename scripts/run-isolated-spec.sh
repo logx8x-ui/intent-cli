@@ -10,7 +10,7 @@ qa_spec_bin="$(mktemp -d "${TMPDIR:-/tmp}/intent-spec-XXXXXXXX")"
 chmod 700 "$qa_spec_data" "$qa_spec_bin"
 printf 'Intent isolated QA data v1\n' > "$qa_spec_data/.intent-qa-root"
 mkdir "$qa_spec_bin/probe"
-swiftc -parse-as-library Sources/IntentCore/IntentEnvironment.swift scripts/test-qa-isolation.swift -o "$qa_spec_bin/probe/IntentQASpec"
+swiftc -parse-as-library Sources/IntentCore/IntentBuildPolicy.swift Sources/IntentCore/IntentEnvironment.swift scripts/test-qa-isolation.swift -o "$qa_spec_bin/probe/IntentQASpec"
 env INTENT_QA_ROOT="$qa_spec_data" "$qa_spec_bin/probe/IntentQASpec"
 cp "$qa_spec_source" "$qa_spec_bin/IntentQASpec"
 if [[ "${CI:-}" == "true" ]]; then

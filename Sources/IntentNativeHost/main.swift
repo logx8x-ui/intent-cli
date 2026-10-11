@@ -3,7 +3,40 @@ import Darwin
 import Foundation
 import IntentCore
 
+if CommandLine.arguments.contains("--print-build-channel") {
+    print(IntentBuildChannel.current.rawValue)
+    exit(0)
+}
+
 let nativeHostEnvironment = ProcessInfo.processInfo.environment
+// Only explicit fixture directories bypass ownership. A browser-launched helper
+// must match the current engine's compiled channel and lifetime before it can
+// even create a data directory. Old connections exit on a channel handoff.
+private let usesFixtureDirectory = nativeHostEnvironment["INTENT_NATIVE_HOST_DIRECTORY"].map { !$0.isEmpty } ?? false
+private let requiresEngineOwnership = !usesFixtureDirectory || nativeHostEnvironment["INTENT_NATIVE_HOST_ENFORCE_OWNER"] == "1"
+private let ownershipDirectory: URL = {
+    guard usesFixtureDirectory, requiresEngineOwnership else { return IntentEngineLease.defaultDirectory }
+    // Ownership integration tests may replace the lease directory only inside a
+    // temporary intent-* fixture. Never borrow the daily engine or its storage.
+    func fixtureURL(_ path: String?) -> URL? {
+        guard let path, !path.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        guard url.path.hasPrefix(temporary), url.path.dropFirst(temporary.count).split(separator: "/").first?.hasPrefix("intent-") == true else { return nil }
+        return url
+    }
+    guard fixtureURL(nativeHostEnvironment["INTENT_NATIVE_HOST_DIRECTORY"]) != nil,
+          let engine = fixtureURL(nativeHostEnvironment["INTENT_NATIVE_HOST_ENGINE_DIRECTORY"]) else { exit(2) }
+    return engine
+}()
+private let connectionEngineOwner = requiresEngineOwnership ? IntentEngineLease.nativeHostOwner(directory: ownershipDirectory) : nil
+if requiresEngineOwnership && connectionEngineOwner == nil { exit(0) }
+
+private func requireConnectionOwnership() {
+    guard requiresEngineOwnership else { return }
+    guard let owner = connectionEngineOwner, IntentEngineLease.ownerStillMatches(owner, directory: ownershipDirectory) else { exit(0) }
+}
+
 if let override = nativeHostEnvironment["INTENT_NATIVE_HOST_DIRECTORY"], !override.isEmpty {
     try? IntentLocalDataSecurity.harden(directory: URL(fileURLWithPath: override, isDirectory: true))
 } else {
@@ -27,6 +60,7 @@ func readMessage() -> Data? {
 let outputLock = NSLock()
 
 func writeMessage<T: Encodable>(_ value: T) throws {
+    requireConnectionOwnership()
     let data = try JSONEncoder().encode(value)
     var length = UInt32(data.count).littleEndian
     let header = Data(bytes: &length, count: 4)
@@ -281,9 +315,7 @@ private struct HostPaths {
         if let override = environment["INTENT_NATIVE_HOST_DIRECTORY"], !override.isEmpty {
             directory = URL(fileURLWithPath: override, isDirectory: true)
         } else {
-            directory = FileManager.default
-                .homeDirectoryForCurrentUser
-                .appendingPathComponent(".intent", isDirectory: true)
+            directory = IntentEnvironment.channelDataDirectory()
         }
     }
 
@@ -360,6 +392,7 @@ private final class HostRuntime {
     private var directoryDescriptor: Int32 = -1
     private var directoryRefreshWorkItem: DispatchWorkItem?
     private var rulesExpirationWorkItem: DispatchWorkItem?
+    private var ownershipTimer: DispatchSourceTimer?
     private var metrics = HostMetrics()
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -368,15 +401,24 @@ private final class HostRuntime {
         } else {
             metricsURL = nil
         }
+        if requiresEngineOwnership {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(25))
+            timer.setEventHandler { requireConnectionOwnership() }
+            timer.resume()
+            ownershipTimer = timer
+        }
     }
 
     func handle(_ requestData: Data) {
+        requireConnectionOwnership()
         guard let request = try? JSONDecoder().decode(HostRequest.self, from: requestData) else {
             // Preserve the request revision even when a malformed descriptor
             // cannot decode, so the extension can abandon the dependent move.
             if let envelope = try? JSONDecoder().decode(VisibilityPlanEnvelope.self, from: requestData),
                envelope.type == "windowVisibilityPlan" {
                 queue.sync {
+                    requireConnectionOwnership()
                     metrics.receivedMessages += 1
                     refreshRulesIfNeeded()
                     sendCurrentState(tabCommand: takePendingCommand(), force: true,
@@ -385,6 +427,7 @@ private final class HostRuntime {
             } else if let envelope = try? JSONDecoder().decode(VisibilityRestartEnvelope.self, from: requestData),
                       envelope.type == "windowVisibilityRestartRecovery" {
                 queue.sync {
+                    requireConnectionOwnership()
                     metrics.receivedMessages += 1
                     refreshRulesIfNeeded()
                     sendCurrentState(tabCommand: takePendingCommand(), force: true,
@@ -393,6 +436,7 @@ private final class HostRuntime {
             } else if let envelope = try? JSONDecoder().decode(VisibilityRecoveryEnvelope.self, from: requestData),
                       envelope.type == "windowVisibilityRecovery" {
                 queue.sync {
+                    requireConnectionOwnership()
                     metrics.receivedMessages += 1
                     refreshRulesIfNeeded()
                     sendCurrentState(tabCommand: takePendingCommand(), force: true,
@@ -401,6 +445,7 @@ private final class HostRuntime {
             } else if let envelope = try? JSONDecoder().decode(VisibilityClosedEnvelope.self, from: requestData),
                       envelope.type == "windowVisibilityClosed" {
                 queue.sync {
+                    requireConnectionOwnership()
                     metrics.receivedMessages += 1
                     refreshRulesIfNeeded()
                     sendCurrentState(tabCommand: takePendingCommand(), force: true,
@@ -408,6 +453,7 @@ private final class HostRuntime {
                 }
             } else if let envelope = try? JSONDecoder().decode(MinimizeBootstrapEnvelope.self, from: requestData) {
                 queue.sync {
+                    requireConnectionOwnership()
                     refreshRulesIfNeeded()
                     if envelope.type == "windowMinimizeBootstrapClaim", let effect = envelope.minimizeBootstrapClaim {
                         sendCurrentState(tabCommand: takePendingCommand(), force: true,
@@ -422,6 +468,7 @@ private final class HostRuntime {
         }
 
         queue.sync {
+            requireConnectionOwnership()
             metrics.receivedMessages += 1
             let browser = request.browserBundleIdentifier ?? browserBundleIdentifier ?? "org.mozilla.firefox"
             var capabilitiesChanged = false
@@ -511,6 +558,7 @@ private final class HostRuntime {
                     let url = paths.directory.appendingPathComponent(BrowserTabPreview.fileURL(browser: browser).lastPathComponent)
                     try? data.write(to: url, options: .atomic)
                     queue.asyncAfter(deadline: .now() + 10) {
+                        requireConnectionOwnership()
                         if let current = try? Data(contentsOf: url),
                            let item = try? JSONDecoder().decode(BrowserTabPreview.self, from: current),
                            item.requestID == preview.requestID { try? FileManager.default.removeItem(at: url) }
@@ -523,7 +571,7 @@ private final class HostRuntime {
                    let data = try? JSONEncoder().encode(receipt), data.count <= 20000 {
                     try? data.write(to: url, options: .atomic)
                     issuedFinderCommands.removeValue(forKey: receipt.requestID)
-                    queue.asyncAfter(deadline: .now() + 30) { try? FileManager.default.removeItem(at: url) }
+                    queue.asyncAfter(deadline: .now() + 30) { requireConnectionOwnership(); try? FileManager.default.removeItem(at: url) }
                 }
             case "tabCreateResult":
                 if let receipt = request.creation, request.browserSessionID == profileSessionID,
@@ -532,7 +580,7 @@ private final class HostRuntime {
                    let data = try? JSONEncoder().encode(receipt), data.count <= 20000 {
                     try? data.write(to: url, options: .atomic)
                     issuedTabCreations.removeValue(forKey: receipt.requestID)
-                    queue.asyncAfter(deadline: .now() + 30) { try? FileManager.default.removeItem(at: url) }
+                    queue.asyncAfter(deadline: .now() + 30) { requireConnectionOwnership(); try? FileManager.default.removeItem(at: url) }
                 }
             case "setGuardEnabled":
                 if let enabled = request.enabled, enabled != guardEnabled {
@@ -577,6 +625,7 @@ private final class HostRuntime {
     func flushMetrics() {
         guard let metricsURL else { return }
         queue.sync {
+            requireConnectionOwnership()
             try? FileManager.default.createDirectory(
                 at: metricsURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
@@ -588,6 +637,7 @@ private final class HostRuntime {
     }
 
     private func registerBrowserIfNeeded(_ browser: String) {
+        requireConnectionOwnership()
         guard browserBundleIdentifier == nil else { return }
         browserBundleIdentifier = browser
         try? FileManager.default.createDirectory(at: paths.directory, withIntermediateDirectories: true)
@@ -636,6 +686,7 @@ private final class HostRuntime {
         [effect, session, profile].allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256 }
     }
     private func claimMinimizeBootstrap(_ request: HostRequest) -> Bool {
+        requireConnectionOwnership()
         guard supportsMinimizeBootstrap, let browser = browserBundleIdentifier, request.browserBundleIdentifier == browser,
               let profile = profileSessionID, request.browserSessionID == profile,
               let claim = request.minimizeBootstrapClaim, claim.previousBrowserSessionID == profile,
@@ -647,6 +698,7 @@ private final class HostRuntime {
             browserProcessIdentity: proof, currentIntentionSessionID: record.plan.intentionSessionID)) == true
     }
     private func receiveMinimizeBootstrapResult(_ request: HostRequest) -> Bool {
+        requireConnectionOwnership()
         guard supportsMinimizeBootstrap, let browser = browserBundleIdentifier, request.browserBundleIdentifier == browser,
               let profile = profileSessionID, request.browserSessionID == profile,
               let result = request.minimizeBootstrapResult,
@@ -722,6 +774,7 @@ private final class HostRuntime {
     }
 
     private func requestNativeWindowVisibilityRecovery(_ request: HostRequest) -> Bool {
+        requireConnectionOwnership()
         guard supportsNativeWindowVisibility,
               let browserBundleIdentifier, request.browserBundleIdentifier == browserBundleIdentifier,
               let profileSessionID, request.browserSessionID == profileSessionID,
@@ -746,6 +799,7 @@ private final class HostRuntime {
     }
 
     private func confirmNativeParkingClosed(_ request: HostRequest) -> Bool {
+        requireConnectionOwnership()
         guard supportsNativeWindowVisibility,
               let browserBundleIdentifier, request.browserBundleIdentifier == browserBundleIdentifier,
               let profileSessionID, request.browserSessionID == profileSessionID,
@@ -769,6 +823,7 @@ private final class HostRuntime {
     }
 
     private func persistWindowVisibilityPlan(_ request: HostRequest) -> Bool {
+        requireConnectionOwnership()
         guard supportsNativeWindowVisibility,
               let browserBundleIdentifier,
               request.browserBundleIdentifier == browserBundleIdentifier,
@@ -831,6 +886,7 @@ private final class HostRuntime {
     }
 
     private func maybeWriteHeartbeat(force: Bool = false) {
+        requireConnectionOwnership()
         guard let browserBundleIdentifier else { return }
         let now = Date()
         if !force,
@@ -868,6 +924,7 @@ private final class HostRuntime {
     private var lastSnapshotAllTabs: [BrowserTabItem]?
     private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserSessionID: String?, browserBundleIdentifier: String,
                                  snapshotRequestIDs: [String]?, completeWindowInventory: Bool?) {
+        requireConnectionOwnership()
         let now = Date()
         issuedSnapshotRequests = issuedSnapshotRequests.filter { now.timeIntervalSince($0.value) <= 3 }
         let proof = self.browserBundleIdentifier == browserBundleIdentifier && self.profileSessionID == browserSessionID
@@ -1041,6 +1098,7 @@ private final class HostRuntime {
     }
 
     private func takePendingCommand() -> BrowserTabCommand? {
+        requireConnectionOwnership()
         guard let browserBundleIdentifier else { return nil }
         if let session = profileSessionID,
            let creation = BrowserTabCreationMailbox(browser: browserBundleIdentifier, session: session, directory: paths.directory).take() {
@@ -1070,6 +1128,7 @@ private final class HostRuntime {
                                   visibilityClosedReceipt: HostVisibilityClosedReceipt? = nil,
                                   minimizeBootstrapClaimReceipt: HostMinimizeBootstrapClaimReceipt? = nil,
                                   minimizeBootstrapResultReceipt: HostMinimizeBootstrapResultReceipt? = nil) {
+        requireConnectionOwnership()
         let state = makeRuleState()
         var finderCommand: BrowserFinderCommand?
         if let browser = browserBundleIdentifier, let session = profileSessionID,

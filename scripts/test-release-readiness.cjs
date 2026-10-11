@@ -127,12 +127,15 @@ assert.ok(
 const developmentInstaller = read("scripts/install-dev.sh");
 assert.ok(
   developmentInstaller.includes('open "$APP_BUNDLE"') &&
-    developmentInstaller.includes("Intent is running in the menu bar."),
+    developmentInstaller.includes("is running in the menu bar.") && developmentInstaller.includes("commands=subprocess.check_output"),
   "The development installer must relaunch Intent and verify its menu process"
 );
-assert.ok(developmentInstaller.includes('Contents/Helpers/IntentNativeHost') && developmentInstaller.includes('Contents/Resources/BrowserGuard/Chrome') && developmentInstaller.includes('Contents/Resources/BrowserGuard/Firefox'),
+const componentEmbedder = read("scripts/embed-update-components.sh");
+assert.ok(developmentInstaller.includes('scripts/embed-update-components.sh') && developmentInstaller.includes('Contents/Helpers/IntentNativeHost') && componentEmbedder.includes('Contents/Resources/BrowserGuard/Chrome') && componentEmbedder.includes('Contents/Resources/BrowserGuard/Firefox'),
   "Development installation must update the helper and matching extension sources together");
-for (const installer of [developmentInstaller, releaseBuilder]) {
+// Local apps may register the common host only after obtaining engine ownership.
+// The public installer retains its signed system-wide registration.
+for (const installer of [read("Sources/IntentApp/IntentBrowserSetup.swift"), releaseBuilder]) {
   assert.ok(
     installer.includes("chrome-extension://aibdbhjdckeeejpggfpfaghmomopjbpb/") &&
       installer.includes("chrome-extension://ffgfjfpkddgimambgmahlodjjojmjnbc/"),

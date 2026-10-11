@@ -121,6 +121,17 @@ func runBrowserWindowEnforcementSpecs() throws {
         fallbackBundleIdentifier: "", strictSingleApp: false, blockAppSwitching: false,
         blockNewApps: false, keepFocused: false, blockBrowserTabEscape: false,
         blockFirefoxChromeClicks: false, allowGoogleSearchTabs: false, spotifyPlaylistURI: nil, allowSpotifyForeground: false)
+    try expect(FocusVisibilityController(spec: spec).isInitialCoverageReady,
+        "No-enforcement startup remains ready without dispatching native visibility effects")
+    var appOnlySpec = FocusSessionSpec(displayName: "QA native-only", startupSteps: [], allowedBundleIdentifiers: ["allowed.app"],
+        fallbackBundleIdentifier: "", strictSingleApp: false, blockAppSwitching: true,
+        blockNewApps: true, keepFocused: true, blockBrowserTabEscape: false,
+        blockFirefoxChromeClicks: false, allowGoogleSearchTabs: false, spotifyPlaylistURI: nil, allowSpotifyForeground: false)
+    try expect(FocusVisibilityController(spec: appOnlySpec).isInitialCoverageReady,
+        "Enforcement without distraction hiding does not invent a visibility startup wait")
+    appOnlySpec.hideDistractions = true
+    try expect(appOnlySpec.browserWindowCoverage.isEmpty && !FocusVisibilityController(spec: appOnlySpec).isInitialCoverageReady,
+        "A restrictive app-only lock waits for actual native hiding before reporting initial readiness")
     let failedLock = FocusLock(spec: spec)
     failedLock.stopForSafety(failure: .browserWindowEnforcementFailed(failure))
     do {
@@ -135,5 +146,13 @@ func runBrowserWindowEnforcementSpecs() throws {
         lock.stopForSafety(failure: .browserWindowEnforcementFailed(failure))
         try lock.run { preconditionFailure("Stopped lock became ready") }
         try expect(!lock.didStopForSafety, "A late visibility callback cannot replace manual/expiry completion with failure")
+        for cause: FocusLockSafetyStopCause in [.requested, .emergencyShortcut, .selectedWindowRecoveryUnavailable,
+                                               .inputTapTimeout, .inputTapDisabled] {
+            let causeOnlyLock = FocusLock(spec: spec); stop(causeOnlyLock)
+            causeOnlyLock.stopForSafety(cause: cause)
+            try causeOnlyLock.run { preconditionFailure("A cause-only callback revived a stopped lock") }
+            try expect(!causeOnlyLock.didStopForSafety,
+                "A late cause-only safety callback must preserve manual/expiry completion")
+        }
     }
 }

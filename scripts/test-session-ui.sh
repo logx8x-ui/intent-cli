@@ -60,6 +60,8 @@ printf 'Session regression logs: %s\n' "$qa_logs"
 run_step change-impact-accounting node scripts/test-change-impact.cjs
 run_step finish-trace-accounting node scripts/test-finish-trace.cjs
 run_step native-keyboard-input bash scripts/test-quick-mark-input.sh
+run_step enforcement-health bash scripts/test-focus-enforcement-health.sh
+run_step channel-isolation bash scripts/test-channel-isolation.sh
 run_step core-build swift build --scratch-path "$qa_build" --product IntentCoreSpec
 qa_debug="$(swift build --scratch-path "$qa_build" --show-bin-path)"
 # Core specs call real lifecycle owners. Even a stop-before-start assertion must
@@ -70,7 +72,7 @@ printf 'Intent isolated QA data v1\n' > "$qa_core_data/.intent-qa-root"
 mkdir -p "$qa_logs/core" "$qa_logs/isolation"
 cp "$qa_debug/IntentCoreSpec" "$qa_logs/core/IntentQASpec"
 printf 'Core QA executable: %s\nCore QA data: %s\n' "$qa_logs/core/IntentQASpec" "$qa_core_data" >> "$qa_logs/provenance.log"
-run_step isolation-build swiftc -parse-as-library Sources/IntentCore/IntentEnvironment.swift scripts/test-qa-isolation.swift -o "$qa_logs/isolation/IntentQASpec"
+run_step isolation-build swiftc -parse-as-library Sources/IntentCore/IntentBuildPolicy.swift Sources/IntentCore/IntentEnvironment.swift scripts/test-qa-isolation.swift -o "$qa_logs/isolation/IntentQASpec"
 run_step isolation-behaviour env INTENT_QA_ROOT="$qa_core_data" "$qa_logs/isolation/IntentQASpec"
 if [[ "${CI:-}" == "true" ]]; then
   run_step core-sign codesign --force --sign - "$qa_logs/core/IntentQASpec"

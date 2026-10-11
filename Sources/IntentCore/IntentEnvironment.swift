@@ -30,7 +30,14 @@ public enum IntentEnvironment {
     public static func validateLaunch() { _ = qaDirectory }
 
     public static var dataDirectory: URL {
-        qaDirectory ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".intent", isDirectory: true)
+        qaDirectory ?? channelDataDirectory()
+    }
+
+    public static func channelDataDirectory(
+        channel: IntentBuildChannel = .current,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        home.appendingPathComponent(channel.dataDirectoryName, isDirectory: true)
     }
 
     /// Explicit fixture homes used by existing tests remain independent.

@@ -238,6 +238,12 @@ final class IntentAppModel: ObservableObject {
     }
 
     var hasActiveSession: Bool { activeSessionName != nil }
+    var canYieldEngine: Bool {
+        !hasActiveSession && !isZeroDriftActive && activeLock == nil && zeroDriftIdleLock == nil
+            && pendingStartIntention == nil && pendingReplacementIntention == nil
+            && pendingFriction == nil && pendingEndTimeRequest == nil && pendingZeroDriftStart == nil
+            && !isPreparingBrowserCoverage && !purposeModeIsResolving
+    }
     var resumableSessionFeedbackOccurrenceID: UUID? {
         guard hasActiveSession, let activeLock, !activeLock.isStopRequested else { return nil }
         return activeSessionOccurrenceID
@@ -1393,7 +1399,8 @@ final class IntentAppModel: ObservableObject {
     func presentEnforcementFailure(occurrenceID: UUID, error: FocusLockError) {
         guard !hasActiveSession else { return }
         switch error {
-        case .browserWindowEnforcementFailed, .browserWindowCoverageFailed: break
+        case .browserWindowEnforcementFailed, .browserWindowCoverageFailed,
+             .nativeWindowEnforcementFailed, .inputProtectionInterrupted: break
         default: return
         }
         dismissSessionPresentation()
@@ -2112,7 +2119,8 @@ final class IntentAppModel: ObservableObject {
                 enforcementFailure = nil
             } catch let error as FocusLockError {
                 switch error {
-                case .browserWindowEnforcementFailed, .browserWindowCoverageFailed:
+                case .browserWindowEnforcementFailed, .browserWindowCoverageFailed,
+                     .nativeWindowEnforcementFailed, .inputProtectionInterrupted:
                     failureMessage = error.description
                     enforcementFailure = error
                 default:

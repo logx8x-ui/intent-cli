@@ -8,6 +8,8 @@ import IntentCore
 enum SessionCompletionLaserChecks {
     static func run(check: (Bool, String) throws -> Void) throws {
         let size = CGSize(width: 1512, height: 982)
+        try check(SessionCompletionLight.duration == 1.18 && SessionCompletionLight.travelDuration == 0.86,
+            "The slightly longer completion sweep remains bounded to 1.18 seconds with 0.86 seconds of travel")
         for mode in IntentionAccessMode.allCases {
             let colour = SessionChromeStyle.accent(for: mode)
             for reduced in [false, true] {
@@ -17,14 +19,20 @@ enum SessionCompletionLaserChecks {
                 try check(layers.count == (reduced ? 2 : 7), "Laser has bounded layers; reduced motion removes travelling tips and collision pulse")
                 try check(strokes.allSatisfy { sameColour($0.strokeColor, colour.cgColor) && sameColour($0.shadowColor, colour.cgColor) },
                     "Every laser stroke and halo keeps the exact shared \(mode.rawValue) accent without whitening")
-                try check(strokes.allSatisfy { $0.lineWidth <= 2.2 && $0.shadowRadius <= 2.2 && $0.fillColor == nil },
+                try check(strokes.allSatisfy { $0.lineWidth <= 2.5 && $0.shadowRadius <= 2.5 && $0.fillColor == nil },
                     "Laser uses narrow strokes and restrained glow, not a broad luminous border")
                 try check(layers.allSatisfy { $0.opacity == 0 && $0.shadowOffset == .zero },
                     "All model layers are invisible outside their finite animation and have centred glow")
                 try check(layers.allSatisfy { layer in
                     let animations = (layer.animationKeys() ?? []).compactMap { layer.animation(forKey: $0) }
                     return animations.count == 1 && animations.allSatisfy(isFinite)
-                }, "All completion work is nonrepeating and bounded by the 1.05-second lifetime")
+                }, "All completion work is nonrepeating and bounded by the 1.18-second lifetime")
+                try check(layers.allSatisfy { layer in
+                    guard let animation = layer.animation(forKey: layer.name == "laser.meeting" ? "meeting" : "completion") else { return false }
+                    guard let opacity = (animation as? CAAnimationGroup).flatMap({ frames($0, key: "opacity") })
+                        ?? (animation as? CAKeyframeAnimation), opacity.keyPath == "opacity" else { return false }
+                    return value(opacity, elapsed: SessionCompletionLight.duration) == 0
+                }, "Every actual stroke and meeting pulse fades completely at the finite lifetime, including Reduce Motion")
 
                 if reduced {
                     try check(strokes.allSatisfy { $0.strokeStart == 0 && $0.strokeEnd == 1
@@ -33,7 +41,7 @@ enum SessionCompletionLaserChecks {
                         "Reduce Motion uses only a subtle static 1-point fade, with no travel or scale animation")
                 } else {
                     let cores = strokes.filter { $0.name?.hasSuffix(".core") == true }
-                    try check(cores.count == 2 && cores.allSatisfy { $0.lineWidth == 1 }, "Both laser cores are exactly 1 point wide")
+                    try check(cores.count == 2 && cores.allSatisfy { $0.lineWidth == 1.2 }, "Both laser cores are exactly 1.2 points wide")
                     try check(strokes.allSatisfy { stroke in
                         guard let group = stroke.animation(forKey: "completion") as? CAAnimationGroup,
                               let head = frames(group, key: "strokeEnd"), let tail = frames(group, key: "strokeStart"),
@@ -46,7 +54,8 @@ enum SessionCompletionLaserChecks {
                     try checkBeamProfile(colour: colour, mode: mode, check: check)
                     let meeting = layers.first { $0.name == "laser.meeting" }
                     try check(meeting.map { sameColour($0.backgroundColor, colour.cgColor)
-                        && sameColour($0.shadowColor, colour.cgColor) && $0.bounds.width == 2.5 && $0.shadowRadius == 2.5 } == true,
+                        && sameColour($0.shadowColor, colour.cgColor) && $0.bounds.size == CGSize(width: 2.8, height: 2.8)
+                        && $0.shadowRadius == 2.8 } == true,
                         "The small meeting pulse uses the same mode colour, never a white flash")
                     if let group = meeting?.animation(forKey: "meeting") as? CAAnimationGroup,
                        let opacity = frames(group, key: "opacity") {
@@ -57,7 +66,7 @@ enum SessionCompletionLaserChecks {
                     }
                 }
 
-                let samples = reduced ? [0.25] : [0.19, 0.38, 0.57, 0.79, 0.94]
+                let samples = reduced ? [0.25] : [0.21, 0.43, 0.65, 0.90, 1.06]
                 for (index, elapsed) in samples.enumerated() {
                     let sampled = makeRoot(size: size, colour: colour, reducedMotion: reduced)
                     try sample(sampled, elapsed: elapsed)
@@ -82,8 +91,8 @@ enum SessionCompletionLaserChecks {
                                          check: (Bool, String) throws -> Void) throws {
         let sizes = [CGSize(width: 1280, height: 800), CGSize(width: 1512, height: 982),
                      CGSize(width: 3024, height: 1964)]
-        let profiles: [(name: String, length: CGFloat, opacity: Double)] = [
-            ("core", 180, 0.96), ("glow", 220, 0.30), ("tip", 12, 1)
+        let profiles: [(name: String, length: CGFloat, opacity: Double, width: CGFloat, glow: CGFloat)] = [
+            ("core", 210, 0.96, 1.2, 0.9), ("glow", 250, 0.33, 2.5, 2.5), ("tip", 14, 1, 1.5, 1.4)
         ]
         for size in sizes {
             let root = makeRoot(size: size, colour: colour, reducedMotion: false)
@@ -91,14 +100,15 @@ enum SessionCompletionLaserChecks {
             for profile in profiles {
                 let matching = strokes.filter { $0.name?.hasSuffix(".\(profile.name)") == true }
                 try check(matching.count == 2 && matching.allSatisfy { stroke in
-                    guard let path = stroke.path,
+                    guard stroke.lineWidth == profile.width, stroke.shadowRadius == profile.glow,
+                          let path = stroke.path,
                           let group = stroke.animation(forKey: "completion") as? CAAnimationGroup,
                           let head = frames(group, key: "strokeEnd"), let tail = frames(group, key: "strokeStart"),
                           let opacity = frames(group, key: "opacity") else { return false }
                     // Inspect the real animations at two separated positions:
                     // the visible beam must remain long and bright while
                     // travelling, not merely flash once near the notch.
-                    return [0.38, 0.57].allSatisfy { elapsed in
+                    return [0.43, 0.65].allSatisfy { elapsed in
                         guard let headValue = value(head, elapsed: elapsed),
                               let tailValue = value(tail, elapsed: elapsed),
                               let opacityValue = value(opacity, elapsed: elapsed) else { return false }

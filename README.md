@@ -13,7 +13,9 @@ Choose Firefox, Chrome, or both when downloads become available. Install the Mac
 
 Firefox uses a matching Mozilla-signed extension. Chrome uses the official Chrome Web Store listing only after its approved version matches the release. An unpacked Chrome extension is for local development.
 
-Intent has two compiled channels in this repository: the owner's **development** build retains the experimental T website adder; the **launch** build excludes it. A tested commit is promoted manually to an immutable `launch-<version>` release. The launch download page does not track `latest` or the old beta feed. App update checks are currently disabled, so there is no promise of hourly or automatic app updates.
+Intent has two separately installed apps built from this repository: **Test Intent** retains the experimental T website adder and uses `~/.intent-test`; **Intent** excludes it and preserves the existing `~/.intent` workspace. Test starts from a one-time durable-data copy and stays local-only; later edits and account credentials are separate. One engine runs at a time, with an idle handoff when opening the other app; an active intention prevents switching. Test needs its own macOS permission grants.
+
+A tested commit is promoted manually to an immutable `launch-<version>` release. The launch download page does not track `latest` or the old beta feed. App update checks are currently disabled, so there is no promise of hourly or automatic app updates. Local source installers are for explicitly requested development/QA use and do not produce public notarized downloads.
 
 See [Launch and development channels](docs/launch-channels.md) for the build, promotion, and installation procedure, and [Browser extension distribution](docs/BROWSER_EXTENSION_DISTRIBUTION.md) for browser distribution requirements.
 

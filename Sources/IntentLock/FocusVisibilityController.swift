@@ -16,6 +16,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var parking: Bool?
         var bootstrapEffectID: String?
         var nativeCoverage: Bool?
+        var accessibilityApplicationHide: Bool?
         // nil decodes old journals with their existing automatic semantics.
         var restorationPolicy: HiddenWorkspaceRestorationPolicy?
         var controllerOwnershipID: String?
@@ -24,6 +25,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var pid: pid_t
         var launched: Date
         var window: UInt32
+    }
+    private struct AccessibleNativeWindow {
+        var element: AXUIElement
+        var role: String
+        var subrole: String
+        var title: String
+        var frame: CGRect
     }
     private static let file = ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent().appendingPathComponent("hidden-workspace.json")
     private static let browsers: Set<String> = ["org.mozilla.firefox", "com.google.Chrome"]
@@ -41,6 +49,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var enforcementPolicy: BrowserWindowEnforcementPolicy?
     /// Main-thread callback. Parking capture receipts are intentionally separate.
     public var onCoverageFailure: ((BrowserWindowCoveragePolicy.Failure) -> Void)?
+    public var onNativeCoverageFailure: ((NativeVisibilityCoveragePolicy.Failure) -> Void)?
     public var onEnforcementFailure: ((BrowserWindowEnforcementPolicy.Failure) -> Void)?
     /// The lock's thread-safe stop gate also fences a main-thread AX pass while
     /// another thread is waiting for synchronous visibility cleanup.
@@ -54,6 +63,29 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var stopped = false
     private var started = false
     private var initialVisibilityApplied = false
+    private var nativeCoverage: NativeVisibilityCoveragePolicy
+    private var nativeStartupWindows: [NativeVisibilityCoveragePolicy.Target: WorkspaceWindow] = [:]
+    private var nativeStartupBindings: [NativeVisibilityCoveragePolicy.Target: AXUIElement] = [:]
+    private var nativeDiagnosticTargets: [NativeVisibilityCoveragePolicy.Target: [String: Any]] = [:]
+    private var nativeDiagnosticSelections: [[String: Any]] = []
+    private var nativeKnownUserWindows: Set<NativeVisibilityCoveragePolicy.Target> = []
+    private var nativeKnownDocumentWindows: Set<NativeVisibilityCoveragePolicy.Target> = []
+    private let auxiliaryProofLock = NSLock()
+    private var auxiliaryProofs: [NativeVisibilityCoveragePolicy.Target: TimeInterval] = [:]
+    private var observedAuxiliaryProofs: [NativeVisibilityCoveragePolicy.Target: TimeInterval] = [:]
+    /// Derived utility permission stays separate from the frozen work selection.
+    /// This lookup performs no AX read or visibility effect and expires quickly.
+    public func permitsAuxiliaryWindow(id: UInt32, pid: pid_t, bundleIdentifier: String, launched: Date?) -> Bool {
+        guard let launched else { return false }
+        let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: bundleIdentifier, pid: pid,
+            launched: launched.timeIntervalSinceReferenceDate, windowID: id)
+        auxiliaryProofLock.lock(); defer { auxiliaryProofLock.unlock() }
+        guard let observedAt = auxiliaryProofs[target] else { return false }
+        return NativeVisibilityCoveragePolicy.auxiliaryProofIsFresh(observedAt: observedAt, now: ProcessInfo.processInfo.systemUptime)
+    }
+    private func publishAuxiliaryProofs(_ proofs: [NativeVisibilityCoveragePolicy.Target: TimeInterval]) {
+        auxiliaryProofLock.lock(); auxiliaryProofs = proofs; auxiliaryProofLock.unlock()
+    }
     private struct CoverageRequest {
         var id: String
         var began: TimeInterval
@@ -94,15 +126,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
     private func updateCoverageReady() {
         coverageReadyLock.lock()
-        initialCoverageReady = coverageStates.values.allSatisfy { $0.cohort.initialResolved }
+        initialCoverageReady = nativeCoverage.initialResolved && coverageStates.values.allSatisfy { $0.cohort.initialResolved }
         coverageReadyLock.unlock()
     }
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        nativeCoverage = .init(required: spec.hideDistractions && spec.requiresEnforcement)
         for coverage in spec.browserWindowCoverage where spec.hideDistractions && spec.requiresEnforcement {
             coverageStates[coverage.browserBundleIdentifier] = CoverageState(coverage, observation: spec.browserCoverageObservations[coverage.browserBundleIdentifier], allowsLater: spec.coverageAllowsLaterWindows)
         }
-        initialCoverageReady = coverageStates.values.allSatisfy { $0.cohort.initialResolved }
+        initialCoverageReady = nativeCoverage.initialResolved && coverageStates.values.allSatisfy { $0.cohort.initialResolved }
         visibilityCache = spec.nativeWindowVisibilitySessionID.map {
             BrowserWindowVisibilityRecordCache(intentionSessionID: $0)
         }
@@ -129,6 +162,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 }
                 return
             }
+            nativeCoverage.begin(now: ProcessInfo.processInfo.systemUptime)
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now(), repeating: 0.5)
             timer.setEventHandler { [weak self] in self?.refresh() }
@@ -138,6 +172,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
     public func stop(restorationPolicyOverride: HiddenWorkspaceRestorationPolicy? = nil) {
         onMain {
             guard !stopped else { return }
+            publishAuxiliaryProofs([:])
+            nativeCoverage.stop()
             enforcementPolicy?.stop()
             for entry in Self.loadEntries() where entry.intentionSessionID == spec.nativeWindowVisibilitySessionID {
                 Self.cancelPreparedBootstrap(entry)
@@ -216,7 +252,6 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private func refresh() {
         guard mayEnforce else { return }
         let initialApps = initialVisibilityApplied ? nil : spec.initialAllowedApps
-        defer { initialVisibilityApplied = true }
         let serverRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         let windows = WorkspaceWindow.list(records: serverRows ?? [])
         // The presentation list can omit a still-live minimized window. Retain
@@ -249,35 +284,401 @@ public final class FocusVisibilityController: @unchecked Sendable {
         reconcileBrowserWindows(records: records, windows: windows)
         refreshBrowserCoverage()
         guard mayEnforce else { return }
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+        var observations: [NativeVisibilityCoveragePolicy.Target: NativeVisibilityCoveragePolicy.Outcome] = [:]
+        var nativeInventoryAvailable = serverRows != nil
+        var unidentifiedPIDs: [pid_t] = [], missingIdentityPIDs: [pid_t] = []
+        nativeDiagnosticTargets.removeAll()
+        nativeDiagnosticSelections.removeAll()
+        observedAuxiliaryProofs.removeAll()
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && !app.isTerminated {
             guard mayEnforce else { return }
-            guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-                  let bundle = app.bundleIdentifier, let launched = app.launchDate,
-                  !FocusSystemToolPolicy.isScreenshotApplication(bundle) else { continue }
-            if spec.shouldHideApplication(bundle, initialAllowedApps: initialApps) {
-                guard !app.isHidden else { continue }
-                let entry = Entry(pid: app.processIdentifier, launched: launched, bundle: bundle, window: nil,
-                    restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)
-                // A previously deferred app can be explicitly reopened during
-                // this session. A new hide belongs to this controller, so its
-                // failed-start/Safety Stop cleanup can undo that new effect.
-                guard acquireVisibleOwnership(entry) else { continue }
-                guard mayEnforce else { return }
-                _ = app.hide()
+            guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { continue }
+            guard let bundle = app.bundleIdentifier else {
+                nativeInventoryAvailable = false; unidentifiedPIDs.append(app.processIdentifier); continue
+            }
+            if let selected = spec.selectedWindowIDsByApp[bundle] {
+                nativeDiagnosticSelections.append(["pid": app.processIdentifier, "selectedWindows": Array(selected.sorted().prefix(60)),
+                    "presentationWindows": Array(windows.filter { $0.pid == app.processIdentifier }.map(\.id).sorted().prefix(60))])
+            }
+            let excludedWindows = windows.filter { window in coverageStates[bundle] == nil && window.pid == app.processIdentifier
+                && (!spec.permitsWindow(window.id, bundleIdentifier: bundle)
+                    || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) }
+            let action = NativeVisibilityCoveragePolicy.applicationAction(
+                isCaptureTool: FocusSystemToolPolicy.isScreenshotApplication(bundle),
+                alwaysAllowed: spec.presetAllowedBundleIdentifiers.contains(bundle),
+                explicitlyBlocked: spec.presetBlockedBundleIdentifiers.contains(bundle),
+                applicationExcluded: spec.shouldHideApplication(bundle, initialAllowedApps: initialApps),
+                excludedWindowIDs: Set(excludedWindows.map(\.id)))
+            guard action.requiresProcessIdentity else { continue }
+            guard let launched = app.launchDate else {
+                nativeInventoryAvailable = false; missingIdentityPIDs.append(app.processIdentifier); continue
+            }
+            if action == .hideApplication {
+                let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: bundle,
+                    pid: app.processIdentifier, launched: launched.timeIntervalSinceReferenceDate)
+                observations[target] = hideNativeApplication(app, target: target)
             } else {
-                for window in windows where coverageStates[bundle] == nil && window.pid == app.processIdentifier && (!spec.permitsWindow(window.id, bundleIdentifier: bundle) || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) {
+                for window in excludedWindows {
                     guard mayEnforce else { return }
-                    guard let element = Self.element(window, launched: launched), Self.boolean(element, kAXMinimizedAttribute).value == false else { continue }
-                    guard historicalDeferredVisibility(id: window.id, pid: window.pid, launched: launched, isHidden: false) != .unresolved,
-                          !entries.contains(where: { $0.pid == window.pid && $0.window == window.id
-                            && ($0.parking == true || $0.bootstrapEffectID != nil || $0.nativeCoverage == true) }) else { continue }
-                    guard acquireVisibleOwnership(Entry(pid: window.pid, launched: launched, bundle: bundle, window: window.id,
-                        restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)) else { continue }
-                    guard mayEnforce else { return }
-                    _ = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+                    let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: bundle, pid: window.pid,
+                        launched: launched.timeIntervalSinceReferenceDate, windowID: window.id)
+                    if !nativeCoverage.initialResolved { nativeStartupWindows[target] = window }
+                    observations[target] = hideNativeWindow(window, app: app, launched: launched)
                 }
             }
         }
+        // A presentation list can omit a minimized or closing window. Omission
+        // cannot satisfy startup: re-read the exact cached AX binding or prove
+        // its WindowServer/process lifetime ended, without touching replacements.
+        if !nativeCoverage.initialResolved {
+            for target in nativeCoverage.targets where observations[target] == nil {
+                guard mayEnforce else { return }
+                observations[target] = observePendingNativeTarget(target, serverRows: serverRows)
+            }
+            guard mayEnforce else { return }
+            let packet = nativeInventoryAvailable ? observations.map {
+                NativeVisibilityCoveragePolicy.Observation(target: $0.key, outcome: $0.value)
+            } : nil
+            let failure = nativeCoverage.update(packet, now: ProcessInfo.processInfo.systemUptime)
+            writeNativeCoverageDiagnostics(observations: observations, inventoryAvailable: nativeInventoryAvailable,
+                unidentifiedPIDs: unidentifiedPIDs, missingIdentityPIDs: missingIdentityPIDs, failure: failure)
+            if let failure {
+                guard mayEnforce else { return }
+                onNativeCoverageFailure?(failure)
+            }
+            if nativeCoverage.initialResolved {
+                initialVisibilityApplied = true
+                nativeStartupWindows.removeAll()
+                nativeStartupBindings.removeAll()
+            }
+        }
+        publishAuxiliaryProofs(mayEnforce ? observedAuxiliaryProofs : [:])
+        updateCoverageReady()
+    }
+
+    private func hideNativeApplication(_ app: NSRunningApplication,
+                                       target: NativeVisibilityCoveragePolicy.Target) -> NativeVisibilityCoveragePolicy.Outcome {
+        var detail: [String: Any] = ["stage": "applicationHide"]
+        var readCount = 0
+        func isCurrent() -> Bool {
+            self.mayEnforce && !app.isTerminated && app.bundleIdentifier == target.bundleIdentifier
+                && app.launchDate?.timeIntervalSinceReferenceDate == target.launched
+        }
+        let outcome = NativeVisibilityCoverageEffects.hideWithFallback(isCurrent: isCurrent, readHidden: {
+            guard !app.isTerminated, app.bundleIdentifier == target.bundleIdentifier,
+                  app.launchDate?.timeIntervalSinceReferenceDate == target.launched else { return nil }
+            readCount += 1
+            let axOwned = self.entries.contains { $0.pid == target.pid && $0.launched.timeIntervalSinceReferenceDate == target.launched
+                && $0.window == nil && $0.accessibilityApplicationHide == true }
+            let state = Self.applicationHidden(app, accessibilityHideOwned: axOwned)
+            let hidden = state.hidden
+            detail[readCount == 1 ? "hiddenBefore" : "hiddenAfter"] = hidden.map { $0 as Any } ?? NSNull()
+            detail["accessibilityHiddenReadStatus"] = state.status.rawValue
+            return hidden
+        }, saveOwnership: {
+            // Persist this controller's ownership before asking macOS to hide.
+            let saved = self.acquireVisibleOwnership(Entry(pid: target.pid,
+                launched: Date(timeIntervalSinceReferenceDate: target.launched), bundle: target.bundleIdentifier, window: nil,
+                restorationPolicy: self.spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: self.controllerOwnershipID))
+            detail["ownershipSaved"] = saved; return saved
+        }, dispatchPrimary: { detail["requestAccepted"] = app.hide() }, saveFallbackOwnership: {
+            let element = AXUIElementCreateApplication(target.pid)
+            guard isCurrent(), Self.isSettable(element, kAXHiddenAttribute), Self.boolean(element, kAXHiddenAttribute).value != nil else {
+                detail["accessibilityHiddenSettable"] = false; return false
+            }
+            detail["accessibilityHiddenSettable"] = true
+            // Mark the AX path durably before dispatch so recovery cannot
+            // retire this entry using a contradictory NS isHidden=false.
+            let saved = self.acquireVisibleOwnership(Entry(pid: target.pid,
+                launched: Date(timeIntervalSinceReferenceDate: target.launched), bundle: target.bundleIdentifier, window: nil,
+                accessibilityApplicationHide: true, restorationPolicy: self.spec.hiddenWorkspaceRestorationOnStop,
+                controllerOwnershipID: self.controllerOwnershipID))
+            detail["fallbackOwnershipSaved"] = saved; return saved
+        }, dispatchFallback: {
+            guard isCurrent() else { return }
+            let element = AXUIElementCreateApplication(target.pid)
+            AXUIElementSetMessagingTimeout(element, 0.025)
+            detail["accessibilityHiddenRequestStatus"] = AXUIElementSetAttributeValue(element, kAXHiddenAttribute as CFString, kCFBooleanTrue).rawValue
+        })
+        if outcome == .unresolved, isCurrent() {
+            let windowOutcome = minimizeExcludedApplicationWindows(app, target: target, detail: &detail)
+            nativeDiagnosticTargets[target] = detail
+            return windowOutcome
+        }
+        nativeDiagnosticTargets[target] = detail
+        return outcome
+    }
+
+    /// Some apps reject both whole-app hide APIs. Cover their complete actual
+    /// AX window cohort through the same exact, durably owned minimize path.
+    /// Unknown, unbound, visible auxiliary, or unsettable windows stay pending.
+    private func minimizeExcludedApplicationWindows(_ app: NSRunningApplication, target: NativeVisibilityCoveragePolicy.Target,
+                                                    detail: inout [String: Any]) -> NativeVisibilityCoveragePolicy.Outcome {
+        guard mayEnforce, !app.isTerminated, app.bundleIdentifier == target.bundleIdentifier,
+              app.launchDate?.timeIntervalSinceReferenceDate == target.launched,
+              let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let accessible = Self.completeAccessibilityWindows(pid: target.pid, deadline: ProcessInfo.processInfo.systemUptime + 0.25, detail: &detail),
+              let native = Self.nativeWindows(rows: rows, app: app),
+              let bindings = Self.nativeBindings(accessible: accessible, native: native) else {
+            detail["windowFallbackInventoryComplete"] = false; return .unresolved
+        }
+        detail["windowFallbackInventoryComplete"] = true; detail["windowFallbackCount"] = bindings.count
+        guard !bindings.isEmpty else { return .unresolved }
+        let launched = Date(timeIntervalSinceReferenceDate: target.launched)
+        var outcomes: [NativeVisibilityCoveragePolicy.Outcome] = []
+        for (accessibleWindow, window) in bindings {
+            guard mayEnforce, !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == target.bundleIdentifier else { return .unresolved }
+            let identity = WindowIdentity(pid: target.pid, launched: launched, window: window.id)
+            Self.accessibilityWindows[identity] = accessibleWindow.element
+            outcomes.append(hideNativeWindow(window, app: app, launched: launched))
+        }
+        let boundIDs = Set(bindings.map { $0.1.id })
+        var hasUnclassifiedSurfaces = false
+        for window in native where !boundIDs.contains(window.id) && window.frame.width > 100 && window.frame.height > 80 {
+            var auxiliaryDetail: [String: Any] = [:]
+            if !classifyNonUserSurface(window, app: app, launched: launched, detail: &auxiliaryDetail) { hasUnclassifiedSurfaces = true }
+        }
+        let allCovered = NativeVisibilityCoveragePolicy.windowFallbackIsCovered(outcomes, hasUnclassifiedSurfaces: hasUnclassifiedSurfaces)
+        detail["windowFallbackCovered"] = allCovered
+        // This outcome represents positively hidden windows, not NS hide API
+        // acceptance. Whole-app and per-window journals retain separate ownership.
+        return allCovered && mayEnforce && !app.isTerminated && app.launchDate == launched
+            && app.bundleIdentifier == target.bundleIdentifier ? .hidden : .unresolved
+    }
+
+    private func hideNativeWindow(_ window: WorkspaceWindow, app: NSRunningApplication,
+                                  launched: Date) -> NativeVisibilityCoveragePolicy.Outcome {
+        guard mayEnforce else { return .unresolved }
+        // Already-hidden user apps need no new minimize or recovery ownership.
+        let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: window.bundle, pid: window.pid,
+            launched: launched.timeIntervalSinceReferenceDate, windowID: window.id)
+        if !window.title.isEmpty { nativeKnownUserWindows.insert(target) }
+        if Self.applicationHidden(app, accessibilityHideOwned: false).hidden == true {
+            nativeDiagnosticTargets[target] = ["stage": "applicationAlreadyHidden"]; return .hidden
+        }
+        guard let element = nativeStartupBindings[target] ?? Self.element(window, launched: launched) else {
+            var detail: [String: Any] = ["stage": "accessibilityWindowUnavailable"]
+            let nonUserSurface = classifyNonUserSurface(window, app: app, launched: launched, detail: &detail)
+            if nonUserSurface { detail["stage"] = "confirmedNonUserSurface" }
+            nativeDiagnosticTargets[target] = detail
+            return nonUserSurface ? .nonUserSurface : .unresolved
+        }
+        var detail: [String: Any] = ["stage": "windowMinimize"]
+        let role = Self.attribute(element, kAXRoleAttribute)
+        let subrole = Self.attribute(element, kAXSubroleAttribute)
+        detail["role"] = Self.diagnosticAXType(role.value as? String)
+        detail["subrole"] = Self.diagnosticAXType(subrole.value as? String)
+        detail["roleStatus"] = role.status.rawValue; detail["subroleStatus"] = subrole.status.rawValue
+        let minimizeCapability = Self.settable(element, kAXMinimizedAttribute)
+        detail["minimizeSettableStatus"] = minimizeCapability.status.rawValue
+        detail["minimizeSettable"] = minimizeCapability.value.map { $0 as Any } ?? NSNull()
+        if subrole.value as? String == kAXStandardWindowSubrole { nativeKnownDocumentWindows.insert(target) }
+        if permittedAuxiliaryWindow(element, window: window, app: app, launched: launched,
+            role: role.value as? String, subrole: subrole.value as? String, detail: &detail) {
+            detail["stage"] = "permittedAuxiliaryWindow"
+            nativeDiagnosticTargets[target] = detail
+            observedAuxiliaryProofs[target] = ProcessInfo.processInfo.systemUptime
+            return .permittedAuxiliary
+        }
+        nativeKnownUserWindows.insert(target)
+        if !nativeCoverage.initialResolved { nativeStartupBindings[target] = element }
+        var readCount = 0
+        let outcome = NativeVisibilityCoverageEffects.hide(isCurrent: { self.mayEnforce }, readHidden: {
+            guard !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
+            readCount += 1
+            let minimized = Self.applicationHidden(app, accessibilityHideOwned: false).hidden == true
+                ? (status: AXError.success, value: Optional(true)) : Self.boolean(element, kAXMinimizedAttribute)
+            detail[readCount == 1 ? "readBeforeStatus" : "readAfterStatus"] = minimized.status.rawValue
+            if let hidden = minimized.value { detail[readCount == 1 ? "hiddenBefore" : "hiddenAfter"] = hidden }
+            return minimized.value
+        }, saveOwnership: {
+            guard self.historicalDeferredVisibility(id: window.id, pid: window.pid, launched: launched, isHidden: false) != .unresolved,
+                  !self.entries.contains(where: { $0.pid == window.pid && $0.launched == launched && $0.window == window.id
+                      && ($0.parking == true || $0.bootstrapEffectID != nil || $0.nativeCoverage == true) }) else {
+                detail["ownershipConflict"] = true; return false
+            }
+            let saved = self.acquireVisibleOwnership(Entry(pid: window.pid, launched: launched, bundle: window.bundle, window: window.id,
+                restorationPolicy: self.spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: self.controllerOwnershipID))
+            detail["ownershipSaved"] = saved; return saved
+        }, dispatch: {
+            let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            detail["requestStatus"] = status.rawValue; return status == .success
+        })
+        nativeDiagnosticTargets[target] = detail
+        return outcome
+    }
+
+    private func permittedAuxiliaryWindow(_ element: AXUIElement, window: WorkspaceWindow, app: NSRunningApplication,
+                                          launched: Date, role: String?, subrole: String?, detail: inout [String: Any]) -> Bool {
+        let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: window.bundle, pid: window.pid,
+            launched: launched.timeIntervalSinceReferenceDate, windowID: window.id)
+        let applicationPermitted = spec.permitsApplication(window.bundle)
+            && !spec.shouldHideApplication(window.bundle, initialAllowedApps: initialVisibilityApplied ? nil : spec.initialAllowedApps)
+            && !spec.presetBlockedBundleIdentifiers.contains(window.bundle)
+        let explicitlyBlockedWindow = spec.accessMode == .blacklist && spec.selectedWindowIDsByApp[window.bundle]?.contains(window.id) == true
+        guard role == kAXWindowRole, subrole == kAXSystemDialogSubrole || subrole == kAXFloatingWindowSubrole,
+              applicationPermitted, !explicitlyBlockedWindow, !nativeKnownDocumentWindows.contains(target),
+              mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.launchDate == launched else { return false }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+        guard let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let native = Self.nativeWindows(rows: rows, app: app),
+              let accessible = Self.completeAccessibilityWindows(pid: window.pid, deadline: deadline, detail: &detail),
+              let bindings = Self.nativeBindings(accessible: accessible, native: native),
+              bindings.contains(where: { $0.1.id == window.id && CFEqual($0.0.element, element) }) else {
+            detail["auxiliaryExactNativeBinding"] = false; return false
+        }
+        detail["auxiliaryExactNativeBinding"] = true
+        let liveWork = bindings.contains { accessibleWindow, nativeWindow in
+            accessibleWindow.role == kAXWindowRole && accessibleWindow.subrole == kAXStandardWindowSubrole
+                && spec.permitsWindow(nativeWindow.id, bundleIdentifier: window.bundle)
+        }
+        detail["auxiliaryLivePermittedNativeWork"] = liveWork
+        let applicationElement = AXUIElementCreateApplication(window.pid)
+        var node = element, visited: [AXUIElement] = [element]
+        var windowAncestor = false, ancestorPermitted = true, exactApplicationParent = false
+        for _ in 0..<8 {
+            guard mayEnforce, ProcessInfo.processInfo.systemUptime < deadline else { detail["auxiliaryParentStage"] = "deadline"; return false }
+            let parentValue = Self.attribute(node, kAXParentAttribute)
+            guard let value = parentValue.value, CFGetTypeID(value) == AXUIElementGetTypeID() else {
+                detail["auxiliaryParentStage"] = "parentUnavailable"; detail["auxiliaryParentStatus"] = parentValue.status.rawValue; return false
+            }
+            let parent = unsafeBitCast(value, to: AXUIElement.self)
+            guard !visited.contains(where: { CFEqual($0, parent) }) else { detail["auxiliaryParentStage"] = "parentCycle"; return false }
+            visited.append(parent)
+            var parentPID: pid_t = 0
+            guard AXUIElementGetPid(parent, &parentPID) == .success, parentPID == window.pid else {
+                detail["auxiliaryParentStage"] = "processMismatch"; return false
+            }
+            let parentRole = Self.attribute(parent, kAXRoleAttribute)
+            detail["auxiliaryParentRole"] = Self.diagnosticAXType(parentRole.value as? String)
+            switch parentRole.value as? String {
+            case kAXApplicationRole:
+                exactApplicationParent = CFEqual(parent, applicationElement)
+            case kAXWindowRole:
+                windowAncestor = true
+                guard let parentWindow = Self.accessibleWindow(parent, pid: window.pid, deadline: deadline, detail: &detail),
+                      let parentBindings = Self.nativeBindings(accessible: [parentWindow], native: native),
+                      let nativeParent = parentBindings.first?.1 else {
+                    detail["auxiliaryParentStage"] = "windowBindingUnavailable"; return false
+                }
+                detail["auxiliaryParentNativeWindow"] = nativeParent.id
+                ancestorPermitted = ancestorPermitted && spec.permitsWindow(nativeParent.id, bundleIdentifier: window.bundle)
+            case kAXGroupRole, kAXSplitGroupRole, kAXScrollAreaRole:
+                break
+            default:
+                detail["auxiliaryParentStage"] = "unknownParentRole"; return false
+            }
+            if parentRole.value as? String == kAXApplicationRole { break }
+            node = parent
+        }
+        detail["auxiliaryHasWindowAncestor"] = windowAncestor
+        detail["auxiliaryAncestorPermitted"] = windowAncestor && ancestorPermitted
+        detail["auxiliaryExactApplicationParent"] = exactApplicationParent
+        guard mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.launchDate == launched else { return false }
+        return NativeVisibilityCoveragePolicy.permitsAuxiliary(role: role, subrole: subrole, applicationPermitted: applicationPermitted,
+            exactProcessParent: exactApplicationParent, hasWindowAncestor: windowAncestor,
+            ancestorBoundToPermittedWindow: windowAncestor && ancestorPermitted, livePermittedNativeWork: liveWork,
+            previouslyStandardWindow: nativeKnownDocumentWindows.contains(target), explicitlyBlockedWindow: explicitlyBlockedWindow)
+    }
+
+    private func classifyNonUserSurface(_ window: WorkspaceWindow, app: NSRunningApplication, launched: Date,
+                                        detail: inout [String: Any]) -> Bool {
+        let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: window.bundle, pid: window.pid,
+            launched: launched.timeIntervalSinceReferenceDate, windowID: window.id)
+        let previousUserWindow = nativeKnownUserWindows.contains(target)
+            || Self.accessibilityWindows[.init(pid: window.pid, launched: launched, window: window.id)] != nil
+        detail["untitled"] = window.title.isEmpty
+        detail["previouslyIdentifiedUserWindow"] = previousUserWindow
+        guard mayEnforce, !previousUserWindow, window.title.isEmpty, AXIsProcessTrusted(),
+              !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return false }
+        // kCGWindowIsOnscreen is optional in optionAll rows. A successful
+        // optionOnScreenOnly snapshot proves absence without guessing its value.
+        guard let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              Self.validServerIdentities(onScreen) else {
+            detail["onScreenInventoryAvailable"] = false; return false
+        }
+        let visible = onScreen.contains { $0[kCGWindowNumber as String] as? UInt32 == window.id
+            && $0[kCGWindowOwnerPID as String] as? pid_t == window.pid }
+        detail["onScreenInventoryAvailable"] = true; detail["onScreen"] = visible
+        guard !visible, mayEnforce else { return false }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+        guard let accessible = Self.completeAccessibilityWindows(pid: window.pid, deadline: deadline, detail: &detail) else {
+            detail["accessibilityInventoryComplete"] = false; return false
+        }
+        let matchingGeometry = accessible.contains { Self.sameFrame($0.frame, window.frame) }
+        detail["accessibilityInventoryComplete"] = true
+        detail["accessibilityWindowCount"] = accessible.count
+        detail["accessibilityGeometryMatch"] = matchingGeometry
+        guard !matchingGeometry, mayEnforce,
+              let fresh = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let native = Self.nativeWindows(rows: fresh, app: app),
+              let same = native.first(where: { $0.id == window.id && $0.pid == window.pid }) else { return false }
+        let stable = same.title.isEmpty && Self.sameFrame(same.frame, window.frame)
+        detail["serverIdentityStable"] = stable
+        let candidates = accessible.map { accessibleWindow in
+            Set(native.filter { $0.title == accessibleWindow.title && Self.sameFrame($0.frame, accessibleWindow.frame) }.map(\.id))
+        }
+        let allBoundElsewhere = NativeVisibilityCoveragePolicy.allUserWindowsBoundElsewhere(candidates: candidates, excluding: window.id)
+        detail["allUserWindowsBoundElsewhere"] = allBoundElsewhere
+        // No exemption is cached: if this surface later becomes visible or AX
+        // readable, every refresh resumes the normal strict minimize path.
+        guard mayEnforce, !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return false }
+        return NativeVisibilityCoveragePolicy.isNonUserSurface(isUntitled: true, serverIdentityStable: stable, isOnScreen: visible,
+            accessibilityInventoryComplete: true, accessibilityGeometryMatch: matchingGeometry,
+            previouslyIdentifiedUserWindow: previousUserWindow, allUserWindowsBoundElsewhere: allBoundElsewhere)
+    }
+
+    private func observePendingNativeTarget(_ target: NativeVisibilityCoveragePolicy.Target,
+                                           serverRows: [[String: Any]]?) -> NativeVisibilityCoveragePolicy.Outcome {
+        guard mayEnforce else { return .unresolved }
+        if kill(target.pid, 0) == -1 { return errno == ESRCH ? .closed : .unresolved }
+        guard let app = NSRunningApplication(processIdentifier: target.pid), let launched = app.launchDate else { return .unresolved }
+        guard !app.isTerminated else { return .closed }
+        guard app.bundleIdentifier == target.bundleIdentifier,
+              launched.timeIntervalSinceReferenceDate == target.launched else { return .closed }
+        guard let windowID = target.windowID else { return hideNativeApplication(app, target: target) }
+        guard let serverRows else { return .unresolved }
+        if Self.applicationHidden(app, accessibilityHideOwned: false).hidden == true { return .hidden }
+        let rowExists = serverRows.contains { $0[kCGWindowNumber as String] as? UInt32 == windowID
+            && $0[kCGWindowOwnerPID as String] as? pid_t == target.pid }
+        if let element = nativeStartupBindings[target] {
+            let minimized = Self.boolean(element, kAXMinimizedAttribute)
+            if minimized.value == true { return .hidden }
+            // A live AX row can outlast its presentation/backing entry. Keep
+            // retrying rather than treating that omission as window closure.
+            if !rowExists { return minimized.status == .invalidUIElement ? .closed : .unresolved }
+        } else if !rowExists { return .closed }
+        guard let window = nativeStartupWindows[target] else { return .unresolved }
+        return hideNativeWindow(window, app: app, launched: launched)
+    }
+
+    private func writeNativeCoverageDiagnostics(
+        observations: [NativeVisibilityCoveragePolicy.Target: NativeVisibilityCoveragePolicy.Outcome], inventoryAvailable: Bool,
+        unidentifiedPIDs: [pid_t], missingIdentityPIDs: [pid_t], failure: NativeVisibilityCoveragePolicy.Failure?) {
+        let targets = observations.sorted { ($0.key.pid, $0.key.windowID ?? 0) < ($1.key.pid, $1.key.windowID ?? 0) }
+        let summaries: [[String: Any]] = targets.prefix(60).map { target, outcome in
+            var value = nativeDiagnosticTargets[target] ?? [:]
+            value["pid"] = target.pid
+            value["kind"] = target.windowID == nil ? "application" : "window"
+            if let window = target.windowID { value["window"] = window }
+            switch outcome { case .hidden: value["outcome"] = "hidden"
+            case .closed: value["outcome"] = "closed"
+            case .nonUserSurface: value["outcome"] = "nonUserSurface"
+            case .permittedAuxiliary: value["outcome"] = "permittedAuxiliary"
+            case .unresolved: value["outcome"] = "unresolved" }
+            return value
+        }
+        var value: [String: Any] = ["schemaVersion": 1, "updatedAt": Date().timeIntervalSinceReferenceDate,
+            "phase": failure != nil ? "failed" : nativeCoverage.initialResolved ? "resolved" : "pending",
+            "inventoryAvailable": inventoryAvailable, "targetCount": targets.count,
+            "unresolvedCount": observations.values.filter { $0 == .unresolved }.count,
+            "unidentifiedPIDs": Array(unidentifiedPIDs.prefix(60)), "missingIdentityPIDs": Array(missingIdentityPIDs.prefix(60)),
+            "targets": summaries, "selections": Array(nativeDiagnosticSelections.prefix(60))]
+        if let failure { value["failureReason"] = failure.reason.rawValue }
+        let url = Self.file.deletingLastPathComponent().appendingPathComponent("native-visibility-diagnostics.json")
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return }
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     /// Called only after positive visible-state observation and before a new
@@ -285,7 +686,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private func acquireVisibleOwnership(_ entry: Entry) -> Bool {
         var next = entries
         if let index = next.firstIndex(where: { $0.pid == entry.pid && $0.launched == entry.launched && $0.window == entry.window }) {
-            next[index] = entry
+            var replacement = entry
+            if next[index].accessibilityApplicationHide == true { replacement.accessibilityApplicationHide = true }
+            next[index] = replacement
         } else { next.append(entry) }
         guard Self.save(next) else { return false }
         entries = next
@@ -924,7 +1327,10 @@ public final class FocusVisibilityController: @unchecked Sendable {
             accessibilityWindows.removeAll()
             return []
         }
-        let windows = WorkspaceWindow.list(onScreen: false)
+        // Restoration resolves exact owned native identities, including small
+        // real dialogs. The overview's presentation-size filter is not an
+        // ownership/lifetime inventory and cannot drop these journal entries.
+        let restorationRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         var pending: [Entry] = []
         let rules = currentRules()
         let activeSession = rules.flatMap { $0.active && $0.isFresh() ? $0.startupSessionID : nil }
@@ -974,7 +1380,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     case .restore: break
                     }
                 }
-                guard let window = windows.first(where: { $0.id == id && $0.pid == entry.pid }),
+                guard let restorationRows, let windows = nativeWindows(rows: restorationRows, app: app),
+                      let window = windows.first(where: { $0.id == id && $0.pid == entry.pid }),
                       let element = element(window, launched: entry.launched) else { pending.append(entry); continue }
                 let before = boolean(element, kAXMinimizedAttribute)
                 if before.value == false { continue }
@@ -1036,13 +1443,26 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 // Successful dispatch is not completion. A request that timed
                 // out may also have completed by the time this read succeeds.
                 if boolean(element, kAXMinimizedAttribute).value != false { pending.append(entry) }
-            } else if app.isHidden {
-                guard (entry.restorationPolicy ?? .automatic).action(isHidden: true) == .reveal else {
-                    pending.append(entry); continue
+            } else {
+                func sameLifetime() -> Bool {
+                    !app.isTerminated && app.processIdentifier == entry.pid && app.bundleIdentifier == entry.bundle && app.launchDate == entry.launched
                 }
-                _ = app.unhide()
-                RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
-                if app.isHidden { pending.append(entry) }
+                let restored = NativeVisibilityCoverageEffects.restoreWithFallback(isCurrent: sameLifetime, readHidden: {
+                    applicationHidden(app, accessibilityHideOwned: entry.accessibilityApplicationHide == true).hidden
+                }, shouldReveal: {
+                    (entry.restorationPolicy ?? .automatic).action(isHidden: true) == .reveal
+                }, dispatchPrimary: {
+                    _ = app.unhide()
+                    RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
+                }, dispatchFallback: {
+                    guard sameLifetime() else { return }
+                    let element = AXUIElementCreateApplication(entry.pid)
+                    guard isSettable(element, kAXHiddenAttribute), sameLifetime() else { return }
+                    AXUIElementSetMessagingTimeout(element, 0.025)
+                    _ = AXUIElementSetAttributeValue(element, kAXHiddenAttribute as CFString, kCFBooleanFalse)
+                    RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
+                })
+                if !restored { pending.append(entry) }
             }
             RestorationFocusGuard.preserveCurrent()
         }
@@ -1126,10 +1546,121 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
         return (status, status == .success ? result as? Bool : nil)
     }
+    private static func applicationHidden(_ app: NSRunningApplication, accessibilityHideOwned: Bool) -> (hidden: Bool?, status: AXError) {
+        if app.isHidden { return (true, .success) }
+        let observed = boolean(AXUIElementCreateApplication(app.processIdentifier), kAXHiddenAttribute)
+        return (NativeVisibilityCoveragePolicy.applicationHidden(nativeHidden: false, accessibilityHidden: observed.value,
+            accessibilityHideOwned: accessibilityHideOwned), observed.status)
+    }
+    private static func isSettable(_ element: AXUIElement, _ key: String) -> Bool {
+        settable(element, key).value == true
+    }
+    private static func settable(_ element: AXUIElement, _ key: String) -> (status: AXError, value: Bool?) {
+        AXUIElementSetMessagingTimeout(element, 0.025)
+        var settable = DarwinBoolean(false)
+        let status = AXUIElementIsAttributeSettable(element, key as CFString, &settable)
+        return (status, status == .success ? settable.boolValue : nil)
+    }
+    private static func diagnosticAXType(_ value: String?) -> String {
+        guard let value, value.hasPrefix("AX"), value.count <= 64,
+              value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) else { return "unknown" }
+        return value
+    }
+    private static func sameFrame(_ first: CGRect, _ second: CGRect) -> Bool {
+        abs(first.minX - second.minX) <= 3 && abs(first.minY - second.minY) <= 3
+            && abs(first.width - second.width) <= 3 && abs(first.height - second.height) <= 3
+    }
+    /// Complete AX inventory includes dialogs and minimized/off-Space windows.
+    /// Geometry is independent of minimization support. A panel which cannot
+    /// minimize still has a usable exact geometry/parent/type identity.
+    private static func completeAccessibilityWindows(pid: pid_t, deadline: TimeInterval, detail: inout [String: Any]) -> [AccessibleNativeWindow]? {
+        let inventory = attribute(AXUIElementCreateApplication(pid), kAXWindowsAttribute)
+        guard let elements = inventory.value as? [AXUIElement], elements.count <= 64 else {
+            detail["geometryFailureStage"] = "windowsInventory"; detail["geometryFailureStatus"] = inventory.status.rawValue; return nil
+        }
+        var windows: [AccessibleNativeWindow] = []
+        for (index, element) in elements.enumerated() {
+            guard let window = accessibleWindow(element, pid: pid, deadline: deadline, detail: &detail) else {
+                detail["geometryFailureIndex"] = index; detail["geometryInventoryCount"] = elements.count; return nil
+            }
+            windows.append(window)
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { detail["geometryFailureStage"] = "deadline"; return nil }
+        return windows
+    }
+    private static func accessibleWindow(_ element: AXUIElement, pid: pid_t, deadline: TimeInterval,
+                                         detail: inout [String: Any]) -> AccessibleNativeWindow? {
+        func fail(_ stage: String, status: AXError? = nil) -> AccessibleNativeWindow? {
+            detail["geometryFailureStage"] = stage
+            if let status { detail["geometryFailureStatus"] = status.rawValue }
+            return nil
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { return fail("deadline") }
+        var elementPID: pid_t = 0
+        let pidStatus = AXUIElementGetPid(element, &elementPID)
+        guard pidStatus == .success, elementPID == pid else { return fail("processIdentity", status: pidStatus) }
+        let role = attribute(element, kAXRoleAttribute)
+        detail["geometryRole"] = diagnosticAXType(role.value as? String)
+        guard let roleValue = role.value as? String, roleValue == kAXWindowRole else { return fail("role", status: role.status) }
+        let subrole = attribute(element, kAXSubroleAttribute)
+        detail["geometrySubrole"] = diagnosticAXType(subrole.value as? String)
+        guard let subroleValue = subrole.value as? String else { return fail("subrole", status: subrole.status) }
+        let title = attribute(element, kAXTitleAttribute)
+        guard let titleValue = title.value as? String else { return fail("title", status: title.status) }
+        let position = attribute(element, kAXPositionAttribute)
+        guard let positionValue = position.value, CFGetTypeID(positionValue) == AXValueGetTypeID() else { return fail("position", status: position.status) }
+        let size = attribute(element, kAXSizeAttribute)
+        guard let sizeValue = size.value, CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return fail("size", status: size.status) }
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(unsafeBitCast(positionValue, to: AXValue.self), .cgPoint, &point),
+              AXValueGetValue(unsafeBitCast(sizeValue, to: AXValue.self), .cgSize, &dimensions),
+              NativeVisibilityCoveragePolicy.usableOwnedWindowGeometry(x: Double(point.x), y: Double(point.y),
+                  width: Double(dimensions.width), height: Double(dimensions.height)) else { return fail("geometry") }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { return fail("deadline") }
+        return .init(element: element, role: roleValue, subrole: subroleValue, title: titleValue, frame: CGRect(origin: point, size: dimensions))
+    }
+    private static func validServerIdentities(_ rows: [[String: Any]]) -> Bool {
+        var identities: [(pid: Int32, windowID: UInt32)] = []
+        for row in rows {
+            guard let id = row[kCGWindowNumber as String] as? UInt32,
+                  let pid = row[kCGWindowOwnerPID as String] as? pid_t else { return false }
+            identities.append((pid: pid, windowID: id))
+        }
+        return NativeVisibilityCoveragePolicy.serverIdentitiesAreComplete(identities)
+    }
+    private static func nativeWindows(rows: [[String: Any]], app: NSRunningApplication) -> [WorkspaceWindow]? {
+        guard validServerIdentities(rows), let bundle = app.bundleIdentifier else { return nil }
+        var result: [WorkspaceWindow] = []
+        for row in rows where row[kCGWindowOwnerPID as String] as? pid_t == app.processIdentifier {
+            guard let layer = row[kCGWindowLayer as String] as? Int else { return nil }
+            guard layer == 0 else { continue }
+            guard let id = row[kCGWindowNumber as String] as? UInt32,
+                  let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  NativeVisibilityCoveragePolicy.usableOwnedWindowGeometry(x: Double(frame.minX), y: Double(frame.minY),
+                    width: Double(frame.width), height: Double(frame.height)) else { return nil }
+            result.append(.init(id: id, pid: app.processIdentifier, bundle: bundle, title: row[kCGWindowName as String] as? String ?? "", frame: frame))
+        }
+        guard Set(result.map(\.id)).count == result.count else { return nil }
+        return result
+    }
+    private static func nativeBindings(accessible: [AccessibleNativeWindow], native: [WorkspaceWindow]) -> [(AccessibleNativeWindow, WorkspaceWindow)]? {
+        var result: [(AccessibleNativeWindow, WorkspaceWindow)] = []
+        for window in accessible {
+            let matches = native.filter { $0.title == window.title && sameFrame($0.frame, window.frame) }
+            guard matches.count == 1, !result.contains(where: { $0.1.id == matches[0].id }) else { return nil }
+            result.append((window, matches[0]))
+        }
+        return result
+    }
     private static func value(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
+        attribute(element, key).value
+    }
+    private static func attribute(_ element: AXUIElement, _ key: String) -> (status: AXError, value: CFTypeRef?) {
         AXUIElementSetMessagingTimeout(element, 0.025)
         var result: CFTypeRef?
-        return AXUIElementCopyAttributeValue(element, key as CFString, &result) == .success ? result : nil
+        let status = AXUIElementCopyAttributeValue(element, key as CFString, &result)
+        return (status, status == .success ? result : nil)
     }
     private static func element(_ window: WorkspaceWindow, launched: Date) -> AXUIElement? {
         let identity = WindowIdentity(pid: window.pid, launched: launched, window: window.id)
