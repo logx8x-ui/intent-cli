@@ -41,7 +41,43 @@ enum OverviewAddedAppIconChecks {
             try check(green + red < bitmap.pixelsWide * bitmap.pixelsHigh / 4,
                 "Selection is a thin icon outline, never a filled background card")
         }
+        try checkRemovalControls(icon: icon, check: check)
     }
+
+    private static func checkRemovalControls(icon: NSImage, check: (Bool, String) throws -> Void) throws {
+        for mode in IntentionAccessMode.allCases {
+            for ownedAddition in [false, true] {
+                var captures: [Bool: Data] = [:]
+                for hovered in [false, true] {
+                    let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    let removal: (() -> Void)? = ownedAddition ? {} : nil
+                    let view = OverviewAddedAppIcon(icon: icon, name: "QA staged app", selected: true,
+                        selectionColor: mode == .blacklist ? .red : .green, opening: false, hovered: hovered,
+                        size: 128, select: {}, remove: removal)
+                        .preferredColorScheme(.dark).environment(\.locale, Locale(identifier: "en_US_POSIX"))
+                    let host = NSHostingView(rootView: view)
+                    host.appearance = NSAppearance(named: .darkAqua)
+                    host.frame = CGRect(x: 0, y: 0, width: 128, height: 128)
+                    host.layoutSubtreeIfNeeded()
+                    guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { throw failure("No removal-control bitmap") }
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    guard let image = bitmap.representation(using: .png, properties: [:]) else { throw failure("No removal-control PNG") }
+                    captures[hovered] = image
+                    let caseDetail = "mode=\(mode.rawValue), owned=\(ownedAddition), hovered=\(hovered)"
+                    try check(host.window == nil, "Removal-control regressions never order or attach a desktop window: \(caseDetail)")
+                    try check(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
+                        "Rendering the production removal control never activates or changes the foreground app: \(caseDetail)")
+                }
+                try check(ownedAddition ? captures[false] != captures[true] : captures[false] == captures[true],
+                    "Hover paints an X only for owned additions; an existing app’s green/red icon remains unchanged: mode=\(mode.rawValue), owned=\(ownedAddition)")
+            }
+        }
+    }
+
+    // macOS returns an empty accessibility tree for unattached and never-ordered
+    // SwiftUI hosts, including positive controls. Do not mistake that for proof
+    // of absent actions. Native accessibility acceptance requires a visible host;
+    // these input-free checks instead verify the production rendering itself.
     private static func failure(_ detail: String) -> NSError {
         NSError(domain: "OverviewAddedAppIconChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: detail])
     }

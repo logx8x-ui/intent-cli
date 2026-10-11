@@ -23,6 +23,9 @@ final class QuickSelectionController: ObservableObject {
     @Published var apps: [AppItem] = []
     @Published private(set) var openingApps = Set<String>()
     private var spotlightApps: [String: AllowedApp] = [:]
+    // Spotlight selection is not ownership: existing apps may be highlighted,
+    // but only a new addition gets the removal control for this draft.
+    private var removableAddedApps = Set<String>()
     var onOverviewClosed: (() -> Void)?
     var includesWebsiteAdder: Bool { IntentBuildPolicy.current.includesWebsiteAdder }
     private var overviewInput = OverviewSearchGesture()
@@ -112,9 +115,10 @@ final class QuickSelectionController: ObservableObject {
         let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent
         let app = AllowedApp(name: name, bundleIdentifier: id)
-        stageSpotlightApplication(app)
+        let alreadyRunning = Self.applicationIsRunning(id)
+        stageSpotlightApplication(app, alreadyRunning: alreadyRunning)
         if selection.accessMode == .whitelist {
-            if NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty {
+            if !alreadyRunning {
                 SpotlightAppPreparation.shared.prepare(url) { [weak self] failure in
                     if let failure { self?.message = failure }
                 }
@@ -128,11 +132,25 @@ final class QuickSelectionController: ObservableObject {
         refreshStagedOutlines()
         if panel?.isVisible != true { showStagedModifiers() }
     }
+    private static func applicationIsRunning(_ id: String) -> Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: id).contains { !$0.isTerminated }
+    }
+    private func rememberAddedApplication(_ app: AllowedApp, alreadyRunning: Bool) {
+        let id = app.bundleIdentifier
+        // Repeating a search or reselecting an icon keeps its original origin,
+        // even if the process/window inventory changed in the meantime.
+        if spotlightApps[id] == nil {
+            if alreadyRunning { removableAddedApps.remove(id) }
+            else { removableAddedApps.insert(id) }
+        }
+        spotlightApps[id] = app
+    }
     /// Commit the selection before preparation or any preview refresh returns.
     /// Kept independent of windows/focus so async inventories cannot undo it.
-    func stageSpotlightApplication(_ app: AllowedApp) {
+    func stageSpotlightApplication(_ app: AllowedApp, alreadyRunning: Bool) {
         let id = app.bundleIdentifier
-        spotlightApps[id] = app; selection.apps.insert(id); hasStagedSelection = true
+        rememberAddedApplication(app, alreadyRunning: alreadyRunning)
+        selection.apps.insert(id); hasStagedSelection = true
         selection.windowIDsByApp.removeValue(forKey: id)
         if QuickSelection.browsers.contains(id) {
             selection.wholeBrowserApps = (selection.wholeBrowserApps ?? []).union([id])
@@ -242,10 +260,12 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func removeAddedApplication(_ id: String) {
+        guard canRemoveAddedApplication(id) else { return }
         preparedSavedWorkspace?.removeResources(for: id)
         pendingSavedTabs.removeAll { $0.descriptor.browser == id }
         savedRunTask?.cancel()
         spotlightApps.removeValue(forKey: id)
+        removableAddedApps.remove(id)
         selection.apps.remove(id)
         selection.windowIDsByApp.removeValue(forKey: id)
         selection.tabs = selection.tabs.filter { $0.browser != id }
@@ -257,6 +277,9 @@ final class QuickSelectionController: ObservableObject {
         refresh(); refreshStagedOutlines()
     }
     func isAddedApplication(_ id: String) -> Bool { spotlightApps[id] != nil }
+    func canRemoveAddedApplication(_ id: String) -> Bool {
+        spotlightApps[id] != nil && removableAddedApps.contains(id)
+    }
     func isAddedApplicationIcon(_ window: WindowItem) -> Bool {
         guard spotlightApps[window.appID] != nil,
               let app = apps.first(where: { $0.id == window.appID }) else { return false }
@@ -383,7 +406,7 @@ final class QuickSelectionController: ObservableObject {
         draft.tabs = draft.tabs.filter { !presets.contains($0.browser) }
         draft.windowIDsByApp = draft.windowIDsByApp.filter { !presets.contains($0.key) }
         for app in intention.allowedApps where draft.apps.contains(app.bundleIdentifier) && !apps.contains(where: { $0.id == app.bundleIdentifier }) {
-            spotlightApps[app.bundleIdentifier] = app
+            rememberAddedApplication(app, alreadyRunning: Self.applicationIsRunning(app.bundleIdentifier))
             if draft.accessMode == .whitelist {
                 draft.startupAppIDs = (draft.startupAppIDs ?? []).union([app.bundleIdentifier])
                 if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) {
@@ -961,7 +984,7 @@ final class QuickSelectionController: ObservableObject {
         markGeneration = UUID()
         markTask?.cancel(); markTask = nil
         runMarkedTask?.cancel()
-        SpotlightAppPreparation.shared.release(); openingApps = []; spotlightApps = [:]
+        SpotlightAppPreparation.shared.release(); openingApps = []; spotlightApps = [:]; removableAddedApps = []
         selection = QuickSelection()
         resumeRecord = nil; preparedOverviewPending = false
         hasStagedSelection = false
@@ -993,7 +1016,7 @@ final class QuickSelectionController: ObservableObject {
         model.quickSelectionDidStart = { [weak self] in
             guard let self else { return }
             self.workspaceOutlines.stop(); self.hideStagedModifiers()
-            SpotlightAppPreparation.shared.didStart(); self.spotlightApps = [:]; self.openingApps = []
+            SpotlightAppPreparation.shared.didStart(); self.spotlightApps = [:]; self.openingApps = []; self.removableAddedApps = []
             self.hasStagedSelection = false
             self.selection = QuickSelection(); self.resumeRecord = nil; self.preparedOverviewPending = false
         }
@@ -1305,7 +1328,7 @@ final class QuickSelectionController: ObservableObject {
         if let app = apps.first(where: { $0.id == window.appID }), window.id == Self.placeholderID(app),
            spotlightApps[window.appID] != nil {
             if selection.apps.contains(window.appID) { selection.toggleApp(window.appID, snapshots: snapshots) }
-            else { stageSpotlightApplication(app.app) }
+            else { stageSpotlightApplication(app.app, alreadyRunning: Self.applicationIsRunning(app.id)) }
             return
         }
         if let app = apps.first(where: { $0.id == window.appID }), window.id == Self.placeholderID(app),
@@ -2098,7 +2121,8 @@ private struct QuickSelectionView: View {
                     opening: controller.openingApps.contains(window.appID), hovered: hovered,
                     size: min(128, min(frame.width, frame.height)),
                     select: { controller.selectWindow(window) },
-                    remove: { controller.removeAddedApplication(window.appID) })
+                    remove: controller.canRemoveAddedApplication(window.appID)
+                        ? { controller.removeAddedApplication(window.appID) } : nil)
                     .position(x: frame.midX - cardBounds.minX, y: frame.midY - cardBounds.minY)
             } else {
             Button { controller.selectWindow(window) } label: {
@@ -2125,7 +2149,7 @@ private struct QuickSelectionView: View {
             }.buttonStyle(.plain)
                 .accessibilityLabel("\(app?.app.name ?? window.appID): \(label), \(selected ? "selected" : "not selected")")
                 .overlay(alignment: .topTrailing) {
-                    if controller.isAddedApplication(window.appID) {
+                    if controller.canRemoveAddedApplication(window.appID) {
                         Button { controller.removeAddedApplication(window.appID) } label: {
                             Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
                                 .frame(width: 24, height: 24).background(.regularMaterial, in: Circle())

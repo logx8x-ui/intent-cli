@@ -182,7 +182,7 @@ enum QuickSelectionInteractionChecks {
                 let app = AllowedApp(name: "QA Spotlight", bundleIdentifier: id)
                 controller.apps = [.init(app: app, icon: NSImage(size: CGSize(width: 128, height: 128)), pid: 0)]
                 let oldInventory = controller.windows
-                controller.stageSpotlightApplication(app)
+                controller.stageSpotlightApplication(app, alreadyRunning: false)
                 controller.windows = controller.preserveAddedAppIcons(in: oldInventory)
                 guard let icon = controller.windows.first(where: { $0.appID == id }) else {
                     throw NSError(domain: "SpotlightMarkChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Spotlight did not preserve its icon"])
@@ -190,6 +190,11 @@ enum QuickSelectionInteractionChecks {
                 try check(controller.isAddedApplicationIcon(icon) && controller.isSelected(icon)
                     && controller.selection.apps.contains(id) && controller.selection.windowIDsByApp[id] == nil,
                     "Native and browser Spotlight additions are selected before icon preparation returns")
+                try check(controller.canRemoveAddedApplication(id),
+                    "A genuinely new Spotlight addition keeps its removal control")
+                controller.stageSpotlightApplication(app, alreadyRunning: true)
+                try check(controller.canRemoveAddedApplication(id),
+                    "A later process inventory cannot turn a staged addition into an existing-app selection")
                 try check(controller.selection.marksNativeWindow(42, app: id),
                     "A whole-app Spotlight selection also authorizes its native selection outline")
                 try check((controller.selection.startupAppIDs?.contains(id) == true) == (mode == .whitelist),
@@ -210,6 +215,45 @@ enum QuickSelectionInteractionChecks {
                 controller.windows = controller.preserveAddedAppIcons(in: oldInventory)
                 try check(controller.windows.isEmpty && !controller.selection.marksNativeWindow(42, app: id),
                     "Removing the selection prevents a late preview inventory from reviving its icon or border")
+                try check(!controller.canRemoveAddedApplication(id),
+                    "Removing an addition retires its removal ownership")
+
+                // Removal refreshes the live inventory. Restore the synthetic
+                // app before exercising the independent existing-app case.
+                controller.apps = [.init(app: app, icon: NSImage(size: CGSize(width: 128, height: 128)), pid: 0)]
+                controller.stageSpotlightApplication(app, alreadyRunning: true)
+                let existingWindow = QuickSelectionController.WindowItem(id: 42, appID: id, title: "Existing app",
+                    sourceFrame: .init(x: 0, y: 0, width: 800, height: 600), preview: nil)
+                controller.windows = [existingWindow]
+                try check(controller.isSelected(existingWindow) && !controller.canRemoveAddedApplication(id),
+                    "Spotlight highlights an existing app without offering window removal in either mode")
+                let existingSelection = controller.selection
+                controller.removeAddedApplication(id)
+                try check(controller.selection.apps == existingSelection.apps
+                    && controller.selection.tabs == existingSelection.tabs
+                    && controller.selection.windowIDsByApp == existingSelection.windowIDsByApp
+                    && controller.selection.wholeBrowserApps == existingSelection.wholeBrowserApps
+                    && controller.selection.startupAppIDs == existingSelection.startupAppIDs
+                    && controller.selection.accessMode == existingSelection.accessMode
+                    && controller.windows.map(\.id) == [42],
+                    "A stale removal action cannot deselect or remove an existing app")
+                controller.windows = controller.preserveAddedAppIcons(in: [])
+                guard let existingIcon = controller.windows.first else {
+                    throw NSError(domain: "SpotlightMarkChecks", code: 2, userInfo: [NSLocalizedDescriptionKey: "Existing app icon missing"])
+                }
+                try check(controller.isAddedApplicationIcon(existingIcon) && controller.isSelected(existingIcon)
+                    && !controller.canRemoveAddedApplication(id),
+                    "An already-running windowless app can use an icon without receiving an X")
+                controller.selectWindow(existingIcon); controller.selectWindow(existingIcon)
+                controller.stageSpotlightApplication(app, alreadyRunning: false)
+                controller.windows = controller.preserveAddedAppIcons(in: [])
+                try check(controller.isSelected(controller.windows[0]) && !controller.canRemoveAddedApplication(id),
+                    "Reselection, repeated search and late missing-process inventory preserve existing-app origin")
+                controller.clearMarks()
+                controller.stageSpotlightApplication(app, alreadyRunning: false)
+                try check(controller.canRemoveAddedApplication(id),
+                    "A new draft reclassifies the app instead of retaining previous existing-app origin")
+                controller.clearMarks()
             }
         }
         var tabs = QuickSelection()

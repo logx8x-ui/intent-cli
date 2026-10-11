@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// A staged app is represented by its own artwork, never a fake window card.
-/// Keep the remove action available on hover and through accessibility.
+/// Only owned additions expose removal on hover and through accessibility.
 struct OverviewAddedAppIcon: View {
     let icon: NSImage
     let name: String
@@ -12,27 +12,13 @@ struct OverviewAddedAppIcon: View {
     let hovered: Bool
     let size: CGFloat
     let select: () -> Void
-    let remove: () -> Void
+    let remove: (() -> Void)?
 
     var body: some View {
-        Button(action: select) {
-            Image(nsImage: icon).resizable().scaledToFit()
-                .frame(width: size, height: size)
-                .opacity(selected ? 1 : 0.55)
-                .contentShape(Rectangle())
-        }.buttonStyle(.plain)
-            .overlay {
-                if selected {
-                    RoundedRectangle(cornerRadius: min(24, size * 0.19))
-                        .strokeBorder(selectionColor, lineWidth: 3)
-                        .allowsHitTesting(false)
-                }
-            }
-            .accessibilityLabel("\(name), \(selected ? "selected" : "not selected")")
-            .accessibilityAction(named: Text("Remove added app"), remove)
+        selectionButton
             .help(name)
             .overlay(alignment: .topTrailing) {
-                if hovered {
+                if hovered, let remove {
                     Button(action: remove) {
                         Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
                             .frame(width: 24, height: 24).background(.regularMaterial, in: Circle())
@@ -46,5 +32,27 @@ struct OverviewAddedAppIcon: View {
                         .accessibilityLabel("Opening \(name) in background")
                 }
             }
+    }
+
+    @ViewBuilder private var selectionButton: some View {
+        let button = Button(action: select) {
+            Image(nsImage: icon).resizable().scaledToFit()
+                .frame(width: size, height: size)
+                .opacity(selected ? 1 : 0.55)
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: min(24, size * 0.19))
+                        .strokeBorder(selectionColor, lineWidth: 3)
+                        .allowsHitTesting(false)
+                }
+            }
+            .accessibilityLabel("\(name), \(selected ? "selected" : "not selected")")
+        if let remove {
+            button.accessibilityAction(named: Text("Remove added app"), remove)
+        } else {
+            button
+        }
     }
 }

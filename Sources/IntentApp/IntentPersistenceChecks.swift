@@ -223,7 +223,8 @@ enum IntentPersistenceChecks {
             try check(controller.selection.apps.contains(app.bundleIdentifier), "Saved closed apps remain selected on replay")
             try check((controller.selection.startupAppIDs ?? []).contains(app.bundleIdentifier), "Replay stages the closed app for Start")
             if beforePIDs.isEmpty {
-                try check(controller.isAddedApplication(app.bundleIdentifier) && controller.windows.contains(where: { $0.appID == app.bundleIdentifier }),
+                try check(controller.isAddedApplication(app.bundleIdentifier) && controller.canRemoveAddedApplication(app.bundleIdentifier)
+                    && controller.windows.contains(where: { $0.appID == app.bundleIdentifier }),
                     "Saved closed app appears as a removable icon in the overview")
                 var scoped = selection; scoped.accessMode = .whitelist
                 scoped.windowIDsByApp = [app.bundleIdentifier: [12345]]
