@@ -237,16 +237,7 @@ cat > "$PKG_ROOT/Library/Google/Chrome/NativeMessagingHosts/intent_native_host.j
 }
 JSON
 
-cat > "$PKG_SCRIPTS/preinstall" <<'SCRIPT'
-#!/bin/bash
-pkill -x IntentApp 2>/dev/null || true
-rm -f /Library/LaunchAgents/dev.loganmondi.intent.plist
-if [[ -x /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister ]]; then
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-    -u "/Applications/Intent.app" >/dev/null 2>&1 || true
-fi
-exit 0
-SCRIPT
+cp "$ROOT/scripts/package-preinstall.sh" "$PKG_SCRIPTS/preinstall"
 
 cat > "$PKG_SCRIPTS/postinstall" <<'SCRIPT'
 #!/bin/bash
@@ -256,8 +247,6 @@ chmod +x "/Library/Application Support/Intent/IntentNativeHost"
 CONSOLE_USER="$(stat -f '%Su' /dev/console)"
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" && "$CONSOLE_USER" != "loginwindow" ]]; then
   USER_ID="$(id -u "$CONSOLE_USER")"
-  launchctl bootout "gui/$USER_ID" /Library/LaunchAgents/dev.loganmondi.intent.plist 2>/dev/null || true
-  rm -f /Library/LaunchAgents/dev.loganmondi.intent.plist
   LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
   if [[ -x "$LSREGISTER" ]]; then
     "$LSREGISTER" -f "/Applications/Intent.app" >/dev/null 2>&1 || true

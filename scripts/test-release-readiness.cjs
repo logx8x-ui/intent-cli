@@ -72,6 +72,9 @@ assert.ok(
   "Release manifests must describe Firefox signing"
 );
 
+assert.ok(releaseBuilder.includes('scripts/package-preinstall.sh'), 'The package must embed the tested preinstall guard');
+assert.ok(!releaseBuilder.includes('pkill'), 'A public package must never terminate an intention by process name');
+
 const releaseVerifier = read("scripts/verify-release.sh");
 assert.ok(
   releaseVerifier.includes("META-INF/mozilla.rsa"),
