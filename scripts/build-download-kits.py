@@ -160,10 +160,15 @@ def verify_package_payload(expanded, manifest, choice, source_root):
         raise ValueError('Installer scripts or browser onboarding handoff differ from this release.')
     import xml.etree.ElementTree as ET
     info = ET.parse(package / 'PackageInfo').getroot()
+    # pkgbuild emits an empty <relocate/> even for a fixed, nonrelocatable
+    # package. Only populated containers can carry relocation instructions.
+    has_relocation_instructions = any(
+        node.attrib or len(node) or (node.text or '').strip()
+        for node in info.findall('.//relocate'))
     if (info.attrib.get('identifier') != 'dev.loganmondi.intent'
             or info.attrib.get('install-location') != '/'
             or info.attrib.get('relocatable') != 'false'
-            or info.findall('.//relocate')):
+            or has_relocation_instructions):
         raise ValueError('Installer destination must be fixed and nonrelocatable.')
     with (app / 'Contents/Info.plist').open('rb') as source:
         metadata = plistlib.load(source)

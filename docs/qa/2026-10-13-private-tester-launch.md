@@ -129,3 +129,50 @@ An implementation or automated fixture does not pass an installed/physical case.
   Do not promote a future extension or update feed until compatibility with the
   frozen tester app has been verified. Chrome Store updates are browser-managed;
   this release does not claim it can disable them or pin a user's browser.
+
+## Fresh signed package preparation, build 202610140001
+
+- Native source was committed as `f6ab614ca5bb790cf9250750d91d2041368ae031`.
+  The source-only branch `codex/selected-resource-lifetime` was fast-forwarded
+  to `5ffb91f28c5cfa9c97b7fe1ca68e096f0f7ba8a2`; no main branch, tag, release
+  or update feed was changed. Remote-only workflow/history files were preserved.
+- A fresh ARM64 release build produced launch app 0.9.3, build 202610140001,
+  Mach-O UUID `BD2706A8-5AA8-3685-9861-2D366B58E4F9`. Application and
+  installer Developer ID signatures use team `Y3ZGWT477T`. Each signed
+  Firefox/Chrome/Both PKG is preserved under
+  `dist/private-candidate-202610140001/pending-notarization/`, together with
+  the exact signed payload and a non-distributable candidate receipt.
+- Actual `pkgutil --expand-full` inspection passed for all three packages:
+  fixed installation destination and scripts, correct browser-choice handoff,
+  matching embedded extension metadata, deep/strict app signature, and safe
+  compiled launch-channel diagnostic. All variants contain the same payload:
+  SHA256 `e341c76f5be361b2ecb3ab9a50979b380039fe3f9bb3c76cf566da25e7d2cb00`.
+  These checks did not install the packages or launch normal app UI.
+- The verifier initially rejected Apple's harmless empty `<relocate/>` element.
+  Only the verifier and regression fixtures were corrected; actual relocation
+  instructions are still rejected. The full release-readiness suite passed,
+  including 40 download-kit tests. Signed application/package bytes were not
+  modified by that verifier correction.
+- Notary submission failed before upload with exit 69: no Keychain item found
+  for profile `intent-notary`. The Mac is locked, and explicit-login-Keychain
+  lookup also failed. This does not establish that credentials were deleted.
+  Retry after unlock before asking Logan to recreate anything. No new candidate
+  has an Apple acceptance ticket, staple, or Gatekeeper acceptance result.
+- The candidate deliberately embeds an empty Chrome published-version marker
+  because 0.2.46 Store approval is unconfirmed. After actual approval, create a
+  new numbered candidate with approved matching Chrome metadata before the
+  complete Chrome/Both onboarding acceptance. Do not relabel these pre-approval
+  packages as ready or silently change their immutable receipts.
+- No fresh package was installed or uploaded, and the website download catalog
+  remains empty. Mac unlock, Chrome upload/review, fresh real-profile runtime
+  tests, clean-account installation and macOS 13 acceptance remain outstanding.
+
+## Verifier follow-up full gate, 16:03 UTC
+
+All eight change-impact suites passed after the verifier-only change against
+unchanged fingerprint
+`9c90863fcc8c83301b1663c13b3b8043a0e5a249dda3f4e2da384c788f27821b`.
+Evidence: `/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-change-gate-muvskQ`.
+The signed native payload remains tied to source commit `f6ab614` and its
+original `199cf56a...` fingerprint; this later check changes only verifier
+tooling and documentation. No live acceptance status was promoted.

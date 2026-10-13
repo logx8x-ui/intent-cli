@@ -377,7 +377,7 @@ class DirectInstallerTests(unittest.TestCase):
         (scripts / 'preinstall').write_bytes((source_root / 'scripts/package-preinstall.sh').read_bytes())
         (scripts / 'postinstall').write_text((source_root / 'scripts/package-postinstall.sh').read_text().replace(
             'SETUP_BROWSER_CHOICE=both', 'SETUP_BROWSER_CHOICE=' + choice))
-        (expanded / 'PackageInfo').write_text('<pkg-info identifier="dev.loganmondi.intent" install-location="/" relocatable="false"/>')
+        (expanded / 'PackageInfo').write_text('<pkg-info identifier="dev.loganmondi.intent" install-location="/" relocatable="false"><relocate/></pkg-info>')
         return expanded, app, source_root
 
     def test_actual_package_handoff_and_destination_are_checked(self):
@@ -393,13 +393,31 @@ class DirectInstallerTests(unittest.TestCase):
         expanded, app, source = self.payload('both')
         info = expanded / 'PackageInfo'
         original = info.read_text()
-        info.write_text('<pkg-info identifier="dev.loganmondi.intent" install-location="/" relocatable="false"><relocate/></pkg-info>')
-        with self.assertRaisesRegex(ValueError, 'nonrelocatable'):
-            kits.verify_package_payload(expanded, self.manifest, 'both', source)
+        for relocation in ('<relocate><bundle id="dev.loganmondi.intent" path="Other/Intent.app"/></relocate>',
+                           '<relocate search="true"/>', '<relocate>Other/Intent.app</relocate>'):
+            with self.subTest(relocation=relocation):
+                info.write_text(original.replace('<relocate/>', relocation))
+                with self.assertRaisesRegex(ValueError, 'nonrelocatable'):
+                    kits.verify_package_payload(expanded, self.manifest, 'both', source)
+        for attribute, replacement in [('relocatable="false"', 'relocatable="true"'),
+                                       ('install-location="/"', 'install-location="/Other"')]:
+            with self.subTest(attribute=attribute):
+                info.write_text(original.replace(attribute, replacement))
+                with self.assertRaisesRegex(ValueError, 'nonrelocatable'):
+                    kits.verify_package_payload(expanded, self.manifest, 'both', source)
         info.write_text(original)
         self.manifest['build'] = 'old-build'
         with self.assertRaisesRegex(ValueError, 'metadata'):
             kits.verify_package_payload(expanded, self.manifest, 'both', source)
+
+    def test_pkgbuild_empty_relocation_containers_are_harmless(self):
+        expanded, app, source = self.payload('both')
+        info = expanded / 'PackageInfo'
+        original = info.read_text()
+        for relocation in ('<relocate/>', '<relocate>\n    </relocate>', ''):
+            with self.subTest(relocation=relocation):
+                info.write_text(original.replace('<relocate/>', relocation))
+                self.assertEqual(kits.verify_package_payload(expanded, self.manifest, 'both', source), app)
 
     def test_architecture_guard_must_match_actual_variant_metadata(self):
         expanded, app, source = self.payload('both')

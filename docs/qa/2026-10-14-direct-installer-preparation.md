@@ -104,3 +104,18 @@ old macOS, Rosetta, universal, failed probes and alternate-volume cases), 39
 download-kit tests, the static release-readiness specification, shell syntax
 and `git diff --check`. These fixtures do not constitute an actual installation
 on Intel, older macOS or a clean Apple Silicon Mac. No build/sign/install ran.
+
+## Actual pkgbuild XML verification follow-up
+
+Extraction of the newly signed candidates showed that Apple's `pkgbuild`
+includes an empty `<relocate/>` container while setting `relocatable="false"`.
+The verifier now accepts an empty or whitespace-only container and still
+rejects children, attributes, non-whitespace text, a relocatable package flag
+or a changed installation root. The fixtures now include Apple's empty
+container rather than incorrectly treating its presence as a relocation rule.
+
+The full `npm run test:release-readiness` suite passed after this verifier-only
+correction, including all 40 download-kit tests and the compiled disposable
+channel/profile fixtures. `git diff --check` passed. The application payload,
+installer scripts and signed package bytes were not modified; notarization and
+clean-machine acceptance remain separate gates.
