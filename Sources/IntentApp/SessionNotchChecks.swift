@@ -34,7 +34,7 @@ enum SessionNotchChecks {
                     host.frame = CGRect(origin: .zero, size: layout.frame.size)
                     timer.setFrame(layout.frame, display: false); timer.contentView = host
                     host.layoutSubtreeIfNeeded()
-                    try check(timer.frame.maxY == frame.maxY && layout.notchFrame.midX == frame.midX, "HUD respects exact camera anchor, not the asymmetric outer frame centre")
+                    try check(timer.frame.maxY == layout.notchFrame.minY - 6 && timer.frame.midX == layout.notchFrame.midX, "Capsule centres six points below the exact camera exclusion")
                     guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
                         throw NSError(domain: "SessionNotchChecks", code: 2, userInfo: [NSLocalizedDescriptionKey: "HUD render unavailable"])
                     }

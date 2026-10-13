@@ -1,7 +1,21 @@
 import Foundation
 import IntentCore
+import IntentLock
 
 func runNativeVisibilityCoverageSpecs() throws {
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    let birth = NativeProcessLaunchDate.kernelDate(pid: ownPID)
+    try expect(birth != nil && birth! <= Date(), "Kernel birth time supplies a real process lifetime")
+    try expect(NativeProcessLaunchDate.kernelDate(pid: ownPID) == birth,
+        "Repeated observations retain the same exact lifetime for hiding and restoration")
+    try expect(NativeProcessLaunchDate.kernelDate(pid: 0) == nil
+        && NativeProcessLaunchDate.kernelDate(pid: -1) == nil,
+        "Invalid PIDs cannot become guessed process identities")
+    let child = Process()
+    child.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+    try child.run(); child.waitUntilExit()
+    try expect(NativeProcessLaunchDate.kernelDate(pid: child.processIdentifier) == nil,
+        "Exited processes cannot retain live identity proof")
     typealias Policy = NativeVisibilityCoveragePolicy
     let app = Policy.Target(bundleIdentifier: "blocked.app", pid: 41, launched: 100)
     let excludedWindow = Policy.Target(bundleIdentifier: "selected.app", pid: 42, launched: 101, windowID: 7)

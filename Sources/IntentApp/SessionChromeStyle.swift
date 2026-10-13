@@ -5,7 +5,7 @@ import IntentCore
 /// Shared by the notch dot and the laser; never whiten the mode's actual colour.
 enum SessionChromeStyle {
     static let timingFontSize: CGFloat = 13
-    static let titleFontSize: CGFloat = 10
+    static let titleFontSize: CGFloat = 11
     static let timingContentWidth: CGFloat = 67
 
     static func accent(for mode: IntentionAccessMode) -> NSColor {

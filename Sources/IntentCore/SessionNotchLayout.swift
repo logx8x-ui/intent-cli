@@ -14,10 +14,7 @@ public struct SessionNotchLayout: Equatable, Sendable {
     public let hasHardwareNotch: Bool
     /// Top-left view coordinates. Only this region may receive checklist input.
     public var controlsCrop: CGRect {
-        guard hasHardwareNotch else { return CGRect(origin: .zero, size: frame.size) }
-        return CGRect(x: checklistHeight > 0 ? 0 : leadingWingWidth, y: headerHeight,
-            width: checklistHeight > 0 ? frame.width : notchWidth,
-            height: titleHeight + checklistHeight)
+        CGRect(origin: .zero, size: frame.size)
     }
     public var controlsFrame: CGRect {
         let crop = controlsCrop
@@ -35,20 +32,24 @@ public struct SessionNotchLayout: Equatable, Sendable {
             && auxiliaryLeft!.maxX >= screen.minX && auxiliaryRight!.minX <= screen.maxX
         hasHardwareNotch = hardware
         notchWidth = hardware ? gap : min(128, screen.width * 0.5)
-        headerHeight = hardware ? safeAreaTop : 24
-        titleHeight = hardware ? 14 : 0
+        headerHeight = 28
+        titleHeight = 0
         let centre = hardware ? (auxiliaryLeft!.maxX + auxiliaryRight!.minX) / 2 : screen.midX
-        leadingWingWidth = min(24, max(0, centre - notchWidth / 2 - screen.minX))
-        trailingWingWidth = min(76, max(0, screen.maxX - centre - notchWidth / 2))
-        let width = notchWidth + leadingWingWidth + trailingWingWidth
-        let top = hardware ? screen.maxY : visibleFrame.maxY
+        leadingWingWidth = 24
+        trailingWingWidth = 76
+        let width = min(264, max(0, screen.width - 24))
+        // The capsule is wholly below both camera and menu bar. Its input
+        // region never touches either, including on offset/external displays.
+        let top = min(visibleFrame.maxY, hardware ? screen.maxY - safeAreaTop : visibleFrame.maxY) - 6
         let availableHeight = max(0, top - visibleFrame.minY - headerHeight - titleHeight - 12)
         checklistHeight = checklistExpanded && checklistCount > 0
             ? min(204, availableHeight, CGFloat(checklistCount) * 34 + 12) : 0
         let height = headerHeight + titleHeight + checklistHeight
-        frame = CGRect(x: hardware ? centre - notchWidth / 2 - leadingWingWidth : centre - width / 2,
+        // AppKit rounds window origins to whole points. Match it up front so
+        // an odd-width camera cannot shift the hosted crop after assignment.
+        frame = CGRect(x: min(screen.maxX - width - 12, max(screen.minX + 12, centre - width / 2)).rounded(.down),
                        y: top - height, width: width, height: height)
-        notchFrame = CGRect(x: frame.minX + leadingWingWidth, y: top - headerHeight,
-            width: notchWidth, height: headerHeight)
+        notchFrame = CGRect(x: centre - notchWidth / 2, y: screen.maxY - (hardware ? safeAreaTop : 0),
+            width: notchWidth, height: hardware ? safeAreaTop : 0)
     }
 }
