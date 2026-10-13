@@ -70,3 +70,19 @@ matching browser distribution, Intel/clean-Mac checks and uninstall safety audit
 remain separate release requirements. See the preceding stabilization QA note.
 Apple notarization and automated suites do not establish those runtime passes.
 The public domain remains waitlist-only and invite downloads remain disabled.
+
+## Firefox submission follow-up
+
+Logan explicitly yielded Firefox for submission. Uploaded
+`dist/firefox/intent_browser_guard-0.2.46.zip` after comparing all 18 archive
+entries byte-for-byte against current source. Existing add-on
+`485649d659c2420c9778` retained its unlisted/on-your-own distribution. Mozilla
+validation reported no errors or warnings; desktop Firefox selected, Android
+unselected. Source question answered No because the archive contains readable
+unprocessed files exactly matching source, with no code-generator/minifier step.
+Submission completed as version record `6571198`; portal explicitly displayed
+`Version Signature Pending`. Signed-XPI download, permanent installation and
+matching-profile QA are not yet established. No AMO API credentials created.
+Screenshot evidence: `/Users/loganmondi/.codex/artifacts/intent-release-20261013/mozilla-submission.png`.
+
+The previous paragraph describing no submission is superseded by this follow-up.
