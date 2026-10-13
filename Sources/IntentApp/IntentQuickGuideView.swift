@@ -119,12 +119,12 @@ struct IntentQuickGuideView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var accessibilityReady = AXIsProcessTrusted()
     @State private var previewsReady = CGPreflightScreenCaptureAccess()
-    @State private var nextAfterStop: IntentOnboardingStep?
     @State private var error: String?
+    @State private var browserPreferences = IntentBrowserOnboardingPreferences.load()
     private let permissionTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private var step: IntentOnboardingStep { guide.state.step }
     private var purpose: String { guide.purposeName }
-    private var purposeLabel: String { purpose.count > 100 ? String(purpose.prefix(97)) + "…" : purpose }
+    private var purposeLabel: String { purpose.isEmpty ? "your intention" : (purpose.count > 100 ? String(purpose.prefix(97)) + "…" : purpose) }
     private var overviewKey: String { OverlayShortcut.quickSelectionShortcut.displayName }
     private var finishKey: String { FinishShortcutStore.load().displayName }
     private var appName: String { IntentBuildChannel.current.appName }
@@ -142,7 +142,7 @@ struct IntentQuickGuideView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     if ![.welcome, .purpose].contains(step) {
                         HStack(alignment: .top) {
-                            Text(purpose).font(.callout.weight(.medium)).lineLimit(2).help(purpose)
+                            Text(purpose.isEmpty ? "Name optional" : purpose).font(.callout.weight(.medium)).lineLimit(2).help(purpose)
                             Spacer(minLength: 8)
                             Button("Edit") { guide.editPurpose() }.buttonStyle(.plain).font(.caption)
                         }.foregroundStyle(.secondary)
@@ -173,9 +173,6 @@ struct IntentQuickGuideView: View {
             .onReceive(permissionTimer) { _ in refreshPermissions() }
             .onAppear { refreshPermissions() }
             .onChange(of: step) { _ in error = nil; refreshPermissions() }
-            .onChange(of: model.hasActiveSession) { running in
-                if !running, let nextAfterStop { self.nextAfterStop = nil; guide.move(to: nextAfterStop) }
-            }
             .onChange(of: model.errorMessage) { message in if guide.isTeaching { error = message } }
             .onExitCommand { leave() }
     }
@@ -193,12 +190,12 @@ struct IntentQuickGuideView: View {
     }
     private var question: some View {
         VStack(alignment: .leading, spacing: 18) {
-            title("What do you want to do on your Mac right now?")
+            title("What would you like to focus on?")
             OnboardingPurposeInput(text: Binding(get: { guide.state.purpose }, set: { guide.setPurpose($0) }), submit: { guide.submitPurpose() })
                 .frame(height: 42).padding(.horizontal, 12)
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             Text("Reply to friends, make something, watch a film… your words are enough.").font(.callout).foregroundStyle(.secondary)
-            primary("Choose my setup") { guide.submitPurpose() }.disabled(purpose.isEmpty)
+            primary(purpose.isEmpty ? "Continue without a name" : "Choose my setup") { guide.submitPurpose() }
             Text("You can name your intention in the top bar, or leave it blank and start with your apps.").font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -216,14 +213,19 @@ struct IntentQuickGuideView: View {
                 Button("Done for now") { guide.finish(); onFinish() }
             } else if !permissionsReady {
                 title("Let Intent work with your windows.")
-                Text("macOS needs your approval before the real picker can open; your answer and the clock will stay here.").font(.callout).foregroundStyle(.secondary)
+                Text("Approve these macOS permissions, then connect your browsers and choose your first intention. Your progress is saved.").font(.callout).foregroundStyle(.secondary)
                 permissionRows
-                Button("Skip this skill for now") { guide.skip() }.buttonStyle(.plain).font(.caption)
+            } else if !browserPreferences.completed {
+                title("Connect the browsers you chose.")
+                Text("We’ll find your profiles, guide you through the browser’s approval, and check each connection before your first intention.")
+                    .font(.callout).foregroundStyle(.secondary)
+                primary("Set up browsers") { IntentBrowserSetup.open() }
+                Text("Your selection is saved if you need to continue later.").font(.caption).foregroundStyle(.secondary)
             } else {
                 title("Press \(overviewKey) once.")
                 Text("Click the apps or windows you need for “\(purposeLabel)”. Click a browser to choose its tabs.")
                 detail("Allow selected", "Only your selected items stay available.")
-                detail("Block selected", "Only your selected items are restricted; switch with / in the overview.")
+                detail("Block selected", "Only your selected items are restricted; switch with B in the overview.")
                 detail("Modifications", "They’re along the bottom. Timer can set a duration or a finish time; leave it off for a quick first try.")
                 Text("Return starts real restrictions on your Mac. To end a plain run, press \(finishKey); Safety Stop always releases restrictions.").font(.caption).foregroundStyle(.secondary)
                 Button("Open the picker instead") { IntentRuntime.shared.toggleQuickFocus() }.buttonStyle(.bordered)
@@ -263,54 +265,53 @@ struct IntentQuickGuideView: View {
     private var save: some View {
         VStack(alignment: .leading, spacing: 16) {
             eyebrow("3 OF 3 · KEEP A USEFUL SETUP")
-            title("Make next time one less decision.")
-            if let id = guide.state.savedIntentionID, let existing = model.intentions.first(where: { $0.id == id }) {
-                success("A saved setup is already on your canvas.")
-                Text(existing.name).font(.headline).lineLimit(2).help(existing.name)
-                if hasRun, let draft = guide.lastIntention, draft.id != existing.id || existing.name != purpose {
-                    Text("You can keep that setup, or replace it with your current selections named “\(purposeLabel)”. Updating a running setup also ends this run.").font(.callout).foregroundStyle(.secondary)
-                    primary(model.hasActiveSession ? "Finish & update saved setup" : "Update saved setup") {
-                        if !model.saveOnboardingIntention(replaceExisting: true) { error = model.errorMessage ?? "The setup couldn’t be updated yet." }
-                    }.disabled(model.hasActiveSession && !model.activeSessionCanFinishManually)
-                    lockedExplanation
-                    Button("Keep existing · show on canvas") { guide.showSavedOnCanvas() }.buttonStyle(.plain)
-                } else {
-                    Text("Open Intent with \(OverlayShortcutStore.load().displayName), then double-click its card to run it again.")
-                    primary("Show it on my canvas") { guide.showSavedOnCanvas() }
-                }
-            } else if hasRun, guide.lastIntention != nil {
-                Text("Save this setup as “\(purposeLabel)” on your existing Intent canvas.")
-                if model.hasActiveSession {
-                    Text("\(OverlayShortcut.finishAndSaveShortcut.displayName) finishes and saves. This ends the current run; choose Keep working if you want to carry on.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                primary(model.hasActiveSession ? "Finish & save to canvas" : "Save to canvas") {
-                    if !model.saveOnboardingIntention() { error = model.errorMessage ?? "The setup couldn’t be saved yet. Try again." }
-                }.disabled(model.hasActiveSession && !model.activeSessionCanFinishManually)
-                lockedExplanation
+            title("Save it for next time.")
+            Text("Every intention appears in Recent intentions. Click its bookmark to save it—even if you left its name blank.")
+                .foregroundStyle(.secondary)
+            if model.hasActiveSession {
+                Text("Finish your intention when you’re ready. Then open Mission Control and bookmark it in Recent intentions.")
+                    .font(.callout)
+                Text("Closing this guide keeps your intention running.").font(.caption).foregroundStyle(.secondary)
+            } else if let id = guide.state.savedIntentionID, let saved = model.savedSlots.first(where: { $0.id == id }) {
+                success("Saved in your numbered slots.")
+                Text(saved.name).font(.headline).lineLimit(2)
+                primary("Show my saved intentions") { guide.showSavedOnCanvas() }
+            } else if let draft = guide.lastIntention,
+                      model.journal.records.contains(where: { $0.intention.id == draft.id }) {
+                primary("Bookmark my last intention") { bookmarkLastIntention() }
+                Button("Show Recent intentions") { _ = model.presentWorkspace?() }.buttonStyle(.plain)
             } else {
-                Text("There’s no completed setup to save yet. You can return to either selection skill, or keep this guide optional.").foregroundStyle(.secondary)
-                Button("Go to the picker skill") { guide.move(to: .overview) }.buttonStyle(.bordered)
+                Text("Run an intention first, then save it from Recent intentions.").font(.caption).foregroundStyle(.secondary)
+                Button("Open Mission Control") { _ = model.presentWorkspace?() }.buttonStyle(.bordered)
             }
-            Button(guide.state.savedIntentionID == nil ? "No thanks—keep it a one-off" : "Continue without another save") { guide.skip() }.buttonStyle(.plain)
+            Text("Saved intentions sit across the top. Click one or press its number in Mission Control to run it. Drag to reorder; use × to remove a saved slot.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Continue") { guide.skip() }.buttonStyle(.plain)
         }
+    }
+    private func bookmarkLastIntention() {
+        guard !model.hasActiveSession, let draft = guide.lastIntention,
+              let record = model.journal.records.first(where: { $0.intention.id == draft.id }),
+              let id = model.saveRecord(record),
+              let saved = model.savedSlots.first(where: { $0.id == id }) else {
+            error = model.errorMessage ?? "Finish an intention first, then bookmark it from Recent intentions."
+            return
+        }
+        guide.retainSavedIntention(saved)
+        guide.record(.saved, savedIntentionID: id)
     }
     private var ready: some View {
         VStack(alignment: .leading, spacing: 18) {
             title(model.hasActiveSession ? "Your space is ready." : "Start with what you came to do.")
-            Text("When I sit down to use my Mac, I press \(overviewKey) and name what I came to do.")
+            Text("Press \(overviewKey), choose what you need, and start. Naming your intention is optional.")
                 .font(.title3.weight(.medium))
             Text("That’s a small action to repeat—not a habit you have to perfect today.").foregroundStyle(.secondary)
             if guide.state.evidence.contains(.reused) { success("You ran your saved intention again.") }
             if !guide.state.skipped.isEmpty { Text("Skipped skills are still available in Settings → Quick guide; they aren’t marked as learned.").font(.caption).foregroundStyle(.secondary) }
             if let id = guide.state.savedIntentionID, let intention = model.intentions.first(where: { $0.id == id }), !model.hasActiveSession {
-                if intention.selectionRequiresTabReselection {
-                    Text("This setup includes temporary browser tabs; choose the current tabs again before running it.").font(.caption).foregroundStyle(.secondary)
-                    Button("Choose current tabs") { IntentRuntime.shared.toggleQuickFocus() }.buttonStyle(.bordered)
-                } else {
-                    Button("Run my saved intention") { model.requestStart(intentionID: intention.id) }.buttonStyle(.bordered)
-                }
-                Text("Or double-click its card on the canvas next time.").font(.caption).foregroundStyle(.secondary)
+                Button("Open my saved intention") { IntentRuntime.shared.prepareSavedIntention(intention) }.buttonStyle(.bordered)
+                Text("Click its numbered slot in Mission Control to run it with its saved apps, tabs and modifications.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             primary(model.hasActiveSession ? "Let me do my thing" : "Done for now") { guide.finish(); onFinish() }
             if !model.hasActiveSession { Button("Replay the guide") { guide.replay() }.buttonStyle(.plain).font(.caption) }
@@ -323,12 +324,6 @@ struct IntentQuickGuideView: View {
         } else {
             title("An intention is already running.")
             Text("Finish it normally before trying another selection mode; the guide won’t stop it for you.").foregroundStyle(.secondary)
-        }
-    }
-    @ViewBuilder private var lockedExplanation: some View {
-        if model.hasActiveSession && !model.activeSessionCanFinishManually {
-            Text("Finish the checklist or wait for the timer first. Your guide progress is saved; Safety Stop is available if anything goes wrong.")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
     private var permissionRows: some View {
@@ -358,23 +353,12 @@ struct IntentQuickGuideView: View {
         }.padding(12).background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
     private var browserSetup: some View {
-        DisclosureGroup("Using Chrome or Firefox tabs?") {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Browser Guard must be connected; without it, try a normal app window or skip this skill.").font(.caption).foregroundStyle(.secondary)
-                ForEach(["com.google.Chrome", "org.mozilla.firefox"], id: \.self) { id in
-                    let connected = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: id)).supports(.tabSessionIdentity, maxAge: 5)
-                    HStack {
-                        Label(id == "com.google.Chrome" ? "Chrome" : "Firefox", systemImage: connected ? "checkmark.circle.fill" : "circle")
-                        Spacer()
-                        if !connected { Button("Connect") { guide.connectBrowser(id) } }
-                    }.font(.caption)
-                }
-                if guide.setupBrowser != nil {
-                    Text("Waiting for Browser Guard; the guide clock keeps running.").font(.caption).foregroundStyle(.secondary)
-                    Button("Continue with app windows") { guide.continueWithAppWindows() }.font(.caption)
-                }
-            }.padding(.top, 8)
-        }.font(.callout)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Browser profiles").font(.callout.weight(.medium))
+            Text("Set up or check the profiles you want to use with Intent. Each profile is checked separately; an installed extension alone does not mean it is connected.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Manage browser profiles") { IntentBrowserSetup.open() }.buttonStyle(.bordered)
+        }
     }
     private func openPermission(_ pane: String) {
         guide.beginPermissionHandoff()
@@ -385,16 +369,13 @@ struct IntentQuickGuideView: View {
     }
     private func refreshPermissions() {
         accessibilityReady = AXIsProcessTrusted(); previewsReady = CGPreflightScreenCaptureAccess()
-        if let browser = guide.setupBrowser, BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser)).supports(.tabSessionIdentity, maxAge: 5) {
-            guide.continueWithAppWindows()
+        if guide.isTeaching, let draft = guide.lastIntention,
+           let saved = model.savedSlots.first(where: { $0.id == draft.id }) {
+            guide.retainSavedIntention(saved)
+            guide.record(.saved, savedIntentionID: saved.id)
         }
-        guide.setSetupInProgress([.overview, .quickMark].contains(step) && (!permissionsReady || guide.setupBrowser != nil))
-    }
-    private func continueAfterRun(to next: IntentOnboardingStep) {
-        guard model.hasActiveSession else { guide.move(to: next); return }
-        guard model.activeSessionCanFinishManually else { return }
-        nextAfterStop = next
-        model.endActiveSession()
+        browserPreferences = .load()
+        guide.setSetupInProgress([.overview, .quickMark].contains(step) && (!permissionsReady || !browserPreferences.completed))
     }
     private func leave() { guide.exit(); onDismiss() }
     private func goBack() {
@@ -419,8 +400,8 @@ struct OnboardingSelectionHint: View {
     var body: some View {
         HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Choose what you need for “\(coordinator.purposeName.count > 100 ? String(coordinator.purposeName.prefix(97)) + "…" : coordinator.purposeName)”").font(.callout.weight(.semibold)).lineLimit(1)
-                Text("/ switches Allow / Block · Modifications are below · Return starts real restrictions")
+                Text(coordinator.purposeName.isEmpty ? "Choose what you need" : "Choose what you need for “\(coordinator.purposeName.count > 100 ? String(coordinator.purposeName.prefix(97)) + "…" : coordinator.purposeName)”").font(.callout.weight(.semibold)).lineLimit(1)
+                Text("B switches Allow / Block · Modifications are below · Return starts real restrictions")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 4)

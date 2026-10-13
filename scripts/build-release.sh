@@ -20,7 +20,14 @@ NOTARY_PROFILE="${INTENT_NOTARY_PROFILE:-}"
 ALLOW_UNSIGNED_LOCAL="${INTENT_ALLOW_UNSIGNED_LOCAL:-0}"
 TESTER_PRERELEASE="${INTENT_TESTER_PRERELEASE:-0}"
 CURRENT_ARM_TESTER="${INTENT_TESTER_USE_CURRENT_ARM_BUILD:-0}"
-ARCHITECTURES='["arm64", "x86_64"]'
+RELEASE_ARCHITECTURE="${INTENT_RELEASE_ARCHITECTURE:-arm64}"
+case "$RELEASE_ARCHITECTURE" in
+  arm64) ARCHITECTURES='["arm64"]' ;;
+  universal) ARCHITECTURES='["arm64", "x86_64"]' ;;
+  *) echo "Use INTENT_RELEASE_ARCHITECTURE=arm64 or universal." >&2; exit 4 ;;
+esac
+SIGNED_FIREFOX_INPUT="${INTENT_SIGNED_FIREFOX_XPI:-}"
+SIGNED_FIREFOX_SHA="${INTENT_SIGNED_FIREFOX_SHA256:-}"
 if [[ "$TESTER_PRERELEASE" == "1" ]]; then
   ALLOW_UNSIGNED_LOCAL=1
   DIST="$ROOT/dist/tester-release"
@@ -29,11 +36,20 @@ if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
   [[ "$TESTER_PRERELEASE" == "1" ]] || { echo "Existing binaries are allowed only for an explicit tester prerelease." >&2; exit 4; }
   ARM_BUILD="${INTENT_LAUNCH_BUILD_PATH:-$ROOT/.build-launch}"
   ARCHITECTURES='["arm64"]'
+  RELEASE_ARCHITECTURE=arm64
 fi
+DIST="${INTENT_RELEASE_OUTPUT:-$DIST}"
 MINIMUM_MACOS="13.0"
 BUILD_CHANNEL="launch"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "Use a stable version and numeric build number." >&2; exit 4; }
 GOOGLE_CLIENT_SECRET="${INTENT_GOOGLE_CLIENT_SECRET:-}"
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+SOURCE_FINGERPRINT="$(cd "$ROOT" && node -e 'console.log(require("./scripts/change-impact.cjs").sourceFingerprint(process.cwd()))')"
+SOURCE_DIRTY="$(cd "$ROOT" && node -e 'console.log(require("./scripts/change-impact.cjs").changedPaths(process.cwd()).length > 0)')"
+if [[ -e "$DIST" && ( ! -d "$DIST" || -n "$(ls -A "$DIST")" ) ]]; then
+  echo 'Release output is not empty. Preserve it and set INTENT_RELEASE_OUTPUT to a new immutable build directory.' >&2
+  exit 4
+fi
 
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]] && {
   [[ -z "$APPLICATION_IDENTITY" ]] || [[ -z "$INSTALLER_IDENTITY" ]] || [[ -z "$NOTARY_PROFILE" ]]
@@ -66,14 +82,22 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mkdir -p "$SUPPORT_DIR"
 mkdir -p "$PKG_ROOT/Library/Application Support/Mozilla/NativeMessagingHosts"
 mkdir -p "$PKG_ROOT/Library/Google/Chrome/NativeMessagingHosts"
-rm -rf "$DIST"
+# Preserve supplied signed input even when the operator points at a prior
+# release directory. Validate before creating any new output.
+if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" && -n "$SIGNED_FIREFOX_INPUT" ]]; then
+  /usr/bin/python3 "$ROOT/scripts/verify-signed-firefox.py" \
+    "$SIGNED_FIREFOX_INPUT" "$ROOT/firefox-extension" "$SIGNED_FIREFOX_SHA"
+  cp "$SIGNED_FIREFOX_INPUT" "$WORK/verified-firefox.xpi"
+fi
 mkdir -p "$PKG_SCRIPTS" "$DMG_ROOT" "$DIST"
 
 cd "$ROOT"
 if [[ "$CURRENT_ARM_TESTER" != "1" ]]; then
 for product in Intent IntentApp IntentNativeHost; do
-  swift build --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple "arm64-apple-macosx${MINIMUM_MACOS}" --product "$product"
-  swift build --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
+  swift build --jobs 2 --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple "arm64-apple-macosx${MINIMUM_MACOS}" --product "$product"
+  if [[ "$RELEASE_ARCHITECTURE" == universal ]]; then
+  swift build --jobs 2 --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
+  fi
 done
 fi
 if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
@@ -93,8 +117,28 @@ fi
 if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
   npm run extension:build
 else
-  find "$ROOT/dist/firefox" -maxdepth 1 -type f -name '*.xpi' -delete 2>/dev/null || true
-  "$ROOT/scripts/sign-firefox-extension.sh"
+  if [[ -z "$SIGNED_FIREFOX_INPUT" ]]; then
+    # AMO signing remains available, but never delete an approved archive while
+    # obtaining another. Require exactly one matching output afterwards.
+    "$ROOT/scripts/sign-firefox-extension.sh"
+    FIREFOX_SOURCE="$(/usr/bin/python3 - "$ROOT/dist/firefox" "$ROOT/firefox-extension/manifest.json" <<'XPI'
+import json, pathlib, sys, zipfile
+version=json.load(open(sys.argv[2]))['version']
+matches=[]
+for path in pathlib.Path(sys.argv[1]).glob('*.xpi'):
+    with zipfile.ZipFile(path) as archive:
+        if json.loads(archive.read('manifest.json')).get('version') == version:
+            matches.append(path)
+if len(matches) != 1:
+    sys.exit('Choose the approved signed archive with INTENT_SIGNED_FIREFOX_XPI and its recorded SHA256.')
+print(matches[0])
+XPI
+)"
+    SIGNED_FIREFOX_SHA="$(shasum -a 256 "$FIREFOX_SOURCE" | awk '{print $1}')"
+    /usr/bin/python3 "$ROOT/scripts/verify-signed-firefox.py" \
+      "$FIREFOX_SOURCE" "$ROOT/firefox-extension" "$SIGNED_FIREFOX_SHA"
+    cp "$FIREFOX_SOURCE" "$WORK/verified-firefox.xpi"
+  fi
 fi
 npm run extension:build:chrome
 FIREFOX_VERSION="$(node -p "require('$ROOT/firefox-extension/manifest.json').version")"
@@ -111,7 +155,7 @@ if [[ -n "$PUBLISHED_CHROME_VERSION" && "$PUBLISHED_CHROME_VERSION" != "$CHROME_
   echo "Release refused: the Chrome store version does not match this build." >&2; exit 6
 fi
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
-  FIREFOX_SOURCE="$(find "$ROOT/dist/firefox" -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+  FIREFOX_SOURCE="$WORK/verified-firefox.xpi"
   [[ -n "$FIREFOX_SOURCE" ]] || { echo "Release refused: Mozilla did not return a signed Firefox extension." >&2; exit 6; }
   /usr/bin/python3 - "$FIREFOX_SOURCE" "$FIREFOX_VERSION" <<'CHECK'
 import json, sys, zipfile
@@ -123,7 +167,7 @@ CHECK
   cp "$FIREFOX_SOURCE" "$APP/Contents/Resources/BrowserGuard/Intent-Firefox-Extension.xpi"
 fi
 
-if [[ "$CURRENT_ARM_TESTER" == "1" ]]; then
+if [[ "$RELEASE_ARCHITECTURE" == arm64 ]]; then
   cp "$ARM_BUILD/arm64-apple-macosx/release/IntentApp" "$APP/Contents/MacOS/IntentApp"
   cp "$ARM_BUILD/arm64-apple-macosx/release/Intent" "$SUPPORT_DIR/Intent"
   cp "$ARM_BUILD/arm64-apple-macosx/release/IntentNativeHost" "$SUPPORT_DIR/IntentNativeHost"
@@ -237,24 +281,11 @@ cat > "$PKG_ROOT/Library/Google/Chrome/NativeMessagingHosts/intent_native_host.j
 }
 JSON
 
-cp "$ROOT/scripts/package-preinstall.sh" "$PKG_SCRIPTS/preinstall"
+sed -e "s/^RELEASE_ARCHITECTURE=.*/RELEASE_ARCHITECTURE=$RELEASE_ARCHITECTURE/" \
+  -e "s/^MINIMUM_MACOS_MAJOR=.*/MINIMUM_MACOS_MAJOR=${MINIMUM_MACOS%%.*}/" \
+  "$ROOT/scripts/package-preinstall.sh" > "$PKG_SCRIPTS/preinstall"
 
-cat > "$PKG_SCRIPTS/postinstall" <<'SCRIPT'
-#!/bin/bash
-set -e
-chmod +x "/Applications/Intent.app/Contents/MacOS/IntentApp"
-chmod +x "/Library/Application Support/Intent/IntentNativeHost"
-CONSOLE_USER="$(stat -f '%Su' /dev/console)"
-if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" && "$CONSOLE_USER" != "loginwindow" ]]; then
-  USER_ID="$(id -u "$CONSOLE_USER")"
-  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-  if [[ -x "$LSREGISTER" ]]; then
-    "$LSREGISTER" -f "/Applications/Intent.app" >/dev/null 2>&1 || true
-  fi
-  launchctl asuser "$USER_ID" sudo -u "$CONSOLE_USER" /usr/bin/open -n "/Applications/Intent.app" || true
-fi
-exit 0
-SCRIPT
+cp "$ROOT/scripts/package-postinstall.sh" "$PKG_SCRIPTS/postinstall"
 chmod +x "$PKG_SCRIPTS/preinstall" "$PKG_SCRIPTS/postinstall"
 
 "$ROOT/scripts/embed-update-components.sh" "$APP" "$ARM_BUILD"
@@ -289,35 +320,42 @@ elif [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
 else
   DMG="$DIST/Intent.dmg"
 fi
-UNSIGNED_PKG="$WORK/Intent-${VERSION}-unsigned.pkg"
-WORK_PKG="$WORK/Intent-${VERSION}.pkg"
 WORK_DMG="$WORK/Intent-${VERSION}.dmg"
 pkgbuild --analyze --root "$PKG_ROOT" "$WORK/components.plist" >/dev/null
 /usr/bin/python3 "$ROOT/scripts/package-component-policy.py" \
   "$WORK/components.plist" "$WORK/components-fixed.plist"
-pkgbuild \
-  --root "$PKG_ROOT" \
-  --component-plist "$WORK/components-fixed.plist" \
-  --scripts "$PKG_SCRIPTS" \
-  --identifier dev.loganmondi.intent \
-  --version "$VERSION" \
-  --install-location / \
-  "$UNSIGNED_PKG" >/dev/null
-
-if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
-  productsign --sign "$INSTALLER_IDENTITY" "$UNSIGNED_PKG" "$WORK_PKG" >/dev/null
-  pkgutil --check-signature "$WORK_PKG"
-  # Attach the installer's ticket before copying it into the disk image, so
-  # Gatekeeper can verify the contained installer without an internet connection.
-  xcrun notarytool submit "$WORK_PKG" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$WORK_PKG"
-  xcrun stapler validate "$WORK_PKG"
-  spctl --assess --type install --verbose=2 "$WORK_PKG"
-else
-  mv "$UNSIGNED_PKG" "$WORK_PKG"
-fi
-
-cp "$WORK_PKG" "$DMG_ROOT/Install Intent.pkg"
+# Every variant packages the same signed app bytes. Only the postinstall's
+# validated browser enum differs; each resulting package gets its own ticket.
+for choice in firefox chrome both; do
+  case "$choice" in firefox) label=Firefox ;; chrome) label=Chrome ;; both) label=Both ;; esac
+  sed "s/^SETUP_BROWSER_CHOICE=.*/SETUP_BROWSER_CHOICE=$choice/" \
+    "$ROOT/scripts/package-postinstall.sh" > "$PKG_SCRIPTS/postinstall"
+  chmod +x "$PKG_SCRIPTS/postinstall"
+  UNSIGNED_PKG="$WORK/Intent-${choice}-unsigned.pkg"
+  WORK_PKG="$WORK/Intent-${choice}.pkg"
+  pkgbuild \
+    --root "$PKG_ROOT" \
+    --component-plist "$WORK/components-fixed.plist" \
+    --scripts "$PKG_SCRIPTS" \
+    --identifier dev.loganmondi.intent \
+    --version "$VERSION" \
+    --install-location / \
+    "$UNSIGNED_PKG" >/dev/null
+  if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
+    productsign --sign "$INSTALLER_IDENTITY" "$UNSIGNED_PKG" "$WORK_PKG" >/dev/null
+    pkgutil --check-signature "$WORK_PKG"
+    xcrun notarytool submit "$WORK_PKG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$WORK_PKG"
+    xcrun stapler validate "$WORK_PKG"
+    spctl --assess --type install --verbose=2 "$WORK_PKG"
+  else
+    mv "$UNSIGNED_PKG" "$WORK_PKG"
+  fi
+  cp "$WORK_PKG" "$DIST/Intent-${label}.pkg"
+  if [[ "$choice" == both ]]; then
+    cp "$WORK_PKG" "$DMG_ROOT/Install Intent.pkg"
+  fi
+done
 
 hdiutil create \
   -volname "Intent ${VERSION}" \
@@ -346,7 +384,7 @@ if [[ "$ALLOW_UNSIGNED_LOCAL" == "1" ]]; then
   FIREFOX_SIGNED=false
 else
   FIREFOX_ASSET="$DIST/Intent-Firefox-Extension.xpi"
-  FIREFOX_SOURCE="$(find "$ROOT/dist/firefox" -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+  FIREFOX_SOURCE="$WORK/verified-firefox.xpi"
   [[ -n "$FIREFOX_SOURCE" ]] || {
     echo "Release refused: Mozilla did not return a signed Firefox extension." >&2
     exit 6
@@ -370,8 +408,13 @@ fi
 
 cat > "$DIST/release-manifest.json" <<JSON
 {
+  "distribution_ready": false,
+  "installer_format": "pkg",
   "version": "${VERSION}",
   "build": "${BUILD_NUMBER}",
+  "source_commit": "${SOURCE_COMMIT}",
+  "source_dirty": ${SOURCE_DIRTY},
+  "source_fingerprint": "${SOURCE_FINGERPRINT}",
   "repository": "logx8x-ui/intent-cli",
   "tag": "launch-${VERSION}",
   "channel": "${BUILD_CHANNEL}",
@@ -397,7 +440,28 @@ cat > "$DIST/release-manifest.json" <<JSON
 }
 JSON
 
+/usr/bin/python3 - "$DIST/release-manifest.json" <<'INSTALLERS'
+import hashlib, json, pathlib, sys
+path=pathlib.Path(sys.argv[1])
+manifest=json.loads(path.read_text())
+manifest['installers']={}
+for choice,label in [('firefox','Firefox'),('chrome','Chrome'),('both','Both')]:
+    asset=path.parent/f'Intent-{label}.pkg'
+    manifest['installers'][choice]={
+        'asset':asset.name, 'browser_choice':choice, 'size_bytes':asset.stat().st_size,
+        'sha256':hashlib.sha256(asset.read_bytes()).hexdigest()}
+path.write_text(json.dumps(manifest, indent=2)+'\n')
+INSTALLERS
+
+[[ "$(cd "$ROOT" && node -e 'console.log(require("./scripts/change-impact.cjs").sourceFingerprint(process.cwd()))')" == "$SOURCE_FINGERPRINT" ]] || {
+  echo 'Source changed during packaging. This candidate must not be distributed.' >&2
+  exit 7
+}
+
 printf '%s\n' \
+  "$DIST/Intent-Firefox.pkg" \
+  "$DIST/Intent-Chrome.pkg" \
+  "$DIST/Intent-Both.pkg" \
   "$DMG" \
   "$FIREFOX_ASSET" \
   "$DIST/Intent-Chrome-Extension.zip" \

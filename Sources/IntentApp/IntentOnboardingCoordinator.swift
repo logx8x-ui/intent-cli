@@ -153,9 +153,8 @@ final class IntentOnboardingCoordinator: ObservableObject {
     func showSavedOnCanvas() {
         guard let id = state.savedIntentionID else { return }
         IntentRuntime.shared.model.selectedID = id
-        IntentRuntime.shared.model.showOverlay()
-        canvasRequest = UUID()
         move(to: .ready)
+        _ = IntentRuntime.shared.model.presentWorkspace?()
     }
     func exit() {
         guard isPresented else { return }

@@ -289,5 +289,158 @@ class CompiledChannelVerificationTests(unittest.TestCase):
             kits.verify_compiled_launch(self.app, run=self.run)
 
 
+class DirectInstallerTests(unittest.TestCase):
+    archive = DownloadKitsTests.archive
+    save = DownloadKitsTests.save
+
+    def setUp(self):
+        DownloadKitsTests.setUp(self)
+        self.manifest.update(installer_format='pkg', distribution_ready=True,
+                             architectures=['arm64'], minimum_macos='13.0',
+                             version='0.9.3', build='202610130002', installers={})
+        for choice, name in kits.INSTALLER_CHOICES.items():
+            asset = self.root / name
+            asset.write_bytes(('fixture ' + choice + ' installer').encode())
+            self.manifest['installers'][choice] = dict(asset=name, browser_choice=choice,
+                size_bytes=asset.stat().st_size, sha256=kits.file_sha256(asset))
+        self.save()
+
+    def test_direct_downloads_are_three_pkgs_without_zip_or_setup_html(self):
+        paths = kits.build_kits(self.root, STORE_URL, VERSION)
+        self.assertEqual([path.name for path in paths], list(kits.INSTALLER_CHOICES.values()))
+        self.assertFalse(list(self.root.glob('Intent-Firefox.zip')))
+        self.assertFalse(list(self.root.glob('Finish setup.html')))
+
+    def test_qualification_and_chrome_approval_are_both_required(self):
+        for field in ['distribution_ready', 'chrome_web_store_approved']:
+            with self.subTest(field=field):
+                self.manifest[field] = False
+                self.save()
+                with self.assertRaises(ValueError): kits.build_kits(self.root, STORE_URL, VERSION)
+                self.manifest[field] = True
+        self.save()
+        with self.assertRaises(ValueError): kits.build_kits(self.root)
+
+    def test_candidate_can_be_verified_before_live_qualification(self):
+        self.manifest['distribution_ready'] = False
+        self.save()
+        kits.verify_release_inputs(self.root)
+        with self.assertRaisesRegex(ValueError, 'remain gated'):
+            kits.build_kits(self.root, STORE_URL, VERSION)
+
+    def test_installer_mutation_size_hash_enum_and_paths_are_rejected(self):
+        for field, value in [('asset', '../Intent-Firefox.pkg'), ('browser_choice', 'both'),
+                             ('size_bytes', 0), ('size_bytes', True), ('sha256', '0' * 64)]:
+            with self.subTest(field=field, value=value):
+                entry = self.manifest['installers']['firefox']
+                original = entry[field]
+                entry[field] = value
+                with self.assertRaises(ValueError): kits.verify_installers(self.root, self.manifest)
+                entry[field] = original
+        asset = self.root / 'Intent-Firefox.pkg'
+        asset.write_bytes(asset.read_bytes() + b'mutation')
+        with self.assertRaises(ValueError): kits.verify_installers(self.root, self.manifest)
+
+    def test_missing_or_extra_variant_is_rejected(self):
+        original = self.manifest['installers'].pop('both')
+        with self.assertRaises(ValueError): kits.verify_installers(self.root, self.manifest)
+        self.manifest['installers']['both'] = original
+        self.manifest['installers']['other'] = original
+        with self.assertRaises(ValueError): kits.verify_installers(self.root, self.manifest)
+
+    def test_symlink_package_is_rejected(self):
+        target = self.root / 'Intent-Firefox.pkg'
+        backup = self.root / 'other.pkg'
+        target.rename(backup)
+        target.symlink_to(backup)
+        with self.assertRaises(ValueError): kits.verify_installers(self.root, self.manifest)
+
+    def test_platform_and_update_policy_are_explicit(self):
+        for field, value in [('architectures', ['x86_64']), ('architectures', []),
+                             ('minimum_macos', '12.0'), ('automatic_update_checks_enabled', True)]:
+            with self.subTest(field=field):
+                original = self.manifest[field]
+                self.manifest[field] = value
+                with self.assertRaises(ValueError): kits.verify_installers(self.root, self.manifest)
+                self.manifest[field] = original
+
+    def payload(self, choice):
+        expanded = self.root / choice
+        app = expanded / 'Payload/Applications/Intent.app'
+        (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(dict(
+            CFBundleShortVersionString=self.manifest['version'], CFBundleVersion=self.manifest['build'],
+            LSMinimumSystemVersion=self.manifest['minimum_macos'])))
+        scripts = expanded / 'Scripts'
+        scripts.mkdir()
+        source_root = pathlib.Path(__file__).resolve().parents[1]
+        (scripts / 'preinstall').write_bytes((source_root / 'scripts/package-preinstall.sh').read_bytes())
+        (scripts / 'postinstall').write_text((source_root / 'scripts/package-postinstall.sh').read_text().replace(
+            'SETUP_BROWSER_CHOICE=both', 'SETUP_BROWSER_CHOICE=' + choice))
+        (expanded / 'PackageInfo').write_text('<pkg-info identifier="dev.loganmondi.intent" install-location="/" relocatable="false"/>')
+        return expanded, app, source_root
+
+    def test_actual_package_handoff_and_destination_are_checked(self):
+        for choice in kits.INSTALLER_CHOICES:
+            with self.subTest(choice=choice):
+                expanded, app, source = self.payload(choice)
+                self.assertEqual(kits.verify_package_payload(expanded, self.manifest, choice, source), app)
+                (expanded / 'Scripts/postinstall').write_text('open some other application')
+                with self.assertRaisesRegex(ValueError, 'handoff'):
+                    kits.verify_package_payload(expanded, self.manifest, choice, source)
+
+    def test_relocation_and_wrong_build_are_rejected(self):
+        expanded, app, source = self.payload('both')
+        info = expanded / 'PackageInfo'
+        original = info.read_text()
+        info.write_text('<pkg-info identifier="dev.loganmondi.intent" install-location="/" relocatable="false"><relocate/></pkg-info>')
+        with self.assertRaisesRegex(ValueError, 'nonrelocatable'):
+            kits.verify_package_payload(expanded, self.manifest, 'both', source)
+        info.write_text(original)
+        self.manifest['build'] = 'old-build'
+        with self.assertRaisesRegex(ValueError, 'metadata'):
+            kits.verify_package_payload(expanded, self.manifest, 'both', source)
+
+    def test_architecture_guard_must_match_actual_variant_metadata(self):
+        expanded, app, source = self.payload('both')
+        preinstall = expanded / 'Scripts/preinstall'
+        original = preinstall.read_text()
+        self.manifest['architectures'] = ['arm64', 'x86_64']
+        with self.assertRaisesRegex(ValueError, 'handoff'):
+            kits.verify_package_payload(expanded, self.manifest, 'both', source)
+        preinstall.write_text(original.replace('RELEASE_ARCHITECTURE=arm64', 'RELEASE_ARCHITECTURE=universal'))
+        self.assertEqual(kits.verify_package_payload(expanded, self.manifest, 'both', source), app)
+        self.manifest['architectures'] = ['arm64']
+        with self.assertRaisesRegex(ValueError, 'handoff'):
+            kits.verify_package_payload(expanded, self.manifest, 'both', source)
+
+    def test_missing_or_weakened_compatibility_checks_are_rejected(self):
+        expanded, _, source = self.payload('both')
+        preinstall = expanded / 'Scripts/preinstall'
+        original = preinstall.read_text()
+        for content in ('#!/bin/bash\nexit 0\n', original.replace('MINIMUM_MACOS_MAJOR=13', 'MINIMUM_MACOS_MAJOR=12')):
+            with self.subTest(content=content[:35]):
+                preinstall.write_text(content)
+                with self.assertRaisesRegex(ValueError, 'handoff'):
+                    kits.verify_package_payload(expanded, self.manifest, 'both', source)
+
+    def test_payload_fingerprint_catches_resources_helpers_modes_and_links(self):
+        expanded, app, _ = self.payload('both')
+        payload = expanded / 'Payload'
+        initial = kits.payload_fingerprint(payload)
+        extra = app / 'Contents/other.txt'
+        extra.write_text('a changed resource')
+        self.assertNotEqual(kits.payload_fingerprint(payload), initial)
+        baseline = kits.payload_fingerprint(payload)
+        extra.chmod(0o700)
+        self.assertNotEqual(kits.payload_fingerprint(payload), baseline)
+        extra.unlink()
+        extra.symlink_to('Info.plist')
+        baseline = kits.payload_fingerprint(payload)
+        extra.unlink()
+        extra.symlink_to('other-file')
+        self.assertNotEqual(kits.payload_fingerprint(payload), baseline)
+
+
 if __name__ == '__main__':
     unittest.main()

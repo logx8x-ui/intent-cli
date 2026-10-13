@@ -94,10 +94,12 @@ APP="$(find "$EXPANDED" -path '*/Applications/Intent.app' -type d -print -quit)"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=4 "$APP" 2>&1 | grep -F "TeamIdentifier=$TEAM_ID"
 ARCHS="$(lipo -archs "$APP/Contents/MacOS/IntentApp")"
-[[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]] || {
-  echo "IntentApp is not universal: $ARCHS" >&2
-  exit 8
-}
+/usr/bin/python3 - "$MANIFEST" "$ARCHS" <<'ARCHS'
+import json,sys
+expected=json.load(open(sys.argv[1])).get('architectures')
+if expected not in (['arm64'], ['arm64','x86_64']) or set(sys.argv[2].split()) != set(expected):
+    sys.exit('Application architectures do not match the supported release.')
+ARCHS
 
 # Older Intent executables do not understand this flag and would open their UI.
 # Require launch metadata and the marker in the verified Mach-O before making
@@ -114,4 +116,44 @@ except (ValueError, OSError, KeyError) as error:
     sys.exit(str(error))
 PY
 
-echo "Intent release verification passed."
+# Assess the actual direct-download packages, not merely the compatibility DMG.
+/usr/bin/python3 - "$ROOT/scripts/build-download-kits.py" "$ASSET_DIR" "$MANIFEST" <<'INPUTS'
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('kits',sys.argv[1]); kits=importlib.util.module_from_spec(spec);spec.loader.exec_module(kits)
+kits.verify_installers(sys.argv[2],json.load(open(sys.argv[3])))
+INPUTS
+PAYLOAD_DIGEST="$(/usr/bin/python3 - "$ROOT/scripts/build-download-kits.py" "$APP/../.." <<'DIGEST'
+import importlib.util,sys
+spec=importlib.util.spec_from_file_location('kits',sys.argv[1]); kits=importlib.util.module_from_spec(spec);spec.loader.exec_module(kits)
+print(kits.payload_fingerprint(sys.argv[2]))
+DIGEST
+)"
+for choice in firefox chrome both; do
+  case "$choice" in firefox) label=Firefox ;; chrome) label=Chrome ;; both) label=Both ;; esac
+  DIRECT_PKG="$ASSET_DIR/Intent-${label}.pkg"
+  xcrun stapler validate "$DIRECT_PKG"
+  SIGNATURE_OUTPUT="$(pkgutil --check-signature "$DIRECT_PKG")"
+  [[ "$SIGNATURE_OUTPUT" == *"($TEAM_ID)"* || "$SIGNATURE_OUTPUT" == *"Team Identifier: $TEAM_ID"* ]] || {
+    echo "Direct installer publisher differs from release manifest." >&2; exit 14;
+  }
+  spctl --assess --type install --verbose=2 "$DIRECT_PKG"
+  DIRECT_EXPANDED="$WORK/direct-${choice}"
+  pkgutil --expand-full "$DIRECT_PKG" "$DIRECT_EXPANDED"
+  DIRECT_APP="$(/usr/bin/python3 - "$ROOT/scripts/build-download-kits.py" "$DIRECT_EXPANDED" "$MANIFEST" "$choice" "$ROOT" <<'PAYLOAD'
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('kits',sys.argv[1]); kits=importlib.util.module_from_spec(spec);spec.loader.exec_module(kits)
+print(kits.verify_package_payload(sys.argv[2],json.load(open(sys.argv[3])),sys.argv[4],sys.argv[5]))
+PAYLOAD
+)"
+  codesign --verify --deep --strict --verbose=2 "$DIRECT_APP"
+  codesign -dv --verbose=4 "$DIRECT_APP" 2>&1 | grep -F "TeamIdentifier=$TEAM_ID"
+  /usr/bin/python3 - "$ROOT/scripts/build-download-kits.py" "$DIRECT_APP" "$MANIFEST" "$PAYLOAD_DIGEST" <<'EMBEDDED'
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('kits',sys.argv[1]); kits=importlib.util.module_from_spec(spec);spec.loader.exec_module(kits)
+kits.verify_embedded_browsers(sys.argv[2],json.load(open(sys.argv[3])))
+if kits.payload_fingerprint(sys.argv[2]+'/../..') != sys.argv[4]:
+    sys.exit('Browser variants contain different application or helper payloads.')
+EMBEDDED
+done
+
+echo "Intent release verification passed. Live onboarding and session acceptance remain separate."

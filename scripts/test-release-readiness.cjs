@@ -75,8 +75,29 @@ assert.ok(
 assert.ok(releaseBuilder.includes('scripts/package-preinstall.sh'), 'The package must embed the tested preinstall guard');
 assert.ok(!releaseBuilder.includes('pkill'), 'A public package must never terminate an intention by process name');
 assert.ok(releaseBuilder.includes('--component-plist "$WORK/components-fixed.plist"'), 'Installer bundles must use the fixed destination policy');
-assert.ok(releaseBuilder.indexOf('stapler staple "$WORK_PKG"') < releaseBuilder.indexOf('cp "$WORK_PKG" "$DMG_ROOT/Install Intent.pkg"'), 'The installer ticket must be embedded in the disk image');
+const packageStaple = releaseBuilder.indexOf('stapler staple "$WORK_PKG"');
+const packageCopy = releaseBuilder.indexOf('cp "$WORK_PKG" "$DMG_ROOT/Install Intent.pkg"');
+assert.ok(packageStaple >= 0 && packageCopy > packageStaple, 'The installer ticket must be embedded in the disk image');
 assert.ok(releaseBuilder.includes('codesign --force --timestamp --sign "$APPLICATION_IDENTITY" "$WORK_DMG"'), 'The public disk image must have the Developer ID signature');
+assert.ok(releaseBuilder.includes('INTENT_SIGNED_FIREFOX_XPI') && releaseBuilder.includes('scripts/verify-signed-firefox.py') &&
+  !releaseBuilder.includes("-name '*.xpi' -delete"), 'Approved signed Firefox input must be preserved and checked against source');
+assert.ok(releaseBuilder.includes('INTENT_RELEASE_ARCHITECTURE') && releaseBuilder.includes('for choice in firefox chrome both'),
+  'Fresh signed ARM releases must produce each browser-specific installer');
+assert.ok(releaseBuilder.includes('s/^RELEASE_ARCHITECTURE=.*/RELEASE_ARCHITECTURE=$RELEASE_ARCHITECTURE/') &&
+  releaseBuilder.includes('MINIMUM_MACOS_MAJOR=${MINIMUM_MACOS%%.*}'),
+  'Installer compatibility checks must match the compiled architecture and minimum macOS');
+assert.ok(releaseBuilder.split('\n').filter(line => /^\s*swift build /.test(line)).every(line => line.includes('--jobs 2')),
+  'Fresh release builds must limit concurrent compiler jobs');
+assert.ok(releaseBuilder.includes('INTENT_RELEASE_OUTPUT') && !releaseBuilder.includes('rm -rf "$DIST"'),
+  'Building a candidate must not erase the previous release or rollback artifacts');
+assert.ok(releaseBuilder.includes('"distribution_ready": false') && releaseBuilder.includes('"source_fingerprint"'),
+  'Signing alone must not mark a candidate as qualified for download');
+assert.ok(read('scripts/package-postinstall.sh').includes('"--setup-browsers=$SETUP_BROWSER_CHOICE"'),
+  'Each installer must hand its exact browser choice to app onboarding');
+assert.ok(!read('uninstall.sh').includes('pkill') && !read('uninstall.sh').includes('$HOME/.intent'),
+  'Uninstall must not kill an intention or delete local user data');
+assert.ok(!read('scripts/update.sh').includes('curl') && !read('scripts/update.sh').includes('raw.githubusercontent.com'),
+  'Private tester update must not execute an unpinned main-branch installer');
 
 const releaseVerifier = read("scripts/verify-release.sh");
 assert.ok(

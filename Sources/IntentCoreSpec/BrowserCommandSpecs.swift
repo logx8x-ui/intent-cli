@@ -2,6 +2,23 @@ import Foundation
 import IntentCore
 
 func runBrowserCommandSpecs() throws {
+    let requiredVersion = "0.2.46"
+    var setup = BrowserTabSnapshot(browserBundleIdentifier: "com.google.Chrome", browserSessionID: "setup-owner",
+        browserProfileID: UUID().uuidString, tabs: [], guardEnabled: true, guardVersion: requiredVersion,
+        guardCapabilities: [BrowserGuardCapability.tabSessionIdentity.rawValue, BrowserGuardCapability.quickSelection.rawValue,
+                            BrowserGuardCapability.nativeWindowVisibility.rawValue])
+    try expect(setup.supportsProfileSetup(version: requiredVersion), "A profile negotiates its own exact setup version and capabilities")
+    var legacySetup = try JSONSerialization.jsonObject(with: JSONEncoder().encode(setup)) as! [String: Any]
+    legacySetup.removeValue(forKey: "guardVersion")
+    let legacy = try JSONDecoder().decode(BrowserTabSnapshot.self, from: JSONSerialization.data(withJSONObject: legacySetup))
+    try expect(legacy.guardVersion == nil && !legacy.supportsProfileSetup(version: requiredVersion),
+               "Legacy snapshots still decode, but an unreported version cannot pass browser setup")
+    setup.guardVersion = "0.2.14"
+    try expect(!setup.supportsProfileSetup(version: requiredVersion), "New matching files on disk cannot certify an older running extension")
+    setup.guardVersion = requiredVersion; setup.guardEnabled = false
+    try expect(!setup.supportsProfileSetup(version: requiredVersion), "A disabled current extension cannot pass setup")
+    setup.guardEnabled = true; setup.guardCapabilities?.removeLast()
+    try expect(!setup.supportsProfileSetup(version: requiredVersion), "A connected profile missing required enforcement capabilities stays pending")
     for action in [BrowserTabCommandAction.activate, .close, .preview] {
         let command = BrowserTabCommand(tabID: 7, windowID: 3, action: action, browserSessionID: "browser-session-a")
         let encoded = try JSONEncoder().encode(command)

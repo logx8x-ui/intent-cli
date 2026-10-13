@@ -969,6 +969,7 @@ private final class HostRuntime {
             profileDiscoveryRequestIDs: profileAnswered.isEmpty ? nil : profileAnswered,
             completeWindowInventory: answered.isEmpty ? nil : true,
             guardEnabled: guardEnabled,
+            guardVersion: extensionVersion,
             guardCapabilities: extensionCapabilities
         )
         let store = BrowserTabSnapshotStore(fileURL: paths.snapshot(for: browserBundleIdentifier))

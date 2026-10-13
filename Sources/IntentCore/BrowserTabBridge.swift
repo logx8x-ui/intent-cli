@@ -94,6 +94,8 @@ public struct BrowserTabSnapshot: Codable, Equatable {
     public var profileDiscoveryRequestIDs: [String]?
     public var completeWindowInventory: Bool?
     public var guardEnabled: Bool?
+    /// Negotiated version from this exact native-host connection, never another profile's heartbeat.
+    public var guardVersion: String?
     public var guardCapabilities: [String]?
 
     public init(
@@ -108,6 +110,7 @@ public struct BrowserTabSnapshot: Codable, Equatable {
         profileDiscoveryRequestIDs: [String]? = nil,
         completeWindowInventory: Bool? = nil,
         guardEnabled: Bool? = nil,
+        guardVersion: String? = nil,
         guardCapabilities: [String]? = nil
     ) {
         self.browserBundleIdentifier = browserBundleIdentifier
@@ -121,7 +124,18 @@ public struct BrowserTabSnapshot: Codable, Equatable {
         self.profileDiscoveryRequestIDs = profileDiscoveryRequestIDs
         self.completeWindowInventory = completeWindowInventory
         self.guardEnabled = guardEnabled
+        self.guardVersion = guardVersion
         self.guardCapabilities = guardCapabilities
+    }
+
+    /// Setup needs the version and capabilities negotiated by this profile's
+    /// host. Disk metadata and another profile's heartbeat cannot satisfy it.
+    public func supportsProfileSetup(version: String) -> Bool {
+        guard !version.isEmpty, guardEnabled == true, guardVersion == version,
+              browserProfileID.flatMap(UUID.init(uuidString:)) != nil,
+              browserSessionID?.isEmpty == false else { return false }
+        let required = [BrowserGuardCapability.tabSessionIdentity, .quickSelection, .nativeWindowVisibility]
+        return required.allSatisfy { guardCapabilities?.contains($0.rawValue) == true }
     }
 }
 

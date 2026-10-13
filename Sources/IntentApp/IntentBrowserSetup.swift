@@ -90,7 +90,14 @@ enum IntentBrowserSetup {
         let view = IntentBrowserSetupView(profiles: { discovery.discover() }, preferredBrowser: browserID.flatMap(IntentSetupBrowser.init(rawValue:)),
             configuration: configuration, openProfile: { profile, destination in
                 open(profile: profile, destination: destination, configuration: configuration)
-            }, close: { setupWindow?.close() })
+            }, openBrowser: { browser in
+                if let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.rawValue) {
+                    NSWorkspace.shared.openApplication(at: application, configuration: .init()) { _, _ in }
+                } else if let url = URL(string: browser == .chrome ? "https://www.google.com/chrome/" : "https://www.mozilla.org/firefox/new/") {
+                    NSWorkspace.shared.open(url)
+                }
+            }, firefoxOwner: { firefoxProfileLock($0) }, verificationRoot: root,
+            close: { setupWindow?.close() })
         let controller = NSHostingController(rootView: view)
         let window = setupWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -162,7 +169,7 @@ enum IntentBrowserSetup {
                 ? "In \(profile.name), turn on Developer mode, choose Load unpacked, then use the copied Chrome folder. Browser confirmation is required."
                 : "In \(profile.name), open about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, then choose manifest.json in the copied folder. This private development add-on must be loaded again after Firefox restarts."
         } else {
-            instructions = "In \(profile.name), approve \(profile.browser.name)’s installation prompt, then return to Intent. Choose Refresh to check the installed version."
+            instructions = "In \(profile.name), approve \(profile.browser.name)’s installation prompt, then return to Intent. The installed version refreshes automatically."
         }
         switch plan {
         case .chromeSetupInstructions:
@@ -191,7 +198,7 @@ enum IntentBrowserSetup {
             }
             let instruction = configuration.development && !profile.guardStatus.isMatching
                 ? instructions
-                : "The setup address has been copied. In the already-open \(profile.name) Firefox window, press ⌘L, paste it, and press Return. Approve Firefox’s prompt."
+                : "The setup address has been copied. In the already-open \(profile.name) Firefox window, press ⌘L, paste it, and press Return. " + (profile.guardStatus.isMatching ? "Check the profile name, then choose Connect this profile." : "Approve Firefox’s installation prompt.")
             return instruction + " Firefox cannot reliably route an external setup link to an already-open named profile; Intent leaves your other profiles and tabs untouched."
         case .open(let arguments):
             let options = NSWorkspace.OpenConfiguration()
@@ -210,7 +217,7 @@ enum IntentBrowserSetup {
                     }
                 }
             }
-            if profile.guardStatus.isMatching { return "Opened \(profile.name). Keep Browser Guard on and return to Intent to verify its live connection." }
+            if profile.guardStatus.isMatching { return "Opened the connection check in \(profile.name). Check the browser’s profile name and choose Connect this profile, then return to Intent." }
             return instructions
         }
     }

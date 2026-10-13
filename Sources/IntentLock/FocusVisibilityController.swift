@@ -310,7 +310,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 applicationExcluded: spec.shouldHideApplication(bundle, initialAllowedApps: initialApps),
                 excludedWindowIDs: Set(excludedWindows.map(\.id)))
             guard action.requiresProcessIdentity else { continue }
-            guard let launched = app.launchDate else {
+            guard let launched = app.intentVisibilityLaunchDate else {
                 nativeInventoryAvailable = false; missingIdentityPIDs.append(app.processIdentifier); continue
             }
             if action == .hideApplication {
@@ -362,11 +362,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var readCount = 0
         func isCurrent() -> Bool {
             self.mayEnforce && !app.isTerminated && app.bundleIdentifier == target.bundleIdentifier
-                && app.launchDate?.timeIntervalSinceReferenceDate == target.launched
+                && app.intentVisibilityLaunchDate?.timeIntervalSinceReferenceDate == target.launched
         }
         let outcome = NativeVisibilityCoverageEffects.hideWithFallback(isCurrent: isCurrent, readHidden: {
             guard !app.isTerminated, app.bundleIdentifier == target.bundleIdentifier,
-                  app.launchDate?.timeIntervalSinceReferenceDate == target.launched else { return nil }
+                  app.intentVisibilityLaunchDate?.timeIntervalSinceReferenceDate == target.launched else { return nil }
             readCount += 1
             let axOwned = self.entries.contains { $0.pid == target.pid && $0.launched.timeIntervalSinceReferenceDate == target.launched
                 && $0.window == nil && $0.accessibilityApplicationHide == true }
@@ -415,7 +415,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private func minimizeExcludedApplicationWindows(_ app: NSRunningApplication, target: NativeVisibilityCoveragePolicy.Target,
                                                     detail: inout [String: Any]) -> NativeVisibilityCoveragePolicy.Outcome {
         guard mayEnforce, !app.isTerminated, app.bundleIdentifier == target.bundleIdentifier,
-              app.launchDate?.timeIntervalSinceReferenceDate == target.launched,
+              app.intentVisibilityLaunchDate?.timeIntervalSinceReferenceDate == target.launched,
               let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               let accessible = Self.completeAccessibilityWindows(pid: target.pid, deadline: ProcessInfo.processInfo.systemUptime + 0.25, detail: &detail),
               let native = Self.nativeWindows(rows: rows, app: app),
@@ -427,7 +427,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let launched = Date(timeIntervalSinceReferenceDate: target.launched)
         var outcomes: [NativeVisibilityCoveragePolicy.Outcome] = []
         for (accessibleWindow, window) in bindings {
-            guard mayEnforce, !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == target.bundleIdentifier else { return .unresolved }
+            guard mayEnforce, !app.isTerminated, app.intentVisibilityLaunchDate == launched, app.bundleIdentifier == target.bundleIdentifier else { return .unresolved }
             let identity = WindowIdentity(pid: target.pid, launched: launched, window: window.id)
             Self.accessibilityWindows[identity] = accessibleWindow.element
             outcomes.append(hideNativeWindow(window, app: app, launched: launched))
@@ -442,7 +442,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         detail["windowFallbackCovered"] = allCovered
         // This outcome represents positively hidden windows, not NS hide API
         // acceptance. Whole-app and per-window journals retain separate ownership.
-        return allCovered && mayEnforce && !app.isTerminated && app.launchDate == launched
+        return allCovered && mayEnforce && !app.isTerminated && app.intentVisibilityLaunchDate == launched
             && app.bundleIdentifier == target.bundleIdentifier ? .hidden : .unresolved
     }
 
@@ -484,7 +484,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         if !nativeCoverage.initialResolved { nativeStartupBindings[target] = element }
         var readCount = 0
         let outcome = NativeVisibilityCoverageEffects.hide(isCurrent: { self.mayEnforce }, readHidden: {
-            guard !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
+            guard !app.isTerminated, app.intentVisibilityLaunchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
             readCount += 1
             let minimized = Self.applicationHidden(app, accessibilityHideOwned: false).hidden == true
                 ? (status: AXError.success, value: Optional(true)) : Self.boolean(element, kAXMinimizedAttribute)
@@ -518,7 +518,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let explicitlyBlockedWindow = spec.accessMode == .blacklist && spec.selectedWindowIDsByApp[window.bundle]?.contains(window.id) == true
         guard role == kAXWindowRole, subrole == kAXSystemDialogSubrole || subrole == kAXFloatingWindowSubrole,
               applicationPermitted, !explicitlyBlockedWindow, !nativeKnownDocumentWindows.contains(target),
-              mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.launchDate == launched else { return false }
+              mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.intentVisibilityLaunchDate == launched else { return false }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.25
         guard let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               let native = Self.nativeWindows(rows: rows, app: app),
@@ -574,7 +574,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         detail["auxiliaryHasWindowAncestor"] = windowAncestor
         detail["auxiliaryAncestorPermitted"] = windowAncestor && ancestorPermitted
         detail["auxiliaryExactApplicationParent"] = exactApplicationParent
-        guard mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.launchDate == launched else { return false }
+        guard mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.intentVisibilityLaunchDate == launched else { return false }
         return NativeVisibilityCoveragePolicy.permitsAuxiliary(role: role, subrole: subrole, applicationPermitted: applicationPermitted,
             exactProcessParent: exactApplicationParent, hasWindowAncestor: windowAncestor,
             ancestorBoundToPermittedWindow: windowAncestor && ancestorPermitted, livePermittedNativeWork: liveWork,
@@ -590,7 +590,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         detail["untitled"] = window.title.isEmpty
         detail["previouslyIdentifiedUserWindow"] = previousUserWindow
         guard mayEnforce, !previousUserWindow, window.title.isEmpty, AXIsProcessTrusted(),
-              !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return false }
+              !app.isTerminated, app.intentVisibilityLaunchDate == launched, app.bundleIdentifier == window.bundle else { return false }
         // kCGWindowIsOnscreen is optional in optionAll rows. A successful
         // optionOnScreenOnly snapshot proves absence without guessing its value.
         guard let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
@@ -623,7 +623,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         detail["allUserWindowsBoundElsewhere"] = allBoundElsewhere
         // No exemption is cached: if this surface later becomes visible or AX
         // readable, every refresh resumes the normal strict minimize path.
-        guard mayEnforce, !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return false }
+        guard mayEnforce, !app.isTerminated, app.intentVisibilityLaunchDate == launched, app.bundleIdentifier == window.bundle else { return false }
         return NativeVisibilityCoveragePolicy.isNonUserSurface(isUntitled: true, serverIdentityStable: stable, isOnScreen: visible,
             accessibilityInventoryComplete: true, accessibilityGeometryMatch: matchingGeometry,
             previouslyIdentifiedUserWindow: previousUserWindow, allUserWindowsBoundElsewhere: allBoundElsewhere)
@@ -633,7 +633,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                                            serverRows: [[String: Any]]?) -> NativeVisibilityCoveragePolicy.Outcome {
         guard mayEnforce else { return .unresolved }
         if kill(target.pid, 0) == -1 { return errno == ESRCH ? .closed : .unresolved }
-        guard let app = NSRunningApplication(processIdentifier: target.pid), let launched = app.launchDate else { return .unresolved }
+        guard let app = NSRunningApplication(processIdentifier: target.pid), let launched = app.intentVisibilityLaunchDate else { return .unresolved }
         guard !app.isTerminated else { return .closed }
         guard app.bundleIdentifier == target.bundleIdentifier,
               launched.timeIntervalSinceReferenceDate == target.launched else { return .closed }
@@ -869,7 +869,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                                        occurrence: String) -> BrowserWindowCoverageCohort.Outcome {
         guard mayEnforce else { return .unresolved }
         if kill(identity.pid, 0) == -1 { return errno == ESRCH ? .closed : .unresolved }
-        guard let app = NSRunningApplication(processIdentifier: identity.pid), let launched = app.launchDate else { return .unresolved }
+        guard let app = NSRunningApplication(processIdentifier: identity.pid), let launched = app.intentVisibilityLaunchDate else { return .unresolved }
         if launched.timeIntervalSinceReferenceDate != identity.launched || app.bundleIdentifier != identity.bundleIdentifier { return .closed }
         guard let current = inventory.windows.first(where: { $0.identity == identity }) else {
             return WorkspaceWindow.exists(id: identity.windowID, pid: identity.pid) == false ? .closed : .unresolved
@@ -957,7 +957,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let resolved = Self.matches(records: records, windows: windows).sorted { $0.isParking && !$1.isParking }
         for match in resolved where match.isParking {
             guard mayEnforce, let app = NSRunningApplication(processIdentifier: match.candidate.pid),
-                  app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.launchDate else { continue }
+                  app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.intentVisibilityLaunchDate else { continue }
             entries = Self.captureParkingMatch(match, launched: launched, entries: entries,
                 restorationPolicy: spec.hiddenWorkspaceRestorationOnStop, controllerOwnershipID: controllerOwnershipID)
         }
@@ -1216,7 +1216,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private static func liveProcessIdentity(_ record: BrowserWindowVisibilityRecord) -> BrowserProcessIdentity? {
         guard let proof = record.browserProcessIdentity, proof.isValid, kill(proof.pid, 0) == 0,
               let app = NSRunningApplication(processIdentifier: proof.pid), !app.isTerminated,
-              app.bundleIdentifier == record.browserBundleIdentifier, let launched = app.launchDate else { return nil }
+              app.bundleIdentifier == record.browserBundleIdentifier, let launched = app.intentVisibilityLaunchDate else { return nil }
         return .init(pid: proof.pid, launched: launched.timeIntervalSinceReferenceDate)
     }
 
@@ -1247,7 +1247,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var result = entries
         for match in matches(records: records, windows: WorkspaceWindow.list(onScreen: false)) where match.isParking {
             guard let app = NSRunningApplication(processIdentifier: match.candidate.pid),
-                  app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.launchDate else { continue }
+                  app.bundleIdentifier == match.record.browserBundleIdentifier, let launched = app.intentVisibilityLaunchDate else { continue }
             result = captureParkingMatch(match, launched: launched, entries: result,
                 restorationPolicy: restorationPolicy, controllerOwnershipID: controllerOwnershipID)
         }
@@ -1345,7 +1345,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             // AppKit can temporarily lack an application or its launch metadata.
             // Only positive death/reuse evidence may discard durable ownership.
             let app = NSRunningApplication(processIdentifier: entry.pid)
-            let observed = app?.launchDate.map {
+            let observed = app?.intentVisibilityLaunchDate.map {
                 BrowserProcessIdentity(pid: entry.pid, launched: $0.timeIntervalSinceReferenceDate)
             }
             let processState: BrowserWindowVisibilityRestorationPolicy.ProcessState
@@ -1450,7 +1450,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 if boolean(element, kAXMinimizedAttribute).value != false { pending.append(entry) }
             } else {
                 func sameLifetime() -> Bool {
-                    !app.isTerminated && app.processIdentifier == entry.pid && app.bundleIdentifier == entry.bundle && app.launchDate == entry.launched
+                    !app.isTerminated && app.processIdentifier == entry.pid && app.bundleIdentifier == entry.bundle && app.intentVisibilityLaunchDate == entry.launched
                 }
                 let restored = NativeVisibilityCoverageEffects.restoreWithFallback(isCurrent: sameLifetime, readHidden: {
                     applicationHidden(app, accessibilityHideOwned: entry.accessibilityApplicationHide == true).hidden
@@ -1678,7 +1678,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         if let cached = accessibilityWindows[identity] { return cached }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.25
         guard let app = NSRunningApplication(processIdentifier: window.pid), !app.isTerminated,
-              app.bundleIdentifier == window.bundle, app.launchDate == launched,
+              app.bundleIdentifier == window.bundle, app.intentVisibilityLaunchDate == launched,
               let elements = PublicAccessibilityWindowInventory.read(pid: window.pid, deadline: deadline),
               let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               let native = nativeWindows(rows: rows, app: app) else { return nil }
@@ -1702,7 +1702,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             matches.append(element)
         }
         guard ProcessInfo.processInfo.systemUptime < deadline, matches.count == 1,
-              !app.isTerminated, app.launchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
+              !app.isTerminated, app.intentVisibilityLaunchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
         accessibilityWindows[identity] = matches[0]
         return matches[0]
     }

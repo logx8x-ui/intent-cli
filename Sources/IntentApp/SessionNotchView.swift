@@ -47,8 +47,7 @@ struct SessionNotchView: View {
     let layout: SessionNotchLayout
     var slice: SessionNotchSlice = .whole
     var body: some View {
-        if (model.activeSessionEndsAt != nil || model.stopwatchStarted != nil)
-            && !(slice == .controls && layout.hasHardwareNotch) {
+        if model.activeSessionEndsAt != nil || model.stopwatchStarted != nil {
             TimelineView(.periodic(from: .now, by: 1)) { context in content(now: context.date) }
         } else { content(now: .now) }
     }
@@ -80,7 +79,7 @@ struct SessionNotchContent: View {
     var slice: SessionNotchSlice = .whole
     var toggleChecklist: () -> Void = {}
     var setCompleted: (Int, Bool) -> Void = { _, _ in }
-    private var accent: Color { Color(nsColor: SessionChromeStyle.accent(for: mode)) }
+    private var accent: Color { .white.opacity(0.85) }
     @ViewBuilder var body: some View {
         switch slice {
         case .whole: chrome
@@ -95,33 +94,27 @@ struct SessionNotchContent: View {
     private var chrome: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                Circle().fill(accent).frame(width: 5, height: 5)
+                Image(systemName: "sparkle")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
                     .frame(width: layout.leadingWingWidth, height: layout.headerHeight)
                     .accessibilityLabel(mode == .blacklist ? "Blacklist intention" : "Whitelist intention")
-                Group {
-                    if layout.hasHardwareNotch { Color.clear.allowsHitTesting(false) }
-                    else { nameControl }
-                }.frame(width: layout.notchWidth, height: layout.headerHeight)
-                Group {
-                    if let time {
-                        Text(time).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
-                            .accessibilityLabel("\(timeLabel) \(time)")
-                    } else if !checklist.isEmpty {
-                        HStack(spacing: 3) {
-                            Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(accent)
+                nameControl.frame(maxWidth: .infinity, maxHeight: .infinity)
+                if time != nil || !checklist.isEmpty {
+                    Group {
+                        if let time {
+                            Text(time).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
+                                .accessibilityLabel("\(timeLabel) \(time)")
+                        } else {
                             Text("\(completed.count)/\(checklist.count)").monospacedDigit()
-                        }.accessibilityLabel("\(completed.count) of \(checklist.count) tasks complete")
-                    }
-                }.font(.system(size: SessionChromeStyle.timingFontSize, weight: .medium))
-                    .frame(width: min(SessionChromeStyle.timingContentWidth, layout.trailingWingWidth), alignment: .leading)
-                    .padding(.leading, 4)
-                    .frame(width: layout.trailingWingWidth, height: layout.headerHeight, alignment: .leading)
-            }.accessibilityHidden(slice == .controls && layout.hasHardwareNotch)
-            if layout.hasHardwareNotch {
-                nameControl.frame(width: layout.notchWidth, height: layout.titleHeight)
-                    .frame(width: layout.frame.width, alignment: .leading).offset(x: layout.leadingWingWidth)
-                    .accessibilityHidden(slice == .header)
-            }
+                                .accessibilityLabel("\(completed.count) of \(checklist.count) tasks complete")
+                        }
+                    }.font(.system(size: SessionChromeStyle.timingFontSize, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.83))
+                        .frame(width: SessionChromeStyle.timingContentWidth, alignment: .trailing)
+                        .padding(.trailing, 12)
+                }
+            }.frame(height: layout.headerHeight)
             if layout.checklistHeight > 0 {
                 ScrollView {
                     VStack(spacing: 0) {
@@ -142,13 +135,18 @@ struct SessionNotchContent: View {
                 }.frame(height: layout.checklistHeight).accessibilityHidden(slice == .header)
             }
         }.frame(width: layout.frame.width, height: layout.frame.height, alignment: .top)
-            .background(SessionNotchSilhouette(layout: layout).fill(
-                LinearGradient(colors: [Color(white: 0.005), Color(white: 0.045)], startPoint: .top, endPoint: .bottom)))
+            .background {
+                SessionNotchSilhouette(layout: layout).fill(.ultraThinMaterial)
+                SessionNotchSilhouette(layout: layout).fill(
+                    LinearGradient(colors: [Color(white: 0.025).opacity(0.96), Color(white: 0.06).opacity(0.94)],
+                        startPoint: .top, endPoint: .bottom))
+            }
+            .overlay(SessionNotchSilhouette(layout: layout).stroke(.white.opacity(0.3), lineWidth: 0.5).padding(0.25))
             .foregroundStyle(.white.opacity(0.92)).preferredColorScheme(.dark)
             .help("` hide or show running controls")
     }
     @ViewBuilder private var nameControl: some View {
-        if checklist.isEmpty { titleLabel.padding(.horizontal, 8) }
+        if checklist.isEmpty { titleLabel.padding(.trailing, 8) }
         else {
             Button(action: toggleChecklist) {
                 HStack(spacing: 5) {
@@ -158,54 +156,21 @@ struct SessionNotchContent: View {
                     }
                     Image(systemName: layout.checklistHeight > 0 ? "chevron.up" : "chevron.down")
                         .font(.system(size: 7, weight: .semibold)).foregroundStyle(.white.opacity(0.45))
-                }.padding(.horizontal, 8).frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
+                }.padding(.trailing, 8).frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel("\(title). Toggle checklist")
         }
     }
     private var titleLabel: some View {
         Text(title).font(.system(size: SessionChromeStyle.titleFontSize, weight: .medium))
-            .foregroundStyle(.white.opacity(0.65)).lineLimit(1).truncationMode(.middle)
+            .foregroundStyle(.white.opacity(0.9)).lineLimit(1).truncationMode(.middle)
             .help(title).accessibilityLabel(title)
     }
 }
 
-/// The wings end at the camera's bottom edge; only the title branches below it.
+/// A quiet silver-edged capsule, with the same shape for its checklist tray.
 struct SessionNotchSilhouette: Shape {
     let layout: SessionNotchLayout
     func path(in rect: CGRect) -> Path {
-        var p = Path()
-        let h = layout.headerHeight, w = rect.width, bottom = rect.height
-        let left = layout.leadingWingWidth, right = left + layout.notchWidth
-        p.move(to: .zero); p.addLine(to: CGPoint(x: w, y: 0))
-        p.addQuadCurve(to: CGPoint(x: w - 3, y: 4), control: CGPoint(x: w - 2, y: 0))
-        if layout.checklistHeight > 0 {
-            p.addLine(to: CGPoint(x: w, y: h + 8))
-            p.addLine(to: CGPoint(x: w, y: bottom - 10))
-            p.addQuadCurve(to: CGPoint(x: w - 10, y: bottom), control: CGPoint(x: w, y: bottom))
-            p.addLine(to: CGPoint(x: 10, y: bottom))
-            p.addQuadCurve(to: CGPoint(x: 0, y: bottom - 10), control: CGPoint(x: 0, y: bottom))
-            p.addLine(to: CGPoint(x: 0, y: h + 8))
-        } else if layout.hasHardwareNotch {
-            p.addLine(to: CGPoint(x: w - 7, y: h - 5))
-            p.addQuadCurve(to: CGPoint(x: w - 12, y: h), control: CGPoint(x: w - 8, y: h))
-            p.addLine(to: CGPoint(x: right + 4, y: h))
-            p.addQuadCurve(to: CGPoint(x: right, y: h + 4), control: CGPoint(x: right, y: h))
-            p.addLine(to: CGPoint(x: right, y: bottom - 6))
-            p.addQuadCurve(to: CGPoint(x: right - 6, y: bottom), control: CGPoint(x: right, y: bottom))
-            p.addLine(to: CGPoint(x: left + 6, y: bottom))
-            p.addQuadCurve(to: CGPoint(x: left, y: bottom - 6), control: CGPoint(x: left, y: bottom))
-            p.addLine(to: CGPoint(x: left, y: h + 4))
-            p.addQuadCurve(to: CGPoint(x: left - 4, y: h), control: CGPoint(x: left, y: h))
-            p.addLine(to: CGPoint(x: 16, y: h))
-            p.addQuadCurve(to: CGPoint(x: 11, y: h - 5), control: CGPoint(x: 12, y: h))
-        } else {
-            p.addLine(to: CGPoint(x: w - 6, y: bottom - 5))
-            p.addQuadCurve(to: CGPoint(x: w - 12, y: bottom), control: CGPoint(x: w - 7, y: bottom))
-            p.addLine(to: CGPoint(x: 12, y: bottom))
-            p.addQuadCurve(to: CGPoint(x: 6, y: bottom - 5), control: CGPoint(x: 7, y: bottom))
-        }
-        p.addLine(to: CGPoint(x: 3, y: 4))
-        p.addQuadCurve(to: .zero, control: CGPoint(x: 2, y: 0)); p.closeSubpath()
-        return p
+        RoundedRectangle(cornerRadius: min(14, rect.height / 2), style: .continuous).path(in: rect)
     }
 }

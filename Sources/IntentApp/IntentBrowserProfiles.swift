@@ -1,10 +1,121 @@
 import Foundation
+import Darwin
 
-enum IntentSetupBrowser: String, CaseIterable, Identifiable {
+enum IntentSetupBrowser: String, CaseIterable, Identifiable, Codable {
     case chrome = "com.google.Chrome"
     case firefox = "org.mozilla.firefox"
     var id: String { rawValue }
     var name: String { self == .chrome ? "Chrome" : "Firefox" }
+}
+
+enum IntentSetupBrowserChoice: String, Codable, CaseIterable {
+    case firefox, chrome, both
+    func includes(_ browser: IntentSetupBrowser) -> Bool {
+        self == .both || (self == .firefox && browser == .firefox) || (self == .chrome && browser == .chrome)
+    }
+
+    /// Only a single, explicit installer argument can seed a fresh setup.
+    /// Duplicate, incomplete and unknown values are ignored in their entirety.
+    static func installerChoice(arguments: [String]) -> Self? {
+        let values = arguments.filter { $0 == "--setup-browsers" || $0.hasPrefix("--setup-browsers=") }
+        guard values.count == 1, let argument = values.first,
+              argument.hasPrefix("--setup-browsers=") else { return nil }
+        return Self(rawValue: String(argument.dropFirst("--setup-browsers=".count)))
+    }
+
+    static func installerReceipt(data: Data, appBuild: String) -> Self? {
+        struct Receipt: Decodable { let version: Int; let browsers: IntentSetupBrowserChoice; let app_build: String }
+        guard !appBuild.isEmpty, data.count <= 4_096,
+              let receipt = try? JSONDecoder().decode(Receipt.self, from: data),
+              receipt.version == 1, receipt.app_build == appBuild else { return nil }
+        return receipt.browsers
+    }
+
+    /// The installer may finish without an unlocked desktop. Read its bounded,
+    /// root-owned receipt later without following a user-replaced link.
+    static func trustedInstallerReceipt(appBuild: String) -> Self? {
+        let path = "/Library/Application Support/Intent/onboarding-browser-choice.json"
+        let descriptor = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        defer { Darwin.close(descriptor) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG, metadata.st_uid == 0,
+              metadata.st_mode & 0o022 == 0, metadata.st_size > 0, metadata.st_size <= 4_096 else { return nil }
+        let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        guard let data = try? file.read(upToCount: 4_097) else { return nil }
+        return installerReceipt(data: data, appBuild: appBuild)
+    }
+}
+
+/// Stored in the current app's defaults domain, so Test and launch never share
+/// setup progress. A durable profile identity is a binding, not a live pass.
+struct IntentBrowserOnboardingPreferences: Codable, Equatable {
+    static let key = "intentBrowserOnboardingV1"
+    var browsers: IntentSetupBrowserChoice = .both
+    var selectedProfileIDs: Set<String>?
+    var profileIdentities: [String: String] = [:]
+    var completed = false
+
+    static func load(defaults: UserDefaults = .standard) -> Self {
+        defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Self.self, from: $0) } ?? .init()
+    }
+    func save(defaults: UserDefaults = .standard) {
+        if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: Self.key) }
+    }
+    static func consumeInstallerArguments(_ arguments: [String], defaults: UserDefaults = .standard,
+                                         receipt: (() -> IntentSetupBrowserChoice?)? = nil) {
+        guard !defaults.bool(forKey: "intentDidCompleteOnboarding"),
+              defaults.object(forKey: key) == nil else { return }
+        let hasExplicitChoice = arguments.contains { $0 == "--setup-browsers" || $0.hasPrefix("--setup-browsers=") }
+        guard let browsers = hasExplicitChoice
+            ? IntentSetupBrowserChoice.installerChoice(arguments: arguments)
+            : receipt?() else { return }
+        var preferences = Self(); preferences.browsers = browsers; preferences.save(defaults: defaults)
+    }
+    func initialSelection(profiles: [IntentLocalBrowserProfile], preferredBrowser: IntentSetupBrowser? = nil) -> Set<String> {
+        // Discovery may temporarily fail while the browser updates its metadata.
+        // Only an explicit user action can remove an existing selection.
+        if let selectedProfileIDs { return selectedProfileIDs }
+        return Set(profiles.filter { profile in
+            preferredBrowser.map { $0 == profile.browser } ?? browsers.includes(profile.browser)
+        }.map(\.id))
+    }
+    func missingBrowsers(profiles: [IntentLocalBrowserProfile]) -> [IntentSetupBrowser] {
+        IntentSetupBrowser.allCases.filter { browser in
+            browsers.includes(browser) && !profiles.contains { $0.browser == browser }
+        }
+    }
+    var browsersNeedingSelection: [IntentSetupBrowser] {
+        IntentSetupBrowser.allCases.filter { browser in
+            browsers.includes(browser) && !(selectedProfileIDs ?? []).contains { $0.hasPrefix(browser.rawValue + "|") }
+        }
+    }
+    func canComplete(profiles: [IntentLocalBrowserProfile], connected: Set<String>) -> Bool {
+        guard let selectedProfileIDs, !selectedProfileIDs.isEmpty,
+              missingBrowsers(profiles: profiles).isEmpty, browsersNeedingSelection.isEmpty else { return false }
+        return selectedProfileIDs.isSubset(of: Set(profiles.map(\.id))) && selectedProfileIDs.isSubset(of: connected)
+    }
+}
+
+enum IntentProfileSetupConfirmation {
+    static func isFreshChallenge(_ createdAt: Date, now: Date) -> Bool {
+        let age = now.timeIntervalSince(createdAt)
+        return age >= 0 && age <= 600
+    }
+    static func isFreshReceipt(_ checkedAt: Date, now: Date) -> Bool {
+        let age = now.timeIntervalSince(checkedAt)
+        return age >= -0.25 && age <= 3
+    }
+    static func accepts(_ url: URL, scheme: String, nonce: String, createdAt: Date, now: Date) -> Bool {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.scheme == scheme, parts.host == "browser-setup-confirm",
+              parts.user == nil, parts.password == nil, parts.port == nil,
+              parts.path.isEmpty, parts.fragment == nil,
+              let items = parts.queryItems, items.count == 1, items[0].name == "nonce",
+              items[0].value == nonce, UUID(uuidString: nonce) != nil else { return false }
+        return isFreshChallenge(createdAt, now: now)
+    }
 }
 
 /// Installation evidence is deliberately separate from a live connection.

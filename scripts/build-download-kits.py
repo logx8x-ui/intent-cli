@@ -14,6 +14,8 @@ import zipfile
 
 CHROME_STORE_ID = 'ffgfjfpkddgimambgmahlodjjojmjnbc'
 KIT_CHOICES = ('Firefox', 'Chrome', 'Both')
+INSTALLER_CHOICES = {'firefox': 'Intent-Firefox.pkg', 'chrome': 'Intent-Chrome.pkg', 'both': 'Intent-Both.pkg'}
+MAX_INSTALLER_BYTES = 96 * 1024 * 1024
 
 
 def file_sha256(path):
@@ -21,6 +23,24 @@ def file_sha256(path):
     with pathlib.Path(path).open('rb') as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def payload_fingerprint(directory):
+    """Compare all payload bytes/modes and literal links across browser variants."""
+    root = pathlib.Path(directory).resolve()
+    digest = hashlib.sha256()
+    for item in sorted(root.rglob('*')):
+        digest.update(item.relative_to(root).as_posix().encode() + b'\0')
+        digest.update(str(item.lstat().st_mode & 0o777).encode() + b'\0')
+        if item.is_symlink():
+            digest.update(b'link\0' + os.readlink(item).encode() + b'\0')
+        elif item.is_file():
+            digest.update(b'file\0' + file_sha256(item).encode() + b'\0')
+        elif item.is_dir():
+            digest.update(b'directory\0')
+        else:
+            raise ValueError('Unexpected special file in installer payload.')
     return digest.hexdigest()
 
 
@@ -84,7 +104,74 @@ def verify_release_inputs(directory, manifest_path=None, dmg_path=None):
     if manifest.get('chrome_web_store_approved') is True:
         approved_chrome_store_url(manifest.get('chrome_store_url'),
                                   manifest.get('chrome_web_store_version'), manifest)
+    if manifest.get('installer_format') == 'pkg':
+        verify_installers(root, manifest)
     return manifest
+
+
+def verify_installers(root, manifest):
+    """Validate all three direct downloads without treating metadata as Apple proof."""
+    if (manifest.get('architectures') not in (['arm64'], ['arm64', 'x86_64'])
+            or manifest.get('minimum_macos') != '13.0'
+            or manifest.get('automatic_update_checks_enabled') is not False):
+        raise ValueError('Installer platform or manual-update policy is invalid.')
+    installers = manifest.get('installers')
+    if not isinstance(installers, dict) or set(installers) != set(INSTALLER_CHOICES):
+        raise ValueError('The release must contain Firefox, Chrome and Both installers.')
+    results = []
+    for choice, name in INSTALLER_CHOICES.items():
+        entry = installers[choice]
+        if (not isinstance(entry, dict) or entry.get('asset') != name
+                or entry.get('browser_choice') != choice):
+            raise ValueError('Installer browser choice or filename mismatch.')
+        asset = pathlib.Path(root) / name
+        size = entry.get('size_bytes')
+        if (type(size) is not int or not 0 < size <= MAX_INSTALLER_BYTES
+                or not asset.is_file() or asset.is_symlink() or asset.stat().st_size != size):
+            raise ValueError('Installer size does not match its immutable record.')
+        if file_sha256(asset) != entry.get('sha256'):
+            raise ValueError('Installer checksum mismatch: ' + name)
+        results.append(asset)
+    return results
+
+
+def verify_package_payload(expanded, manifest, choice, source_root):
+    """Verify actual package scripts/destination before its app is executed."""
+    expanded, source_root = pathlib.Path(expanded), pathlib.Path(source_root)
+    if choice not in INSTALLER_CHOICES:
+        raise ValueError('Unknown installer choice.')
+    apps = list(expanded.glob('**/Payload/Applications/Intent.app'))
+    if len(apps) != 1:
+        raise ValueError('Installer must contain exactly one fixed Intent application.')
+    app = apps[0]
+    package = app.parents[2]
+    scripts = package / 'Scripts'
+    architectures = manifest.get('architectures')
+    if architectures not in (['arm64'], ['arm64', 'x86_64']) or manifest.get('minimum_macos') != '13.0':
+        raise ValueError('Installer compatibility guard cannot match unsupported platform metadata.')
+    architecture = 'arm64' if architectures == ['arm64'] else 'universal'
+    expected_preinstall = (source_root / 'scripts/package-preinstall.sh').read_text().replace(
+        'RELEASE_ARCHITECTURE=arm64', 'RELEASE_ARCHITECTURE=' + architecture).replace(
+        'MINIMUM_MACOS_MAJOR=13', 'MINIMUM_MACOS_MAJOR=' + manifest['minimum_macos'].split('.')[0]).encode()
+    expected_postinstall = (source_root / 'scripts/package-postinstall.sh').read_text().replace(
+        'SETUP_BROWSER_CHOICE=both', 'SETUP_BROWSER_CHOICE=' + choice).encode()
+    if ((scripts / 'preinstall').read_bytes() != expected_preinstall
+            or (scripts / 'postinstall').read_bytes() != expected_postinstall):
+        raise ValueError('Installer scripts or browser onboarding handoff differ from this release.')
+    import xml.etree.ElementTree as ET
+    info = ET.parse(package / 'PackageInfo').getroot()
+    if (info.attrib.get('identifier') != 'dev.loganmondi.intent'
+            or info.attrib.get('install-location') != '/'
+            or info.attrib.get('relocatable') != 'false'
+            or info.findall('.//relocate')):
+        raise ValueError('Installer destination must be fixed and nonrelocatable.')
+    with (app / 'Contents/Info.plist').open('rb') as source:
+        metadata = plistlib.load(source)
+    if (metadata.get('CFBundleShortVersionString') != manifest['version']
+            or metadata.get('CFBundleVersion') != manifest['build']
+            or metadata.get('LSMinimumSystemVersion') != manifest['minimum_macos']):
+        raise ValueError('Installer application metadata differs from the release manifest.')
+    return app
 
 
 def approved_chrome_store_url(url, approved_version, manifest):
@@ -189,6 +276,12 @@ def build_kits(directory, chrome_store_url=None, chrome_store_version=None):
     root = pathlib.Path(directory)
     manifest = verify_release_inputs(root)
     chrome_store_url = approved_chrome_store_url(chrome_store_url, chrome_store_version, manifest)
+    if manifest.get('installer_format') == 'pkg':
+        if manifest.get('distribution_ready') is not True or not chrome_store_url:
+            raise ValueError('Direct installer downloads remain gated until all release checks and matching Chrome approval pass.')
+        # The browser-specific signed PKG is the download. There is no ZIP/DMG
+        # or external setup HTML between Installer and app onboarding.
+        return verify_installers(root, manifest)
     # Firefox ships independently while Chrome waits for its matching store approval.
     choices = KIT_CHOICES if chrome_store_url else ('Firefox',)
     for stale_choice in set(KIT_CHOICES).difference(choices):

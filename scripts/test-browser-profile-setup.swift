@@ -170,6 +170,125 @@ struct BrowserProfileSetupSpec {
                      "Do not route into a guessed Firefox profile or start a locked profile")
         precondition(IntentBrowserProfileLaunchPlan.plan(profile: study, destination: "about:addons", firefoxAlreadyOpen: false)
                      == .open(arguments: ["--no-remote", "--profile", study.directory.path, "--new-tab", "about:addons"]))
+
+        let suite = "intent-browser-onboarding-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for choice in IntentSetupBrowserChoice.allCases {
+            defaults.removePersistentDomain(forName: suite)
+            IntentBrowserOnboardingPreferences.consumeInstallerArguments(["IntentApp", "--setup-browsers=" + choice.rawValue], defaults: defaults)
+            let settings = IntentBrowserOnboardingPreferences.load(defaults: defaults)
+            precondition(settings.browsers == choice && !settings.completed)
+            precondition(settings.initialSelection(profiles: profiles) == Set(profiles.filter { choice.includes($0.browser) }.map(\.id)))
+        }
+        for arguments in [["--setup-browsers"], ["--setup-browsers=unknown"], ["--setup-browsers=chrome", "--setup-browsers=firefox"],
+                          ["--setup-browsers=chrome", "--setup-browsers"], ["--setup-browsers=CHROME"], ["--setup-browsers=chrome extra"]] {
+            defaults.removePersistentDomain(forName: suite)
+            IntentBrowserOnboardingPreferences.consumeInstallerArguments(arguments, defaults: defaults, receipt: { preconditionFailure("Malformed explicit flags must not use fallback") })
+            precondition(defaults.object(forKey: IntentBrowserOnboardingPreferences.key) == nil, "Malformed and duplicated arguments must not seed setup")
+        }
+        for choice in IntentSetupBrowserChoice.allCases {
+            let data = try JSONSerialization.data(withJSONObject: ["version": 1, "browsers": choice.rawValue, "app_build": "test-build-1"])
+            precondition(IntentSetupBrowserChoice.installerReceipt(data: data, appBuild: "test-build-1") == choice)
+            precondition(IntentSetupBrowserChoice.installerReceipt(data: data, appBuild: "old-build") == nil, "A stale installer receipt cannot seed another build")
+            defaults.removePersistentDomain(forName: suite)
+            IntentBrowserOnboardingPreferences.consumeInstallerArguments(["IntentApp"], defaults: defaults, receipt: {
+                IntentSetupBrowserChoice.installerReceipt(data: data, appBuild: "test-build-1")
+            })
+            precondition(IntentBrowserOnboardingPreferences.load(defaults: defaults).browsers == choice,
+                         "Later manual first launch recovers installer choice after failed auto-launch")
+        }
+        for object: [String: Any] in [
+            ["version": 2, "browsers": "both", "app_build": "test-build-1"],
+            ["version": true, "browsers": "both", "app_build": "test-build-1"],
+            ["version": 1, "browsers": "other", "app_build": "test-build-1"],
+            ["version": 1, "browsers": "both"],
+            ["version": 1, "browsers": "both", "app_build": 1]
+        ] {
+            let receiptData = try JSONSerialization.data(withJSONObject: object)
+            precondition(IntentSetupBrowserChoice.installerReceipt(data: receiptData, appBuild: "test-build-1") == nil)
+        }
+        precondition(IntentSetupBrowserChoice.installerReceipt(data: Data(repeating: 32, count: 4_097), appBuild: "test-build-1") == nil)
+        defaults.removePersistentDomain(forName: suite)
+        IntentBrowserOnboardingPreferences.consumeInstallerArguments(["--setup-browsers=chrome"], defaults: defaults,
+            receipt: { preconditionFailure("Valid command-line choice takes precedence") })
+        precondition(IntentBrowserOnboardingPreferences.load(defaults: defaults).browsers == .chrome)
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(true, forKey: "intentDidCompleteOnboarding")
+        IntentBrowserOnboardingPreferences.consumeInstallerArguments(["--setup-browsers=firefox"], defaults: defaults,
+            receipt: { preconditionFailure("Completed onboarding must not read installer receipts") })
+        precondition(defaults.object(forKey: IntentBrowserOnboardingPreferences.key) == nil, "An update cannot restart completed onboarding")
+        defaults.set(false, forKey: "intentDidCompleteOnboarding")
+        var settings = IntentBrowserOnboardingPreferences()
+        settings.browsers = .chrome; settings.selectedProfileIDs = [profiles[0].id]
+        settings.profileIdentities[profiles[0].id] = UUID().uuidString; settings.completed = true
+        settings.save(defaults: defaults)
+        IntentBrowserOnboardingPreferences.consumeInstallerArguments(["--setup-browsers=both"], defaults: defaults,
+            receipt: { preconditionFailure("Existing progress must not read installer receipts") })
+        precondition(IntentBrowserOnboardingPreferences.load(defaults: defaults) == settings,
+                     "Installer arguments preserve existing browser choices, bindings and completion")
+        precondition(settings.initialSelection(profiles: Array(profiles.dropFirst())) == settings.selectedProfileIDs,
+                     "Temporarily unavailable selected profiles remain pending on resume")
+        var pendingSetup = IntentBrowserOnboardingPreferences()
+        pendingSetup.browsers = .both
+        let firefoxOnly = profiles.filter { $0.browser == .firefox }
+        pendingSetup.selectedProfileIDs = Set(firefoxOnly.map(\.id))
+        precondition(pendingSetup.missingBrowsers(profiles: firefoxOnly) == [.chrome])
+        precondition(!pendingSetup.canComplete(profiles: firefoxOnly, connected: pendingSetup.selectedProfileIDs!),
+                     "Both cannot silently finish after only Firefox is available and connected")
+        pendingSetup.browsers = .firefox
+        precondition(pendingSetup.canComplete(profiles: firefoxOnly, connected: pendingSetup.selectedProfileIDs!),
+                     "An explicit Firefox-only choice can finish after its selected profiles connect")
+        let missingProfileID = "org.mozilla.firefox|/previously-selected-profile"
+        pendingSetup.selectedProfileIDs!.insert(missingProfileID)
+        precondition(!pendingSetup.canComplete(profiles: firefoxOnly, connected: Set(firefoxOnly.map(\.id))),
+                     "An unavailable selected profile cannot be certified by the remaining connected profiles")
+        precondition(!pendingSetup.canComplete(profiles: firefoxOnly, connected: pendingSetup.selectedProfileIDs!),
+                     "Even a recent receipt cannot certify a selected profile missing from current discovery")
+        precondition(pendingSetup.initialSelection(profiles: []) == pendingSetup.selectedProfileIDs,
+                     "A wholly unreadable discovery does not erase persisted profile selections")
+        pendingSetup.selectedProfileIDs!.remove(missingProfileID)
+        precondition(pendingSetup.canComplete(profiles: firefoxOnly, connected: Set(firefoxOnly.map(\.id))),
+                     "Explicitly removing an unavailable profile restores readiness for the remaining choices")
+        for initiallyAvailable in IntentSetupBrowser.allCases {
+            let laterBrowser: IntentSetupBrowser = initiallyAvailable == .chrome ? .firefox : .chrome
+            let initialProfiles = profiles.filter { $0.browser == initiallyAvailable }
+            let initialIDs = Set(initialProfiles.map(\.id))
+            var appearing = IntentBrowserOnboardingPreferences()
+            appearing.browsers = .both
+            appearing.selectedProfileIDs = initialIDs
+            precondition(!appearing.canComplete(profiles: initialProfiles, connected: initialIDs))
+            precondition(appearing.missingBrowsers(profiles: profiles).isEmpty)
+            precondition(appearing.browsersNeedingSelection == [laterBrowser])
+            precondition(!appearing.canComplete(profiles: profiles, connected: initialIDs),
+                         "A requested browser appearing later must not silently disappear from setup")
+            var explicitlyReduced = appearing
+            explicitlyReduced.browsers = initiallyAvailable == .chrome ? .chrome : .firefox
+            precondition(explicitlyReduced.canComplete(profiles: profiles, connected: initialIDs),
+                         "Explicit Continue without the newly available browser can reduce the setup")
+            appearing.selectedProfileIDs!.formUnion(profiles.filter { $0.browser == laterBrowser }.map(\.id))
+            precondition(!appearing.canComplete(profiles: profiles, connected: initialIDs),
+                         "Selecting newly appeared profiles does not fabricate their connection")
+            precondition(appearing.canComplete(profiles: profiles, connected: Set(profiles.map(\.id))))
+        }
+        let nonce = UUID().uuidString, now = Date()
+        let callback = URL(string: "intent://browser-setup-confirm?nonce=" + nonce)!
+        precondition(IntentProfileSetupConfirmation.isFreshChallenge(now, now: now.addingTimeInterval(599)))
+        precondition(!IntentProfileSetupConfirmation.isFreshChallenge(now, now: now.addingTimeInterval(601)),
+                     "An earlier user confirmation cannot bind once its challenge has expired")
+        precondition(IntentProfileSetupConfirmation.isFreshReceipt(now, now: now))
+        precondition(!IntentProfileSetupConfirmation.isFreshReceipt(now, now: now.addingTimeInterval(3.01)), "Connected status expires without fresh replies")
+        precondition(!IntentProfileSetupConfirmation.isFreshReceipt(now, now: now.addingTimeInterval(-0.26)), "Future-dated receipts cannot certify setup")
+        precondition(IntentProfileSetupConfirmation.accepts(callback, scheme: "intent", nonce: nonce, createdAt: now, now: now))
+        precondition(!IntentProfileSetupConfirmation.accepts(callback, scheme: "intent-test", nonce: nonce, createdAt: now, now: now),
+                     "A launch confirmation cannot bind a Test Intent profile")
+        precondition(!IntentProfileSetupConfirmation.accepts(callback, scheme: "intent", nonce: UUID().uuidString, createdAt: now, now: now))
+        precondition(!IntentProfileSetupConfirmation.accepts(callback, scheme: "intent", nonce: nonce, createdAt: now, now: now.addingTimeInterval(601)))
+        precondition(!IntentProfileSetupConfirmation.accepts(callback, scheme: "intent", nonce: nonce, createdAt: now, now: now.addingTimeInterval(-1)))
+        for suffix in ["&nonce=" + nonce, "&extra=true", "#fragment"] {
+            precondition(!IntentProfileSetupConfirmation.accepts(URL(string: callback.absoluteString + suffix)!, scheme: "intent", nonce: nonce, createdAt: now, now: now))
+        }
+        precondition(!IntentProfileSetupConfirmation.accepts(URL(string: "intent://attacker@browser-setup-confirm?nonce=" + nonce)!, scheme: "intent", nonce: nonce, createdAt: now, now: now))
         print("Browser profile discovery, permanent-install readiness, and exact-profile routing spec passed")
     }
 }

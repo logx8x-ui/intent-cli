@@ -52,15 +52,18 @@ async function check(browser) {
     send({type: 'tabsSnapshot', tabs: [tab], allTabs: [tab], snapshotRequestIDs: [crypto.randomUUID()]});
     await until(() => read(ordinary), 'Initial profile snapshot missing');
     assert.equal(read(ordinary).browserProfileID, profile);
+    assert.equal(read(ordinary).guardVersion, undefined, 'Legacy handshakes do not invent a matching extension version');
     assert.equal(read(ordinary).allTabs[0].cookieStoreID, tab.cookieStoreID);
     assert.equal(fs.existsSync(discovery), false, 'Unissued IDs must not manufacture correlated inventory');
 
+    send({type: 'getRules', extensionVersion: '0.2.46'});
     const id = await request();
     send({type: 'tabsSnapshot', tabs: [tab], allTabs: [tab], snapshotRequestIDs: [id]});
     await until(() => read(discovery)?.profileDiscoveryRequestIDs?.includes(id), 'Full owner query did not produce discovery proof');
     const frozen = fs.readFileSync(discovery, 'utf8');
     assert.equal(read(discovery).browserProfileID, profile);
     assert.equal(read(discovery).browserSessionID, session);
+    assert.equal(read(discovery).guardVersion, '0.2.46', 'Correlated setup replies carry this connection’s negotiated version');
     assert.equal(read(discovery).completeWindowInventory, undefined, 'Profile discovery must not manufacture native-window coverage proof');
     assert.equal(read(discovery).snapshotRequestIDs, undefined);
 

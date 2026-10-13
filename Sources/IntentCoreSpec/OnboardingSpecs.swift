@@ -13,11 +13,20 @@ func runOnboardingSpecs() throws {
     let justStarted = onboarding
     onboarding.begin(now: time(0))
     try expect(onboarding == justStarted, "Repeated begin delivery is idempotent")
-    try expect(onboarding.step == .purpose && onboarding.isActive, "Beginning asks for the real purpose first")
-    try expect(!onboarding.skipCurrent(now: time(0)), "The required real-purpose question cannot be silently skipped")
+    try expect(onboarding.step == .overview && onboarding.isActive, "Beginning goes directly to setup without forcing a naming screen")
+    var legacyPurpose = onboarding
+    legacyPurpose.move(to: .purpose, now: time(0))
+    legacyPurpose.exit(now: time(1))
+    legacyPurpose = try JSONDecoder().decode(IntentOnboardingState.self, from: JSONEncoder().encode(legacyPurpose))
+    legacyPurpose.begin(now: time(2))
+    try expect(legacyPurpose.step == .purpose && !legacyPurpose.skipCurrent(now: time(2)), "A legacy or explicitly edited name screen resumes without losing its place")
     for blank in ["", "  ", "\n\t", "\u{2003}\u{3000}"] {
-        onboarding.purpose = blank
-        try expect(!onboarding.submitPurpose(now: time(0)), "Empty or whitespace-only purposes stay on the question")
+        var unnamed = IntentOnboardingState(purpose: blank)
+        unnamed.begin(now: time(0))
+        try expect(unnamed.submitPurpose(now: time(0)) && unnamed.step == .overview,
+                   "An explicit Continue accepts an empty optional name")
+        try expect(unnamed.defaultName.isEmpty && unnamed.finish(now: time(1)),
+                   "An unnamed intention can complete onboarding without an invented name")
     }
     let rawPurpose = "  친구에게 편지 쓰기 🧑🏽‍💻\n  café e\u{301} — отдых  \n"
     onboarding.purpose = rawPurpose

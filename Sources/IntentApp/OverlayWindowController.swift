@@ -339,14 +339,14 @@ final class OverlayWindowController: NSObject, IntentOverlayPresenting {
         panel.ignoresMouseEvents = true
         let headerFrame = CGRect(x: layout.frame.minX, y: layout.frame.maxY - layout.headerHeight,
             width: layout.frame.width, height: layout.headerHeight)
-        if hasChecklist && !layout.hasHardwareNotch {
-            panel.contentViewController = nil // The fallback's one live clock is in the controls panel.
+        if hasChecklist {
+            panel.contentViewController = nil // The capsule's one live clock is in its controls panel.
         } else {
             SessionNotchPanel.setHostedContent(SessionNotchView(model: model,
                 layout: layout, slice: hasChecklist ? .header : .whole), in: panel,
                 frame: hasChecklist ? headerFrame : layout.frame)
         }
-        if sessionOverlayState.visible && (!hasChecklist || layout.hasHardwareNotch) { panel.orderFrontRegardless() }
+        if sessionOverlayState.visible && !hasChecklist { panel.orderFrontRegardless() }
         else { panel.orderOut(nil) }
         if hasChecklist {
             let controls = sessionChecklistPanel ?? SessionNotchPanel.make()

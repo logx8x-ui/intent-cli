@@ -30,6 +30,11 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
             let alert = NSAlert(); alert.messageText = "Fresh setup needs attention"; alert.informativeText = error.localizedDescription; alert.runModal()
             NSApp.terminate(nil); return
         }
+        IntentBrowserOnboardingPreferences.consumeInstallerArguments(CommandLine.arguments, receipt: {
+            guard IntentBuildChannel.current == .launch,
+                  let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else { return nil }
+            return IntentSetupBrowserChoice.trustedInstallerReceipt(appBuild: build)
+        })
         do { try IntentBrowserSetup.register() } catch { NSLog("Browser Guard registration failed: %@", error.localizedDescription) }
         try? IntentLocalDataSecurity.hardenDefaultDirectory()
         NSApp.setActivationPolicy(.accessory)
@@ -61,6 +66,10 @@ final class IntentAppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard IntentEnvironment.isQA || IntentChannelRuntimeCoordinator.shared.acquired else { return }
+        if urls.contains(where: { IntentBrowserSetupConnectionMonitor.handleConfirmation($0) }) {
+            _ = IntentBrowserSetup.focusIfPresented()
+            return
+        }
         for url in urls where IntentRuntime.shared.accountManager.handleAuthCallback(url) {
             IntentRuntime.shared.model.showOverlay()
             return

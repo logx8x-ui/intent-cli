@@ -110,7 +110,9 @@ public struct IntentOnboardingState: Codable, Equatable {
         guard !isComplete else { return }
         if startedAt == nil {
             startedAt = now
-            step = .purpose
+            // New installs go straight to permissions/browser setup. Keep the
+            // legacy purpose step resumable and available through explicit Edit.
+            step = .overview
         } else {
             observe(now: now)
         }
@@ -140,7 +142,7 @@ public struct IntentOnboardingState: Codable, Equatable {
 
     @discardableResult
     public mutating func submitPurpose(now: Date = Date()) -> Bool {
-        guard hasStarted, !isComplete, !defaultName.isEmpty else { return false }
+        guard hasStarted, !isComplete else { return false }
         observe(now: now)
         if step == .purpose || step == .welcome { move(to: .overview, now: now) }
         return true
@@ -244,7 +246,7 @@ public struct IntentOnboardingState: Codable, Equatable {
     /// Completing the flow is distinct from demonstrated mastery; skipped skills remain skipped.
     @discardableResult
     public mutating func finish(now: Date = Date()) -> Bool {
-        guard hasStarted, !isComplete, !defaultName.isEmpty else { return false }
+        guard hasStarted, !isComplete else { return false }
         move(to: .ready, now: now)
         completedAt = effectiveDate
         isActive = false

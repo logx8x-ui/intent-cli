@@ -33,8 +33,12 @@ try {
     websiteFeaturePolicies:{youtube:{version:1,allowedFeatures:["search"]}}
   }));
   const snapshot = {type:"tabsSnapshot",tabs:[{id:7,windowID:2,index:0,title:"Test",url:"https://www.youtube.com/watch?v=test",active:true}]};
-  const a = invoke("a",[snapshot,{type:"getRules"}]).at(-1);
-  const b = invoke("b",[snapshot,{type:"getRules"}]).at(-1);
+  const a = invoke("a",[{type:"getRules",extensionVersion:"0.2.46"},snapshot,{type:"getRules"}]).at(-1);
+  const b = invoke("b",[{type:"getRules",extensionVersion:"0.2.14"},snapshot,{type:"getRules"}]).at(-1);
+  const profileSnapshot = session => JSON.parse(fs.readFileSync(path.join(directory,
+    "browser-tabs-com-google-Chrome.profile-" + hash(session).slice(0,24) + ".json")));
+  assert.equal(profileSnapshot("a").guardVersion, "0.2.46");
+  assert.equal(profileSnapshot("b").guardVersion, "0.2.14", "Another profile's newer version cannot certify this profile");
   assert.deepEqual(a.selectedTabIDs,[7]);
   assert.deepEqual(b.selectedTabIDs,[], "Other profile's tab 7 must not inherit permission");
   assert.equal(a.selectedBrowserSessionID,"a");
