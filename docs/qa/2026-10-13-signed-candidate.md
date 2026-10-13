@@ -86,3 +86,33 @@ matching-profile QA are not yet established. No AMO API credentials created.
 Screenshot evidence: `/Users/loganmondi/.codex/artifacts/intent-release-20261013/mozilla-submission.png`.
 
 The previous paragraph describing no submission is superseded by this follow-up.
+
+## Firefox signing and installed-profile completion
+
+Mozilla subsequently approved unlisted version 0.2.46, version record 6571198,
+file 5115335. Downloaded through the existing authenticated developer session
+to `dist/firefox/intent-browser-guard-0.2.46-signed.xpi`. Its SHA256 is
+`5fe3ad9af1d122f6c74b5458f17fd811b531a48d7de17918a9d9beed5e6c7606`.
+Mozilla signature metadata is present. All 16 non-manifest source files match
+byte-for-byte; the manifest matches semantically, with Mozilla JSON formatting
+changes only. This supersedes the preceding pending-signature status.
+
+The Firefox local file picker would not enable Open for the XPI, including the
+supported Add-on From File path and standard all-files filter. Cancelled the
+picker and installed the update through its official Mozilla download link.
+No additional permissions relative to 0.2.42 were requested; private-window access
+was left unchecked. Firefox reported the add-on was added. Actual Add-ons Manager
+shows 0.2.46 enabled, and its toolbar popover reports Connected to Intent.
+Matched the observed extension UI UUID to `ykomjweq.default-release`; its exact
+installed add-on record is active, signedState=2 and location=app-profile.
+That establishes a normal signed installation and bridge connection, not a
+restart pass or enforcement/finish-restoration acceptance. No active intention
+was interrupted: both channels' browser rules and the launch lease were inactive
+before updating. Screenshots are in the same local evidence folder,
+`mozilla-approved.png`, `firefox-installed.png` and `firefox-connected.png`.
+
+Chrome developer-portal creation via browser control returned Not allowed;
+read-only inventory found no new portal tab. Did not bypass that refusal. The
+public Chrome Web Store still reports 0.2.14, independently verified against
+its official listing; matching 0.2.46 distribution remains unqualified.
+No public download, main branch, release tag or update feed was changed.
