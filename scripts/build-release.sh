@@ -292,8 +292,12 @@ fi
 UNSIGNED_PKG="$WORK/Intent-${VERSION}-unsigned.pkg"
 WORK_PKG="$WORK/Intent-${VERSION}.pkg"
 WORK_DMG="$WORK/Intent-${VERSION}.dmg"
+pkgbuild --analyze --root "$PKG_ROOT" "$WORK/components.plist" >/dev/null
+/usr/bin/python3 "$ROOT/scripts/package-component-policy.py" \
+  "$WORK/components.plist" "$WORK/components-fixed.plist"
 pkgbuild \
   --root "$PKG_ROOT" \
+  --component-plist "$WORK/components-fixed.plist" \
   --scripts "$PKG_SCRIPTS" \
   --identifier dev.loganmondi.intent \
   --version "$VERSION" \
@@ -303,6 +307,12 @@ pkgbuild \
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
   productsign --sign "$INSTALLER_IDENTITY" "$UNSIGNED_PKG" "$WORK_PKG" >/dev/null
   pkgutil --check-signature "$WORK_PKG"
+  # Attach the installer's ticket before copying it into the disk image, so
+  # Gatekeeper can verify the contained installer without an internet connection.
+  xcrun notarytool submit "$WORK_PKG" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$WORK_PKG"
+  xcrun stapler validate "$WORK_PKG"
+  spctl --assess --type install --verbose=2 "$WORK_PKG"
 else
   mv "$UNSIGNED_PKG" "$WORK_PKG"
 fi
@@ -317,6 +327,7 @@ hdiutil create \
   "$WORK_DMG" >/dev/null
 
 if [[ "$ALLOW_UNSIGNED_LOCAL" != "1" ]]; then
+  codesign --force --timestamp --sign "$APPLICATION_IDENTITY" "$WORK_DMG"
   xcrun notarytool submit "$WORK_DMG" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$WORK_DMG"
   xcrun stapler validate "$WORK_DMG"

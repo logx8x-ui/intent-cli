@@ -74,6 +74,9 @@ assert.ok(
 
 assert.ok(releaseBuilder.includes('scripts/package-preinstall.sh'), 'The package must embed the tested preinstall guard');
 assert.ok(!releaseBuilder.includes('pkill'), 'A public package must never terminate an intention by process name');
+assert.ok(releaseBuilder.includes('--component-plist "$WORK/components-fixed.plist"'), 'Installer bundles must use the fixed destination policy');
+assert.ok(releaseBuilder.indexOf('stapler staple "$WORK_PKG"') < releaseBuilder.indexOf('cp "$WORK_PKG" "$DMG_ROOT/Install Intent.pkg"'), 'The installer ticket must be embedded in the disk image');
+assert.ok(releaseBuilder.includes('codesign --force --timestamp --sign "$APPLICATION_IDENTITY" "$WORK_DMG"'), 'The public disk image must have the Developer ID signature');
 
 const releaseVerifier = read("scripts/verify-release.sh");
 assert.ok(
