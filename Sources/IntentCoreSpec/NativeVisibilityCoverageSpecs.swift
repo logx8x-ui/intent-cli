@@ -3,6 +3,7 @@ import IntentCore
 import IntentLock
 
 func runNativeVisibilityCoverageSpecs() throws {
+    try runNativeWindowBindingInventorySpecs()
     let ownPID = ProcessInfo.processInfo.processIdentifier
     let birth = NativeProcessLaunchDate.kernelDate(pid: ownPID)
     try expect(birth != nil && birth! <= Date(), "Kernel birth time supplies a real process lifetime")

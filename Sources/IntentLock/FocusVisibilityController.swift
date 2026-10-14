@@ -1385,7 +1385,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     case .restore: break
                     }
                 }
-                guard let restorationRows, let windows = nativeWindows(rows: restorationRows, app: app),
+                // Resolve this exact owned ID, not whole-app coverage. A
+                // zero-area sibling cannot strand its restoration; element()
+                // still requires a positive, uniquely bound target. Complete
+                // coverage and classification keep the strict inventory mode.
+                guard let restorationRows, let windows = nativeWindows(rows: restorationRows, app: app, requireUsableGeometry: false),
                       let window = windows.first(where: { $0.id == id && $0.pid == entry.pid }),
                       let element = element(window, launched: entry.launched) else { pending.append(entry); continue }
                 let before = boolean(element, kAXMinimizedAttribute)
@@ -1631,29 +1635,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
         return .init(element: element, role: roleValue, subrole: subroleValue, title: titleValue, frame: CGRect(origin: point, size: dimensions))
     }
     private static func validServerIdentities(_ rows: [[String: Any]]) -> Bool {
-        var identities: [(pid: Int32, windowID: UInt32)] = []
-        for row in rows {
-            guard let id = row[kCGWindowNumber as String] as? UInt32,
-                  let pid = row[kCGWindowOwnerPID as String] as? pid_t else { return false }
-            identities.append((pid: pid, windowID: id))
-        }
-        return NativeVisibilityCoveragePolicy.serverIdentitiesAreComplete(identities)
+        NativeWindowBindingInventory.serverIdentitiesAreComplete(in: rows)
     }
-    private static func nativeWindows(rows: [[String: Any]], app: NSRunningApplication) -> [WorkspaceWindow]? {
-        guard validServerIdentities(rows), let bundle = app.bundleIdentifier else { return nil }
-        var result: [WorkspaceWindow] = []
-        for row in rows where row[kCGWindowOwnerPID as String] as? pid_t == app.processIdentifier {
-            guard let layer = row[kCGWindowLayer as String] as? Int else { return nil }
-            guard layer == 0 else { continue }
-            guard let id = row[kCGWindowNumber as String] as? UInt32,
-                  let bounds = row[kCGWindowBounds as String] as? [String: Any],
-                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
-                  NativeVisibilityCoveragePolicy.usableOwnedWindowGeometry(x: Double(frame.minX), y: Double(frame.minY),
-                    width: Double(frame.width), height: Double(frame.height)) else { return nil }
-            result.append(.init(id: id, pid: app.processIdentifier, bundle: bundle, title: row[kCGWindowName as String] as? String ?? "", frame: frame))
-        }
-        guard Set(result.map(\.id)).count == result.count else { return nil }
-        return result
+    private static func nativeWindows(rows: [[String: Any]], app: NSRunningApplication,
+                                      requireUsableGeometry: Bool = true) -> [WorkspaceWindow]? {
+        guard let bundle = app.bundleIdentifier else { return nil }
+        return NativeWindowBindingInventory.windows(rows: rows, pid: app.processIdentifier,
+            bundleIdentifier: bundle, requireUsableGeometry: requireUsableGeometry)
     }
     private static func nativeBindings(accessible: [AccessibleNativeWindow], native: [WorkspaceWindow]) -> [(AccessibleNativeWindow, WorkspaceWindow)]? {
         var result: [(AccessibleNativeWindow, WorkspaceWindow)] = []
@@ -1674,6 +1662,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         return (status, status == .success ? result : nil)
     }
     private static func element(_ window: WorkspaceWindow, launched: Date) -> AXUIElement? {
+        guard NativeWindowBindingInventory.hasUsableGeometry(window.frame) else { return nil }
         let identity = WindowIdentity(pid: window.pid, launched: launched, window: window.id)
         if let cached = accessibilityWindows[identity] { return cached }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.25
@@ -1681,7 +1670,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
               app.bundleIdentifier == window.bundle, app.intentVisibilityLaunchDate == launched,
               let elements = PublicAccessibilityWindowInventory.read(pid: window.pid, deadline: deadline),
               let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
-              let native = nativeWindows(rows: rows, app: app) else { return nil }
+              let native = nativeWindows(rows: rows, app: app, requireUsableGeometry: false) else { return nil }
         func sameTitle(_ first: String, _ second: String) -> Bool {
             browsers.contains(window.bundle) ? BrowserWindowMatching.sameWindowTitle(first, second) : first == second
         }
@@ -1697,8 +1686,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
                   AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return nil }
             let frame = CGRect(origin: point, size: dimensions)
             guard sameFrame(frame, window.frame) else { continue }
-            let counterparts = native.filter { sameTitle(title, $0.title) && sameFrame(frame, $0.frame) }
-            guard counterparts.count == 1, counterparts[0].id == window.id else { return nil }
+            guard NativeWindowBindingInventory.uniquelyMatches(target: window, accessibilityTitle: title,
+                accessibilityFrame: frame, native: native, sameTitle: sameTitle) else { return nil }
             matches.append(element)
         }
         guard ProcessInfo.processInfo.systemUptime < deadline, matches.count == 1,

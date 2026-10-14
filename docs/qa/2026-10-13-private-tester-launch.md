@@ -11,7 +11,7 @@ waitlist, and the T website adder stays development-only.
 The app baseline is `2754a7e0005579cf458f321fd6ecb50aedfb7b95` on
 `codex/name-first-intentions` in the Documents checkout. Unrelated `.superpowers/`
 and `weppy-project-sync/` are preserved. The website baseline is `18a09b6`.
-The installed launch QA app has UUID `DEA9ABCF-9322-32D3-BD3B-EDC35795FC2E`.
+At baseline, the installed launch QA app had UUID `DEA9ABCF-9322-32D3-BD3B-EDC35795FC2E`.
 The previous notarized candidate predates this runtime baseline and is not a
 qualified download.
 
@@ -28,21 +28,22 @@ Caps Lock/backtick and saved-slot controls; keep Test Intent identity separate.
 
 ## Qualification ledger
 
-All entries remain pending until evidence from the final frozen build is linked.
-An implementation or automated fixture does not pass an installed/physical case.
+Gate states distinguish artifact checks, installed behavior and physical input.
+An implementation or automated fixture does not pass an installed/physical case;
+partial evidence below does not qualify the complete release.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Direct packages and selected-browser handoff | Pending | All three actual packages launch matching first-run choices |
+| Direct packages and selected-browser handoff | Partial | All three build 202610140001 packages accepted/stapled/Gatekeeper-passed; actual Firefox installation opened Intent with the Firefox argument; Chrome/Both handoffs still need installed checks |
 | Profile readiness | Pending | Fresh matching installed extension and exact selected-profile reply; wrong profile fails |
-| Chrome delivery | Blocked | Matching approved Store version installed from Store; current public listing is 0.2.14 |
-| Firefox delivery | Partial | Signed permanent 0.2.46 exists; final-build restart/enforcement still required |
-| Ordinary app restriction | Partial | Baseline iLoader missing-birth-date fix passed its installed case; final build recheck required |
-| Cross-profile / off-Space coverage | Pending | Reproduce historical AX-absent failure and verify actual final candidate |
+| Chrome delivery | Blocked | Source-matching 0.2.46 upload prepared; user upload/review and matching approved Store installation remain unconfirmed |
+| Firefox delivery | Blocked on runtime | Signed permanent 0.2.46 exists, but the installed candidate's disposable single-tab run failed sibling-window enforcement |
+| Ordinary app restriction | Partial | Installed build 202610140001 completed app-only timer expiry; a separate normal Spotify activation attempt recorded one block; broader cases remain |
+| Cross-profile / off-Space coverage | Blocked | New installed Firefox run ended after 3.59 seconds with accessibilityUnavailable for unselected sibling window 3; diagnosis ongoing |
 | Finish restoration | Pending | Independent exact-window and Space trace, including pre-minimized sibling |
 | Preset replay and resource closure | Pending | Missing apps/tabs/modifications restored; session retains remaining resources |
 | Tabs / shortcuts / site controls | Pending | Matching Chrome and Firefox profile flows, physical input where required |
-| Clean install and onboarding recovery | Pending | Clean account, permission denial/grant, quit/resume, first intention |
+| Clean install and onboarding recovery | Partial | Actual Firefox PKG install and automatic app launch passed with two existing saved intentions retained; clean account, permission recovery and quit/resume remain pending |
 | Supported macOS / Apple silicon | Pending | Oldest supported and current OS; no Intel claim |
 | Update / rollback / uninstall | Pending | Disposable behavioral tests and installed data-preserving verification |
 | Private hosted artifact | Pending | Authorized bytes/hash match, unauthorized requests denied, no public asset |
@@ -153,19 +154,19 @@ An implementation or automated fixture does not pass an installed/physical case.
   instructions are still rejected. The full release-readiness suite passed,
   including 40 download-kit tests. Signed application/package bytes were not
   modified by that verifier correction.
-- Notary submission failed before upload with exit 69: no Keychain item found
+- Initially, notary submission failed before upload with exit 69: no Keychain item found
   for profile `intent-notary`. The Mac is locked, and explicit-login-Keychain
   lookup also failed. This does not establish that credentials were deleted.
-  Retry after unlock before asking Logan to recreate anything. No new candidate
-  has an Apple acceptance ticket, staple, or Gatekeeper acceptance result.
+  This historical blocker was resolved after unlock, as recorded below; no
+  credentials needed to be recreated.
 - The candidate deliberately embeds an empty Chrome published-version marker
   because 0.2.46 Store approval is unconfirmed. After actual approval, create a
   new numbered candidate with approved matching Chrome metadata before the
   complete Chrome/Both onboarding acceptance. Do not relabel these pre-approval
   packages as ready or silently change their immutable receipts.
-- No fresh package was installed or uploaded, and the website download catalog
-  remains empty. Mac unlock, Chrome upload/review, fresh real-profile runtime
-  tests, clean-account installation and macOS 13 acceptance remain outstanding.
+- At that checkpoint, no fresh package was installed or uploaded, and the website
+  download catalog remained empty. Later artifact and installed evidence is
+  recorded below; it does not clear Chrome or runtime qualification.
 
 ## Verifier follow-up full gate, 16:03 UTC
 
@@ -176,3 +177,65 @@ Evidence: `/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-change-gate-m
 The signed native payload remains tied to source commit `f6ab614` and its
 original `199cf56a...` fingerprint; this later check changes only verifier
 tooling and documentation. No live acceptance status was promoted.
+
+## Unlocked notarization and installed acceptance, October 14
+
+- After unlock, all three build 202610140001 packages were submitted using the
+  existing `intent-notary` profile, accepted by Apple, stapled and passed
+  Gatekeeper. The authoritative artifact record is
+  `dist/private-candidate-202610140001/notarized-preapproval/candidate-receipt.json`.
+  This resolves the earlier locked-Keychain submission blocker. These remain
+  pre-approval candidates, not qualified public or private tester downloads.
+- The Firefox PKG completed installation through Apple's actual Installer and
+  automatically opened `/Applications/Intent.app --setup-browsers=firefox`.
+  Observed PID: `86861`; installed Mach-O UUID:
+  `BD2706A8-5AA8-3685-9861-2D366B58E4F9`. The root-owned, mode-0644 onboarding
+  receipt records `firefox` and exact build `202610140001`. The user's two
+  existing saved intentions were retained. This was an update of the existing
+  account, not clean-account onboarding acceptance.
+- Clicking out of the intention-name field passed the installed blur check.
+  An app-only intention selecting ChatGPT, with Add as you go off and a
+  one-minute timer, stopped at timer expiry.
+- A second untimed app-only run tested opening Spotify through Finder and
+  recorded `blockedActivationCount: 1`. The run was stopped through Intent's
+  app-targeted safety-menu command; the visibility ledger became `[]`.
+  This is not a pass for the physical global safety shortcut or full exact-window
+  restoration across Spaces.
+- Installed evidence is recorded under `dist/qa-20261014-installed/`.
+
+## New blocking Firefox runtime result
+
+A disposable Firefox test selected only an Example Domain tab with a one-minute
+timer. The intention started, then stopped after 3.59 seconds with safety reason
+`browserWindowEnforcementFailure` / `accessibilityUnavailable`, identifying
+unselected sibling window `3`. No accessibility minimize action was dispatched.
+This is a failed runtime gate and is being diagnosed; it must not be counted as
+successful browser restriction, timer completion or restoration acceptance.
+
+The source-matching Chrome upload archive is available as
+`~/Downloads/Intent-Browser-Guard-0.2.46-UPLOAD-THIS.zip`, with unchanged SHA256
+`ead565e9b4fb0e51a0b8fd346be013532a34215ea606ccd073bf6f70bde0a1d9`.
+Logan reported completing the upload and review submission on October 14; Store
+approval has not been independently confirmed. After approval, Chrome's published-version
+marker must be included in a new numbered candidate; the pre-approval packages
+must not be relabeled. Quiet session completion, browser runtime behavior,
+cross-profile/Space restoration, clean-account onboarding and supported-OS
+checks remain open. Overall release acceptance has not passed and website
+downloads remain off.
+
+## Firefox zero-area native surface diagnosis
+
+Two installed runs reproduced the same sibling-window safety stop. A bounded,
+read-only public AX/CG probe found both real Firefox windows readable and their
+minimized state false. In all 35 repeat observations Firefox also exposed a
+separate layer-zero native surface with zero width and height. The shared strict
+native parser rejected that surface before exact positive-window AX matching,
+poisoning both enforcement and later owned-window restoration.
+
+The scoped correction retains strict complete-coverage parsing and introduces
+a separate exact-target binding mode. Zero-area siblings remain represented
+for reverse-identity ambiguity checks; the requested target must be present,
+positive-sized and uniquely matched. Malformed numeric geometry is validated
+before CoreGraphics construction, including strings and booleans that would
+otherwise cross an unsafe CF boundary. Installed verification of the corrected
+build is still required. Browser extension source is unchanged.
