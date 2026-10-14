@@ -31,7 +31,7 @@ public struct NativeVisibilityCoveragePolicy {
             !bundleIdentifier.isEmpty && pid > 0 && launched.isFinite && (windowID.map { $0 > 0 } ?? true)
         }
     }
-    public enum Outcome: Equatable { case hidden, closed, nonUserSurface, permittedAuxiliary, unresolved }
+    public enum Outcome: Equatable { case hidden, closed, offscreen, nonUserSurface, permittedAuxiliary, unresolved }
     /// An auxiliary is permitted only through positive type/parent evidence.
     /// A same-app parent does not grant a standard document an exemption.
     public static func permitsAuxiliary(role: String?, subrole: String?, applicationPermitted: Bool,
@@ -120,7 +120,7 @@ public struct NativeVisibilityCoveragePolicy {
         guard let began else { return nil }
         let inventoryAvailable: Bool
         if let observations, observations.allSatisfy({ $0.target.isValid
-            && (($0.outcome != .nonUserSurface && $0.outcome != .permittedAuxiliary) || $0.target.windowID != nil) }),
+            && (($0.outcome != .nonUserSurface && $0.outcome != .permittedAuxiliary && $0.outcome != .offscreen) || $0.target.windowID != nil) }),
            Set(observations.map(\.target)).count == observations.count,
            targets.isSubset(of: Set(observations.map(\.target))) {
             inventoryAvailable = true
@@ -134,6 +134,55 @@ public struct NativeVisibilityCoveragePolicy {
         failed = true
         return .init(reason: inventoryAvailable ? .hidingUnconfirmed : .inventoryUnavailable,
                      target: inventoryAvailable ? outcomes.first(where: { $0.value == .unresolved })?.key : nil)
+    }
+}
+
+/// Public AX roots can omit a real window on another Space. Positive native
+/// offscreen proof is therefore distinct from hiding, closure or permission.
+/// Every admitted exact lifetime stays watched; reappearance or unavailable
+/// observations must regain verified hiding within the normal bounded deadline.
+/// This never changes the allowed selection or authorizes a foreground click.
+public struct NativeOffscreenWindowCoveragePolicy {
+    public typealias Target = NativeVisibilityCoveragePolicy.Target
+    public typealias Outcome = NativeVisibilityCoveragePolicy.Outcome
+    private var tracked: Set<Target> = []
+    private var unresolvedSince: [Target: TimeInterval] = [:]
+    private var stopped = false
+    private var failed = false
+    public var targets: Set<Target> { tracked }
+    public init() {}
+    public mutating func stop() { stopped = true; tracked.removeAll(); unresolvedSince.removeAll() }
+
+    /// Explicit current-policy permission retires only these exact targets.
+    /// Missing native observations never call this path and cannot grant access.
+    public mutating func retirePermittedTargets(_ targets: Set<Target>) {
+        tracked.subtract(targets)
+        for target in targets { unresolvedSince.removeValue(forKey: target) }
+    }
+
+    public mutating func update(_ observations: [Target: Outcome]?, now: TimeInterval) -> NativeVisibilityCoveragePolicy.Failure? {
+        guard !stopped, !failed, now.isFinite else { return nil }
+        if let observations {
+            tracked.formUnion(observations.compactMap { target, outcome in
+                outcome == .offscreen && target.isValid && target.windowID != nil ? target : nil
+            })
+        }
+        for target in tracked {
+            switch observations?[target] {
+            case .closed?:
+                tracked.remove(target); unresolvedSince.removeValue(forKey: target)
+            case .hidden?, .offscreen?, .nonUserSurface?, .permittedAuxiliary?:
+                unresolvedSince.removeValue(forKey: target)
+            case .unresolved?, nil:
+                let began = unresolvedSince[target] ?? now
+                unresolvedSince[target] = began
+                if now - began >= NativeVisibilityCoveragePolicy.deadline {
+                    failed = true
+                    return .init(reason: observations == nil ? .inventoryUnavailable : .hidingUnconfirmed, target: target)
+                }
+            }
+        }
+        return nil
     }
 }
 

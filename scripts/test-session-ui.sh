@@ -4,6 +4,7 @@
 # registers browser hosts, starts a focus session or opens the daily app.
 set -Eeuo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source scripts/build-jobs.sh
 
 qa_logs="$(mktemp -d "${TMPDIR:-/tmp}/intent-session-checks-XXXXXXXX")"
 qa_build="${INTENT_QA_BUILD_PATH:-$PWD/.build}"
@@ -18,7 +19,7 @@ source_fingerprint() {
     Assets/Intent.icns scripts/test-session-ui.sh scripts/build-qa.sh \
     scripts/test-quick-mark-input.sh scripts/quick-mark-input-spec.swift \
     scripts/quick-mark-expiry-spec.swift scripts/test-qa-isolation.swift \
-    scripts/change-impact.cjs scripts/test-change-impact.cjs scripts/run-isolated-spec.sh \
+    scripts/change-impact.cjs scripts/test-change-impact.cjs scripts/run-isolated-spec.sh scripts/build-jobs.sh \
     scripts/verify-finish-trace.cjs scripts/test-finish-trace.cjs |
     while IFS= read -r -d '' qa_input; do
       if [[ -f "$qa_input" ]]; then shasum -a 256 "$qa_input";
@@ -62,8 +63,8 @@ run_step finish-trace-accounting node scripts/test-finish-trace.cjs
 run_step native-keyboard-input bash scripts/test-quick-mark-input.sh
 run_step enforcement-health bash scripts/test-focus-enforcement-health.sh
 run_step channel-isolation bash scripts/test-channel-isolation.sh
-run_step core-build swift build --scratch-path "$qa_build" --product IntentCoreSpec
-qa_debug="$(swift build --scratch-path "$qa_build" --show-bin-path)"
+run_step core-build swift build --jobs "$INTENT_BUILD_JOBS" --scratch-path "$qa_build" --product IntentCoreSpec
+qa_debug="$(swift build --jobs "$INTENT_BUILD_JOBS" --scratch-path "$qa_build" --show-bin-path)"
 # Core specs call real lifecycle owners. Even a stop-before-start assertion must
 # never be allowed to discover daily recovery files through their default store.
 qa_core_data="$(mktemp -d "${TMPDIR:-/tmp}/intent-qa-XXXXXXXX")"
@@ -78,7 +79,7 @@ if [[ "${CI:-}" == "true" ]]; then
   run_step core-sign codesign --force --sign - "$qa_logs/core/IntentQASpec"
 fi
 run_step core-behaviour env INTENT_QA_ROOT="$qa_core_data" "$qa_logs/core/IntentQASpec"
-run_step app-release-build swift build --scratch-path "$qa_build" -c release --product IntentApp
+run_step app-release-build swift build --jobs "$INTENT_BUILD_JOBS" --scratch-path "$qa_build" -c release --product IntentApp
 run_step isolated-package env INTENT_QA_BUILD_PATH="$qa_build" bash scripts/build-qa.sh --skip-build
 qa_app="$(sed -n 's/^QA app: //p' "$qa_step_log")"
 qa_data="$(sed -n 's/^QA data: //p' "$qa_step_log")"

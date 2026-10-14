@@ -28,13 +28,56 @@ final class QuickSelectionController: ObservableObject {
     private var removableAddedApps = Set<String>()
     var onOverviewClosed: (() -> Void)?
     var includesWebsiteAdder: Bool { IntentBuildPolicy.current.includesWebsiteAdder }
+    var includesTaskWorkspace: Bool { IntentBuildPolicy.current.includesTaskWorkspace }
+    @Published private(set) var taskWorkspaceVisible = false
+    private var taskWorkspaceEditing = false
+    lazy var taskWorkspaceModel = TaskWorkspaceViewModel()
+
+    func setTaskWorkspaceEditing(_ editing: Bool) { taskWorkspaceEditing = editing }
+    var canShowTaskWorkspace: Bool {
+        includesTaskWorkspace && !model.hasActiveSession && !nativeFinderOwnsInput && !closing
+            && !restoringSavedWorkspace && savedRunTask == nil
+    }
+    func showTaskWorkspace() {
+        guard canShowTaskWorkspace else { return }
+        panel?.makeFirstResponder(nil)
+        closeModification(); settingsOpen = false; dismissBrowserPicker()
+        overviewInput = OverviewSearchGesture(); overviewNormalizer = QuickMarkKeyboardNormalizer()
+        taskWorkspaceVisible = true
+    }
+    func returnFromTaskWorkspace() {
+        panel?.makeFirstResponder(nil)
+        taskWorkspaceEditing = false
+        taskWorkspaceVisible = false
+        overviewInput = OverviewSearchGesture(); overviewNormalizer = QuickMarkKeyboardNormalizer()
+    }
+    func handlePageSwipe(_ direction: OverviewPageSwipe.Direction) {
+        guard includesTaskWorkspace, panel?.isVisible == true, !settingsOpen, optionsSection == nil,
+              !nativeFinderOwnsInput else { return }
+        if direction == .left { showTaskWorkspace() }
+        else if taskWorkspaceVisible { returnFromTaskWorkspace() }
+    }
+    func chooseWorkspaceTask(_ task: TaskWorkspaceTask) {
+        guard includesTaskWorkspace, !model.hasActiveSession else { return }
+        panel?.makeFirstResponder(nil)
+        if let intention = task.linkedIntention(in: model.savedSlots) {
+            prepare(intention, workspace: model.journal.workspaces[intention.id], run: false)
+        } else {
+            clearMarks()
+            if task.linkedIntentionID != nil {
+                message = "That saved intention is no longer available. Choose the apps for this task."
+            }
+        }
+        selection.name = task.title
+        returnFromTaskWorkspace()
+    }
     private var overviewInput = OverviewSearchGesture()
     private var overviewNormalizer = QuickMarkKeyboardNormalizer()
     private var browserSetupSuspended = false
     var ownsOverviewPrefixInput: Bool { panel?.isVisible == true && overviewInput.isHoldingPrefix }
     // WebKit's page responder is not an NSTextView. Treat the finder as an
     // editing surface so digits, Return, X and Space cannot trigger the overview.
-    private var isEditingText: Bool { websiteFinder != nil || (NSApp.keyWindow ?? panel)?.firstResponder is NSTextView }
+    private var isEditingText: Bool { websiteFinder != nil || taskWorkspaceEditing || (NSApp.keyWindow ?? panel)?.firstResponder is NSTextView }
     func prepareForSpotlight() {
         guard panel?.isVisible == true else { return }
         overviewInput = OverviewSearchGesture()
@@ -50,6 +93,12 @@ final class QuickSelectionController: ObservableObject {
     }
     func handleOverviewKey(code: Int, down: Bool, modified: Bool, repeatKey: Bool, capsLockHeld: Bool = false) -> Bool {
         guard panel?.isVisible == true, !nativeFinderOwnsInput else { return false }
+        if taskWorkspaceVisible {
+            guard !isEditingText, !modified else { return false }
+            if code == 53 { if down && !repeatKey { returnFromTaskWorkspace() }; return true }
+            if code == 50 { if down && !repeatKey { cancelImmediately() }; return true }
+            return false
+        }
         let result = overviewInput.key(code: code, down: down, modified: modified, repeated: repeatKey,
             editing: isEditingText, capsLockHeld: capsLockHeld, browserPickerAvailable: currentWebsiteFinderTarget != nil)
         switch result.action {
@@ -239,7 +288,7 @@ final class QuickSelectionController: ObservableObject {
     }
 
     func runSavedSlot(_ index: Int) {
-        guard isSelectionSurfaceVisible, !closing, !restoringSavedWorkspace,
+        guard isSelectionSurfaceVisible, !taskWorkspaceVisible, !closing, !restoringSavedWorkspace,
               visibleSavedSlots.indices.contains(index) else { return }
         let intention = visibleSavedSlots[index]
         savedRunTask?.cancel()
@@ -248,9 +297,9 @@ final class QuickSelectionController: ObservableObject {
             // must never start a different intention.
             while let self, self.loading || !self.openingApps.isEmpty {
                 try? await Task.sleep(nanoseconds: 50_000_000)
-                if Task.isCancelled || !self.isSelectionSurfaceVisible { return }
+                if Task.isCancelled || self.taskWorkspaceVisible || !self.isSelectionSurfaceVisible { return }
             }
-            guard !Task.isCancelled, let self, self.isSelectionSurfaceVisible,
+            guard !Task.isCancelled, let self, !self.taskWorkspaceVisible, self.isSelectionSurfaceVisible,
                   let current = self.model.intentions.first(where: { $0.id == intention.id }) else { return }
             let workspace = self.model.journal.workspaces[current.id]
             // Saved-card/digit activation is the explicit Run gesture. The
@@ -1100,7 +1149,8 @@ final class QuickSelectionController: ObservableObject {
         panel.level = .popUpMenu
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = .clear; panel.isOpaque = false
-        let content = NSHostingView(rootView: QuickSelectionView(controller: self))
+        let content = OverviewPageHostingView(rootView: QuickSelectionView(controller: self))
+        if includesTaskWorkspace { content.onPageSwipe = { [weak self] in self?.handlePageSwipe($0) } }
         // The desktop is the viewport. Intrinsic SwiftUI content must never
         // grow a borderless panel beyond it or push its controls off-screen.
         content.sizingOptions = []
@@ -1119,6 +1169,7 @@ final class QuickSelectionController: ObservableObject {
                self.handleOverviewKey(code: input.code, down: input.down, modified: input.modified,
                    repeatKey: input.repeatKey, capsLockHeld: input.capsLockHeld) { return nil }
             guard event.type == .keyDown else { return event }
+            if self.taskWorkspaceVisible { return event }
             if event.keyCode == 53 { self.cancelImmediately(); return nil }
             if event.keyCode == 49, event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command {
                 // Spotlight's panel must be able to appear above the overview.
@@ -1550,7 +1601,7 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     func runSelection() {
-        guard !nativeFinderOwnsInput, !closing, !loading, !creatingWebsiteTab, !restoringSavedWorkspace, openingApps.isEmpty, hasRunnableDraft else { return }
+        guard !taskWorkspaceVisible, !nativeFinderOwnsInput, !closing, !loading, !creatingWebsiteTab, !restoringSavedWorkspace, openingApps.isEmpty, hasRunnableDraft else { return }
         closeModification()
         if let workspace = preparedSavedWorkspace, let intention = preparedSavedIntention {
             runPreparedSavedWorkspace(workspace, intention: intention)
@@ -1577,7 +1628,7 @@ final class QuickSelectionController: ObservableObject {
             guard let self else { return }
             @MainActor func isCurrent() -> Bool {
                 !Task.isCancelled && self.savedRestorationGeneration == token && self.generation == overview
-                    && !self.model.hasActiveSession && !self.closing && !self.nativeFinderOwnsInput && self.panel?.isVisible == true
+                    && !self.taskWorkspaceVisible && !self.model.hasActiveSession && !self.closing && !self.nativeFinderOwnsInput && self.panel?.isVisible == true
             }
             defer {
                 if self.savedRestorationGeneration == token {
@@ -1684,6 +1735,8 @@ final class QuickSelectionController: ObservableObject {
         }
     }
     private func close() {
+        panel?.makeFirstResponder(nil)
+        taskWorkspaceVisible = false; taskWorkspaceEditing = false
         browserSetupSuspended = false
         closing = true
         savedRestorationGeneration = UUID()
@@ -1972,7 +2025,7 @@ private struct QuickSelectionView: View {
             let panelBounds = intentionFrames["overview-footer"].map {
                 OverviewRecentPanelLayout.bounds(in: viewport, topSafeInset: controller.topSafeInset, footer: $0)
             }
-            let protected = ["overview-name", "overview-saved", "overview-clock", "overview-onboarding"]
+            let protected = ["overview-name", "overview-saved", "overview-clock", "overview-onboarding", "overview-tasks"]
                 .compactMap { intentionFrames[$0] }
             let panelSize = panelBounds.flatMap { bounds in
                 OverviewRecentPanelLayout.frame(origin: bounds.origin, size: OverviewRecentPanelLayout.size(in: bounds),
@@ -2002,6 +2055,14 @@ private struct QuickSelectionView: View {
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
+                if controller.taskWorkspaceVisible && controller.includesTaskWorkspace {
+                    TaskWorkspaceView(viewModel: controller.taskWorkspaceModel, savedIntentions: model.savedSlots,
+                        onChooseTask: controller.chooseWorkspaceTask, onBack: controller.returnFromTaskWorkspace,
+                        onEditingChanged: controller.setTaskWorkspaceEditing)
+                        .padding(.top, controller.topSafeInset)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                } else {
                 OverviewChromeLayout {
                     OverviewHeader(controller: controller, model: model, showClock: showClock,
                                    topSafeInset: controller.topSafeInset, width: geometry.size.width)
@@ -2052,9 +2113,11 @@ private struct QuickSelectionView: View {
                         source: CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2 - 200),
                         target: CGPoint(x: menu.midX, y: menu.minY + 110)).id(transfer.id)
                 }
+                }
                 RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)
             }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: controller.taskWorkspaceVisible)
                 .clipped().foregroundStyle(.white).preferredColorScheme(.dark)
                 .coordinateSpace(name: "IntentOverview")
                 .onPreferenceChange(IntentionFramePreference.self) { intentionFrames = $0 }
@@ -2076,7 +2139,10 @@ private struct QuickSelectionView: View {
                     }
                     if let focused, ids.contains(focused.appID) { controller.dismissBrowserPicker() }
                 }
-        }.ignoresSafeArea().onExitCommand { controller.cancelImmediately() }
+        }.ignoresSafeArea().onExitCommand {
+            if controller.taskWorkspaceVisible { controller.returnFromTaskWorkspace() }
+            else { controller.cancelImmediately() }
+        }
     }
     private func recentPanel(frame: CGRect, settled: CGRect, bounds: CGRect, protected: [CGRect]) -> some View {
         VStack(spacing: 0) {

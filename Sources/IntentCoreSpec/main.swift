@@ -26,6 +26,8 @@ func legacyIntentionData(_ intention: Intention) throws -> Data {
 
 do {
     try runIntentBuildPolicySpecs()
+    try runTaskWorkspaceSpecs()
+    try runOverviewPageSwipeSpecs()
     try runIntentPermissionInstructionsSpecs()
     try runOptionalNamingSpecs()
     try runAppStackPolicySpecs()

@@ -275,6 +275,24 @@ public struct FocusSessionSpec {
         return !permitsApplication(bundleIdentifier) || initialAllowedApps.map { !$0.contains(bundleIdentifier) } == true
     }
 
+    /// Both fresh native windows and previously offscreen targets use the same
+    /// effective visibility policy. Add as you go limits the initial workspace,
+    /// then permits ordinary later windows without weakening persistent bans.
+    public func nativeVisibilityAction(bundleIdentifier: String, windowIDs: Set<UInt32>,
+                                       initialVisibilityApplied: Bool) -> NativeVisibilityCoveragePolicy.ApplicationAction {
+        let initialApps = initialVisibilityApplied ? nil : initialAllowedApps
+        let excluded = windowIDs.filter { id in
+            !permitsWindow(id, bundleIdentifier: bundleIdentifier)
+                || (initialApps != nil && initialSelectedWindows[bundleIdentifier].map { !$0.contains(id) } == true)
+        }
+        return NativeVisibilityCoveragePolicy.applicationAction(
+            isCaptureTool: FocusSystemToolPolicy.isScreenshotApplication(bundleIdentifier),
+            alwaysAllowed: presetAllowedBundleIdentifiers.contains(bundleIdentifier),
+            explicitlyBlocked: presetBlockedBundleIdentifiers.contains(bundleIdentifier),
+            applicationExcluded: shouldHideApplication(bundleIdentifier, initialAllowedApps: initialApps),
+            excludedWindowIDs: Set(excluded))
+    }
+
     private static func make(for task: ShallowTask) -> FocusSessionSpec {
         switch task {
         case .imessages:

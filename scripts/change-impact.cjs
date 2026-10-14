@@ -25,6 +25,10 @@ const LIVE_CASES = Object.freeze([
   'actual-browser-tab-outline-not-overview-thumbnail',
   'dbt-start-exact-current-native-window-and-browser-tab',
   'finish-exact-current-native-window-and-browser-tab-delayed-tail',
+  'apple-mission-control-sbt-click-allowed-window-keeps-session',
+  'apple-mission-control-dbt-click-allowed-window-keeps-session',
+  'task-workspace-development-channel-and-launch-exclusion',
+  'task-workspace-physical-swipe-drag-mention-and-named-overview',
 ]);
 
 function ownedPath(file) {
@@ -52,7 +56,10 @@ function planChanges(files) {
     if (/^Sources\//.test(file)) {
       // App/core/lock changes are coupled to browser startup and recovery. A
       // deliberately broad boundary is safer than a filename keyword guess.
-      add(file, [...DESKTOP, 'swift']); continue;
+      // Native coverage and experimental UI share build policy, the installed
+      // app and browser delivery. Keep packaging/channel checks mandatory even
+      // when a new owner has an unfamiliar name, rather than a fragile allowlist.
+      add(file, [...DESKTOP, 'swift', 'release']); continue;
     }
     if (/^(Package\.|package(?:-lock)?\.json|scripts\/|\.github\/|AGENTS\.md)/.test(file)) {
       add(file, ALL); continue;
@@ -110,7 +117,10 @@ function executePlan(plan, {fingerprint, run, now = () => new Date().toISOString
   const before = fingerprint();
   const result = {
     schemaVersion: 1, startedAt: now(), sourceFingerprint: before,
-    status: 'running', suites: [], liveAcceptance: plan.liveAcceptance,
+    status: 'running', suites: [], releaseReady: false,
+    // A reused plan is not a desktop test receipt. This runner can never carry
+    // forward a prior build's physical acceptance, even if supplied by a caller.
+    liveAcceptance: plan.liveAcceptance.map(({id}) => ({id, status: 'pending'})),
   };
   for (const id of plan.suites) {
     const exitCode = run(id, SUITES[id]);
@@ -169,7 +179,7 @@ function main(argv) {
   // CI keeps stdout even when its temporary workspace is gone. Keep the source
   // receipt visible there without copying private profiles or browser content.
   console.log(JSON.stringify(result, null, 2));
-  console.log('Installed UUID/profile, actual rendered outlines, physical input and exact window/tab focus remain separate acceptance checks.');
+  console.log('Automated evidence is not release approval. Known failures, pending Mission Control/physical checks, channel isolation and exact window/tab focus remain release blockers.');
   if (result.status !== 'automated-pass') process.exitCode = 1;
 }
 

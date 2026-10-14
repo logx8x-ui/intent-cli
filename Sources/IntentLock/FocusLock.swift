@@ -844,6 +844,7 @@ public final class FocusLock {
 
     private func scheduleSpaceRecovery() {
         guard !isStopped else { return }
+        visibilityController.refreshAfterWorkspaceTransition()
         permittedWindowRecovery.noteSpaceChange()
         systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 0.15)
         pendingSpaceRecovery?.cancel()

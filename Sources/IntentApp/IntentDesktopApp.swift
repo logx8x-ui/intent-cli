@@ -474,7 +474,8 @@ final class IntentRuntime {
         hotKeyManager?.spotlightContext = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return (false, []) }
-                return (self.quickSelectionController.isSelectionSurfaceVisible && !self.quickSelectionController.nativeFinderOwnsInput,
+                return (self.quickSelectionController.isSelectionSurfaceVisible && !self.quickSelectionController.taskWorkspaceVisible
+                    && !self.quickSelectionController.nativeFinderOwnsInput,
                     self.model.installedApps.map { .init(name: $0.name, url: $0.url) })
             }
         }

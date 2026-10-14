@@ -62,8 +62,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var entries: [Entry] = []
     private var stopped = false
     private var started = false
+    private var workspaceRefreshQueued = false
     private var initialVisibilityApplied = false
     private var nativeCoverage: NativeVisibilityCoveragePolicy
+    private var offscreenCoverage = NativeOffscreenWindowCoveragePolicy()
+    private var lastNativeObservations: [NativeVisibilityCoveragePolicy.Target: NativeVisibilityCoveragePolicy.Outcome]?
     private var nativeStartupWindows: [NativeVisibilityCoveragePolicy.Target: WorkspaceWindow] = [:]
     private var nativeStartupBindings: [NativeVisibilityCoveragePolicy.Target: AXUIElement] = [:]
     private var nativeDiagnosticTargets: [NativeVisibilityCoveragePolicy.Target: [String: Any]] = [:]
@@ -174,6 +177,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             guard !stopped else { return }
             publishAuxiliaryProofs([:])
             nativeCoverage.stop()
+            offscreenCoverage.stop()
             enforcementPolicy?.stop()
             for entry in Self.loadEntries() where entry.intentionSessionID == spec.nativeWindowVisibilitySessionID {
                 Self.cancelPreparedBootstrap(entry)
@@ -197,6 +201,21 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private func onMain(_ action: () -> Void) {
         if Thread.isMainThread { action() }
         else { DispatchQueue.main.sync(execute: action) }
+    }
+
+    /// Space changes should not wait for the half-second background sweep.
+    /// Coalesce notifications and fence the queued pass with session ownership.
+    public func refreshAfterWorkspaceTransition() {
+        onMain {
+            guard started, mayEnforce, timer != nil, !workspaceRefreshQueued else { return }
+            workspaceRefreshQueued = true
+            queue.async { [weak self] in
+                guard let self else { return }
+                self.workspaceRefreshQueued = false
+                guard self.started, self.mayEnforce, self.timer != nil else { return }
+                self.refresh()
+            }
+        }
     }
 
     @discardableResult private static func beginRecovery(policy: HiddenWorkspaceRestorationPolicy = .automatic,
@@ -251,7 +270,6 @@ public final class FocusVisibilityController: @unchecked Sendable {
 
     private func refresh() {
         guard mayEnforce else { return }
-        let initialApps = initialVisibilityApplied ? nil : spec.initialAllowedApps
         let serverRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         let windows = WorkspaceWindow.list(records: serverRows ?? [])
         // The presentation list can omit a still-live minimized window. Retain
@@ -300,15 +318,10 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 nativeDiagnosticSelections.append(["pid": app.processIdentifier, "selectedWindows": Array(selected.sorted().prefix(60)),
                     "presentationWindows": Array(windows.filter { $0.pid == app.processIdentifier }.map(\.id).sorted().prefix(60))])
             }
-            let excludedWindows = windows.filter { window in coverageStates[bundle] == nil && window.pid == app.processIdentifier
-                && (!spec.permitsWindow(window.id, bundleIdentifier: bundle)
-                    || (initialApps != nil && spec.initialSelectedWindows[bundle].map { !$0.contains(window.id) } == true)) }
-            let action = NativeVisibilityCoveragePolicy.applicationAction(
-                isCaptureTool: FocusSystemToolPolicy.isScreenshotApplication(bundle),
-                alwaysAllowed: spec.presetAllowedBundleIdentifiers.contains(bundle),
-                explicitlyBlocked: spec.presetBlockedBundleIdentifiers.contains(bundle),
-                applicationExcluded: spec.shouldHideApplication(bundle, initialAllowedApps: initialApps),
-                excludedWindowIDs: Set(excludedWindows.map(\.id)))
+            let applicationWindows = windows.filter { $0.pid == app.processIdentifier }
+            let action = spec.nativeVisibilityAction(bundleIdentifier: bundle,
+                windowIDs: coverageStates[bundle] == nil ? Set(applicationWindows.map(\.id)) : [],
+                initialVisibilityApplied: initialVisibilityApplied)
             guard action.requiresProcessIdentity else { continue }
             guard let launched = app.intentVisibilityLaunchDate else {
                 nativeInventoryAvailable = false; missingIdentityPIDs.append(app.processIdentifier); continue
@@ -317,40 +330,62 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: bundle,
                     pid: app.processIdentifier, launched: launched.timeIntervalSinceReferenceDate)
                 observations[target] = hideNativeApplication(app, target: target)
-            } else {
-                for window in excludedWindows {
+            } else if case .minimizeWindows(let excludedIDs) = action {
+                for window in applicationWindows where excludedIDs.contains(window.id) {
                     guard mayEnforce else { return }
                     let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: bundle, pid: window.pid,
                         launched: launched.timeIntervalSinceReferenceDate, windowID: window.id)
-                    if !nativeCoverage.initialResolved { nativeStartupWindows[target] = window }
-                    observations[target] = hideNativeWindow(window, app: app, launched: launched)
+                    nativeStartupWindows[target] = window
+                    observations[target] = hideNativeWindow(window, app: app, launched: launched, allowsOffscreenVerification: true)
                 }
             }
+        }
+        // Initial selected-window restrictions expire once Add as you go starts.
+        // Retire a deferred sibling before the pending-target path can hide it
+        // again. Ordinary whitelist exclusions and explicit bans remain watched.
+        let permittedTargets = Set(offscreenCoverage.targets.filter { target in
+            guard let windowID = target.windowID else { return false }
+            return spec.nativeVisibilityAction(bundleIdentifier: target.bundleIdentifier, windowIDs: [windowID],
+                initialVisibilityApplied: initialVisibilityApplied) == .untouched
+        })
+        offscreenCoverage.retirePermittedTargets(permittedTargets)
+        for target in permittedTargets {
+            nativeStartupWindows.removeValue(forKey: target)
+            nativeStartupBindings.removeValue(forKey: target)
         }
         // A presentation list can omit a minimized or closing window. Omission
         // cannot satisfy startup: re-read the exact cached AX binding or prove
         // its WindowServer/process lifetime ended, without touching replacements.
-        if !nativeCoverage.initialResolved {
-            for target in nativeCoverage.targets where observations[target] == nil {
-                guard mayEnforce else { return }
-                observations[target] = observePendingNativeTarget(target, serverRows: serverRows)
-            }
+        let pendingTargets = (nativeCoverage.initialResolved ? [] : nativeCoverage.targets).union(offscreenCoverage.targets)
+        for target in pendingTargets where observations[target] == nil {
             guard mayEnforce else { return }
-            let packet = nativeInventoryAvailable ? observations.map {
-                NativeVisibilityCoveragePolicy.Observation(target: $0.key, outcome: $0.value)
-            } : nil
-            let failure = nativeCoverage.update(packet, now: ProcessInfo.processInfo.systemUptime)
+            observations[target] = observePendingNativeTarget(target, serverRows: serverRows)
+        }
+        guard mayEnforce else { return }
+        let packet = nativeInventoryAvailable ? observations.map {
+            NativeVisibilityCoveragePolicy.Observation(target: $0.key, outcome: $0.value)
+        } : nil
+        let now = ProcessInfo.processInfo.systemUptime
+        let wasReady = nativeCoverage.initialResolved
+        let startupFailure = nativeCoverage.update(packet, now: now)
+        let offscreenFailure = offscreenCoverage.update(nativeInventoryAvailable ? observations : nil, now: now)
+        let failure = startupFailure ?? offscreenFailure
+        if !wasReady || failure != nil || lastNativeObservations != observations {
             writeNativeCoverageDiagnostics(observations: observations, inventoryAvailable: nativeInventoryAvailable,
                 unidentifiedPIDs: unidentifiedPIDs, missingIdentityPIDs: missingIdentityPIDs, failure: failure)
-            if let failure {
-                guard mayEnforce else { return }
-                onNativeCoverageFailure?(failure)
-            }
-            if nativeCoverage.initialResolved {
-                initialVisibilityApplied = true
-                nativeStartupWindows.removeAll()
-                nativeStartupBindings.removeAll()
-            }
+            lastNativeObservations = observations
+        }
+        if let failure {
+            guard mayEnforce else { return }
+            onNativeCoverageFailure?(failure)
+            return
+        }
+        if nativeCoverage.initialResolved {
+            initialVisibilityApplied = true
+            // Offscreen admission remains an exact-lifetime obligation after
+            // readiness. A later presentation-list omission cannot erase it.
+            nativeStartupWindows = nativeStartupWindows.filter { offscreenCoverage.targets.contains($0.key) }
+            nativeStartupBindings = nativeStartupBindings.filter { offscreenCoverage.targets.contains($0.key) }
         }
         publishAuxiliaryProofs(mayEnforce ? observedAuxiliaryProofs : [:])
         updateCoverageReady()
@@ -447,7 +482,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
 
     private func hideNativeWindow(_ window: WorkspaceWindow, app: NSRunningApplication,
-                                  launched: Date) -> NativeVisibilityCoveragePolicy.Outcome {
+                                  launched: Date, allowsOffscreenVerification: Bool = false) -> NativeVisibilityCoveragePolicy.Outcome {
         guard mayEnforce else { return .unresolved }
         // Already-hidden user apps need no new minimize or recovery ownership.
         let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: window.bundle, pid: window.pid,
@@ -455,6 +490,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
         if !window.title.isEmpty { nativeKnownUserWindows.insert(target) }
         if Self.applicationHidden(app, accessibilityHideOwned: false).hidden == true {
             nativeDiagnosticTargets[target] = ["stage": "applicationAlreadyHidden"]; return .hidden
+        }
+        if allowsOffscreenVerification {
+            let allRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+            let visibleRows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+            if NativeWindowBindingInventory.isOffscreen(windowID: window.id, pid: window.pid,
+                allRows: allRows, onScreenRows: visibleRows) == true,
+               mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.intentVisibilityLaunchDate == launched {
+                nativeDiagnosticTargets[target] = ["stage": "verifiedOffscreen", "onScreen": false]
+                return .offscreen
+            }
         }
         guard let element = nativeStartupBindings[target] ?? Self.element(window, launched: launched) else {
             var detail: [String: Any] = ["stage": "accessibilityWindowUnavailable"]
@@ -481,13 +526,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
             return .permittedAuxiliary
         }
         nativeKnownUserWindows.insert(target)
-        if !nativeCoverage.initialResolved { nativeStartupBindings[target] = element }
+        if !nativeCoverage.initialResolved || offscreenCoverage.targets.contains(target) { nativeStartupBindings[target] = element }
         var readCount = 0
         let outcome = NativeVisibilityCoverageEffects.hide(isCurrent: { self.mayEnforce }, readHidden: {
             guard !app.isTerminated, app.intentVisibilityLaunchDate == launched, app.bundleIdentifier == window.bundle else { return nil }
             readCount += 1
             let minimized = Self.applicationHidden(app, accessibilityHideOwned: false).hidden == true
                 ? (status: AXError.success, value: Optional(true)) : Self.boolean(element, kAXMinimizedAttribute)
+            if minimized.status == .invalidUIElement {
+                self.nativeStartupBindings.removeValue(forKey: target)
+            }
             detail[readCount == 1 ? "readBeforeStatus" : "readAfterStatus"] = minimized.status.rawValue
             if let hidden = minimized.value { detail[readCount == 1 ? "hiddenBefore" : "hiddenAfter"] = hidden }
             return minimized.value
@@ -649,8 +697,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
             // retrying rather than treating that omission as window closure.
             if !rowExists { return minimized.status == .invalidUIElement ? .closed : .unresolved }
         } else if !rowExists { return .closed }
-        guard let window = nativeStartupWindows[target] else { return .unresolved }
-        return hideNativeWindow(window, app: app, launched: launched)
+        // A window can become too small for the overview while its native
+        // lifetime remains live. Rebind its current raw geometry, not a stale
+        // preview frame from the Space where it was first observed.
+        let currentWindow = Self.nativeWindows(rows: serverRows, app: app, requireUsableGeometry: false)?
+            .first(where: { $0.id == windowID && $0.pid == target.pid })
+        guard let window = currentWindow ?? nativeStartupWindows[target] else { return .unresolved }
+        return hideNativeWindow(window, app: app, launched: launched, allowsOffscreenVerification: true)
     }
 
     private func writeNativeCoverageDiagnostics(
@@ -664,6 +717,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             if let window = target.windowID { value["window"] = window }
             switch outcome { case .hidden: value["outcome"] = "hidden"
             case .closed: value["outcome"] = "closed"
+            case .offscreen: value["outcome"] = "offscreen"
             case .nonUserSurface: value["outcome"] = "nonUserSurface"
             case .permittedAuxiliary: value["outcome"] = "permittedAuxiliary"
             case .unresolved: value["outcome"] = "unresolved" }

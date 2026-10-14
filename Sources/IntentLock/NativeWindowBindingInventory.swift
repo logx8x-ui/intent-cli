@@ -5,6 +5,22 @@ import IntentCore
 /// Pure parsing and matching for native window identity. Permissive geometry is
 /// only for binding one positive-size target, never for declaring coverage.
 public enum NativeWindowBindingInventory {
+    /// Nil means unknown, including a target missing from the complete lifetime
+    /// inventory. False is a positive visible observation, never a minimize flag.
+    /// No AX omission or preview-size filter supplies offscreen evidence.
+    public static func isOffscreen(windowID: UInt32, pid: Int32,
+                                   allRows: [[String: Any]]?, onScreenRows: [[String: Any]]?) -> Bool? {
+        guard windowID > 0, pid > 0, let allRows, let onScreenRows,
+              serverIdentitiesAreComplete(in: allRows), serverIdentitiesAreComplete(in: onScreenRows),
+              allRows.contains(where: { $0[kCGWindowNumber as String] as? UInt32 == windowID
+                  && $0[kCGWindowOwnerPID as String] as? Int32 == pid
+                  && $0[kCGWindowLayer as String] as? Int == 0 }) else { return nil }
+        if let visible = onScreenRows.first(where: { $0[kCGWindowNumber as String] as? UInt32 == windowID }) {
+            return visible[kCGWindowOwnerPID as String] as? Int32 == pid ? false : nil
+        }
+        return true
+    }
+
     public static func serverIdentitiesAreComplete(in rows: [[String: Any]]) -> Bool {
         var identities: [(pid: Int32, windowID: UInt32)] = []
         for row in rows {

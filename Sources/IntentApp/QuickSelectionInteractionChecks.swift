@@ -5,6 +5,7 @@ import IntentCore
 @MainActor
 enum QuickSelectionInteractionChecks {
     static func run(_ check: (Bool, String) throws -> Void) throws {
+        try TaskWorkspaceChecks.run(check)
         try WebsiteFinderFocusChecks.run(check)
         try OptionalNameDismissalChecks.run(check)
         try OverviewAddedAppIconChecks.run(check)
@@ -16,6 +17,20 @@ enum QuickSelectionInteractionChecks {
         let controller = QuickSelectionController(model: IntentAppModel())
         try check(controller.includesWebsiteAdder == IntentBuildPolicy.current.includesWebsiteAdder,
             "The production overview uses the compiled feature policy, not a persisted user preference")
+        try check(controller.includesTaskWorkspace == IntentBuildPolicy.current.includesTaskWorkspace,
+            "The production overview uses the compiled task-workspace policy")
+        let taskEncoder = JSONEncoder(); taskEncoder.outputFormatting = [.sortedKeys]
+        let oldDraft = try taskEncoder.encode(controller.selection)
+        controller.chooseWorkspaceTask(.init(title: "Study Korean"))
+        if controller.includesTaskWorkspace {
+            try check(controller.selection.name == "Study Korean" && !controller.taskWorkspaceVisible
+                && !controller.model.hasActiveSession,
+                "Choosing a task prepares its name without starting a session")
+        } else {
+            try check(try taskEncoder.encode(controller.selection) == oldDraft && !controller.taskWorkspaceVisible,
+                "A direct task action cannot enable the experimental workspace in launch")
+        }
+        controller.clearMarks()
         if !controller.includesWebsiteAdder {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -63,6 +78,27 @@ enum QuickSelectionInteractionChecks {
             allowedApps: [], allowedWebsites: [], startupActions: [], restrictions: .init())
         saved.restrictionNodes = [.init(kind: .timer, position: .zero, durationMinutes: 7)]
         saved.frictionNodes = [.init(friction: .taskChecklist(["Saved line"]), position: .zero)]
+        if transitions.includesTaskWorkspace {
+            transitions.model.intentions = [saved]
+            transitions.showTaskWorkspace()
+            try check(transitions.taskWorkspaceVisible, "Test Intent opens its task page without altering session state")
+            transitions.chooseWorkspaceTask(.init(title: "Review chapter 3", linkedIntentionID: saved.id))
+            try check(transitions.selection.name == "Review chapter 3"
+                && transitions.selection.sourceIntentionID == saved.id
+                && transitions.selection.restrictionNodes.first?.durationMinutes == 7
+                && transitions.selection.frictionNodes == saved.frictionNodes
+                && !transitions.taskWorkspaceVisible && !transitions.model.hasActiveSession,
+                "A linked task keeps its own name and saved Timer/Checklist while returning for app review")
+            transitions.showTaskWorkspace()
+            transitions.chooseWorkspaceTask(.init(title: "Missing setup task", linkedIntentionID: "deleted-preset"))
+            try check(transitions.selection.name == "Missing setup task" && transitions.selection.apps.isEmpty
+                && transitions.selection.restrictionNodes.isEmpty && transitions.message != nil,
+                "A deleted linked preset becomes an explicit fresh draft, never an unrelated saved setup")
+            transitions.closing = true
+            transitions.showTaskWorkspace()
+            try check(!transitions.taskWorkspaceVisible, "A pending overview close cannot reopen the task workspace")
+            transitions.closing = false
+        }
         transitions.prepare(saved, workspace: nil)
         transitions.prepareOverviewEntry()
         try check(transitions.selection.name == "Saved setup"

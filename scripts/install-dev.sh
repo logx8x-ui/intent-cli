@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Explicit local source installs. Neither branch creates a public release.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/build-jobs.sh"
 CHANNEL=development
 PRINT_PLAN=0
 for argument in "$@"; do
@@ -62,9 +63,9 @@ if [[ -z "$GOOGLE_CLIENT_SECRET" ]]; then
 fi
 cd "$ROOT"
 for product in Intent IntentApp IntentNativeHost; do
-  swift build -c release --jobs 2 --scratch-path "$BUILD" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"} --product "$product"
+  swift build -c release --jobs "$INTENT_BUILD_JOBS" --scratch-path "$BUILD" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"} --product "$product"
 done
-BUILD_BIN="$(swift build -c release --jobs 2 --scratch-path "$BUILD" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"} --show-bin-path)"
+BUILD_BIN="$(swift build -c release --jobs "$INTENT_BUILD_JOBS" --scratch-path "$BUILD" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"} --show-bin-path)"
 [[ "$("$BUILD_BIN/IntentApp" --print-build-channel)" == "$CHANNEL" ]] || {
   echo 'Refusing an executable compiled for another channel.' >&2; exit 4;
 }

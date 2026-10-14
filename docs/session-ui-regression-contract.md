@@ -35,6 +35,8 @@ with another delayed activation or an independent copy of session state.
 | Compact HUD palette and completion laser | `SessionChromeStyle.swift`, `SessionCompletionLight.swift`; `SessionCompletionLaserChecks.swift` samples the actual finite animation layers |
 | Browser activation after completion | Firefox/Chrome background recovery; separate browser harnesses and matching-profile live QA |
 | Actual staged browser outline | `WorkspaceWindow.swift`, browser session/tab identity and active-tab snapshot; actual browser surface acceptance distinct from overview selection state |
+| Apple Mission Control during an active intention | `FocusLock.swift`, `FocusVisibilityController.swift`, `NativeVisibilityCoveragePolicy.swift`; `NativeVisibilityCoverageSpecs.swift` plus installed DBT and SBT click-return checks |
+| Test Intent task workspace and page gesture | `TaskWorkspace*.swift`, `OverviewPageSwipe.swift`, `OverviewPageHostingView.swift`, `IntentBuildPolicy.swift`; core task persistence/gesture specs and actual isolated app-controller checks, then physical Test/Launch verification |
 
 ## Invariants
 
@@ -120,6 +122,20 @@ with another delayed activation or an independent copy of session state.
   finite, nonactivating, mouse-transparent notice independent of timer visibility.
   Keep details for deliberate reopening. Sleep/lock cancels transient feedback;
   wake can rearm only an exact still-running occurrence, never a consumed failure.
+- Apple Mission Control transitions must not turn a previously valid native
+  window into a permanently invalid resource from one transient AX result. Keep
+  verified ownership through a bounded transition, then enforce normally. Do not
+  solve an allowed-window false failure by permitting excluded windows or by
+  suppressing a genuine persistent coverage failure. Test both selection paths.
+- The task workspace is exposed only in Test Intent. Its three-finger page swipe
+  is scoped to Intent's overview and must not replace system Space navigation or
+  text input. Selecting a task opens overview with its task name; linked saved
+  intentions resolve by exact ID and do not auto-run. A missing/deleted link must
+  remain editable without opening a different preset by a similar name.
+- A task's identity, completion and preset link survive drag/reorder and app
+  reopening. Removing an area moves tasks to General. General remains available;
+  a failed save, future schema, stale writer or malformed file must not silently
+  reset user tasks. The launch channel cannot acquire mutable Test workspace data.
 
 ## Automated gate
 
@@ -135,7 +151,7 @@ npm run test:changed -- --base <pre-change-commit>
 `scripts/change-impact.cjs` maps the diff (including staged changes, deletions,
 rename sides and owned untracked source) to existing suites. Swift app/core/lock
 changes conservatively run the isolated session gate, Swift specs, both browser
-suites and native-host tests. Browser edits also check app consumers, release
+suites, native-host tests and release/channel checks. Browser edits also check app consumers, release
 compatibility and lint. Tooling/dependency or unknown runtime changes select all
 safe suites; documentation-only changes run the gate's own accounting tests.
 Tests verify mapping, real Git discovery, fail-fast execution, content identity
@@ -150,6 +166,12 @@ against the shared build directory in parallel. The existing GitHub workflow
 runs the gate for pull requests and `main`/`codex/**` pushes; beta publication is
 still main-only and depends on it. CI is automated evidence, not desktop approval;
 branch-protection settings are a separate repository administration concern.
+
+QA SwiftPM builds, native-host tests and local development installs default to one
+compiler worker. `INTENT_BUILD_JOBS=1` through `8` is the explicit bounded override
+for a suitable machine; invalid values stop before compiling. This limits build
+load, not all operating-system resource use, and does not promise crash immunity.
+Do not overlap the gate with another compile, installation or desktop test.
 
 For a narrower iteration on session behaviour, run:
 
@@ -198,6 +220,10 @@ display geometry, and actual browser profile + extension version if involved.
 | Manual finish, duration expiry, absolute end, final checklist item | Same foreground PID/window before and after; no browser, utility or save screen rises |
 | Finish immediately after a pending picker/recovery/show animation | No late focus steal or old HUD resurrection; a new session is unaffected |
 | Completion colour, duration, Reduce Motion, lock/sleep | Two bounded edge traces meet/fade; mouse/typing still reaches foreground app; no replay on unlock |
+| Apple Mission Control after SBT start | Enter Apple's Mission Control; click the allowed window to return. The same occurrence remains active, no failure notice or crash occurs, and an excluded ordinary app still cannot become usable. Repeat on the same Space, another Space, an empty Space and a sibling browser window. |
+| Apple Mission Control after DBT start | Repeat the preceding sequence from a double-backtick selection. Record exact allowed window/tab IDs before entry and after click return; Control-Tab, physical Caps Run, Escape and finish retain their original behavior. |
+| Test Intent task workspace | Physically swipe left with three fingers in Intent overview, use the page button as fallback, then swipe back. Rename/add/complete tasks, move tasks within/across cards, drag cards, remove/undo tasks and reopen the app. Names, positions, completion and links persist. |
+| Saved-intention mentions and channel isolation | Choose an `@` suggestion, rename/delete the underlying saved intention, then open its task. The exact remaining preset is loaded with the task name without auto-running; a deleted link cannot guess a replacement. Confirm neither task page, gesture interception nor task-data writes appear in launch Intent. |
 
 Check foreground identity again after delayed callbacks have had time to finish,
 not only on the first frame. Start with disposable test data and safe targets;
@@ -225,6 +251,27 @@ node scripts/verify-finish-trace.cjs TRACE.jsonl DIAGNOSTIC.json
 The verifier rejects short tails, gaps, reordered/stale samples, foreground
 changes, Space changes and corrective raises. A sampled pass is not proof of
 sub-sample animation, physical key delivery or an untested display/profile.
+
+## Tester release decision
+
+The automated receipt always records `releaseReady: false`; every live case starts
+as `pending`, even when a caller reuses a plan from an earlier build. An automated
+pass cannot close a known failure or an untested physical case. Keep tester
+downloads disabled while any release-critical row is failed or not exercised.
+
+Freeze one candidate source fingerprint, app UUID/build, browser versions and
+profile identities. Record each installed result against that candidate. A new
+source change invalidates affected acceptance; a restart or browser/profile
+change requires rechecking the corresponding connection and identity. Preserve
+the original failing evidence when adding the eventual pass. The current release
+decision must list remaining failures explicitly, including foreground changes
+on finish, rather than relying on a previous “all tests passed” note.
+
+Build and exercise both channels when feature-gated UI changes: compiling a
+launch-only binary or testing the policy enum alone does not prove Test Intent's
+workspace is usable or absent from the installed launch app. This contract lowers
+regression risk through evidence; it is not a claim that every possible bug can
+be eliminated before testers use the app.
 
 ## Handoff
 

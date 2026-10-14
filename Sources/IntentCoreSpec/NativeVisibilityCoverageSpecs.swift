@@ -23,6 +23,116 @@ func runNativeVisibilityCoverageSpecs() throws {
     func observation(_ target: Policy.Target, _ outcome: Policy.Outcome) -> Policy.Observation {
         .init(target: target, outcome: outcome)
     }
+    // Native Mission Control can expose a still-live sibling on another Space
+    // to CG while the app's public AX roots only expose its current window.
+    // This is positive offscreen presence, not an absent or permitted window.
+    var offscreenStartup = Policy(required: true)
+    offscreenStartup.begin(now: 1)
+    try expect(offscreenStartup.update([observation(excludedWindow, .offscreen)], now: 1) == nil
+        && offscreenStartup.initialResolved,
+        "An exactly verified offscreen sibling no longer falsely aborts app-only startup while waiting for an unavailable off-Space AX root")
+    var invalidOffscreenApp = Policy(required: true)
+    invalidOffscreenApp.begin(now: 1)
+    try expect(invalidOffscreenApp.update([observation(app, .offscreen)], now: 4)?.reason == .inventoryUnavailable,
+        "Offscreen window presence cannot waive an excluded whole application")
+    try expect(!Policy.windowFallbackIsCovered([.offscreen], hasUnclassifiedSurfaces: false),
+        "Offscreen is never relabelled as a successful minimize or complete whole-app hiding")
+
+    var offscreen = NativeOffscreenWindowCoveragePolicy()
+    try expect(offscreen.update([excludedWindow: .offscreen], now: 1) == nil
+        && offscreen.targets == [excludedWindow],
+        "Offscreen startup admission retains the exact lifetime for later Space transitions")
+    try expect(offscreen.update([excludedWindow: .offscreen], now: 100) == nil,
+        "A fresh positive offscreen observation can remain inaccessible on another Space without timing out")
+    try expect(offscreen.update([excludedWindow: .unresolved], now: 101) == nil
+        && offscreen.update([excludedWindow: .unresolved], now: 103.99) == nil,
+        "A reappearing native window receives only the normal bounded verification interval")
+    try expect(offscreen.update([excludedWindow: .hidden], now: 104) == nil
+        && offscreen.targets == [excludedWindow],
+        "Positive minimize readback resolves reappearance without losing its later lifetime obligation")
+    try expect(offscreen.update([excludedWindow: .unresolved], now: 110) == nil
+        && offscreen.update([excludedWindow: .unresolved], now: 113)?.target == excludedWindow,
+        "A later visible unhide with unavailable AX cannot remain exempt indefinitely after startup")
+    try expect(offscreen.update([excludedWindow: .unresolved], now: 114) == nil,
+        "A deferred-window failure is emitted once per session")
+
+    for unknown: [Policy.Target: Policy.Outcome]? in [nil, [:]] {
+        var incomplete = NativeOffscreenWindowCoveragePolicy()
+        _ = incomplete.update([excludedWindow: .offscreen], now: 1)
+        try expect(incomplete.update(unknown, now: 2) == nil
+            && incomplete.update(unknown, now: 5) != nil,
+            "Failed inventory or an omitted tracked window cannot become proof of offscreen absence or closure")
+    }
+    var offscreenClosed = NativeOffscreenWindowCoveragePolicy()
+    _ = offscreenClosed.update([excludedWindow: .offscreen], now: 1)
+    try expect(offscreenClosed.update([excludedWindow: .closed], now: 2) == nil && offscreenClosed.targets.isEmpty
+        && offscreenClosed.update(nil, now: 100) == nil,
+        "Positively ended exact native lifetimes retire deferred observations without touching offscreenReplacements")
+    var stopped = NativeOffscreenWindowCoveragePolicy()
+    _ = stopped.update([excludedWindow: .offscreen], now: 1)
+    stopped.stop()
+    try expect(stopped.targets.isEmpty && stopped.update([excludedWindow: .offscreen], now: 2) == nil
+        && stopped.targets.isEmpty && stopped.update(nil, now: 100) == nil,
+        "Queued observation after finish cannot resurrect an offscreen cohort or terminate the next intention")
+    let offscreenReplacement = Policy.Target(bundleIdentifier: excludedWindow.bundleIdentifier, pid: excludedWindow.pid,
+        launched: excludedWindow.launched + 1, windowID: excludedWindow.windowID)
+    var replaced = NativeOffscreenWindowCoveragePolicy()
+    _ = replaced.update([excludedWindow: .offscreen], now: 1)
+    _ = replaced.update([offscreenReplacement: .hidden], now: 2)
+    try expect(replaced.update([offscreenReplacement: .hidden], now: 5)?.target == excludedWindow,
+        "A reused PID and window ID cannot use a offscreenReplacement process's hidden state to satisfy the original lifetime")
+
+    var additions = Intention(id: "offscreen-additions", name: "Write", icon: "pencil", colorHex: "#34C759", folder: "",
+        allowedApps: [.init(name: "Selected", bundleIdentifier: excludedWindow.bundleIdentifier)],
+        allowedWebsites: [], startupActions: [], restrictions: .init())
+    var restrictiveSpec = FocusSessionSpec.make(for: additions)
+    restrictiveSpec.selectedWindowIDsByApp = [excludedWindow.bundleIdentifier: [6]]
+    additions.restrictionNodes = [.init(kind: .addAsYouGo, position: .zero)]
+    additions.presetBlockedBundleIdentifiers = [app.bundleIdentifier]
+    var additionsSpec = FocusSessionSpec.make(for: additions)
+    additionsSpec.initialAllowedApps = [excludedWindow.bundleIdentifier]
+    additionsSpec.initialSelectedWindows = [excludedWindow.bundleIdentifier: [6]]
+    func action(_ spec: FocusSessionSpec, _ target: Policy.Target, ready: Bool) -> Policy.ApplicationAction {
+        spec.nativeVisibilityAction(bundleIdentifier: target.bundleIdentifier,
+            windowIDs: target.windowID.map { [$0] } ?? [], initialVisibilityApplied: ready)
+    }
+    try expect(action(additionsSpec, excludedWindow, ready: false) == .minimizeWindows([7])
+        && action(additionsSpec, excludedWindow, ready: true) == .untouched,
+        "Add as you go's offscreen sibling is initially excluded but becomes permitted after the selected workspace is ready")
+    try expect(action(restrictiveSpec, excludedWindow, ready: true) == .minimizeWindows([7]),
+        "A restrictive whitelist sibling remains excluded after startup")
+    let permanentlyBlocked = Policy.Target(bundleIdentifier: app.bundleIdentifier, pid: app.pid,
+        launched: app.launched, windowID: 8)
+    try expect(action(additionsSpec, permanentlyBlocked, ready: false) == .hideApplication
+        && action(additionsSpec, permanentlyBlocked, ready: true) == .hideApplication,
+        "An always-banned app cannot retire its offscreen obligation when Add as you go starts")
+    var exactBlock = additionsSpec
+    exactBlock.selectedWindowIDsByApp = [excludedWindow.bundleIdentifier: [7]]
+    try expect(action(exactBlock, excludedWindow, ready: true) == .minimizeWindows([7]),
+        "An exact blacklisted window retains priority over Add as you go's expired initial restriction")
+
+    var relaxed = NativeOffscreenWindowCoveragePolicy()
+    _ = relaxed.update([excludedWindow: .offscreen, permanentlyBlocked: .offscreen], now: 1)
+    _ = relaxed.update([excludedWindow: .unresolved, permanentlyBlocked: .offscreen], now: 2)
+    let nowPermitted = Set(relaxed.targets.filter { action(additionsSpec, $0, ready: true) == .untouched })
+    relaxed.retirePermittedTargets(nowPermitted)
+    try expect(relaxed.targets == [permanentlyBlocked]
+        && relaxed.update([permanentlyBlocked: .offscreen], now: 20) == nil,
+        "The exact permitted sibling leaves pending enforcement and its old deadline cannot stop Add as you go")
+    _ = relaxed.update([permanentlyBlocked: .unresolved], now: 21)
+    try expect(relaxed.update([permanentlyBlocked: .unresolved], now: 24)?.target == permanentlyBlocked,
+        "Retiring an ordinary sibling does not waive a persistent app ban's bounded enforcement")
+    var exactRetirement = NativeOffscreenWindowCoveragePolicy()
+    _ = exactRetirement.update([excludedWindow: .offscreen], now: 1)
+    exactRetirement.retirePermittedTargets([offscreenReplacement])
+    try expect(exactRetirement.targets == [excludedWindow],
+        "Permission for a reused PID/window in a replacement process does not retire the original lifetime")
+    exactRetirement.retirePermittedTargets([excludedWindow])
+    _ = exactRetirement.update([excludedWindow: .offscreen], now: 10)
+    _ = exactRetirement.update([excludedWindow: .unresolved], now: 11)
+    try expect(exactRetirement.update([excludedWindow: .unresolved], now: 13.9) == nil
+        && exactRetirement.update([excludedWindow: .unresolved], now: 14)?.target == excludedWindow,
+        "A genuinely excluded target observed again receives a new bounded obligation without stale permission or deadline")
     let finderWithoutLaunchDate: Double? = nil
     let permittedFinder = Policy.applicationAction(isCaptureTool: false, alwaysAllowed: false, explicitlyBlocked: false,
         applicationExcluded: false, excludedWindowIDs: [])

@@ -23,6 +23,16 @@ struct OverviewHeader: View {
     var body: some View {
         VStack(spacing: 8) {
             HStack {
+                if controller.includesTaskWorkspace {
+                    Button(action: controller.showTaskWorkspace) {
+                        Label("Tasks", systemImage: "checklist")
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, 13).padding(.vertical, 8)
+                    }.buttonStyle(.plain).background(.ultraThinMaterial, in: Capsule())
+                        .disabled(!controller.canShowTaskWorkspace)
+                        .help("Your task lists · swipe left with three fingers")
+                        .intentionFrame("overview-tasks")
+                }
                 Spacer()
                 if showClock {
                     TimelineView(.periodic(from: .now, by: 1)) { context in

@@ -5,6 +5,8 @@ func runIntentBuildPolicySpecs() throws {
     let launch = IntentBuildPolicy(channel: .launch)
     try expect(development.includesWebsiteAdder && !launch.includesWebsiteAdder,
         "Only the explicit development channel includes the experimental website adder")
+    try expect(development.includesTaskWorkspace && !launch.includesTaskWorkspace,
+        "Task workspace is restricted to the compiled Test Intent channel")
     #if INTENT_DEVELOPMENT
     try expect(IntentBuildPolicy.current == development,
         "The development compiler definition selects the personal test policy")

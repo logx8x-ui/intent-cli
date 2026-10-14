@@ -32,6 +32,8 @@ public struct IntentBuildPolicy: Equatable, Sendable {
     /// existing tabs, Tab searches and saved-intention website restoration stay
     /// available in both channels.
     public var includesWebsiteAdder: Bool { channel == .development }
+    /// Personal task lists are experimental and never appear in tester releases.
+    public var includesTaskWorkspace: Bool { channel == .development }
     /// Test data must not be synced into the launch account's remote workspace.
     public var includesCloudAccountSync: Bool { channel == .launch }
 }

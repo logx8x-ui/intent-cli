@@ -31,6 +31,25 @@ func runNativeWindowBindingInventorySpecs() throws {
     let selected = row(6376, title: "Example Domain")
     let zero = row(100, title: "", frame: CGRect(x: 0, y: 1112, width: 0, height: 0))
     let rows = [zero, blocked, selected]
+    try expect(Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [selected]) == true,
+        "A named still-live native sibling absent from a successful complete on-screen query has positive offscreen proof")
+    try expect(Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [blocked, selected]) == false,
+        "Returning from Mission Control to the sibling immediately invalidates offscreen proof")
+    var changedLayer = blocked; changedLayer[kCGWindowLayer as String] = 3
+    var missingOnScreenIdentity = selected; missingOnScreenIdentity.removeValue(forKey: kCGWindowOwnerPID as String)
+    for proof in [
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: nil, onScreenRows: []),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: nil),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [selected], onScreenRows: []),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [changedLayer], onScreenRows: []),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [row(110, owner: 616)]),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [missingOnScreenIdentity]),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [selected, selected]),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows + [blocked], onScreenRows: [])
+    ] {
+        try expect(proof == nil,
+            "Unavailable, missing, duplicate or wrong-process native identities cannot waive a window as offscreen")
+    }
     guard let native = bindingInventory(rows), let target = native.first(where: { $0.id == 110 }) else {
         throw SpecFailure(description: "A zero-area sibling must not poison the exact positive native-window binding inventory")
     }

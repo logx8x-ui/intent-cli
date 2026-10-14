@@ -36,9 +36,9 @@ const installer = fs.readFileSync(path.join(root, 'scripts', 'install-dev.sh'), 
 const buildCommand = installer.split('\n').find(line => /^  swift build /.test(line));
 assert.ok(buildCommand);
 for (const flags of ['', '-Xswiftc -D -Xswiftc INTENT_DEVELOPMENT']) {
-  const result = spawnSync('/bin/bash', ['-uc', `SWIFT_FLAGS=(${flags}); BUILD='/tmp/intent fixture'; product=IntentApp; swift() { printf '%s\\n' "$@"; }; ${buildCommand}`], { encoding: 'utf8' });
+  const result = spawnSync('/bin/bash', ['-uc', `INTENT_BUILD_JOBS=1; SWIFT_FLAGS=(${flags}); BUILD='/tmp/intent fixture'; product=IntentApp; swift() { printf '%s\\n' "$@"; }; ${buildCommand}`], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  const expected = ['build', '-c', 'release', '--jobs', '2', '--scratch-path', '/tmp/intent fixture'];
+  const expected = ['build', '-c', 'release', '--jobs', '1', '--scratch-path', '/tmp/intent fixture'];
   if (flags) expected.push('-Xswiftc', '-D', '-Xswiftc', 'INTENT_DEVELOPMENT');
   expected.push('--product', 'IntentApp');
   assert.deepEqual(result.stdout.trimEnd().split('\n'), expected);
