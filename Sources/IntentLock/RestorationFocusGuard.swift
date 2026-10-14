@@ -35,11 +35,15 @@ public enum RestorationFocusCorrectionEffects {
     /// Re-probe immediately before each distinct effect. A previous main-window
     /// request is not permission to raise after the target or input changes.
     public static func perform<Result>(isCurrent: () -> Bool, readTarget: () -> Observation,
-                                       permitsForeground: () -> Bool, effect: () -> Result) -> Result? {
-        guard isCurrent() else { return nil }
+                                       permitsForeground: () -> Bool, targetIsFront: () -> Bool?,
+                                       effect: () -> Result) -> Result? {
+        // Avoid AX IPC and corrective focus on the window that is already in
+        // front. Unknown native order is not permission to raise anything.
+        guard isCurrent(), targetIsFront() == false else { return nil }
         let target = readTarget()
         guard target.exists == true, target.onScreen == true, target.minimized == false,
-              isCurrent(), permitsForeground(), isCurrent() else { return nil }
+              isCurrent(), permitsForeground(), targetIsFront() == false,
+              isCurrent() else { return nil }
         return effect()
     }
 }
@@ -190,12 +194,26 @@ final class RestorationFocusGuard {
         return .init(exists: exists, onScreen: onScreen, minimized: minimized)
     }
 
-    private func correctiveEffect<Result>(_ window: AXUIElement, effect: () -> Result) -> Result? {
+    private func targetIsNativeFront() -> Bool? {
+        guard let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let front = WorkspaceWindow.list().first else { return nil }
+        return foreground == application.processIdentifier
+            && front.pid == application.processIdentifier && front.id == visibleWindowID
+    }
+
+    private func correctiveEffect<Result>(_ window: AXUIElement, action: String, effect: () -> Result) -> Result? {
         RestorationFocusCorrectionEffects.perform(isCurrent: { self.correctionIsCurrent() }, readTarget: {
             self.correctionObservation(window)
         }, permitsForeground: {
             self.policy.shouldPreserve(frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
-        }, effect: effect)
+        }, targetIsFront: { self.targetIsNativeFront() }, effect: {
+            // Record each individual effect, including timeouts and a Main
+            // request followed by a cancelled Raise. A missing combined event
+            // must never be mistaken for evidence of an effect-free finish.
+            let result = effect()
+            self.observe("correctionResult", details: ["action": action, "result": String(describing: result)])
+            return result
+        })
     }
 
     private func preserveOwnedVisibilityChange() {
@@ -220,7 +238,7 @@ final class RestorationFocusGuard {
         // raises its window. Correct only the bound work window, with fresh
         // visibility after AX reads. This cannot guarantee quiet sibling
         // deminiaturization; never trade input/Space safety for a faster raise.
-        guard let mainStatus = correctiveEffect(window, effect: {
+        guard let mainStatus = correctiveEffect(window, action: "AXMain", effect: {
             AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         }) else { return }
         let beforeRaise = nativePermission()
@@ -232,7 +250,7 @@ final class RestorationFocusGuard {
         // cannotComplete means dispatch may still be pending, not that a second
         // independent AX action must be suppressed. The bounded timer remains
         // a fallback, and input/new-session/Space cancellation still owns it.
-        guard let raiseStatus = correctiveEffect(window, effect: {
+        guard let raiseStatus = correctiveEffect(window, action: "AXRaise", effect: {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         }) else { return }
         observe("ownedRestorePreservation", details: ["mainStatus": mainStatus.rawValue, "raiseStatus": raiseStatus.rawValue,
@@ -357,6 +375,9 @@ final class RestorationFocusGuard {
         // This finite observer is diagnostic only, with no AX calls, activation
         // or window raising; exact-window acceptance is independently sampled.
         if observationOnly { return }
+        if foreground.processIdentifier == application.processIdentifier,
+           frontWindow?.pid == application.processIdentifier,
+           frontWindow?.id == visibleWindowID { return }
         // A still-live window on another Space is not a correction target.
         // The effect boundary below also re-reads native visibility because AX
         // probes can delay the queued Space/input cancellation notification.
@@ -389,15 +410,15 @@ final class RestorationFocusGuard {
             if !application.isActive || focused.map({ !CFEqual($0, window) }) != false {
                 guard !inputCancelled() else { return }
                 observe("preserveWindow")
-                guard let mainStatus = correctiveEffect(window, effect: {
+                guard let mainStatus = correctiveEffect(window, action: "AXMain", effect: {
                     AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
                 }), mainStatus != .cannotComplete else { return }
-                guard correctiveEffect(window, effect: {
+                guard correctiveEffect(window, action: "AXRaise", effect: {
                     AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                 }) == .success else { return }
             }
             if !application.isActive {
-                _ = correctiveEffect(window, effect: { application.activate(options: []) })
+                _ = correctiveEffect(window, action: "activate", effect: { application.activate(options: []) })
             }
         }
     }

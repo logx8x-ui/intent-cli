@@ -371,6 +371,32 @@ func runRestorationFocusSpecs() throws {
         "A failed AX read cannot reuse a supplied Boolean value as current visibility")
     typealias CorrectionObservation = RestorationFocusCorrectionEffects.Observation
     let visibleTarget = CorrectionObservation(exists: true, onScreen: true, minimized: false)
+    for alreadyFront in [Optional(true), nil] {
+        var reads = 0, effects = 0
+        let result = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: {
+            reads += 1; return visibleTarget
+        }, permitsForeground: { true }, targetIsFront: { alreadyFront }, effect: { effects += 1; return true })
+        try expect(result == nil && reads == 0 && effects == 0,
+            "An already-front target or unknown native order performs no AX read or corrective effect")
+    }
+    do {
+        var alreadyFront: Bool? = false
+        var effects = 0
+        let result = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: {
+            alreadyFront = true; return visibleTarget
+        }, permitsForeground: { true }, targetIsFront: { alreadyFront }, effect: { effects += 1; return true })
+        try expect(result == nil && effects == 0,
+            "A target restored to the front during an AX read is not raised again")
+        alreadyFront = false
+        let main = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { visibleTarget },
+            permitsForeground: { true }, targetIsFront: { alreadyFront }, effect: {
+                effects += 1; alreadyFront = true; return AXError.cannotComplete
+            })
+        let raise = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { visibleTarget },
+            permitsForeground: { true }, targetIsFront: { alreadyFront }, effect: { effects += 1; return AXError.success })
+        try expect(main == .cannotComplete && raise == nil && effects == 1,
+            "A timed-out Main request that nevertheless restores native order cannot cause a redundant Raise")
+    }
     let rejectedTargets = [
         CorrectionObservation(exists: nil, onScreen: true, minimized: false),
         CorrectionObservation(exists: false, onScreen: true, minimized: false),
@@ -382,7 +408,7 @@ func runRestorationFocusSpecs() throws {
     for target in rejectedTargets {
         var effects = 0
         let result = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
-            permitsForeground: { true }, effect: { effects += 1; return AXError.success })
+            permitsForeground: { true }, targetIsFront: { false }, effect: { effects += 1; return AXError.success })
         try expect(result == nil && effects == 0,
             "Unknown, closed, offscreen or minimized targets never dispatch the production corrective effect")
     }
@@ -390,13 +416,13 @@ func runRestorationFocusSpecs() throws {
         var target = visibleTarget
         var effects: [String] = []
         let main = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
-            permitsForeground: { true }, effect: {
+            permitsForeground: { true }, targetIsFront: { false }, effect: {
                 effects.append("main"); target.onScreen = false; return AXError.success
             })
         let raise = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
-            permitsForeground: { true }, effect: { effects.append("raise"); return AXError.success })
+            permitsForeground: { true }, targetIsFront: { false }, effect: { effects.append("raise"); return AXError.success })
         let activate = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { target },
-            permitsForeground: { true }, effect: { effects.append("activate"); return true })
+            permitsForeground: { true }, targetIsFront: { false }, effect: { effects.append("activate"); return true })
         try expect(main == .success && raise == nil && activate == nil && effects == ["main"],
             "A Space move between Main and Raise cancels both later effects; a previous main request is not permission")
     }
@@ -405,21 +431,21 @@ func runRestorationFocusSpecs() throws {
         var effects = 0
         let canceledDuringRead = RestorationFocusCorrectionEffects.perform(isCurrent: { current }, readTarget: {
             current = false; return visibleTarget
-        }, permitsForeground: { true }, effect: { effects += 1; return true })
+        }, permitsForeground: { true }, targetIsFront: { false }, effect: { effects += 1; return true })
         current = true
         let canceledDuringForeground = RestorationFocusCorrectionEffects.perform(isCurrent: { current }, readTarget: { visibleTarget },
-            permitsForeground: { current = false; return true }, effect: { effects += 1; return true })
+            permitsForeground: { current = false; return true }, targetIsFront: { false }, effect: { effects += 1; return true })
         let stale = RestorationFocusCorrectionEffects.perform(isCurrent: { false }, readTarget: { visibleTarget },
-            permitsForeground: { true }, effect: { effects += 1; return true })
+            permitsForeground: { true }, targetIsFront: { false }, effect: { effects += 1; return true })
         try expect(canceledDuringRead == nil && canceledDuringForeground == nil && stale == nil && effects == 0,
             "Input, Space, deadline or new-transaction cancellation before an effect cannot replay corrective focus")
     }
     do {
         var effects = 0
         let rejectedForeground = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { visibleTarget },
-            permitsForeground: { false }, effect: { effects += 1; return true })
+            permitsForeground: { false }, targetIsFront: { false }, effect: { effects += 1; return true })
         let accepted = RestorationFocusCorrectionEffects.perform(isCurrent: { true }, readTarget: { visibleTarget },
-            permitsForeground: { true }, effect: { effects += 1; return AXError.success })
+            permitsForeground: { true }, targetIsFront: { false }, effect: { effects += 1; return AXError.success })
         try expect(rejectedForeground == nil && accepted == .success && effects == 1,
             "The production boundary permits a live visible target only within the original restoration foreground policy")
     }

@@ -34,13 +34,13 @@ partial evidence below does not qualify the complete release.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Direct packages and selected-browser handoff | Partial | All three build 202610140001 packages accepted/stapled/Gatekeeper-passed; actual Firefox installation opened Intent with the Firefox argument; Chrome/Both handoffs still need installed checks |
+| Direct packages and selected-browser handoff | Partial | All three build 202610140002 packages accepted/stapled/Gatekeeper-passed; actual Firefox update installed that exact build and passed the Firefox launch argument; Chrome/Both installed handoffs remain pending |
 | Profile readiness | Pending | Fresh matching installed extension and exact selected-profile reply; wrong profile fails |
-| Chrome delivery | Blocked | Source-matching 0.2.46 upload prepared; user upload/review and matching approved Store installation remain unconfirmed |
-| Firefox delivery | Blocked on runtime | Signed permanent 0.2.46 exists, but the installed candidate's disposable single-tab run failed sibling-window enforcement |
+| Chrome delivery | Blocked | User reports source-matching 0.2.46 upload/submission completed; approval and matching Store installation remain unconfirmed |
+| Firefox delivery | Blocked on runtime | Permanent signed 0.2.46 and installed build 0002 passed the full one-minute single-tab enforcement run; finish foreground preservation failed |
 | Ordinary app restriction | Partial | Installed build 202610140001 completed app-only timer expiry; a separate normal Spotify activation attempt recorded one block; broader cases remain |
-| Cross-profile / off-Space coverage | Blocked | New installed Firefox run ended after 3.59 seconds with accessibilityUnavailable for unselected sibling window 3; diagnosis ongoing |
-| Finish restoration | Pending | Independent exact-window and Space trace, including pre-minimized sibling |
+| Cross-profile / off-Space coverage | Blocked | Build 0002 fixes the reproduced zero-area sibling binding failure; broader profiles and off-Space coverage remain unverified |
+| Finish restoration | Blocked | Build 0002 restores owned visibility but raises excluded Firefox sibling for about 1.19 seconds; strict independent trace fails |
 | Preset replay and resource closure | Pending | Missing apps/tabs/modifications restored; session retains remaining resources |
 | Tabs / shortcuts / site controls | Pending | Matching Chrome and Firefox profile flows, physical input where required |
 | Clean install and onboarding recovery | Partial | Actual Firefox PKG install and automatic app launch passed with two existing saved intentions retained; clean account, permission recovery and quit/resume remain pending |
@@ -281,3 +281,86 @@ build is still required. Browser extension source is unchanged.
   files and normalized manifests. The sole difference is the intentionally
   omitted development public key in the Store upload; both published and
   development extension IDs are supported by native-host registration.
+
+
+## Installed build 0002 and restart recovery
+
+- Apple's actual Installer completed the Firefox package update after Logan's
+  protected approval. `/Applications/Intent.app` is version 0.9.3, build
+  202610140002, ARM64 UUID `120B5C30-DD39-3068-BAA9-FEDF75B1625F`.
+  Deep/strict signing and Gatekeeper notarized Developer ID checks passed.
+  The root-owned browser-choice receipt and actual launch argument both specify
+  Firefox. Existing completed onboarding and two saved intentions survived.
+- The exact daily Firefox profile retained permanent signed Browser Guard
+  0.2.46 (`signedState=2`). A disposable Example Domain window was the only
+  selected browser resource, Timer was one minute, all other modifications off.
+  The native controller minimized excluded sibling 110 successfully and the
+  intention ran for the full minute rather than safety-stopping at 3–4 seconds.
+- Timer expiry restored sibling 110 with AX status zero and left the owned
+  visibility journal empty. This passes restoration completion, not quiet
+  foreground preservation. The independent 50ms sampler saw target 6376 at
+  +0.001s, sibling 110 in front at +0.110s and target 6376 again at +1.298s.
+  There were 735 post-finish samples, a 39.52s tail, maximum gap 66.75ms and no
+  Space-change notification. `verify-finish-trace.cjs` correctly failed.
+  Evidence: `dist/qa-20261014-installed/firefox-fixed-0002/`.
+- A combined preservation log could miss an AXMain request when its following
+  AXRaise was cancelled or timed out. Source now logs every returned corrective
+  effect independently, and refuses needless AX reads/corrections when the exact
+  work window is already front or native order is unknown. The final boundary
+  rechecks after AX reads and between Main and Raise. This is not a claimed fix
+  for the underlying deminiaturization ordering or a new installed pass.
+- Focus-boundary regressions and the full isolated IntentCoreSpec passed with
+  one compiler job; strict finish-trace accounting passed unchanged. Logs are
+  `/tmp/intent-restoration-core-20261014.log` and
+  `/tmp/intent-restoration-spec-20261014.log`.
+- After the reported whole-machine restart, the macOS reset report recorded
+  `btn_rst` in AppleM68Buttons and LOW swap space. It does not establish what
+  caused the preceding unresponsiveness. No attribution to Intent is proven.
+  Post-restart checks found 15 GiB free, no swap in use, the same installed
+  build and signed Firefox extension, and no pending owned visibility.
+  Subsequent builds run serially with one worker; no reboot or user-app
+  termination was requested by this work.
+- Firefox's upstream `ext-windows.js` still leaves `focused=false` unimplemented:
+  https://searchfox.org/firefox-main/source/browser/components/extensions/parent/ext-windows.js
+  Replacing native restoration with that flag alone is not a verified remedy.
+
+## Hosted owner verification update
+
+Website commit `cf3e2a933ca22faf0637faf04187274f3644e954` was deployed as version
+18, deployment `appgdep_6acf0f78e6a881918e3f4253c67dc11e`. Owner-only staging now
+supports HEAD, partial and complete checksum-verified reads before pinning a
+release. Switching selected files clears stale verification results. All 24
+website checks, local R2 cases, TypeScript and production build passed.
+
+The hosted site remains public waitlist-only with an unpinned tester catalog.
+No installers have been uploaded or enabled. Sites confirms the existing owner
+is `thavis.cung@gmail.com`. Firefox successfully opened the authenticated owner
+upload form on October 14; no additional login is needed there. Subsequent
+selection attempts were interrupted by user activity in Firefox, so uploading
+is waiting for desktop ownership rather than another sign-in. No alternate
+account or authentication bypass was used.
+Chrome approval, hosted actual bytes, clean-account setup, remaining runtime
+acceptance and the supported macOS range remain open release gates.
+
+## October 14 evening continuation
+
+- ARM64/macOS 13 release compilation of the correction-boundary changes passed
+  with one compiler job (`/tmp/intent-restoration-release-20261014.log`). Final
+  incremental CoreSpec and isolated execution passed, as did unchanged strict
+  finish-trace accounting. This source has not replaced installed build 0002.
+- The full five-suite change-impact gate passed at 18:49 KST: gate accounting,
+  isolated session/app/notch checks, Swift specs, both browser suites and native
+  host tests. Source fingerprint
+  `ff5a2112563ec015d63ae99b4e3c67dae55d4a7db6a26164f186161c29607766`;
+  evidence directory `intent-change-gate-845900` under the system temporary
+  directory. Swift build calls were limited to one compiler worker via a
+  temporary PATH wrapper; production source and test assertions were unchanged.
+- Rechecked all three build-0002 PKGs against their manifest sizes and SHA-256,
+  and verified the Developer ID Installer signature and expected team. These
+  staging candidates remain explicitly `distribution_ready: false`.
+- The public Chrome Web Store listing still reports 0.2.14 on October 14:
+  https://chromewebstore.google.com/detail/intent-browser-guard/ffgfjfpkddgimambgmahlodjjojmjnbc
+  A successful upload of 0.2.46 is not evidence of store approval or delivery.
+- Anonymous shell requests to the public root and private routes all hit the
+  hosting edge's 403 response. They do not prove application-level access
+  controls passed, and are not counted as private-download acceptance.
