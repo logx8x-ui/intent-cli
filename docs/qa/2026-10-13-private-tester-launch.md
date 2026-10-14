@@ -239,3 +239,45 @@ positive-sized and uniquely matched. Malformed numeric geometry is validated
 before CoreGraphics construction, including strings and booleans that would
 otherwise cross an unsafe CF boundary. Installed verification of the corrected
 build is still required. Browser extension source is unchanged.
+
+## Corrected signed candidate, build 202610140002
+
+- Exact binding correction committed as
+  `19adf11ad68af92b5bcef434a1038ed99aa4afda`; independent review found no
+  actionable defects. Source-only remote publication is
+  `a65ff08e62604566994baa5088673e4b66105496` on
+  `codex/selected-resource-lifetime`, verified through `git ls-remote`.
+- The full isolated IntentCoreSpec passed, including malformed geometry,
+  zero-area sibling, exact-target ambiguity and strict-coverage regressions.
+  No browser extension source changed; the matching signed Firefox 0.2.46
+  package is reused.
+- Fresh ARM64 launch candidate 0.9.3, build 202610140002, was built from that
+  clean commit with source fingerprint
+  `2aaf38232f86ca4625a22c9e9e6a3627195e2fbd833a63e0ded411247ab7b1cb`.
+  Artifacts and immutable hashes are in
+  `dist/private-candidate-202610140002/release-manifest.json`.
+- All three direct PKGs and the compatibility DMG were accepted by Apple,
+  stapled and Gatekeeper-accepted. Notary submissions:
+  Firefox `334d64a6-57f1-41e8-a778-7dbe83582ad0`,
+  Chrome `f4fa4c7c-4f5b-4d24-ab9f-b0ebb95718fb`,
+  Both `29fcdd25-4e2e-4bf1-b7fe-eb804bcb2398`,
+  DMG `f76775ac-5121-4e05-9add-9591bfbaca39`.
+- `scripts/verify-release.sh` passed for the actual build 0002 artifacts:
+  post-staple checksums, architecture, embedded browser metadata, deep/strict
+  signatures, fixed installer destination/scripts, per-package browser handoff
+  and equal application/helper payloads across all variants.
+  Log: `/tmp/intent-release-verify-202610140002.log`.
+- The Mac locked during construction, before build 0002 installation. Installed
+  verification is pending unlock. The Chrome published-version marker remains
+  empty pending confirmed approval, and `distribution_ready` remains false.
+  No package was uploaded to public storage or enabled for testers.
+
+- The five change-impact suites selected for this correction (gate, session,
+  Swift, extensions and native host) all passed against the unchanged build
+  fingerprint. Evidence:
+  `/var/folders/jb/trzpwgm90j3_s80cb4536jvr0000gn/T/intent-change-gate-lWDPyp`.
+  The isolated session suite does not install or operate the daily app.
+- Submitted Chrome archive and candidate extension have identical runtime
+  files and normalized manifests. The sole difference is the intentionally
+  omitted development public key in the Store upload; both published and
+  development extension IDs are supported by native-host registration.
