@@ -3,6 +3,7 @@ import Foundation
 /// Two or three stable indirect contacts. Vertical scrolling, four-finger
 /// gestures and replacement fingers cannot accidentally change the overview page.
 public struct OverviewPageSwipe {
+    // Page navigation direction is opposite the raw trackpad translation.
     public enum Direction: Equatable { case left, right }
     private var origins: [Int: CGPoint] = [:]
     private var tracking = false
@@ -45,6 +46,6 @@ public struct OverviewPageSwipe {
         guard abs(x) >= 0.18, abs(x) > abs(y) * 2,
               movement.allSatisfy({ abs($0.x) >= 0.10 && $0.x * x > 0 }) else { return nil }
         finished = true
-        return x < 0 ? .left : .right
+        return x > 0 ? .left : .right
     }
 }

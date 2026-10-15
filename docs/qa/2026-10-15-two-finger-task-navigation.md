@@ -41,3 +41,23 @@ The existing private website passed all 24 download tests including local
 Worker/R2 behavior. Public root returns the waitlist; anonymous download page
 and binary endpoint return 404. Chrome's public store still serves 0.2.14 while
 this candidate needs 0.2.46, so no download catalog was falsely qualified.
+
+## Requested direction reversal (16 October)
+
+Logan reported the installed gesture opens Notes from the right-hand swipe and
+explicitly asked for the opposite direction. Reversed only the recognizer's
+horizontal result. `Direction` now represents page navigation opposite raw
+trackpad translation; the existing controller still routes left to Tasks and
+right back to apps. Both two/three stable contacts, landing/reset logic, one
+navigation per contact sequence, and vertical/cancel/replacement guards remain.
+Updated the existing direction fixtures for both contact counts.
+
+All six suites passed in `intent-change-gate-Oi7Wa3`, source fingerprint
+`176be8d13f4ea244767d884c87fcd6d9c2557258796df2ea19b6db66d596869b`.
+Installed Test Intent UUID `699611B8-ED10-355F-8426-D81E58AF0E78` matches the
+compiled development executable; deep strict signature and compiled channel
+checks passed. Reopened through Finder and verified Tasks/Choose apps navigation
+and both direction help labels; quit normally afterward to avoid obstructing the
+pending system installer. Physical trackpad direction is not an automated pass.
+The launch channel still excludes Notes. No user tasks or system trackpad
+settings were changed.
