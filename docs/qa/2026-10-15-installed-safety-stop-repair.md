@@ -47,13 +47,27 @@ Notary submission `a6333d09-e3eb-4054-bb7d-6ba839d75baa` was Accepted.
 This maintenance package is not a qualified tester release; nothing was
 published or pinned on the download site.
 
-## Still pending
+## User confirmation and remaining checks
+
+On 15 October, Logan corrected his earlier inability-to-test report: “wait
+nevermind it lokwy worked,” in direct reply to the Mission Control return
+check. Record this as user-confirmed successful Mission Control return in the
+updated launch installation, not as an automated gesture pass. The running
+process remained `/Applications/Intent.app` build `202610150001`. At follow-up,
+the latest diagnostics belonged to a later session (zero selected window
+groups), which became ready and ended `manual`, with zero input-tap timeouts
+and zero unresolved visibility targets. Do not conflate that later diagnostic
+record with the original prepared ChatGPT session or infer its input route.
+
+This confirmation does not independently certify DBT or the Test Intent
+physical path. Those remain pending, along with the other release checks.
 
 App-targeted keyboard automation did not reliably exercise global backtick or
 Apple Mission Control input. Dock/Mission Control handles timed out; app-window
 screenshots cannot establish the global Mission Control display. Therefore the
-physical SBT/DBT → Mission Control → click allowed window journeys remain
-pending. A user check was requested after installing every copy. Do not report
+separate SBT/DBT → Mission Control → click allowed window journeys were not
+automatically verified. A user check was requested after installing every copy;
+its limited confirmation is recorded above. Do not report
 attempted shortcuts, successful startup, or the source regression suite as a
 pass for that physical transition.
 
