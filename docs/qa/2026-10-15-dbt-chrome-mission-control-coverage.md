@@ -75,3 +75,47 @@ The existing private website passed all 24 download tests including local
 Worker/R2 behavior. Public root returns the waitlist; anonymous download page
 and binary endpoint return 404. Chrome's public store still serves 0.2.14 while
 this candidate needs 0.2.46, so no download catalog was falsely qualified.
+
+## Fresh signed candidate and remaining installation boundary
+
+Prepared launch 0.9.4 build `202610150002` from clean committed source
+`ccf472ad3ad92faf4b4b99acb46cc21f44b9d479`, packaging fingerprint
+`a32bbcf0fd841502116046a2493a9e1b5e4107fbdf4555ae9e7011b4103898c9`.
+All three direct PKGs and the compatibility DMG have Apple notarization and
+stapled tickets. `scripts/verify-release.sh` passed, including every direct
+package's signature, Gatekeeper assessment, exact setup enum, embedded browser
+versions, launch channel, matching app/helper payload and checksums. The release
+builder now uses the existing bounded one-worker default; its release-readiness
+regressions also passed. Artifacts: `dist/private-candidate-202610150002/`.
+
+Normal macOS Installer opened the new Firefox package and reached its protected
+SecurityAgent approval. Automation is explicitly denied access to that app;
+root `/Applications/Intent.app` is still build `202610150001` until Logan approves.
+The two home-channel apps already contain the runtime repair. Do not mistake the
+root update attempt for a completed install.
+
+All three new packages uploaded successfully through the real owner-authenticated
+live site into private R2. Live read-back found that its HTTP/2 range response
+omits Content-Length despite correct 206, Content-Range, ETag and checksum
+headers. This is a verifier transport assumption, not permission to claim hosted
+acceptance. The website repair retains required HEAD size, checks any declared
+body size, and always checks actual range/full length and SHA-256. Hosted retry
+and final result remain to be recorded. Downloads stay unpinned.
+
+Website repair: all 25 download tests, invite cases, actual local Worker/R2 cases,
+TypeScript and production build passed in the separate existing Site checkout
+`/Users/loganmondi/.codex/artifacts/intent-site-resume-20261015`, commit
+`df33bbd` (not deployed). Three source-helper pushes, including HTTP/1.1 transport,
+were rejected by the hosting Git service with `protocol error: bad line length
+134`. No forced push, credential workaround, public storage or catalog bypass
+was used. Existing production remains version 18. Its real owner PUT responses
+confirmed all three fresh objects stored with verified checksums. HEAD returned
+200 with exact size and hash; range returned 206 with correct 0-1023 span, ETag
+and hash but omitted Content-Length. Full hosted read-back did not complete.
+The Mac then locked before the independent normal-browser download retry.
+
+Remaining gates: protected system installation approval, unlocked physical
+DBT/SBT Mission Control click-return and two/three-finger delivery; matching
+Chrome Store approval; successful Site source publication and full hosted
+read-back; clean-account onboarding and declared OS-range acceptance. Do not
+provide a supposedly ready tester link while these are unresolved.
