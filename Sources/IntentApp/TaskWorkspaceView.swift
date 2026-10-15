@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 import IntentCore
 
 /// A content page hosted over the overview's existing desktop wallpaper. The
-/// caller owns channel gating, the three-finger gesture and the selection draft.
+/// caller owns channel gating, the two/three-finger gesture and the selection draft.
 @MainActor
 struct TaskWorkspaceView: View {
     @StateObject private var model: TaskWorkspaceViewModel
@@ -95,7 +95,7 @@ struct TaskWorkspaceView: View {
                     Label("Choose apps", systemImage: "arrow.left").font(.system(size: 13, weight: .medium))
                         .padding(.horizontal, 14).padding(.vertical, 10)
                 }.buttonStyle(.plain).background(.ultraThinMaterial, in: Capsule())
-                    .help("Return to your intention, or swipe right with three fingers")
+                    .help("Return to your intention, or swipe right with two or three fingers")
                 Spacer(minLength: 0)
                 VStack(spacing: 3) {
                     Text("Make room for what matters.").font(.system(size: 26, weight: .regular, design: .serif))

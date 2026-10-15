@@ -30,7 +30,7 @@ struct OverviewHeader: View {
                             .padding(.horizontal, 13).padding(.vertical, 8)
                     }.buttonStyle(.plain).background(.ultraThinMaterial, in: Capsule())
                         .disabled(!controller.canShowTaskWorkspace)
-                        .help("Your task lists · swipe left with three fingers")
+                        .help("Your task lists · swipe left with two or three fingers")
                         .intentionFrame("overview-tasks")
                 }
                 Spacer()

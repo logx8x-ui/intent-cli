@@ -36,8 +36,10 @@ public enum BrowserWindowCoveragePolicy {
         public var processIdentity: BrowserProcessIdentity
         public var title: String
         public var frame: CGRect
-        public init(bundleIdentifier: String, processIdentity: BrowserProcessIdentity, title: String, frame: CGRect) {
+        public var internalURL: URL?
+        public init(bundleIdentifier: String, processIdentity: BrowserProcessIdentity, title: String, frame: CGRect, internalURL: URL? = nil) {
             self.bundleIdentifier = bundleIdentifier; self.processIdentity = processIdentity; self.title = title; self.frame = frame
+            self.internalURL = internalURL
         }
     }
     public struct Inventory {
@@ -113,10 +115,17 @@ public enum BrowserWindowCoveragePolicy {
         return Set(native.filter { item in
             item.identity.isValid && item.identity.bundleIdentifier == window.bundleIdentifier
                 && item.identity.pid == window.processIdentity.pid && item.identity.launched == window.processIdentity.launched
-                && BrowserWindowMatching.sameWindowTitle(item.title, window.title)
+                && (BrowserWindowMatching.sameWindowTitle(item.title, window.title)
+                    || (window.bundleIdentifier == "com.google.Chrome" && isChromeProfilePickerURL(window.internalURL)
+                        && item.title == "Google Chrome"))
                 && abs(item.frame.minX - window.frame.minX) <= 3 && abs(item.frame.minY - window.frame.minY) <= 3
                 && abs(item.frame.width - window.frame.width) <= 3 && abs(item.frame.height - window.frame.height) <= 3
         }.map(\.identity))
+    }
+    public static func isChromeProfilePickerURL(_ url: URL?) -> Bool {
+        guard let url, url.scheme?.lowercased() == "chrome", url.host?.lowercased() == "profile-picker",
+              url.path.isEmpty || url.path == "/" else { return false }
+        return url.user == nil && url.password == nil && url.port == nil && url.query == nil && url.fragment == nil
     }
     /// Every AX standard window must bind uniquely, including the reverse map.
     /// Anchors are supplied only after the native boundary revalidates CFEqual
@@ -127,7 +136,9 @@ public enum BrowserWindowCoveragePolicy {
     /// Shared identity-only anchor validation. Native callers provide CFEqual;
     /// fixtures supply opaque tokens, never fabricated AX window objects.
     public static func continuingAnchors<Token>(native: [NativeWindow], standard: [StandardWindow],
-        previous: [NativeIdentity: Token], current: [Token], equal: (Token, Token) -> Bool) -> [Int: NativeIdentity]? {
+        previous: [NativeIdentity: Token], current: [Token],
+        minimizedIndices: Set<Int> = [], offscreenIdentities: Set<NativeIdentity> = [],
+        equal: (Token, Token) -> Bool) -> [Int: NativeIdentity]? {
         guard current.count == standard.count else { return nil }
         for index in current.indices where current[..<index].contains(where: { equal($0, current[index]) }) { return nil }
         var result: [Int: NativeIdentity] = [:]
@@ -138,16 +149,19 @@ public enum BrowserWindowCoveragePolicy {
             // not reserved without a live equal AX row, nor does its old proof survive.
             if equalRows.isEmpty { continue }
             guard equalRows.count == 1, let index = equalRows.first, result[index] == nil,
-                  candidates(standard[index], native: native).contains(identity) else { return nil }
+                  anchorMatches(identity, index: index, native: native, standard: standard,
+                    minimizedIndices: minimizedIndices, offscreenIdentities: offscreenIdentities) else { return nil }
             result[index] = identity
         }
         return result
     }
     public static func standardIdentityBindings(native: [NativeWindow], standard: [StandardWindow],
-                                                anchors: [Int: NativeIdentity] = [:]) -> [NativeIdentity]? {
+        anchors: [Int: NativeIdentity] = [:], minimizedIndices: Set<Int> = [],
+        offscreenIdentities: Set<NativeIdentity> = []) -> [NativeIdentity]? {
         guard Set(native.map(\.identity)).count == native.count,
               Set(anchors.values).count == anchors.count,
-              anchors.allSatisfy({ standard.indices.contains($0.key) && candidates(standard[$0.key], native: native).contains($0.value) }) else { return nil }
+              anchors.allSatisfy({ anchorMatches($0.value, index: $0.key, native: native, standard: standard,
+                  minimizedIndices: minimizedIndices, offscreenIdentities: offscreenIdentities) }) else { return nil }
         var result = anchors
         var remaining = Set(standard.indices).subtracting(anchors.keys)
         while !remaining.isEmpty {
@@ -159,6 +173,20 @@ public enum BrowserWindowCoveragePolicy {
             for (index, identities) in unique { result[index] = identities.first!; remaining.remove(index) }
         }
         return standard.indices.compactMap { result[$0] }
+    }
+    private static func anchorMatches(_ identity: NativeIdentity, index: Int, native: [NativeWindow],
+        standard: [StandardWindow], minimizedIndices: Set<Int>, offscreenIdentities: Set<NativeIdentity>) -> Bool {
+        guard standard.indices.contains(index) else { return false }
+        if candidates(standard[index], native: native).contains(identity) { return true }
+        // Chrome can retain AX restore bounds/title while WindowServer reports
+        // the minimized backing surface. Only a previously bound, still-equal
+        // live AX object may use this path; it cannot discover a new identity.
+        let row = standard[index]
+        return minimizedIndices.contains(index) && offscreenIdentities.contains(identity)
+            && identity.isValid && row.processIdentity.isValid
+            && row.bundleIdentifier == identity.bundleIdentifier
+            && row.processIdentity.pid == identity.pid && row.processIdentity.launched == identity.launched
+            && validFrame(row.frame) && native.filter({ $0.identity == identity }).count == 1
     }
     public static func evaluate(browserBundleIdentifier: String, native: [NativeWindow]?, observedStandard: Set<NativeIdentity>,
                                 reported: [ReportedWindow], requiredSelected: Set<ReportedIdentity> = [],

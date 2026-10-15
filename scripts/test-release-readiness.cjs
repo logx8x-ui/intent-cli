@@ -86,8 +86,8 @@ assert.ok(releaseBuilder.includes('INTENT_RELEASE_ARCHITECTURE') && releaseBuild
 assert.ok(releaseBuilder.includes('s/^RELEASE_ARCHITECTURE=.*/RELEASE_ARCHITECTURE=$RELEASE_ARCHITECTURE/') &&
   releaseBuilder.includes('MINIMUM_MACOS_MAJOR=${MINIMUM_MACOS%%.*}'),
   'Installer compatibility checks must match the compiled architecture and minimum macOS');
-assert.ok(releaseBuilder.split('\n').filter(line => /^\s*swift build /.test(line)).every(line => line.includes('--jobs 2')),
-  'Fresh release builds must limit concurrent compiler jobs');
+assert.ok(releaseBuilder.split('\n').filter(line => /^\s*swift build /.test(line)).every(line => line.includes('--jobs "$INTENT_BUILD_JOBS"')),
+  'Fresh release builds must use the bounded laptop-safe compiler job setting');
 assert.ok(releaseBuilder.includes('INTENT_RELEASE_OUTPUT') && !releaseBuilder.includes('rm -rf "$DIST"'),
   'Building a candidate must not erase the previous release or rollback artifacts');
 assert.ok(releaseBuilder.includes('"distribution_ready": false') && releaseBuilder.includes('"source_fingerprint"'),

@@ -96,10 +96,11 @@ public struct WorkspaceWindow {
         var native: [BrowserWindowCoveragePolicy.NativeWindow] = []
         var standard: [BrowserWindowCoveragePolicy.StandardWindow] = []
         var standardElements: [AXUIElement] = []
+        var minimizedIndices = Set<Int>()
         func failed(_ stage: String) -> CoverageObservation? {
             let diagnostic: [String: Any] = ["stage": stage, "browser": bundleIdentifier,
                 "recordedAt": Date().timeIntervalSince1970, "nativeCount": native.count,
-                "standardCount": standard.count,
+                "standardCount": standard.count, "minimizedCount": minimizedIndices.count,
                 "candidateCounts": standard.map { BrowserWindowCoveragePolicy.candidates($0, native: native).count }]
             if let data = try? JSONSerialization.data(withJSONObject: diagnostic) {
                 try? data.write(to: ActiveBrowserRulesStore.defaultFileURL().deletingLastPathComponent()
@@ -133,24 +134,54 @@ public struct WorkspaceWindow {
                 guard role == kAXWindowRole, subrole == kAXStandardWindowSubrole else { continue }
                 var elementPID: pid_t = 0
                 guard AXUIElementGetPid(element, &elementPID) == .success, elementPID == proof.pid,
-                      attribute(element, kAXMinimizedAttribute) as? Bool != nil,
+                      let minimized = attribute(element, kAXMinimizedAttribute) as? Bool,
                       let title = attribute(element, kAXTitleAttribute) as? String,
                       let position = attribute(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
                       let size = attribute(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return failed("window-attributes") }
                 var point = CGPoint.zero, dimensions = CGSize.zero
                 guard AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point),
                       AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) else { return nil }
+                if minimized { minimizedIndices.insert(standard.count) }
                 standardElements.append(element)
-                standard.append(.init(bundleIdentifier: bundleIdentifier, processIdentity: proof, title: title,
-                    frame: CGRect(origin: point, size: dimensions)))
+                var row = BrowserWindowCoveragePolicy.StandardWindow(bundleIdentifier: bundleIdentifier,
+                    processIdentity: proof, title: title, frame: CGRect(origin: point, size: dimensions))
+                if bundleIdentifier == "com.google.Chrome", BrowserWindowCoveragePolicy.candidates(row, native: native).isEmpty {
+                    row.internalURL = PublicAccessibilityWindowInventory.chromeProfilePickerURL(in: element,
+                        deadline: min(deadline ?? ProcessInfo.processInfo.systemUptime + 0.08,
+                            ProcessInfo.processInfo.systemUptime + 0.08))
+                }
+                standard.append(row)
             }
         }
+        // AX reads and Mission Control animations can overtake the first CG
+        // sample. Match against a fresh complete inventory after reading AX.
+        guard hasTime(), let currentRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let visibleRows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              NativeWindowBindingInventory.serverIdentitiesAreComplete(in: currentRows),
+              NativeWindowBindingInventory.serverIdentitiesAreComplete(in: visibleRows) else { return failed("post-ax-inventory") }
+        native.removeAll()
+        for app in apps {
+            guard hasTime(), !app.isTerminated, let launched = app.launchDate,
+                  let current = NativeWindowBindingInventory.windows(rows: currentRows, pid: app.processIdentifier,
+                    bundleIdentifier: bundleIdentifier, requireUsableGeometry: false),
+                  current.allSatisfy({ BrowserWindowCoveragePolicy.validFrame($0.frame) }) else { return failed("post-ax-process") }
+            for window in current {
+                native.append(.init(identity: .init(bundleIdentifier: bundleIdentifier, pid: window.pid,
+                    launched: launched.timeIntervalSinceReferenceDate, windowID: window.id), title: window.title, frame: window.frame))
+            }
+        }
+        let offscreen = Set(native.filter {
+            NativeWindowBindingInventory.isOffscreen(windowID: $0.identity.windowID, pid: $0.identity.pid,
+                allRows: currentRows, onScreenRows: visibleRows) == true
+        }.map(\.identity))
         // CFEqual compares the same live accessible object, not its title or
         // frame. Only packets created by a previous successful bidirectional
         // match may anchor a row; the general AX cache is not this authority.
         guard hasTime(), let pinned = BrowserWindowCoveragePolicy.continuingAnchors(native: native, standard: standard,
-            previous: prior?.anchors ?? [:], current: standardElements, equal: { CFEqual($0, $1) }) else { return failed("window-continuity") }
-        guard hasTime(), let identities = BrowserWindowCoveragePolicy.standardIdentityBindings(native: native, standard: standard, anchors: pinned) else { return failed("window-identity") }
+            previous: prior?.anchors ?? [:], current: standardElements, minimizedIndices: minimizedIndices,
+            offscreenIdentities: offscreen, equal: { CFEqual($0, $1) }) else { return failed("window-continuity") }
+        guard hasTime(), let identities = BrowserWindowCoveragePolicy.standardIdentityBindings(native: native, standard: standard,
+            anchors: pinned, minimizedIndices: minimizedIndices, offscreenIdentities: offscreen) else { return failed("window-identity") }
         let anchors = Dictionary(uniqueKeysWithValues: zip(identities, standardElements))
         return .init(inventory: .init(windows: native, observedStandard: Set(identities)),
             continuousIdentities: Set(pinned.values), sampledAt: sampledAt, anchors: anchors)

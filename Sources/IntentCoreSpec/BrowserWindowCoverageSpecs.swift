@@ -44,6 +44,31 @@ func runBrowserWindowCoverageSpecs() throws {
             title: title, frame: bounds ?? frame)
     }
     let a = native(11, "Allowed — Google Chrome – A"), b = native(12, "Other profile — Google Chrome – B")
+    let picker = native(701, "Google Chrome")
+    var pickerAX = Policy.StandardWindow(bundleIdentifier: browser, processIdentity: proof,
+        title: "Who's using Chrome?", frame: frame)
+    try expect(Policy.standardIdentities(native: [picker], standard: [pickerAX]) == nil,
+        "Profile-picker-like text alone cannot override a native window title mismatch")
+    pickerAX.internalURL = URL(string: "chrome://profile-picker/")
+    try expect(Policy.standardIdentities(native: [picker], standard: [pickerAX]) == [picker.identity],
+        "Chrome's verified internal profile picker binds its different AX and CG titles by exact process and unique geometry")
+    try expect(Policy.standardIdentities(native: [picker, native(702, "Google Chrome")], standard: [pickerAX]) == nil,
+        "Even a verified profile picker cannot guess between equal native candidates")
+    for address in ["https://profile-picker/", "https://example.test/chrome://profile-picker/", "chrome://profile-picker.evil/",
+                    "chrome://profile-picker/not-the-picker", "chrome://profile-picker/?fake=1", "chrome://user@profile-picker/"] {
+        var spoof = pickerAX; spoof.internalURL = URL(string: address)
+        try expect(Policy.standardIdentities(native: [picker], standard: [spoof]) == nil,
+            "Untrusted URL fixture cannot create Chrome internal-surface identity")
+    }
+    var foreignPicker = pickerAX; foreignPicker.processIdentity.launched += 1
+    try expect(Policy.standardIdentities(native: [picker], standard: [foreignPicker]) == nil,
+        "Profile picker identity cannot cross a browser process lifetime")
+    guard case .complete(let pickerCoverage) = Policy.evaluate(browserBundleIdentifier: browser,
+        native: [picker], observedStandard: [picker.identity], reported: [], knownProfiles: ["selected-profile"],
+        continuousIdentities: [picker.identity], witnessedBeforeSnapshot: [picker.identity]) else {
+        throw SpecFailure(description: "Verified picker must remain inside the coverage cohort")
+    }
+    try expect(pickerCoverage.unreported == [picker], "The picker remains an excluded window to hide, never a permission exception")
     let auxiliary = native(13, "", CGRect(x: 99, y: 64, width: 1200, height: 139))
     let omittedOtherSpace = native(14, "Unknown Desktop — Google Chrome")
     let all = [a, b, auxiliary, omittedOtherSpace]
@@ -377,6 +402,31 @@ private func runCoverageAnchorSpecs() throws {
     try expect(closedNative?.isEmpty == true, "Missing native lifetime cannot retain prior anchor proof")
     try expect(Policy.continuingAnchors(native: [selected, old], standard: [standard("Study"), standard()], previous: [old.identity: "study-AX"],
         current: ["study-AX", "old-AX"], equal: ==) == nil, "An equal token with incompatible current title/frame is not a valid anchor")
+    let restoreBounds = Policy.StandardWindow(bundleIdentifier: browser, processIdentity: process,
+        title: "Put aside by Intent - Google Chrome", frame: CGRect(x: 0, y: 39, width: 1710, height: 1073))
+    let hiddenAnchor = Policy.continuingAnchors(native: [old], standard: [restoreBounds],
+        previous: [old.identity: "old-AX"], current: ["old-AX"], minimizedIndices: [0],
+        offscreenIdentities: [old.identity], equal: ==)
+    try expect(hiddenAnchor == [0: old.identity],
+        "A still-equal minimized AX window retains its bound offscreen CG identity across Mission Control restore-bounds changes")
+    try expect(Policy.standardIdentityBindings(native: [old], standard: [restoreBounds], anchors: hiddenAnchor ?? [:],
+        minimizedIndices: [0], offscreenIdentities: [old.identity]) == [old.identity],
+        "Hidden continuity survives both stages of the real coverage binding pipeline")
+    try expect(Policy.continuingAnchors(native: [old], standard: [restoreBounds], previous: [old.identity: "old-AX"],
+        current: ["old-AX"], minimizedIndices: [0], equal: ==) == nil,
+        "AX minimized alone cannot bypass visible or unknown WindowServer state")
+    try expect(Policy.continuingAnchors(native: [old], standard: [restoreBounds], previous: [old.identity: "old-AX"],
+        current: ["old-AX"], offscreenIdentities: [old.identity], equal: ==) == nil,
+        "Offscreen alone cannot bypass an unminimized or unknown AX window")
+    let coldHidden = Policy.continuingAnchors(native: [old], standard: [restoreBounds], previous: [old.identity: "old-AX"],
+        current: ["replacement-AX"], minimizedIndices: [0], offscreenIdentities: [old.identity], equal: ==)
+    try expect(coldHidden?.isEmpty == true && Policy.standardIdentityBindings(native: [old], standard: [restoreBounds],
+        anchors: coldHidden ?? [:], minimizedIndices: [0], offscreenIdentities: [old.identity]) == nil,
+        "A replacement AX window cannot inherit hidden-window identity")
+    var otherProcess = restoreBounds; otherProcess.processIdentity.launched += 1
+    try expect(Policy.continuingAnchors(native: [old], standard: [otherProcess], previous: [old.identity: "old-AX"],
+        current: ["old-AX"], minimizedIndices: [0], offscreenIdentities: [old.identity], equal: ==) == nil,
+        "Hidden continuity cannot cross a process lifetime")
     var reused = old.identity; reused.launched += 1
     let reusedAnchors = Policy.continuingAnchors(native: twins, standard: rows, previous: [reused: "old-AX"], current: ["new-AX", "old-AX"], equal: ==)
     try expect(reusedAnchors?.isEmpty == true, "Process lifetime changes invalidate all old anchor authority")

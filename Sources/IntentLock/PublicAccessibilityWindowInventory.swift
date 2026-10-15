@@ -1,10 +1,36 @@
 import ApplicationServices
 import Foundation
+import IntentCore
 
 /// Positively exposed public window objects, not proof that every native window
 /// was enumerated. Some apps return AXWindows=[] while exposing a real window
 /// through their direct children, main window or focused window.
 public enum PublicAccessibilityWindowInventory {
+    /// Read Chrome's browser-owned internal surface identity. Website text and
+    /// window titles never supply this proof. The caller verifies the Chrome PID.
+    public static func chromeProfilePickerURL(in window: AXUIElement, deadline: TimeInterval) -> URL? {
+        var pending: [(AXUIElement, Int)] = [(window, 0)]
+        var index = 0
+        func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            AXUIElementSetMessagingTimeout(element, 0.01)
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success ? value : nil
+        }
+        while index < pending.count, index < 64, ProcessInfo.processInfo.systemUptime < deadline {
+            let (element, depth) = pending[index]; index += 1
+            if attribute(element, kAXRoleAttribute) as? String == "AXWebArea",
+               let value = attribute(element, kAXURLAttribute) {
+                let url = (value as? URL) ?? (value as? String).flatMap(URL.init(string:))
+                if BrowserWindowCoveragePolicy.isChromeProfilePickerURL(url) { return url }
+            }
+            if depth < 7, let children = attribute(element, kAXChildrenAttribute),
+               let elements = validatedElements(in: children) {
+                pending.append(contentsOf: elements.prefix(max(0, 64 - pending.count)).map { ($0, depth + 1) })
+            }
+        }
+        return nil
+    }
     public enum Attribute: CaseIterable, Equatable { case windows, children, mainWindow, focusedWindow }
     public enum Value<Element> { case array([Element]), element(Element), absent, failed }
     public struct Observation<Element> {

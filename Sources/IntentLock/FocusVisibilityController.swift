@@ -768,18 +768,41 @@ public final class FocusVisibilityController: @unchecked Sendable {
             return .retired
         }
     }
+    private func reportCoverageFailure(_ failure: BrowserWindowCoveragePolicy.Failure) {
+        var value: [String: Any] = ["schemaVersion": 1, "browser": failure.browserBundleIdentifier,
+            "reason": failure.reason.rawValue, "recordedAt": Date().timeIntervalSince1970]
+        if let occurrence = spec.nativeWindowVisibilitySessionID { value["occurrence"] = occurrence }
+        if let window = failure.window {
+            value["windowID"] = window.windowID; value["pid"] = window.pid; value["launched"] = window.launched
+        }
+        if let state = coverageStates[failure.browserBundleIdentifier] {
+            value["knownWindowCount"] = state.known.count
+            value["pendingReportedCount"] = state.pendingReported.count
+            value["expectedProfileCount"] = state.request?.expectedProfiles.count ?? state.profiles.count
+            if let began = state.request?.began {
+                value["discoveryElapsed"] = ProcessInfo.processInfo.systemUptime - began
+            }
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
+            let url = Self.file.deletingLastPathComponent().appendingPathComponent("browser-coverage-failure.json")
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        onCoverageFailure?(failure)
+    }
+
     private func refreshBrowserCoverage() {
         guard !coverageStates.isEmpty, coverageIsCurrent() else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let active = coverageStates.filter { !spec.coverageAllowsLaterWindows || !$0.value.cohort.initialResolved
             || !$0.value.pendingReported.isEmpty || $0.value.request != nil }
         for (browser, state) in active {
-            if let failure = state.cohort.expiredFailure(now: now) { onCoverageFailure?(failure); return }
+            if let failure = state.cohort.expiredFailure(now: now) { reportCoverageFailure(failure); return }
             if let request = state.request, now - request.began >= 3 {
-                onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
+                reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
             }
             if let began = state.inventoryFailureSince, now - began >= 3 {
-                onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)); return
+                reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)); return
             }
             if let request = state.request, request.snapshots == nil {
                 let snapshots = BrowserProfileSnapshots.coverageSnapshots(base: BrowserTabSnapshotStore.fileURL(for: browser), requestID: request.id)
@@ -835,14 +858,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
             for target in state.cohort.targets {
                 _ = state.cohort.observe(target.identity, outcome: .unresolved, now: began)
                 if let failure = state.cohort.observe(target.identity, outcome: .unresolved, now: now) {
-                    onCoverageFailure?(failure); return
+                    reportCoverageFailure(failure); return
                 }
             }
             let firstFailure = state.inventoryFailureSince ?? began; state.inventoryFailureSince = firstFailure
-            if now - firstFailure >= 3 { onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)) }
+            if now - firstFailure >= 3 { reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)) }
             return
         }
-        if let failure = state.cohort.expiredFailure(now: now) { onCoverageFailure?(failure); return }
+        if let failure = state.cohort.expiredFailure(now: now) { reportCoverageFailure(failure); return }
         let inventory = observation.inventory
         state.observation = observation
         state.coverage = state.coverage.retainingContinuous(observation.continuousIdentities)
@@ -864,7 +887,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                let receiptAt = request.receiptAt, BrowserWindowCoveragePolicy.isPostReceiptObservation(receiptAt: receiptAt,
                     sampledAt: observation.sampledAt, now: now, deadline: request.began + 3) {
                 if now - request.began >= 3 {
-                    onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
+                    reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
                 }
                 let profiles = Set(snapshots.compactMap(\.browserSessionID))
                 let base = BrowserTabSnapshotStore.fileURL(for: browser)
@@ -898,7 +921,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     }
                 }
                 if state.request != nil && now - request.began >= 3 {
-                    onCoverageFailure?(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
+                    reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
                 }
             }
         }
@@ -913,7 +936,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
             let outcome = minimizeCoverageWindow(target.identity, inventory: inventory, occurrence: occurrence)
             if let failure = state.cohort.observe(target.identity, outcome: outcome, now: now) {
-                guard mayEnforce else { return }; onCoverageFailure?(failure); return
+                guard mayEnforce else { return }; reportCoverageFailure(failure); return
             }
         }
     }

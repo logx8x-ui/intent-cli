@@ -3,6 +3,7 @@ set -euo pipefail
 export COPYFILE_DISABLE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/build-jobs.sh"
 VERSION="${1:-0.9.3}"
 BUILD_NUMBER="${2:-202610110001}"
 DIST="$ROOT/dist/release"
@@ -12,7 +13,7 @@ PKG_SCRIPTS="$WORK/scripts"
 DMG_ROOT="$WORK/dmg"
 APP="$PKG_ROOT/Applications/Intent.app"
 SUPPORT_DIR="$PKG_ROOT/Library/Application Support/Intent"
-ARM_BUILD="$WORK/swift-arm64"
+ARM_BUILD="${INTENT_RELEASE_BUILD_PATH:-$WORK/swift-arm64}"
 X86_BUILD="$WORK/swift-x86_64"
 APPLICATION_IDENTITY="${INTENT_APPLICATION_IDENTITY:-}"
 INSTALLER_IDENTITY="${INTENT_INSTALLER_IDENTITY:-}"
@@ -94,9 +95,9 @@ mkdir -p "$PKG_SCRIPTS" "$DMG_ROOT" "$DIST"
 cd "$ROOT"
 if [[ "$CURRENT_ARM_TESTER" != "1" ]]; then
 for product in Intent IntentApp IntentNativeHost; do
-  swift build --jobs 2 --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple "arm64-apple-macosx${MINIMUM_MACOS}" --product "$product"
+  swift build --jobs "$INTENT_BUILD_JOBS" --disable-sandbox -c release --scratch-path "$ARM_BUILD" --triple "arm64-apple-macosx${MINIMUM_MACOS}" --product "$product"
   if [[ "$RELEASE_ARCHITECTURE" == universal ]]; then
-  swift build --jobs 2 --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
+  swift build --jobs "$INTENT_BUILD_JOBS" --disable-sandbox -c release --scratch-path "$X86_BUILD" --triple "x86_64-apple-macosx${MINIMUM_MACOS}" --product "$product"
   fi
 done
 fi
