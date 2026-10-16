@@ -65,3 +65,17 @@ Regression evidence is retained locally in dist/qa-20261016-layer-transition.
   all three direct packages and DMG passed verify-release.sh. System installer
   is prepared at protected SecurityAgent authentication; user action requested.
   Root app remains 0.9.5 until that approval completes and version is rechecked.
+
+## System update completed
+
+Installer approval completed during the turn. Verified root app version 0.9.6,
+build 202610160002, valid deep/strict signature, ARM64 UUID
+5421833A-0E1F-373C-9596-173996B08FAA. Running process path is
+/Applications/Intent.app/Contents/MacOS/IntentApp.
+
+Used Jump back in to restore the actual interrupted selection and Run to start.
+At 12:06 KST, the system build reached enforcing with zero unresolved targets;
+exact selected native windows match the failure: ChatGPT 4105 and Messages 7256,
+plus the selected Chrome tab. No extension reload was needed. User physical
+Mission Control return requested on this system session, superseding the earlier
+Test session prompt. Until that result arrives, physical acceptance remains open.
