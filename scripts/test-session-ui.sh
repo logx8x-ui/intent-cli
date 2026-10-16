@@ -19,6 +19,7 @@ source_fingerprint() {
     Assets/Intent.icns scripts/test-session-ui.sh scripts/build-qa.sh \
     scripts/test-quick-mark-input.sh scripts/quick-mark-input-spec.swift \
     scripts/quick-mark-expiry-spec.swift scripts/test-qa-isolation.swift \
+    scripts/test-rcmd-platform.sh scripts/test-rcmd-platform.swift \
     scripts/change-impact.cjs scripts/test-change-impact.cjs scripts/run-isolated-spec.sh scripts/build-jobs.sh \
     scripts/verify-finish-trace.cjs scripts/test-finish-trace.cjs |
     while IFS= read -r -d '' qa_input; do
@@ -62,6 +63,7 @@ run_step change-impact-accounting node scripts/test-change-impact.cjs
 run_step finish-trace-accounting node scripts/test-finish-trace.cjs
 run_step native-keyboard-input bash scripts/test-quick-mark-input.sh
 run_step enforcement-health bash scripts/test-focus-enforcement-health.sh
+run_step rcmd-platform bash scripts/test-rcmd-platform.sh
 run_step channel-isolation bash scripts/test-channel-isolation.sh
 run_step core-build swift build --jobs "$INTENT_BUILD_JOBS" --scratch-path "$qa_build" --product IntentCoreSpec
 qa_debug="$(swift build --jobs "$INTENT_BUILD_JOBS" --scratch-path "$qa_build" --show-bin-path)"

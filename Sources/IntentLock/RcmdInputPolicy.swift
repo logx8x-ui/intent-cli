@@ -48,6 +48,7 @@ public struct RcmdCompatibilitySnapshot: Equatable, Sendable {
     /// The configuration fingerprint excludes changing app/key use counts.
     public let configurationFingerprint: String
     public let retryableFailure: Bool
+    public let keyboardLayoutRevision: UInt64?
     public static let maximumAge: TimeInterval = 3
     public static let inactive = Self(processIdentity: nil, observedAtUptime: 0,
         isCompatible: true, statusReason: nil, appTrigger: nil, blockedTriggers: [],
@@ -56,20 +57,29 @@ public struct RcmdCompatibilitySnapshot: Equatable, Sendable {
     public init(processIdentity: RcmdProcessIdentity?, observedAtUptime: TimeInterval, isCompatible: Bool,
         statusReason: String?, appTrigger: RcmdModifierChord?, blockedTriggers: [RcmdModifierChord],
         appBundlesByKeyCode: [Int64: String], tapIDs: Set<UInt32>, capturesCommandGrave: Bool,
-        configurationFingerprint: String, retryableFailure: Bool = false) {
+        configurationFingerprint: String, retryableFailure: Bool = false, keyboardLayoutRevision: UInt64? = nil) {
         self.processIdentity = processIdentity; self.observedAtUptime = observedAtUptime
         self.isCompatible = isCompatible; self.statusReason = statusReason; self.appTrigger = appTrigger
         self.blockedTriggers = blockedTriggers; self.appBundlesByKeyCode = appBundlesByKeyCode
         self.tapIDs = tapIDs; self.capturesCommandGrave = capturesCommandGrave
         self.configurationFingerprint = configurationFingerprint
         self.retryableFailure = retryableFailure
+        self.keyboardLayoutRevision = keyboardLayoutRevision
     }
 
     public func invalidated(_ reason: String, now: TimeInterval) -> Self {
         .init(processIdentity: processIdentity, observedAtUptime: now, isCompatible: false,
             statusReason: reason, appTrigger: appTrigger, blockedTriggers: blockedTriggers,
             appBundlesByKeyCode: [:], tapIDs: tapIDs, capturesCommandGrave: capturesCommandGrave,
-            configurationFingerprint: configurationFingerprint)
+            configurationFingerprint: configurationFingerprint, keyboardLayoutRevision: keyboardLayoutRevision)
+    }
+
+    func usingKeyboardLayout(revision: UInt64) -> Self {
+        .init(processIdentity: processIdentity, observedAtUptime: observedAtUptime, isCompatible: isCompatible,
+            statusReason: statusReason, appTrigger: appTrigger, blockedTriggers: blockedTriggers,
+            appBundlesByKeyCode: appBundlesByKeyCode, tapIDs: tapIDs, capturesCommandGrave: capturesCommandGrave,
+            configurationFingerprint: configurationFingerprint, retryableFailure: retryableFailure,
+            keyboardLayoutRevision: revision)
     }
 
     public func remainsCompatible(with current: Self) -> Bool {
@@ -112,6 +122,7 @@ public struct RcmdInputRouter {
         guard snapshot.processIdentity != nil else { return .pass }
         let fresh = snapshot.isCompatible && now >= snapshot.observedAtUptime
             && now - snapshot.observedAtUptime <= RcmdCompatibilitySnapshot.maximumAge
+            && (snapshot.keyboardLayoutRevision.map { RcmdKeyboardLayoutCache.shared.isCurrent($0) } ?? true)
         let matched = snapshot.blockedTriggers.contains { $0.matches(flags) }
         let uncertainRightTrigger = !fresh && flags.rawValue & RcmdModifierChord.rightMask != 0
         let commandGrave = snapshot.capturesCommandGrave && flags.contains(.maskCommand) && keyCode == 50

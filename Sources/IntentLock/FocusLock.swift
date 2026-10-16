@@ -193,6 +193,7 @@ public final class FocusLock {
     }
 
     public init(spec: FocusSessionSpec) {
+        RcmdCompatibilityMonitor.prepareKeyboardLayout()
         self.spec = spec
         permittedWindowRecovery = PermittedWindowRecovery(spec: spec)
         healthOwner = Self.healthDiagnostics.begin(.init(accessMode: spec.accessMode.rawValue,

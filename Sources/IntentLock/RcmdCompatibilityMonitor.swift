@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import CoreGraphics
 import Darwin
 import Foundation
@@ -146,6 +145,10 @@ public final class RcmdCompatibilityMonitor {
 
     /// Bounded off-callback discovery. Uses the app's bundled supported CLI,
     /// never legacy defaults, a user shell, or a guessed app/window keymap.
+    public static func prepareKeyboardLayout() {
+        RcmdKeyboardLayoutCache.shared.prepare()
+    }
+
     public static func readCurrent() -> RcmdCompatibilitySnapshot {
         let now = ProcessInfo.processInfo.systemUptime
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
@@ -159,15 +162,19 @@ public final class RcmdCompatibilityMonitor {
         do {
             guard identity.version == "3.4.0", let taps = filterTapIDs(pid: identity.pid), !taps.isEmpty,
                   FileManager.default.isExecutableFile(atPath: cli.path) else { throw MonitorFailure.unsupported }
+            guard let layout = RcmdKeyboardLayoutCache.shared.snapshot else { throw MonitorFailure.keyboardLayoutChanged }
             let status = try boundedCLI(cli, arguments: ["status", "--json"])
             let keys = try boundedCLI(cli, arguments: ["app", "debug", "keys", "--json"])
             let config = try boundedCLI(cli, arguments: ["config", "export", "--json"])
             guard runningIdentity() == identity, filterTapIDs(pid: identity.pid) == taps else { throw MonitorFailure.changed }
+            guard RcmdKeyboardLayoutCache.shared.isCurrent(layout.revision) else { throw MonitorFailure.keyboardLayoutChanged }
             return try RcmdSnapshotDecoder.decode(statusData: status, keysData: keys, configData: config,
                 identity: identity, tapIDs: taps, now: ProcessInfo.processInfo.systemUptime,
-                keyCodesByCharacter: keyboardKeyCodes())
+                keyCodesByCharacter: layout.keyCodesByCharacter).usingKeyboardLayout(revision: layout.revision)
         } catch {
-            let retryable = (error as? MonitorFailure).map { $0 == .timedOut || $0 == .commandFailed } ?? false
+            let retryable = (error as? MonitorFailure).map {
+                $0 == .timedOut || $0 == .commandFailed || $0 == .keyboardLayoutChanged
+            } ?? false
             return unavailable(identity: identity, reason: "rcmd compatibility could not be verified (\(error))", now: now,
                 retryable: retryable)
         }
@@ -176,7 +183,8 @@ public final class RcmdCompatibilityMonitor {
     /// Run off-callback immediately after creating Intent's head-inserted tap,
     /// before the session can become ready. This closes the capture/install gap.
     public static func verifyCurrentTopology(_ snapshot: RcmdCompatibilitySnapshot) -> Bool {
-        guard snapshot.isCompatible else { return false }
+        guard snapshot.isCompatible,
+              snapshot.keyboardLayoutRevision.map({ RcmdKeyboardLayoutCache.shared.isCurrent($0) }) != false else { return false }
         guard let identity = snapshot.processIdentity else {
             return NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty
         }
@@ -218,7 +226,7 @@ public final class RcmdCompatibilityMonitor {
         return Set(relevant.map(\.eventTapID))
     }
 
-    private enum MonitorFailure: Error, Equatable { case unsupported, changed, timedOut, outputTooLarge, commandFailed }
+    private enum MonitorFailure: Error, Equatable { case unsupported, changed, timedOut, outputTooLarge, commandFailed, keyboardLayoutChanged }
 
     private static func boundedCLI(_ executable: URL, arguments: [String]) throws -> Data {
         let process = Process(), output = Pipe()
@@ -263,24 +271,4 @@ public final class RcmdCompatibilityMonitor {
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     }
 
-    private static func keyboardKeyCodes() -> [String: Int64] {
-        guard let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
-              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return [:] }
-        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
-        guard let bytes = CFDataGetBytePtr(data) else { return [:] }
-        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
-        var result: [String: Int64] = [:], ambiguous: Set<String> = []
-        for code in UInt16(0)..<128 {
-            var dead: UInt32 = 0, actual = 0, text = [UniChar](repeating: 0, count: 4)
-            let error = UCKeyTranslate(layout, code, UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
-                OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, text.count, &actual, &text)
-            guard error == noErr, actual == 1 else { continue }
-            let character = String(utf16CodeUnits: text, count: actual).lowercased()
-            guard character.rangeOfCharacter(from: .letters) != nil else { continue }
-            if result[character] != nil { ambiguous.insert(character) }
-            else { result[character] = Int64(code) }
-        }
-        for key in ambiguous { result.removeValue(forKey: key) }
-        return result
-    }
 }
