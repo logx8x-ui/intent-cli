@@ -158,9 +158,13 @@ public final class FocusLock {
     private let visibilityController: FocusVisibilityController
     private lazy var blurController = FocusBlurController(spec: spec, tabGuard: nativeTabClickGuard)
     private let permittedWindowRecovery: PermittedWindowRecovery
-    private var eventTap: CFMachPort?
-    private var suppressedTabButtons: Set<Int64> = []
-    private var runLoopSource: CFRunLoopSource?
+    private let inputLifecycleLock = NSLock()
+    private var inputDriver: FocusInputTapDriver?
+    private let inputPolicyQueue = DispatchQueue(label: "intent.input-policy", qos: .userInteractive)
+    private var inputPolicyTimer: DispatchSourceTimer?
+    private var rcmdMonitor: RcmdCompatibilityMonitor?
+    // Owned by inputPolicyQueue after initial installation.
+    private var rcmdSnapshot = RcmdCompatibilitySnapshot.inactive
     private var focusTimer: Timer?
     private var spotifyTimer: Timer?
     private var launchObserver: NSObjectProtocol?
@@ -176,6 +180,17 @@ public final class FocusLock {
     private var systemSwitcherGraceUntil: Date = .distantPast
 
     public var onManualFinishRequest: (@Sendable () -> Void)?
+
+    public func acknowledgeManualFinishRequest() {
+        inputComponents().driver?.acknowledgeManualFinishRequest()
+    }
+
+    private func inputComponents(remove: Bool = false) -> (driver: FocusInputTapDriver?, timer: DispatchSourceTimer?, monitor: RcmdCompatibilityMonitor?) {
+        inputLifecycleLock.lock(); defer { inputLifecycleLock.unlock() }
+        let result = (inputDriver, inputPolicyTimer, rcmdMonitor)
+        if remove { inputDriver = nil; inputPolicyTimer = nil; rcmdMonitor = nil }
+        return result
+    }
 
     public init(spec: FocusSessionSpec) {
         self.spec = spec
@@ -199,6 +214,8 @@ public final class FocusLock {
             self?.stopForSafety(failure: .nativeWindowEnforcementFailed(failure))
         }
         visibilityController.enforcementIsCurrent = { [weak self] in self?.isStopRequested == false }
+        allowedAppSwitcher.activateSelection = { [weak self] pid in _ = self?.activateApp(processIdentifier: pid) }
+
     }
 
     public func stop() {
@@ -226,6 +243,8 @@ public final class FocusLock {
         stopStateLock.lock()
         currentFinishShortcut = shortcut
         stopStateLock.unlock()
+        inputPolicyQueue.async { [weak self] in self?.refreshInputPolicy() }
+
     }
 
     private var finishShortcut: FocusKeyboardShortcut {
@@ -288,6 +307,10 @@ public final class FocusLock {
         // Do this at the stop request, not up to one run-loop turn later in
         // cleanup: queued Cmd-Tab and AX work can otherwise steal focus
         // after the session has already ended.
+        let input = inputComponents()
+        input.driver?.stop()
+        input.timer?.cancel()
+        input.monitor?.stop()
         focusActions.invalidate()
         inputRecovery.stop()
         selectedWindowRecovery.stop()
@@ -560,223 +583,198 @@ public final class FocusLock {
     }
 
     private func installEventTap() throws {
-        let types: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDragged, .scrollWheel,
-                                   .leftMouseUp, .rightMouseUp, .otherMouseUp,
-                                   .leftMouseDown, .rightMouseDown, .otherMouseDown]
-        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
-        let callback: CGEventTapCallBack = { _, type, event, userInfo in
-            guard let userInfo else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            let lock = Unmanaged<FocusLock>.fromOpaque(userInfo).takeUnretainedValue()
-            return lock.handle(type: type, event: event)
+        rcmdSnapshot = RcmdCompatibilityMonitor.readCurrent()
+        guard rcmdSnapshot.isCompatible else { throw FocusLockError.eventTapUnavailable }
+        let configuration = FocusInputConfiguration(restrictSwitching: spec.blockAppSwitching || spec.keepFocused,
+            blockSystemCommands: shouldBlockSystemCommand,
+            blockBrowserEscape: spec.accessMode == .whitelist && spec.blockBrowserTabEscape,
+            protectFirefoxChrome: spec.blockFirefoxChromeClicks, allowGoogleSearchTabs: spec.allowGoogleSearchTabs)
+        let driver = FocusInputTapDriver(snapshot: makeInputSnapshot(), configuration: configuration,
+            onEffects: { [weak self] actions, isCurrent in self?.applyInputEffects(actions, isCurrent: isCurrent) },
+            onControl: { [weak self] in self?.handleInputControl($0) },
+            onMetrics: { [weak self] sample in
+                self?.recordHealth(.inputBatch(samples: sample.samples,
+                    maxDurationMicroseconds: sample.maxDurationMicroseconds,
+                    maxSnapshotAgeMilliseconds: sample.maxSnapshotAgeMilliseconds,
+                    maxPendingActions: sample.maxPendingActions, coalescedActions: sample.coalescedActions,
+                    schedulingDelayMilliseconds: sample.schedulingDelayMilliseconds))
+            })
+        inputLifecycleLock.lock(); inputDriver = driver; inputLifecycleLock.unlock()
+        try driver.start()
+        guard RcmdCompatibilityMonitor.verifyCurrentTopology(rcmdSnapshot) else {
+            driver.stop(); throw FocusLockError.eventTapUnavailable
         }
-
-        eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        )
-
-        guard let eventTap else {
-            throw FocusLockError.eventTapUnavailable
-        }
-
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        guard let runLoopSource else {
-            throw FocusLockError.eventTapUnavailable
-        }
-
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
+        guard !isStopped else { driver.stop(); return }
+        let timer = DispatchSource.makeTimerSource(queue: inputPolicyQueue)
+        timer.schedule(deadline: .now(), repeating: 0.04, leeway: .milliseconds(5))
+        timer.setEventHandler { [weak self] in self?.refreshInputPolicy() }
+        inputLifecycleLock.lock(); inputPolicyTimer = timer; inputLifecycleLock.unlock()
+        timer.resume()
+        let monitor = RcmdCompatibilityMonitor(initialSnapshot: rcmdSnapshot,
+            onSnapshot: { [weak self] snapshot in
+                guard let self else { return }
+                self.inputPolicyQueue.async { [weak self] in
+                    guard let self, !self.isStopped else { return }
+                    self.rcmdSnapshot = snapshot; self.refreshInputPolicy()
+                }
+            }, onInvalidated: { [weak self] _ in
+                self?.requestSafetyStop(failure: .inputProtectionInterrupted(.inputTapUnavailable),
+                    cause: .inputTapUnavailable, releaseSynchronously: false)
+            })
+        inputLifecycleLock.lock(); rcmdMonitor = monitor; inputLifecycleLock.unlock()
+        monitor.start()
     }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            // Never repeatedly re-enable an input tap that macOS disabled as unhealthy.
-            let cause: FocusLockSafetyStopCause = type == .tapDisabledByTimeout ? .inputTapTimeout : .inputTapDisabled
+    private func refreshInputPolicy() {
+        guard !isStopped else { return }
+        let snapshot = makeInputSnapshot()
+        guard !isStopped else { return }
+        inputComponents().driver?.publish(snapshot)
+    }
+
+    /// Only this producer performs platform discovery. An AX timeout cannot
+    /// stall input delivery or queue another scan while this scan is in flight.
+    private func makeInputSnapshot() -> FocusInputPolicySnapshot {
+        var snapshot = FocusInputPolicySnapshot()
+        snapshot.observedAt = ProcessInfo.processInfo.systemUptime
+        let foreground = NSWorkspace.shared.frontmostApplication
+        let applications = NSWorkspace.shared.runningApplications
+        let appsByPID = Dictionary(applications.map { ($0.processIdentifier, $0) }, uniquingKeysWith: { first, _ in first })
+        let records = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let displays = NSScreen.screens.map { screen -> (CGRect, CGFloat) in
+            let number = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            let rect = number.map(CGDisplayBounds) ?? screen.frame
+            return (rect, max(30, screen.frame.maxY - screen.visibleFrame.maxY))
+        }
+        snapshot.menuBars = displays.map { CGRect(x: $0.0.minX, y: $0.0.minY, width: $0.0.width, height: $0.1) }
+        snapshot.missionControl = records.contains { row in
+            guard let value = row[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: value as CFDictionary) else { return false }
+            return displays.contains { FocusForegroundPolicy.isMissionControlOverlay(
+                ownerName: row[kCGWindowOwnerName as String] as? String,
+                layer: row[kCGWindowLayer as String] as? Int, bounds: rect, displayBounds: $0.0) }
+        }
+        var foregroundWindowID: UInt32 = 0
+        for row in records {
+            guard let pid = row[kCGWindowOwnerPID as String] as? pid_t,
+                  let id = row[kCGWindowNumber as String] as? UInt32,
+                  let layer = row[kCGWindowLayer as String] as? Int, layer >= 0,
+                  let value = row[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: value as CFDictionary),
+                  let app = appsByPID[pid], let bundle = app.bundleIdentifier else { continue }
+            if layer == 0, pid == foreground?.processIdentifier, foregroundWindowID == 0 { foregroundWindowID = id }
+            if layer == 0, pid == foreground?.processIdentifier, bundle == "org.mozilla.firefox", snapshot.firefoxBounds == nil {
+                snapshot.firefoxBounds = rect
+            }
+            let auxiliary = FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(bundleIdentifier: bundle,
+                isRegularApplication: app.activationPolicy == .regular,
+                controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers, accessMode: spec.accessMode)
+            let verifiedAuxiliary = visibilityController.permitsAuxiliaryWindow(id: id, pid: pid,
+                bundleIdentifier: bundle, launched: app.launchDate) == true
+            let permitted = bundle == Bundle.main.bundleIdentifier || FocusSystemToolPolicy.isScreenshotApplication(bundle)
+                || auxiliary || verifiedAuxiliary || spec.permitsWindow(id, bundleIdentifier: bundle)
+            snapshot.windows.append(.init(id: id, bounds: rect, permitted: permitted))
+        }
+        let panels = IntentInteractivePanelRegions.shared.inputSnapshot()
+        snapshot.panelRegions = panels.regions; snapshot.panelKeyboardFocus = panels.hasKeyboardFocus
+        snapshot.screenshotActive = FocusSystemToolPolicy.isScreenshotApplication(foreground?.bundleIdentifier)
+        snapshot.firefoxFrontmost = foreground?.bundleIdentifier == "org.mozilla.firefox"
+        snapshot.browserFrontmost = ["org.mozilla.firefox", "com.google.Chrome"].contains(foreground?.bundleIdentifier ?? "")
+            && !spec.presetAllowedBundleIdentifiers.contains(foreground?.bundleIdentifier ?? "")
+        snapshot.foregroundRejected = FocusForegroundPolicy.shouldImmediatelyReject(bundleIdentifier: foreground?.bundleIdentifier,
+            accessMode: spec.accessMode, controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
+            isRegularApplication: foreground?.activationPolicy == .regular)
+        if let app = foreground, let bundle = app.bundleIdentifier {
+            let verifiedAuxiliary = visibilityController.permitsAuxiliaryWindow(id: foregroundWindowID,
+                pid: app.processIdentifier, bundleIdentifier: bundle, launched: app.launchDate) == true
+            snapshot.foregroundRejected = snapshot.foregroundRejected || FocusInputForegroundPolicy.rejectsWindow(
+                hasWindowScope: spec.selectedWindowIDsByApp[bundle] != nil, foregroundWindowID: foregroundWindowID,
+                windowPermitted: spec.permitsWindow(foregroundWindowID, bundleIdentifier: bundle),
+                auxiliaryVerified: verifiedAuxiliary)
+        }
+        let tab = nativeTabClickGuard.inputSnapshot()
+        if tab.pid == foreground?.processIdentifier, tab.remainingValidity > 0, tab.windowID == foregroundWindowID, foregroundWindowID != 0 {
+            snapshot.tabWindowID = tab.windowID; snapshot.tabRegions = tab.rectangles
+            snapshot.nativeWindowBlocked = tab.foregroundBlocked; snapshot.addressSubmissionBlocked = tab.addressBlocked
+            snapshot.tabRegionsValidUntil = ProcessInfo.processInfo.systemUptime + tab.remainingValidity
+        }
+        if let point = CGEvent(source: nil)?.location {
+            let target = clickTarget(at: point, inMissionControl: snapshot.missionControl)
+            snapshot.pointerProbe = point
+            if snapshot.missionControl {
+                snapshot.pointerPermitted = FocusClickTargetPolicy.shouldAllowMissionControlClick(
+                    ownerBundleIdentifier: target.ownerBundleIdentifier, representedBundleIdentifier: target.representedBundleIdentifier,
+                    controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers, accessMode: spec.accessMode,
+                    isSpaceNavigation: target.isSpaceNavigation)
+            } else {
+                let owner = applications.first { $0.bundleIdentifier == target.ownerBundleIdentifier }
+                snapshot.pointerPermitted = FocusClickTargetPolicy.shouldAllowAuxiliaryApplication(
+                    bundleIdentifier: target.ownerBundleIdentifier, isRegularApplication: owner?.activationPolicy == .regular,
+                    controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers, accessMode: spec.accessMode)
+                    || FocusClickTargetPolicy.shouldAllow(ownerBundleIdentifier: target.ownerBundleIdentifier,
+                        representedBundleIdentifier: target.representedBundleIdentifier,
+                        allowedBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
+                        intentBundleIdentifier: Bundle.main.bundleIdentifier, accessMode: spec.accessMode,
+                        isMenuBarClick: snapshot.menuBars.contains { $0.contains(point) })
+            }
+        }
+        snapshot.finishShortcut = finishShortcut
+        snapshot.accessibilityTrusted = AXIsProcessTrusted()
+        let coverage = visibilityController.inputRecoveryCoverage
+        snapshot.coverageVerifiedAt = coverage.verifiedAtUptime; snapshot.coverageResolved = coverage.resolved
+        snapshot.allowedSwitchingBundles = Set(applications.compactMap { app in
+            guard let bundle = app.bundleIdentifier, app.activationPolicy == .regular,
+                  !app.isTerminated, spec.permitsApplication(bundle) else { return nil }
+            return bundle
+        })
+        snapshot.rcmd = rcmdSnapshot
+        snapshot.stopped = isStopped
+        return snapshot
+    }
+
+    private func applyInputEffects(_ actions: [FocusInputAction], isCurrent: () -> Bool) {
+        for action in actions {
+            guard !isStopped, isCurrent() else { return }
+            switch action {
+            case .refocus: scheduleInputRefocus()
+            case .switcherAdvance(let steps): allowedAppSwitcher.advance(steps: steps)
+            case .switcherCommit: allowedAppSwitcher.commit()
+            case .switcherCancel: allowedAppSwitcher.cancel()
+            case .activate(let bundle): _ = activateApp(bundleIdentifier: bundle)
+            case .spaceNavigation: systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
+            case .drag: nativeTabClickGuard.invalidateDuringDrag()
+            case .mouseDown(let mission): nativeTabClickGuard.recordMouseDown(missionControl: mission)
+            case .blockedClick: recordHealth(.blockedClick)
+            case .manualFinish, .emergencyStop: break // Separate priority control worker owns these.
+            }
+        }
+    }
+
+    private func handleInputControl(_ control: FocusInputTapDriver.Control) {
+        guard !isStopped else { return }
+        switch control {
+        case .recoveryBegan:
+            recordHealth(.inputTapRecoveryBegan)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isStopped else { return }
+                self.allowedAppSwitcher.cancel()
+                self.visibilityController.refreshAfterWorkspaceTransition()
+            }
+            inputPolicyQueue.async { [weak self] in self?.refreshInputPolicy() }
+        case .recoverySucceeded: recordHealth(.inputTapRecoverySucceeded)
+        case .failed(let cause):
             requestSafetyStop(failure: .inputProtectionInterrupted(cause), cause: cause, releaseSynchronously: false)
-            return Unmanaged.passUnretained(event)
-        }
-        if isStopped { return Unmanaged.passUnretained(event) }
-        if FocusSystemToolPolicy.isScreenshotApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
-            // Once capture is open, its drag, Space, Return and Escape belong to
-            // macOS even if a forbidden browser window is underneath it.
-            suppressedTabButtons.removeAll()
-            return Unmanaged.passUnretained(event)
-        }
-        if type == .scrollWheel {
-            let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            let wholeWindowBlocked = nativeTabClickGuard.blocksForegroundWindow(foregroundPID)
-            // Do not intercept normal tab/sidebar scrolling or scroll over a
-            // different window. shouldBlock also exempts registered controls.
-            let pointerBlocked = wholeWindowBlocked && nativeTabClickGuard.shouldBlock(event.location, frontmostPID: foregroundPID,
-                targetWindowID: UInt32(clamping: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent)))
-            if NativeTabClickPolicy.blocksScroll(wholeWindowBlocked: wholeWindowBlocked,
-                pointerBlocked: pointerBlocked, missionControl: pointerBlocked && isMissionControlActive()) {
-                return nil
-            }
-            return Unmanaged.passUnretained(event)
-        }
-        if [.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(type) {
-            if suppressedTabButtons.remove(event.getIntegerValueField(.mouseEventButtonNumber)) != nil { return nil }
-            return Unmanaged.passUnretained(event)
-        }
-        if type == .leftMouseDragged {
-            if suppressedTabButtons.contains(0) { return nil }
-            nativeTabClickGuard.invalidateDuringDrag()
-            return Unmanaged.passUnretained(event)
-        }
-        if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type) {
-            guard spec.requiresEnforcement else { return Unmanaged.passUnretained(event) }
-            let missionControl = isMissionControlActive()
-            nativeTabClickGuard.recordMouseDown(missionControl: missionControl)
-            if missionControl {
-                let target = clickTarget(at: event.location, inMissionControl: true)
-                guard FocusClickTargetPolicy.shouldAllowMissionControlClick(
-                    ownerBundleIdentifier: target.ownerBundleIdentifier,
-                    representedBundleIdentifier: target.representedBundleIdentifier,
-                    controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
-                    accessMode: spec.accessMode,
-                    isSpaceNavigation: target.isSpaceNavigation
-                ) else {
-                    // Keep Mission Control open; a known forbidden tile is a no-op.
-                    recordHealth(.blockedClick)
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
-            }
-
-            if IntentInteractivePanelRegions.shared.contains(event.location) {
-                return Unmanaged.passUnretained(event)
-            }
-
-            if nativeTabClickGuard.shouldBlock(event.location, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                targetWindowID: UInt32(clamping: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent))) {
-                // A forbidden native tab is a no-op: do not activate it and bounce afterward.
-                suppressedTabButtons.insert(event.getIntegerValueField(.mouseEventButtonNumber))
-                return nil
-            }
-
-            if spec.blockFirefoxChromeClicks,
-               isFirefoxFrontmost(),
-               isProtectedFirefoxChromeClick(event.location) {
-                recordHealth(.blockedClick)
-                scheduleInputRefocus()
-                return nil
-            }
-
-            guard shouldAllowMouseDown(at: event.location) else {
-                recordHealth(.blockedClick)
-                scheduleInputRefocus()
-                return nil
-            }
-
-            return Unmanaged.passUnretained(event)
-        }
-
-        if type == .flagsChanged {
-            if allowedAppSwitcher.isVisible,
-               !event.flags.contains(.maskCommand) {
-                allowedAppSwitcher.commit()
-            }
-            return Unmanaged.passUnretained(event)
-        }
-
-        guard type == .keyDown else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
-        let command = flags.contains(.maskCommand)
-        let shift = flags.contains(.maskShift)
-        let control = flags.contains(.maskControl)
-        let option = flags.contains(.maskAlternate)
-
-        if FocusSystemShortcutPolicy.isScreenshotShortcut(keyCode: keyCode, command: command, shift: shift) {
-            return Unmanaged.passUnretained(event)
-        }
-
-        if command && control && option && keyCode == KeyCode.escape {
+        case .emergencyStop:
             requestSafetyStop(failure: nil, cause: .emergencyShortcut, releaseSynchronously: false)
-            return nil
-        }
-
-        switch FocusSystemShortcutPolicy.tabRoute(keyCode: keyCode, command: command, control: control,
-            restrictApplicationSwitching: spec.blockAppSwitching || spec.keepFocused) {
-        case .allowedApplications:
-            allowedAppSwitcher.advance(reverse: shift)
-            return nil
-        case .nativeBrowser:
-            // Native Control-Tab/Control-Shift-Tab, including key repeats, goes
-            // directly to the browser. Guard keeps the destination policy.
-            return Unmanaged.passUnretained(event)
-        case .ordinary:
-            break
-        }
-
-        if keyCode == KeyCode.escape,
-           allowedAppSwitcher.isVisible {
-            allowedAppSwitcher.cancel()
-            return nil
-        }
-
-        if finishShortcut.matches(
-            keyCode: keyCode,
-            command: command,
-            shift: shift,
-            control: control,
-            option: option
-        ) {
+        case .manualFinish:
             if let onManualFinishRequest { onManualFinishRequest() }
             else if spec.allowsManualFinish {
-                stop()
-            }
-            return nil
+                // Main-thread restoration must not delay delivery of another input.
+                DispatchQueue.main.async { [weak self] in
+                    self?.stop(); self?.acknowledgeManualFinishRequest()
+                }
+            } else { acknowledgeManualFinishRequest() }
         }
-
-        if command && shouldBlockSystemCommand && isBlockedSystemCommand(keyCode) {
-            scheduleInputRefocus()
-            return nil
-        }
-
-        if control,
-           shouldBlockSystemCommand,
-           FocusSystemShortcutPolicy.isSpaceNavigationKey(keyCode) {
-            systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 1.5)
-            return Unmanaged.passUnretained(event)
-        }
-
-        // A browser with no permitted tab cannot redirect an already-open or
-        // internal page. Keep its content inert without closing anything. The
-        // stop/switcher routes above and Intent's grave-key controls stay usable.
-        if FocusSystemShortcutPolicy.shouldBlockInertBrowserInput(keyCode: keyCode, command: command,
-            control: control, option: option, shift: shift, allowGoogleSearchTabs: spec.allowGoogleSearchTabs,
-            hasPanelKeyboardFocus: IntentInteractivePanelRegions.shared.hasKeyboardFocus,
-            windowBlocked: nativeTabClickGuard.blocksForegroundWindow(NSWorkspace.shared.frontmostApplication?.processIdentifier)) {
-            return nil
-        }
-
-        if [Int64(36), Int64(76)].contains(keyCode),
-           !IntentInteractivePanelRegions.shared.hasKeyboardFocus,
-           nativeTabClickGuard.blocksAddressSubmission(NSWorkspace.shared.frontmostApplication?.processIdentifier) {
-            return nil
-        }
-
-        if spec.accessMode == .whitelist,
-           spec.blockBrowserTabEscape && isSupportedBrowserFrontmost() {
-            if isBlockedBrowserCommand(keyCode: keyCode, command: command, control: control, option: option, shift: shift) {
-                scheduleInputRefocus()
-                return nil
-            }
-        }
-
-        return Unmanaged.passUnretained(event)
     }
 
     private func isBlockedSystemCommand(_ keyCode: Int64) -> Bool {
@@ -823,12 +821,18 @@ public final class FocusLock {
         ) { [weak self] notification in
             guard
                 let self,
-                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                notification.userInfo?[NSWorkspace.applicationUserInfoKey] is NSRunningApplication
             else {
                 return
             }
 
-            self.handleActivated(app)
+            // Notification bursts from switchers collapse into one current
+            // foreground check; never replay a stale activation after a finish.
+            self.inputRecovery.request { [weak self] in
+                guard let self, !self.isStopped,
+                      let current = NSWorkspace.shared.frontmostApplication else { return }
+                self.handleActivated(current)
+            }
         }
     }
 
@@ -1454,16 +1458,10 @@ public final class FocusLock {
             self.activeSpaceObserver = nil
         }
 
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-            CFMachPortInvalidate(eventTap)
-            self.eventTap = nil
-        }
-
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-            self.runLoopSource = nil
-        }
+        let input = inputComponents(remove: true)
+        input.driver?.stop()
+        input.timer?.cancel()
+        input.monitor?.stop()
 
         // Errors before readiness are not successful completion. Release this
         // attempted session's visibility changes; previously deferred windows

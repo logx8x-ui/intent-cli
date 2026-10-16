@@ -91,6 +91,11 @@ EXPANDED="$WORK/expanded"
 pkgutil --expand-full "$PKG" "$EXPANDED"
 APP="$(find "$EXPANDED" -path '*/Applications/Intent.app' -type d -print -quit)"
 [[ -n "$APP" ]] || { echo "Package does not install /Applications/Intent.app." >&2; exit 7; }
+EXPECTED_APP_SHA="$(plutil -extract app_binary_sha256 raw -o - "$MANIFEST")"
+[[ "$(shasum -a 256 "$APP/Contents/MacOS/IntentApp" | awk '{print $1}')" == "$EXPECTED_APP_SHA" ]] || {
+  echo "The packaged app executable does not match the qualified candidate identity." >&2
+  exit 7
+}
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=4 "$APP" 2>&1 | grep -F "TeamIdentifier=$TEAM_ID"
 ARCHS="$(lipo -archs "$APP/Contents/MacOS/IntentApp")"

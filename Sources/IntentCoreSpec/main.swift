@@ -56,6 +56,9 @@ do {
     try runOnboardingPresentationSpecs()
     try runSystemCaptureRegressionSpecs()
     try runMissionControlRepresentationSpecs()
+    try runMissionControlOutlineSpecs()
+    try runRcmdCompatibilitySpecs()
+    try runFocusInputRoutingSpecs()
     do {
         var gesture = QuickMarkGesture()
         try expect(gesture.key(code: 50, down: true, modified: false, repeatKey: false, now: 0).consume, "Backtick is owned by Intent")

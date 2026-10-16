@@ -105,6 +105,26 @@ final class NativeBrowserTabClickGuard: @unchecked Sendable {
     private var tabGroups = 0
     private var blurContinuity = TabBlurContinuity()
 
+    struct InputSnapshot {
+        let pid: pid_t
+        let windowID: UInt32
+        let rectangles: [CGRect]
+        let foregroundBlocked: Bool
+        let addressBlocked: Bool
+        let remainingValidity: TimeInterval
+    }
+    /// Called only by the independent policy producer, never the event tap.
+    func inputSnapshot() -> InputSnapshot {
+        mutex.lock(); defer { mutex.unlock() }
+        let age = Date().timeIntervalSince(updatedAt)
+        let valid = !stopped && age >= 0 && age < 0.45
+        return .init(pid: pid, windowID: nativeWindowID,
+            rectangles: valid && (foregroundWindowBlocked || Date() >= ignoreUntil) ? rectangles : [],
+            foregroundBlocked: valid && foregroundWindowBlocked,
+            addressBlocked: valid && addressSubmissionBlocked,
+            remainingValidity: valid ? max(0, 0.45 - age) : 0)
+    }
+
     func recordMouseDown(missionControl: Bool) {
         mutex.lock(); mouseDownEvents += 1
         if missionControl { missionControlEvents += 1 }

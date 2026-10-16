@@ -1992,8 +1992,11 @@ final class IntentAppModel: ObservableObject {
         activeSessionOccurrenceID = UUID()
         let occurrence = activeSessionOccurrenceID
         if let occurrence { overlayPresenter?.prepareSessionPresentation(occurrenceID: occurrence) }
-        lock.onManualFinishRequest = { [weak self] in
-            Task { @MainActor [weak self] in
+        lock.onManualFinishRequest = { [weak self, weak lock] in
+            Task { @MainActor [weak self, weak lock] in
+                // Acknowledge only after the model processed Finish (including
+                // friction/denial), never while queued activation can overtake it.
+                defer { lock?.acknowledgeManualFinishRequest() }
                 guard let self, self.activeSessionOccurrenceID == occurrence else { return }
                 self.endActiveSession()
             }

@@ -19,6 +19,7 @@ final class AllowedAppSwitcher {
     private var visible = false
     private var stopped = false
     private var panelController: AllowedAppSwitcherPanelController?
+    var activateSelection: ((pid_t) -> Void)?
 
     init(
         allowedBundleIdentifiers: Set<String>,
@@ -45,17 +46,19 @@ final class AllowedAppSwitcher {
         }
     }
 
-    func advance(reverse: Bool) {
+    func advance(reverse: Bool) { advance(steps: reverse ? -1 : 1) }
+
+    func advance(steps: Int) {
+        guard steps != 0 else { return }
         let snapshot: ([AllowedAppSwitcherPanelController.Item], Int, UInt64)? = stateLock.withLock {
             guard !stopped else { return nil }
             if !visible {
                 items = makeItems()
                 guard items.count > 1 else { return nil }
                 visible = true
-                selectedIndex = reverse ? items.count - 1 : 1
+                selectedIndex = ((steps % items.count) + items.count) % items.count
             } else if !items.isEmpty {
-                let delta = reverse ? -1 : 1
-                selectedIndex = (selectedIndex + delta + items.count) % items.count
+                selectedIndex = ((selectedIndex + steps) % items.count + items.count) % items.count
             }
 
             let panelItems = items.map {
@@ -111,10 +114,15 @@ final class AllowedAppSwitcher {
             guard let self else { return }
             self.actions.perform(ifCurrent: selection.1) {
                 self.panelController?.hide()
-                selection.0.unhide()
-                // An activation notification may synchronously cancel this work.
-                self.actions.perform(ifCurrent: selection.1) {
-                    selection.0.activate(options: [.activateIgnoringOtherApps])
+                if let activateSelection = self.activateSelection {
+                    // The session owner raises an exactly permitted window for
+                    // scoped apps instead of activating an arbitrary sibling.
+                    activateSelection(selection.0.processIdentifier)
+                } else {
+                    selection.0.unhide()
+                    self.actions.perform(ifCurrent: selection.1) {
+                        selection.0.activate(options: [.activateIgnoringOtherApps])
+                    }
                 }
             }
         }

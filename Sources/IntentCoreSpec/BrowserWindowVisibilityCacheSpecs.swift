@@ -45,6 +45,7 @@ func runBrowserWindowVisibilityCacheSpecs() throws {
         return try Data(contentsOf: url)
     }
     try expect(cache.records() == [current], "Discovery returns only the current occurrence, not historical ownership")
+    try expect(cache.lastReadComplete, "A complete current inventory can include positively identified historical records")
     try expect(reads.values.reduce(0, +) == 13, "The initial discovery reads each candidate once")
     for _ in 0..<10 {
         try expect(cache.records() == [current], "An unchanged snapshot keeps its exact current plan")
@@ -83,25 +84,31 @@ func runBrowserWindowVisibilityCacheSpecs() throws {
     let repaired = makeRecord("profile-c")
     try Data("not valid JSON".utf8).write(to: file(repaired), options: .atomic)
     try expect(cache.records() == [replacement, newProfile], "Invalid bytes cannot authorize a window claim")
+    try expect(!cache.lastReadComplete, "Invalid bytes cannot be mistaken for a positively absent current claim")
     _ = cache.records()
+    try expect(!cache.lastReadComplete, "Cached invalid bytes remain incomplete without repeatedly decoding them")
     try expect(reads[file(repaired)] == 1, "Stable known-invalid bytes are not repeatedly decoded")
     try write(repaired)
     try expect(cache.records() == [replacement, newProfile, repaired] && reads[file(repaired)] == 2,
         "Invalid-to-valid atomic replacement is retried and accepted")
+    try expect(cache.lastReadComplete, "A repaired plan restores positive inventory completeness")
 
     let initiallyUnreadable = makeRecord("profile-d")
     try write(initiallyUnreadable)
     failReads.insert(file(initiallyUnreadable))
     try expect(!cache.records().contains(initiallyUnreadable) && reads[file(initiallyUnreadable)] == 1,
         "A failed first read cannot introduce a new native claim")
+    try expect(!cache.lastReadComplete, "Read uncertainty cannot satisfy post-timeout recovery coverage")
     failReads.remove(file(initiallyUnreadable))
     try expect(cache.records().contains(initiallyUnreadable) && reads[file(initiallyUnreadable)] == 2,
         "A transient read failure retries even when metadata is unchanged")
+    try expect(cache.lastReadComplete, "Successful retry independently restores read completeness")
 
     failReads.insert(file(current))
     let previousReads = reads[file(current), default: 0]
     try expect(!cache.records(forceRefresh: true).contains(replacement),
         "A failed forced read never returns its previously cached plan as authority")
+    try expect(!cache.lastReadComplete, "Failed forced validation cannot reuse an earlier complete-read flag")
     failReads.remove(file(current))
     try expect(cache.records().contains(replacement) && reads[file(current)] == previousReads + 2,
         "An unreadable previously cached plan is retried without a permanent failure tombstone")
@@ -109,9 +116,35 @@ func runBrowserWindowVisibilityCacheSpecs() throws {
     let hiddenDirectory = directory.appendingPathExtension("unavailable")
     try manager.moveItem(at: directory, to: hiddenDirectory)
     let unavailableSnapshot = cache.records()
+    let unavailableComplete = cache.lastReadComplete
     try manager.moveItem(at: hiddenDirectory, to: directory)
     try expect(unavailableSnapshot.isEmpty, "A directory listing failure returns no stale new-claim authority")
+    try expect(!unavailableComplete, "A missing directory is unavailable, not a verified empty browser plan inventory")
     try expect(cache.records().contains(replacement), "Discovery retries after the directory becomes available again")
+    try expect(cache.lastReadComplete, "The complete flag resets after a successful fresh directory pass")
+
+    // Enumeration may return a path that changes type or is replaced while its
+    // bytes are being read. Both must fail the same recovery availability gate.
+    let nonFile = directory.appendingPathComponent("browser-window-visibility-unreadable.json")
+    try manager.createDirectory(at: nonFile, withIntermediateDirectories: true)
+    _ = cache.records()
+    try expect(!cache.lastReadComplete, "An unstatable/nonregular candidate prevents claiming complete inventory")
+    try manager.removeItem(at: nonFile)
+    _ = cache.records()
+    try expect(cache.lastReadComplete, "Removing the invalid candidate permits an independent successful read")
+    var mutateDuringRead = true
+    let racingCache = BrowserWindowVisibilityRecordCache(store: store, intentionSessionID: session) { url in
+        let bytes = try Data(contentsOf: url)
+        if url.standardizedFileURL == file(current), mutateDuringRead {
+            mutateDuringRead = false
+            try replacementData.write(to: url, options: .atomic)
+        }
+        return bytes
+    }
+    try expect(!racingCache.records().contains(replacement) && !racingCache.lastReadComplete,
+        "Atomic replacement during a read cannot be counted as fresh post-timeout proof")
+    try expect(racingCache.records().contains(replacement) && racingCache.lastReadComplete,
+        "A stable retry after the race can establish complete fresh inventory")
 
     try manager.removeItem(at: file(newProfile))
     try expect(!cache.records().contains(newProfile), "Removing a plan prunes it from the next current snapshot")
@@ -129,4 +162,10 @@ func runBrowserWindowVisibilityCacheSpecs() throws {
         intentionSessionID: session) == nil, "Direct recovery reads reject mismatched persisted tuple identity")
     try expect(!cache.records().contains(forged) && !cache.records().contains(replacement),
         "Discovery validates the canonical hashed path and cannot keep the replaced prior plan")
+    try expect(!cache.lastReadComplete, "A forged tuple/path mismatch cannot count as an empty verified claim")
+    let emptyDirectory = directory.appendingPathComponent("empty")
+    try manager.createDirectory(at: emptyDirectory, withIntermediateDirectories: true)
+    let emptyCache = BrowserWindowVisibilityRecordCache(store: .init(directory: emptyDirectory), intentionSessionID: session)
+    try expect(emptyCache.records().isEmpty && emptyCache.lastReadComplete,
+        "A successful genuinely empty discovery remains distinguishable from unavailable discovery")
 }

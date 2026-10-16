@@ -124,6 +124,39 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
     private let coverageReadyLock = NSLock()
     private var initialCoverageReady = true
+    private var recoveryCoverage = (verifiedAtUptime: TimeInterval(0), resolved: false)
+    // These observations are main-queue-owned. The input scanner reads only the
+    // short-lock copy, never AX state or sticky startup readiness.
+    private var nativeRecoveryObservation = (at: TimeInterval(0), resolved: false)
+    private var reportedRecoveryObservation = (at: TimeInterval(0), resolved: false)
+    private var browserRecoveryObservations: [String: (at: TimeInterval, resolved: Bool)] = [:]
+    public var inputRecoveryCoverage: (verifiedAtUptime: TimeInterval, resolved: Bool) {
+        coverageReadyLock.lock(); defer { coverageReadyLock.unlock() }
+        if recoveryCoverage.resolved && !(spec.hideDistractions && spec.requiresEnforcement) {
+            return (ProcessInfo.processInfo.systemUptime, true)
+        }
+        return recoveryCoverage
+    }
+    private func publishRecoveryCoverage() {
+        var observations = [nativeRecoveryObservation, reportedRecoveryObservation]
+        for (browser, state) in coverageStates {
+            // Add-as-you-go retires initial browser exclusions; native and
+            // reported claims still require current observations.
+            if spec.coverageAllowsLaterWindows && state.cohort.initialResolved
+                && state.pendingReported.isEmpty && state.request == nil { continue }
+            let sample = browserRecoveryObservations[browser] ?? (0, false)
+            observations.append((sample.at, sample.resolved && state.inventoryFailureSince == nil
+                && state.request == nil && state.pendingReported.isEmpty && state.cohort.initialResolved))
+        }
+        let at = observations.map(\.at).min() ?? 0
+        let resolved = mayEnforce && observations.allSatisfy { $0.resolved && $0.at > 0 }
+        coverageReadyLock.lock()
+        recoveryCoverage = (at, resolved)
+        coverageReadyLock.unlock()
+    }
+    private func invalidateRecoveryCoverage() {
+        coverageReadyLock.lock(); recoveryCoverage = (0, false); coverageReadyLock.unlock()
+    }
     public var isInitialCoverageReady: Bool {
         coverageReadyLock.lock(); defer { coverageReadyLock.unlock() }; return initialCoverageReady
     }
@@ -160,6 +193,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
             // Normal quiet-owned entries already carry their durable policy.
             entries = spec.startupWindowAnchor == nil ? Self.restore() : Self.loadEntries()
             guard spec.hideDistractions && spec.requiresEnforcement, !stopped, timer == nil else {
+                let now = ProcessInfo.processInfo.systemUptime
+                nativeRecoveryObservation = (now, true); reportedRecoveryObservation = (now, true)
+                publishRecoveryCoverage()
                 if spec.startupWindowAnchor == nil, Self.needsRecoveryObservation(entries, parkingOnly: true) {
                     Self.startRecoveryWatcher(generation: Self.recoveryGeneration, parkingOnly: true)
                 }
@@ -175,6 +211,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     public func stop(restorationPolicyOverride: HiddenWorkspaceRestorationPolicy? = nil) {
         onMain {
             guard !stopped else { return }
+            invalidateRecoveryCoverage()
             publishAuxiliaryProofs([:])
             nativeCoverage.stop()
             offscreenCoverage.stop()
@@ -270,6 +307,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
 
     private func refresh() {
         guard mayEnforce else { return }
+        let recoveryObservationBegan = ProcessInfo.processInfo.systemUptime
+        invalidateRecoveryCoverage()
         let serverRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         let windows = WorkspaceWindow.list(records: serverRows ?? [])
         // The presentation list can omit a still-live minimized window. Retain
@@ -286,10 +325,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
         }
         let records: [BrowserWindowVisibilityRecord]
+        var reportedInventoryComplete = false
         if let session = spec.nativeWindowVisibilitySessionID,
            let rules = Self.currentRules(), rules.active, rules.hideDistractions,
            rules.nativeWindowVisibility, rules.isFresh(), rules.startupSessionID == session {
             records = visibilityCache?.records() ?? []
+            reportedInventoryComplete = visibilityCache?.lastReadComplete == true
         } else {
             records = []
         }
@@ -299,7 +340,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         if spec.startupWindowAnchor == nil, entries.contains(where: { $0.parking == true || $0.bootstrapEffectID != nil }) {
             entries = Self.restore(parkingOnly: true)
         }
-        reconcileBrowserWindows(records: records, windows: windows)
+        reconcileBrowserWindows(records: records, windows: windows, observedAt: recoveryObservationBegan, inventoryComplete: reportedInventoryComplete)
         refreshBrowserCoverage()
         guard mayEnforce else { return }
         var observations: [NativeVisibilityCoveragePolicy.Target: NativeVisibilityCoveragePolicy.Outcome] = [:]
@@ -370,6 +411,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let startupFailure = nativeCoverage.update(packet, now: now)
         let offscreenFailure = offscreenCoverage.update(nativeInventoryAvailable ? observations : nil, now: now)
         let failure = startupFailure ?? offscreenFailure
+        nativeRecoveryObservation = (recoveryObservationBegan,
+            nativeInventoryAvailable && failure == nil && observations.values.allSatisfy { $0 != .unresolved })
         if !wasReady || failure != nil || lastNativeObservations != observations {
             writeNativeCoverageDiagnostics(observations: observations, inventoryAvailable: nativeInventoryAvailable,
                 unidentifiedPIDs: unidentifiedPIDs, missingIdentityPIDs: missingIdentityPIDs, failure: failure)
@@ -389,6 +432,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
         publishAuxiliaryProofs(mayEnforce ? observedAuxiliaryProofs : [:])
         updateCoverageReady()
+        publishRecoveryCoverage()
     }
 
     private func hideNativeApplication(_ app: NSRunningApplication,
@@ -844,8 +888,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
                         }
                     }
                     self.applyBrowserCoverage(browser: sample.browser, observation: observation, began: now)
+                    if let state = self.coverageStates[sample.browser] {
+                        self.browserRecoveryObservations[sample.browser] = (now,
+                            observation != nil && state.inventoryFailureSince == nil && state.request == nil
+                                && state.pendingReported.isEmpty && state.cohort.initialResolved)
+                    }
                 }
                 self.updateCoverageReady()
+                self.publishRecoveryCoverage()
             }
         }
     }
@@ -1021,7 +1071,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
         return identity.windowID
     }
 
-    private func reconcileBrowserWindows(records: [BrowserWindowVisibilityRecord], windows: [WorkspaceWindow]) {
+    private func reconcileBrowserWindows(records: [BrowserWindowVisibilityRecord], windows: [WorkspaceWindow], observedAt: TimeInterval, inventoryComplete: Bool) {
+        reportedRecoveryObservation = (observedAt, false)
         // A newly connected profile can report an already-observed native-only
         // window. Its native ID is not new, but its report identity still needs
         // the same bounded, correlated discovery before normal enforcement.
@@ -1147,6 +1198,10 @@ public final class FocusVisibilityController: @unchecked Sendable {
         } else {
             enforcementPolicy = nextPolicy
         }
+        reportedRecoveryObservation = (observedAt, inventoryComplete && mayEnforce && failure == nil
+            && currentSession == spec.nativeWindowVisibilitySessionID && observations.allSatisfy {
+                $0.outcome == .verifiedMinimized || $0.outcome == .verifiedApplicationHidden || $0.outcome == .noLongerExists
+            })
         // Plan omission is not a reveal: Add As You Go leaves initial
         // distractions hidden until completion.
     }

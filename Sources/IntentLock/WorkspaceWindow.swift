@@ -267,6 +267,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
     private var snapshotStates: [String: SnapshotState] = [:] // worker queue only
     private var diagnosticsSignature = "" // worker queue only
     private var tabContinuity: [UInt32: TabBlurContinuity] = [:] // worker queue only
+    private var missionContinuity = MissionControlOutline.Continuity() // worker queue only
     private var panels: [NSPanel] = [] // main queue only
     private var scanCache: [UInt32: (key: String, at: Date, regions: [CGRect])] = [:] // worker queue
     public init() {}
@@ -288,6 +289,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         mutex.lock(); revision += 1; selection = QuickSelection(); preserveBehindIntentPanels = false; mutex.unlock()
         queue.async { [weak self] in
             self?.snapshotStates.removeAll(); self?.scanCache.removeAll(); self?.tabContinuity.removeAll()
+            self?.missionContinuity = MissionControlOutline.Continuity()
         }
         DispatchQueue.main.async { [weak self] in self?.panels.forEach { $0.orderOut(nil) }; self?.panels = [] }
     }
@@ -358,6 +360,9 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         mutex.unlock()
         let windows = WorkspaceWindow.list(onScreen: false)
         var markedRegions: [UInt32: [CGRect]] = [:]
+        var markedWindowIDs = Set<UInt32>()
+        var selectedTabCounts: [UInt32: Int] = [:]
+        var matchedSelectedTabs = Set<QuickSelectionTab>()
         let focused = WorkspaceWindow.focused()
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let presentationID = WorkspaceOutlinePresentation.windowID(
@@ -369,9 +374,19 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         // Resolve against current live windows, not a retained rectangle. A
         // hidden/destroyed mark must never float above the next application.
         let front = windows.first(where: { $0.id == presentationID })
-        let overviewVisible = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains {
-            $0[kCGWindowOwnerName as String] as? String == "Dock" && $0[kCGWindowLayer as String] as? Int == 20
+        var displayIDs = [CGDirectDisplayID](repeating: 0, count: 32)
+        var displayCount: UInt32 = 0
+        CGGetActiveDisplayList(32, &displayIDs, &displayCount)
+        let displayFrames = displayIDs.prefix(Int(displayCount)).map(CGDisplayBounds)
+        let overviewVisible = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains { row in
+            guard let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return false }
+            return displayFrames.contains { FocusForegroundPolicy.isMissionControlOverlay(
+                ownerName: row[kCGWindowOwnerName as String] as? String,
+                layer: row[kCGWindowLayer as String] as? Int, bounds: frame, displayBounds: $0) }
         }
+        let missionScan = overviewVisible ? MissionControlOutlineScanner.scan(overlayVisible: true)
+            : MissionControlOutline.Scan(status: .complete, present: false, dockIdentity: "", tiles: [])
         let selectedBrowsers = Set(selection.tabs.map(\.browser))
         snapshotStates = snapshotStates.filter { selectedBrowsers.contains($0.key) }
         var inventories: [String: WorkspaceOutlineInventory.Response] = [:]
@@ -390,6 +405,7 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         }
         for window in windows {
             if selection.marksNativeWindow(window.id, app: window.bundle) {
+                markedWindowIDs.insert(window.id)
                 markedRegions[window.id] = [window.frame]
                 continue
             }
@@ -402,12 +418,21 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
             matchedWindows += 1
             let tabs = (snapshot.allTabs ?? snapshot.tabs).filter { $0.windowID == id }
             let selectedIDs = Set(selection.tabs.filter { $0.browser == window.bundle }.map(\.id))
-            guard tabs.contains(where: { selectedIDs.contains($0.id) }) else { continue }
+            let selectedCount = tabs.filter { selectedIDs.contains($0.id) }.count
+            guard selectedCount > 0 else { continue }
+            markedWindowIDs.insert(window.id)
+            selectedTabCounts[window.id] = selectedCount
+            matchedSelectedTabs.formUnion(tabs.filter { selectedIDs.contains($0.id) }
+                .map { QuickSelectionTab(browser: window.bundle, id: $0.id) })
             if let whole = selection.browserWindowTabs[.init(browser: window.bundle, id: id)],
                !whole.isEmpty, whole.isSubset(of: selectedIDs), whole == Set(tabs.filter(QuickSelection.isSelectable).map(\.id)) {
                 markedRegions[window.id] = [window.frame]
                 continue
             }
+            // Mission Control represents windows, not tab-strip geometry. Its
+            // positively matched native window gets a contour plus tab count,
+            // even while the browser's tab AX tree is temporarily unavailable.
+            if missionScan.present { continue }
             // Selection/geometry changes refresh immediately; an unchanged tab strip
             // needs no full accessibility traversal on every animation tick.
             let key = "\(window.pid):\(process.launched):\(snapshot.browserSessionID ?? ""): \(window.frame):\(tabs.map { "\($0.id):\($0.index):\($0.title):\($0.active)" }):\(selectedIDs.sorted())"
@@ -442,31 +467,61 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         }
         scanCache = scanCache.filter { markedRegions[$0.key] != nil }
         tabContinuity = tabContinuity.filter { markedRegions[$0.key] != nil }
-        let selected = windows.filter { markedRegions[$0.id]?.isEmpty == false }
-        let mission = Self.missionRegions(selected: selected, all: windows, markedRegions: markedRegions)
-        let dockTransition = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []).contains {
-            $0[kCGWindowOwnerName as String] as? String == "Dock" && $0[kCGWindowLayer as String] as? Int == 20
+        let missionWindows = windows.map { window in
+            MissionControlOutline.Window(id: window.id, pid: window.pid,
+                launched: NSRunningApplication(processIdentifier: window.pid)?.launchDate?.timeIntervalSinceReferenceDate ?? 0,
+                bundle: window.bundle, title: window.title, selected: markedWindowIDs.contains(window.id),
+                selectedTabCount: selectedTabCounts[window.id])
+        }.sorted { $0.id < $1.id }
+        let mission = missionContinuity.update(missionScan, windows: missionWindows, revision: token,
+            now: ProcessInfo.processInfo.systemUptime)
+        struct RenderRegion {
+            let frame: CGRect
+            let browser: String?
+            let chromeTab: Bool
+            let mission: Bool
+            let badge: String?
+            let summary: String?
         }
-        let rectangles: [CGRect]
-        if let mission { rectangles = mission }
-        else if dockTransition { rectangles = [] }
-        else {
-            // A full-window border must not float across a window covering it.
-            // Render the focused marked window (or the still-visible window
-            // behind our staged modifier editor); Mission Control renders all marks.
-            rectangles = front.flatMap { markedRegions[$0.id] } ?? []
+        var regions: [RenderRegion]
+        if missionScan.present {
+            regions = mission.regions.map { .init(frame: $0.frame, browser: $0.window.bundle,
+                chromeTab: false, mission: true, badge: $0.badge, summary: nil) }
+            let unmatchedTabs = selection.tabs.subtracting(matchedSelectedTabs)
+                .filter { selection.wholeBrowserApps?.contains($0.browser) != true }.count
+            if mission.unresolvedCount > 0 || unmatchedTabs > 0, let display = displayFrames.first {
+                var counts: [String] = []
+                if mission.unresolvedCount > 0 { counts.append("\(mission.unresolvedCount) window\(mission.unresolvedCount == 1 ? "" : "s")") }
+                if unmatchedTabs > 0 { counts.append("\(unmatchedTabs) tab\(unmatchedTabs == 1 ? "" : "s")") }
+                let text = "Selected: " + counts.joined(separator: " · ")
+                let width = min(370, display.width - 32)
+                regions.append(.init(frame: CGRect(x: display.midX - width / 2, y: display.maxY - 70, width: width, height: 38),
+                    browser: nil, chromeTab: false, mission: false, badge: nil, summary: text))
+            }
+        } else {
+            // A full-window border must not float across a covering window.
+            // Shape belongs to each represented window, never the frontmost
+            // browser left behind while Mission Control owns the screen.
+            regions = (front.flatMap { markedRegions[$0.id] } ?? []).map { rect in
+                .init(frame: rect, browser: front?.bundle,
+                    chromeTab: front?.bundle == "com.google.Chrome" && rect != front?.frame
+                        && rect.height < 65 && rect.width > rect.height * 1.5,
+                    mission: false, badge: nil, summary: nil)
+            }
         }
         recordDiagnostics(["selectedTabCount": selection.tabs.count, "selectedWindowCount": selection.windowIDsByApp.values.reduce(0) { $0 + $1.count },
             "selectedBrowserCount": selectedBrowsers.count, "inventoryPhases": phases, "nativeWindowCount": windows.count,
             "presentationWindowID": presentationID.map { Int($0) } ?? 0, "matchedWindowCount": matchedWindows,
             "completeScanCount": completedScans, "partialScanCount": partialScans, "identityContradictionCount": contradictedScans,
-            "renderedRegionCount": rectangles.count])
+            "missionScanStatus": missionScan.status.rawValue, "missionVisitedCount": missionScan.visitedCount,
+            "missionMappedCount": mission.regions.count, "missionUnresolvedCount": mission.unresolvedCount,
+            "renderedRegionCount": regions.count])
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.mutex.lock(); let current = self.revision == token; self.mutex.unlock()
             guard current else { return }
-            while self.panels.count > rectangles.count { self.panels.removeLast().orderOut(nil) }
-            for (index, rect) in rectangles.enumerated() {
+            while self.panels.count > regions.count { self.panels.removeLast().orderOut(nil) }
+            for (index, region) in regions.enumerated() {
                 if index == self.panels.count {
                     let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                     panel.isOpaque = false; panel.backgroundColor = .clear; panel.ignoresMouseEvents = true; panel.hasShadow = false; panel.hidesOnDeactivate = false
@@ -477,64 +532,34 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                 let panel = self.panels[index]
                 if let view = panel.contentView as? WorkspaceMarkBorderView {
                     view.color = selection.accessMode == .blacklist ? .systemRed : .systemGreen
-                    view.chromeTab = front?.bundle == "com.google.Chrome" && rect.height < 65 && rect.width > rect.height * 1.5
+                    view.chromeTab = region.chromeTab
+                    view.missionControl = region.mission
+                    view.badge = region.badge
+                    view.summary = region.summary
                     view.needsDisplay = true
                 }
-                panel.setFrame(FocusBlurPolicy.appKitFrame(rect, primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height), display: false)
+                panel.setFrame(FocusBlurPolicy.appKitFrame(region.frame, primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height), display: false)
                 if !panel.isVisible { panel.orderFrontRegardless() }
             }
         }
     }
-    private static func missionRegions(selected: [WorkspaceWindow], all: [WorkspaceWindow], markedRegions: [UInt32: [CGRect]]) -> [CGRect]? {
-        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
-        let deadline = Date(timeIntervalSinceNow: 0.08)
-        func value(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
-            guard Date() < deadline else { return nil }; AXUIElementSetMessagingTimeout(element, 0.008)
-            var result: CFTypeRef?
-            return AXUIElementCopyAttributeValue(element, key as CFString, &result) == .success ? result : nil
-        }
-        func children(_ element: AXUIElement) -> [AXUIElement] { value(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] }
-        let app = AXUIElementCreateApplication(dock.processIdentifier)
-        guard let root = children(app).first(where: { value($0, kAXIdentifierAttribute) as? String == "mc" }) else { return nil }
-        let titles = Set(selected.filter { window in !window.title.isEmpty && all.filter { $0.title == window.title }.count == 1 }.map(\.title))
-        var pending = children(root); var index = 0; var result: [CGRect] = []
-        while index < pending.count && index < 400 && Date() < deadline {
-            let element = pending[index]; index += 1
-            if (value(element, kAXIdentifierAttribute) as? String ?? "").hasPrefix("mc.spaces") { continue }
-            let labels = [value(element, kAXTitleAttribute) as? String, value(element, kAXDescriptionAttribute) as? String].compactMap { $0 }
-            if labels.contains(where: titles.contains),
-               let position = value(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
-               let size = value(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() {
-                var point = CGPoint.zero; var dimensions = CGSize.zero
-                if AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point), AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &dimensions) {
-                    let frame = CGRect(origin: point, size: dimensions)
-                    if FocusBlurPolicy.valid(frame), let window = selected.first(where: { labels.contains($0.title) }) {
-                        // Scale just the tab chrome into the thumbnail; a selected tab
-                        // must never imply that the entire browser window was selected.
-                        for region in markedRegions[window.id] ?? [] {
-                            let source = window.frame
-                            let mapped = CGRect(x: frame.minX + (region.minX - source.minX) * frame.width / source.width,
-                                                y: frame.minY + (region.minY - source.minY) * frame.height / source.height,
-                                                width: region.width * frame.width / source.width,
-                                                height: region.height * frame.height / source.height)
-                            if mapped.width > 2 && mapped.height > 2 { result.append(mapped) }
-                        }
-                        continue
-                    }
-                }
-            }
-            pending.append(contentsOf: children(element).prefix(max(0, 400 - pending.count)))
-        }
-        return result
-    }
+
 }
 
 /// Thin, inset contours follow the tab chrome instead of boxing its hit target.
 private final class WorkspaceMarkBorderView: NSView {
     var color: NSColor = .systemGreen
     var chromeTab = false
+    var missionControl = false
+    var badge: String?
+    var summary: String?
     override func draw(_ dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 1.25, dy: 1.25)
+        if let summary {
+            drawLabel(summary, in: bounds.insetBy(dx: 1, dy: 1), summary: true)
+            return
+        }
+        let inset: CGFloat = missionControl ? 2 : 1.25
+        let rect = bounds.insetBy(dx: inset, dy: inset)
         guard rect.width > 0, rect.height > 0 else { return }
         let path: NSBezierPath
         if chromeTab {
@@ -552,6 +577,25 @@ private final class WorkspaceMarkBorderView: NSView {
         } else {
             path = NSBezierPath(roundedRect: rect, xRadius: min(8, rect.height / 4), yRadius: min(8, rect.height / 4))
         }
-        color.setStroke(); path.lineWidth = 1.5; path.stroke()
+        color.setStroke(); path.lineWidth = missionControl ? 3 : 1.5; path.stroke()
+        if let badge {
+            let height: CGFloat = 22
+            // Even a tiny thumbnail retains its visible contour. The badge
+            // shortens to the count if there is insufficient room for words.
+            let text = bounds.width < 125 ? badge.components(separatedBy: " ").first ?? badge : badge
+            let width = min(bounds.width - 8, (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold)]).width + 16)
+            if width > 12, bounds.height >= height + 6 {
+                drawLabel(text, in: CGRect(x: bounds.midX - width / 2, y: 4, width: width, height: height), summary: false)
+            }
+        }
+    }
+    private func drawLabel(_ text: String, in rect: CGRect, summary: Bool) {
+        NSColor.black.withAlphaComponent(0.82).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: min(10, rect.height / 2), yRadius: min(10, rect.height / 2)).fill()
+        let style = NSMutableParagraphStyle(); style.alignment = .center; style.lineBreakMode = .byTruncatingTail
+        let font = NSFont.systemFont(ofSize: summary ? 12 : 11, weight: .semibold)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: summary ? NSColor.white : color, .paragraphStyle: style]
+        let height = (text as NSString).size(withAttributes: attributes).height
+        (text as NSString).draw(in: CGRect(x: rect.minX + 5, y: rect.midY - height / 2, width: max(0, rect.width - 10), height: height), withAttributes: attributes)
     }
 }

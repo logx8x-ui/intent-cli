@@ -395,6 +395,7 @@ fi
 cp -f "$FIREFOX_SOURCE" "$FIREFOX_ASSET"
 cp -f "$ROOT/dist/chrome/intent-browser-guard-chrome-${CHROME_VERSION}.zip" "$DIST/Intent-Chrome-Extension.zip"
 
+APP_BINARY_SHA256="$(shasum -a 256 "$APP/Contents/MacOS/IntentApp" | awk '{print $1}')"
 DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 FIREFOX_SHA256="$(shasum -a 256 "$FIREFOX_ASSET" | awk '{print $1}')"
 CHROME_SHA256="$(shasum -a 256 "$DIST/Intent-Chrome-Extension.zip" | awk '{print $1}')"
@@ -416,6 +417,7 @@ cat > "$DIST/release-manifest.json" <<JSON
   "source_commit": "${SOURCE_COMMIT}",
   "source_dirty": ${SOURCE_DIRTY},
   "source_fingerprint": "${SOURCE_FINGERPRINT}",
+  "app_binary_sha256": "${APP_BINARY_SHA256}",
   "repository": "logx8x-ui/intent-cli",
   "tag": "launch-${VERSION}",
   "channel": "${BUILD_CHANNEL}",

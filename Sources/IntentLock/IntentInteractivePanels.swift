@@ -15,6 +15,12 @@ public final class IntentInteractivePanelRegions: @unchecked Sendable {
         entries[id] = frame.map { Entry(frame: $0, key: isKey) }
     }
 
+    /// Copy on the policy producer. The input tap never takes this UI-owned lock.
+    public func inputSnapshot() -> (regions: [CGRect], hasKeyboardFocus: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (entries.values.map(\.frame), entries.values.contains { $0.key })
+    }
+
     public func contains(_ point: CGPoint) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return entries.values.contains { $0.frame.contains(point) }
