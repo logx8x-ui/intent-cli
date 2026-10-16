@@ -126,4 +126,47 @@ func runRcmdCompatibilitySpecs() throws {
     _ = recoveredRead.unavailable(now: 1)
     try expect(recoveredRead.verified(now: 2) && !recoveredRead.expired(now: 100),
         "A matching original process/keymap can recover before the bounded deadline")
+    let inventoryCases: [(RcmdTapInventory, RcmdCompatibilityFailure?)] = [
+        (.init(available: false), .tapInventoryUnavailable),
+        (.init(available: true), .tapMissing),
+        (.init(available: true, ids: [9], disabled: [9]), .tapDisabled),
+        (.init(available: true, ids: [9], unsupported: [9]), .tapLocationUnsupported),
+        (.init(available: true, ids: [9]), nil)
+    ]
+    for (observation, expected) in inventoryCases {
+        try expect(observation.failure == expected,
+            "An unavailable inventory, missing tap, disabled tap and unsupported tap must not all report topology change")
+    }
+    try expect(snapshot.incompatibilityReason(with: replacement) == .processIdentityChanged,
+        "PID reuse must be reported as an exact process-lifetime change")
+    try expect(snapshot.incompatibilityReason(with: changedSnapshot) == .configurationChanged,
+        "A positive config change is distinct from unavailable live CLI data")
+    try expect(snapshot.incompatibilityReason(with: .inactive) == .processTerminated,
+        "A confirmed absent rcmd has a different reason from unknown process identity")
+    try expect(RcmdCompatibilitySnapshot.inactive.incompatibilityReason(with: snapshot) == .processStarted,
+        "A newly started rcmd invalidates the baseline with its own typed reason")
+    let otherTaps = RcmdCompatibilitySnapshot(processIdentity: identity, observedAtUptime: 101,
+        isCompatible: true, statusReason: nil, appTrigger: snapshot.appTrigger,
+        blockedTriggers: snapshot.blockedTriggers, appBundlesByKeyCode: snapshot.appBundlesByKeyCode,
+        tapIDs: [10], capturesCommandGrave: snapshot.capturesCommandGrave,
+        configurationFingerprint: snapshot.configurationFingerprint)
+    try expect(snapshot.incompatibilityReason(with: otherTaps) == .tapIDsChanged,
+        "A positively observed new tap ID must remain distinct from a disabled original tap")
+    for reason in [RcmdCompatibilityFailure.cliTimedOut, .cliCommandFailed, .keyboardLayoutChanged,
+                   .tapInventoryUnavailable, .schemaMalformed] {
+        let failure = RcmdCompatibilityDiagnostic(reason: reason, now: 101)
+        let unavailable = RcmdCompatibilitySnapshot(processIdentity: identity, observedAtUptime: 101,
+            isCompatible: false, statusReason: "unavailable", appTrigger: nil, blockedTriggers: [],
+            appBundlesByKeyCode: [:], tapIDs: [], capturesCommandGrave: false,
+            configurationFingerprint: "unavailable", diagnostic: failure)
+        try expect(snapshot.incompatibilityReason(with: unavailable) == reason,
+            "A failed observation cannot masquerade as a positive configuration or tap-ID change")
+    }
+    let many = Set((1...1_000).map(UInt32.init))
+    let bounded = RcmdCompatibilityDiagnostic(reason: .tapDisabled, now: 102,
+        expectedTapIDs: many, inventory: .init(available: true, ids: many, disabled: many, unsupported: many))
+    try expect(bounded.expectedTapIDs.count == 16 && bounded.observedTapIDs.count == 16
+        && bounded.disabledTapIDs.count == 16 && bounded.unsupportedTapIDs.count == 16
+        && bounded.observedTapCount == 1_000,
+        "Diagnostic arrays remain bounded while counts preserve the size of the observation")
 }

@@ -8,6 +8,7 @@ trap 'rm -rf "$WORK"' EXIT
 swiftc -parse-as-library \
   "$ROOT/Sources/IntentLock/NativeProcessLaunchDate.swift" \
   "$ROOT/Sources/IntentLock/RcmdKeyboardLayoutCache.swift" \
+  "$ROOT/Sources/IntentLock/RcmdCompatibilityDiagnostics.swift" \
   "$ROOT/Sources/IntentLock/RcmdInputPolicy.swift" \
   "$ROOT/Sources/IntentLock/RcmdCompatibilityMonitor.swift" \
   "$ROOT/scripts/test-rcmd-platform.swift" -o "$WORK/rcmd-platform-spec"

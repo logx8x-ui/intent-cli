@@ -585,6 +585,7 @@ public final class FocusLock {
 
     private func installEventTap() throws {
         rcmdSnapshot = RcmdCompatibilityMonitor.readCurrent()
+        if let diagnostic = rcmdSnapshot.diagnostic { recordHealth(.rcmdDiagnostic(diagnostic)) }
         guard rcmdSnapshot.isCompatible else { throw FocusLockError.eventTapUnavailable }
         let configuration = FocusInputConfiguration(restrictSwitching: spec.blockAppSwitching || spec.keepFocused,
             blockSystemCommands: shouldBlockSystemCommand,
@@ -618,7 +619,10 @@ public final class FocusLock {
                     guard let self, !self.isStopped else { return }
                     self.rcmdSnapshot = snapshot; self.refreshInputPolicy()
                 }
-            }, onInvalidated: { [weak self] _ in
+            }, onDiagnostic: { [weak self] diagnostic in
+                self?.recordHealth(.rcmdDiagnostic(diagnostic))
+            }, onInvalidated: { [weak self] diagnostic in
+                self?.recordHealth(.rcmdDiagnostic(diagnostic))
                 self?.requestSafetyStop(failure: .inputProtectionInterrupted(.inputTapUnavailable),
                     cause: .inputTapUnavailable, releaseSynchronously: false)
             })

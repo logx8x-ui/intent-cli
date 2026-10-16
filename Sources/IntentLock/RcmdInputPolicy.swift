@@ -49,6 +49,7 @@ public struct RcmdCompatibilitySnapshot: Equatable, Sendable {
     public let configurationFingerprint: String
     public let retryableFailure: Bool
     public let keyboardLayoutRevision: UInt64?
+    public let diagnostic: RcmdCompatibilityDiagnostic?
     public static let maximumAge: TimeInterval = 3
     public static let inactive = Self(processIdentity: nil, observedAtUptime: 0,
         isCompatible: true, statusReason: nil, appTrigger: nil, blockedTriggers: [],
@@ -57,7 +58,8 @@ public struct RcmdCompatibilitySnapshot: Equatable, Sendable {
     public init(processIdentity: RcmdProcessIdentity?, observedAtUptime: TimeInterval, isCompatible: Bool,
         statusReason: String?, appTrigger: RcmdModifierChord?, blockedTriggers: [RcmdModifierChord],
         appBundlesByKeyCode: [Int64: String], tapIDs: Set<UInt32>, capturesCommandGrave: Bool,
-        configurationFingerprint: String, retryableFailure: Bool = false, keyboardLayoutRevision: UInt64? = nil) {
+        configurationFingerprint: String, retryableFailure: Bool = false, keyboardLayoutRevision: UInt64? = nil,
+        diagnostic: RcmdCompatibilityDiagnostic? = nil) {
         self.processIdentity = processIdentity; self.observedAtUptime = observedAtUptime
         self.isCompatible = isCompatible; self.statusReason = statusReason; self.appTrigger = appTrigger
         self.blockedTriggers = blockedTriggers; self.appBundlesByKeyCode = appBundlesByKeyCode
@@ -65,13 +67,15 @@ public struct RcmdCompatibilitySnapshot: Equatable, Sendable {
         self.configurationFingerprint = configurationFingerprint
         self.retryableFailure = retryableFailure
         self.keyboardLayoutRevision = keyboardLayoutRevision
+        self.diagnostic = diagnostic
     }
 
     public func invalidated(_ reason: String, now: TimeInterval) -> Self {
         .init(processIdentity: processIdentity, observedAtUptime: now, isCompatible: false,
             statusReason: reason, appTrigger: appTrigger, blockedTriggers: blockedTriggers,
             appBundlesByKeyCode: [:], tapIDs: tapIDs, capturesCommandGrave: capturesCommandGrave,
-            configurationFingerprint: configurationFingerprint, keyboardLayoutRevision: keyboardLayoutRevision)
+            configurationFingerprint: configurationFingerprint, keyboardLayoutRevision: keyboardLayoutRevision,
+            diagnostic: diagnostic)
     }
 
     func usingKeyboardLayout(revision: UInt64) -> Self {
@@ -79,12 +83,23 @@ public struct RcmdCompatibilitySnapshot: Equatable, Sendable {
             statusReason: statusReason, appTrigger: appTrigger, blockedTriggers: blockedTriggers,
             appBundlesByKeyCode: appBundlesByKeyCode, tapIDs: tapIDs, capturesCommandGrave: capturesCommandGrave,
             configurationFingerprint: configurationFingerprint, retryableFailure: retryableFailure,
-            keyboardLayoutRevision: revision)
+            keyboardLayoutRevision: revision, diagnostic: diagnostic)
     }
 
     public func remainsCompatible(with current: Self) -> Bool {
         isCompatible && current.isCompatible && processIdentity == current.processIdentity
             && tapIDs == current.tapIDs && configurationFingerprint == current.configurationFingerprint
+    }
+
+    /// Explains the existing compatibility decision without changing it.
+    public func incompatibilityReason(with current: Self) -> RcmdCompatibilityFailure? {
+        if let reason = current.diagnostic?.reason { return reason }
+        if processIdentity == nil && current.processIdentity != nil { return .processStarted }
+        if processIdentity != nil && current.processIdentity == nil { return .processTerminated }
+        if processIdentity != current.processIdentity { return .processIdentityChanged }
+        if tapIDs != current.tapIDs { return .tapIDsChanged }
+        if configurationFingerprint != current.configurationFingerprint { return .configurationChanged }
+        return remainsCompatible(with: current) ? nil : .schemaUnsupported
     }
 }
 

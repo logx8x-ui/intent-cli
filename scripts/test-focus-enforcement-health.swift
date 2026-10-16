@@ -53,6 +53,27 @@ enum EnforcementHealthSpec {
             maxPendingActions: 4, coalescedActions: 9_000, schedulingDelayMilliseconds: 18))
         precondition(metrics.inputCallbackCount == 10_002 && metrics.maxInputSchedulingDelayMilliseconds == 18)
         precondition(metrics.maxCallbackMicroseconds == 220 && metrics.coalescedInputActions == 9_001)
+        var rcmdHealth = initial()
+        rcmdHealth.apply(.starting); rcmdHealth.apply(.ready)
+        let disabledInventory = RcmdTapInventory(available: true, ids: [9], disabled: [9])
+        var rcmdFailure = RcmdCompatibilityDiagnostic(reason: .tapDisabled, now: 15,
+            expectedTapIDs: [9], inventory: disabledInventory)
+        rcmdFailure.expectedPID = 71; rcmdFailure.observedPID = 71; rcmdFailure.lastVerifiedAtUptime = 14
+        for _ in 0..<100 { rcmdHealth.apply(.rcmdDiagnostic(rcmdFailure)) }
+        rcmdHealth.apply(.safetyStopped(.inputTapUnavailable)); rcmdHealth.apply(.completed)
+        precondition(rcmdHealth.rcmdDiagnostics?.count == 8 && rcmdHealth.rcmdDiagnostics?.last == rcmdFailure,
+            "The exact third-party failure must survive stop/cleanup in bounded history")
+        rcmdHealth.apply(.rcmdDiagnostic(.init(reason: .configurationChanged, now: 20)))
+        precondition(rcmdHealth.rcmdDiagnostics?.last == rcmdFailure, "Late diagnostics cannot overwrite the stopped occurrence")
+        let detailedData = try JSONEncoder().encode(rcmdHealth)
+        let detailedRoundtrip = try JSONDecoder().decode(FocusEnforcementHealth.self, from: detailedData)
+        precondition(detailedRoundtrip == rcmdHealth)
+        let detailedObject = try JSONSerialization.jsonObject(with: detailedData) as! [String: Any]
+        let diagnosticKeys = Set((detailedObject["rcmdDiagnostics"] as! [[String: Any]]).flatMap(\.keys))
+        let allowedDiagnosticKeys: Set<String> = ["reason", "precedingReason", "observedAtUptime", "lastVerifiedAtUptime",
+            "expectedPID", "observedPID", "expectedLaunch", "observedLaunch", "keyboardLayoutRevision", "inventoryAvailable",
+            "expectedTapCount", "observedTapCount", "expectedTapIDs", "observedTapIDs", "disabledTapIDs", "unsupportedTapIDs"]
+        precondition(diagnosticKeys.isSubset(of: allowedDiagnosticKeys), "No configuration/map/title/URL or raw error may be persisted")
         let sink = FocusEnforcementDiagnosticSink()
         let previous = sink.begin(initial())
         sink.record(.starting, owner: previous); sink.record(.ready, owner: previous)
@@ -73,7 +94,7 @@ enum EnforcementHealthSpec {
             "hideDistractions", "selectedWindowGroupCount", "startedAt", "updatedAt", "becameReady",
             "inputTapInstalled", "inputTapTimeoutCount", "inputTapDisabledCount", "blockedActivationCount",
             "blockedClickCount", "finish", "safetyStopCause", "inputRecoveryAttempts", "inputRecoverySuccesses",
-            "inputCallbackCount", "maxCallbackMicroseconds", "maxSnapshotAgeMilliseconds", "maxInputSchedulingDelayMilliseconds", "maxPendingInputActions", "coalescedInputActions"]
+            "inputCallbackCount", "maxCallbackMicroseconds", "maxSnapshotAgeMilliseconds", "maxInputSchedulingDelayMilliseconds", "maxPendingInputActions", "coalescedInputActions", "rcmdDiagnostics"]
         precondition(keys.isSubset(of: allowedKeys), "Diagnostics must contain only counts, flags and typed lifecycle state")
         for _ in 0..<1_000_005 { sink.record(.blockedClick, owner: current) }
         precondition(sink.snapshot()?.blockedClickCount == 1_000_000, "Long runs keep counters bounded")
@@ -84,6 +105,7 @@ enum EnforcementHealthSpec {
         for index in 0..<25 {
             var item = initial(); item.selectedWindowGroupCount = index
             let owner = persisted.begin(item)
+            persisted.record(.rcmdDiagnostic(rcmdFailure), owner: owner)
             persisted.record(.safetyStopped(.inputTapTimeout), owner: owner)
         }
         let historyURL = directory.appendingPathComponent("health.history.json")
@@ -97,6 +119,9 @@ enum EnforcementHealthSpec {
         precondition(history.count == 20, "Diagnostics retain a bounded set of separate occurrences")
         precondition((history.first?["health"] as? [String: Any])?["selectedWindowGroupCount"] as? Int == 5)
         precondition((history.last?["health"] as? [String: Any])?["safetyStopCause"] as? String == "inputTapTimeout")
+        let archivedRcmd = (history.last?["health"] as? [String: Any])?["rcmdDiagnostics"] as? [[String: Any]]
+        precondition(archivedRcmd?.last?["reason"] as? String == "tapDisabled",
+            "The typed reason must reach the persisted occurrence, not only the in-memory health snapshot")
         let attributes = try FileManager.default.attributesOfItem(atPath: historyURL.path)
         precondition((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
         var pending: [() -> Void] = []

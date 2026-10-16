@@ -10,7 +10,8 @@ import notify
 public final class RcmdCompatibilityMonitor {
     private let initialSnapshot: RcmdCompatibilitySnapshot
     private let onSnapshot: (RcmdCompatibilitySnapshot) -> Void
-    private let onInvalidated: (String) -> Void
+    private let onInvalidated: (RcmdCompatibilityDiagnostic) -> Void
+    private let onDiagnostic: (RcmdCompatibilityDiagnostic) -> Void
     private let queue = DispatchQueue(label: "intent.rcmd.compatibility", qos: .userInitiated)
     private let readQueue = DispatchQueue(label: "intent.rcmd.read", qos: .utility)
     private let lock = NSLock()
@@ -20,6 +21,8 @@ public final class RcmdCompatibilityMonitor {
     private var readInFlight = false
     private var lastReadStarted: TimeInterval = 0
     private var readRecovery = RcmdReadRecoveryPolicy()
+    private var lastVerified: RcmdCompatibilitySnapshot
+    private var lastReadFailure: RcmdCompatibilityDiagnostic?
     private var timer: DispatchSourceTimer?
     private var notificationTokens: [Int32] = []
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -27,8 +30,11 @@ public final class RcmdCompatibilityMonitor {
 
     public init(initialSnapshot: RcmdCompatibilitySnapshot,
         onSnapshot: @escaping (RcmdCompatibilitySnapshot) -> Void,
-        onInvalidated: @escaping (String) -> Void) {
+        onDiagnostic: @escaping (RcmdCompatibilityDiagnostic) -> Void = { _ in },
+        onInvalidated: @escaping (RcmdCompatibilityDiagnostic) -> Void) {
         self.initialSnapshot = initialSnapshot
+        lastVerified = initialSnapshot
+        self.onDiagnostic = onDiagnostic
         self.onSnapshot = onSnapshot; self.onInvalidated = onInvalidated
     }
 
@@ -50,7 +56,12 @@ public final class RcmdCompatibilityMonitor {
                     [weak self] notification in
                     guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                           app.bundleIdentifier == Self.bundleIdentifier else { return }
-                    self?.queue.async { [weak self] in self?.invalidate("rcmd process lifetime changed") }
+                    let reason: RcmdCompatibilityFailure = name == NSWorkspace.didLaunchApplicationNotification
+                        ? .processStarted : .processTerminated
+                    self?.queue.async { [weak self] in
+                        guard let self else { return }
+                        self.invalidate(self.evidence(reason, observed: Self.runningIdentity()))
+                    }
                 }
                 self.workspaceObservers.append(observer)
             }
@@ -88,7 +99,7 @@ public final class RcmdCompatibilityMonitor {
         guard isActive, !invalidated else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if readRecovery.expired(now: now) {
-            invalidate("rcmd connection could not be reverified within two seconds"); return
+            invalidate(readExpiredEvidence()); return
         }
         guard !readInFlight, now - lastReadStarted >= 1 else { return }
         // The absent case needs no CLI and keeps no third-party mappings alive.
@@ -105,19 +116,28 @@ public final class RcmdCompatibilityMonitor {
         guard isActive, !invalidated else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard !readRecovery.expired(now: now) else {
-            invalidate("rcmd connection could not be reverified within two seconds"); return
+            invalidate(readExpiredEvidence()); return
         }
         if current.retryableFailure, current.processIdentity == initialSnapshot.processIdentity {
             _ = readRecovery.unavailable(now: now)
+            var diagnostic = current.diagnostic ?? evidence(.cliCommandFailed, observed: current.processIdentity)
+            attachBaseline(to: &diagnostic)
+            lastReadFailure = diagnostic
+            onDiagnostic(diagnostic)
             // Keep input interception, but disable all mapped activations until
             // the original process, tap topology and configuration are reverified.
             onSnapshot(initialSnapshot.invalidated("rcmd connection is being reverified", now: now))
             return
         }
         guard initialSnapshot.remainsCompatible(with: current) else {
-            invalidate(current.statusReason ?? "rcmd configuration or input-tap lifetime changed"); return
+            var diagnostic = current.diagnostic ?? evidence(
+                initialSnapshot.incompatibilityReason(with: current) ?? .schemaUnsupported,
+                observed: current.processIdentity, inventory: .init(available: true, ids: current.tapIDs))
+            attachBaseline(to: &diagnostic)
+            invalidate(diagnostic); return
         }
         guard readRecovery.verified(now: now) else { return }
+        lastVerified = current; lastReadFailure = nil
         onSnapshot(current)
     }
 
@@ -125,22 +145,53 @@ public final class RcmdCompatibilityMonitor {
         guard isActive, !invalidated else { return }
         guard let identity = initialSnapshot.processIdentity else {
             if !NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).isEmpty {
-                invalidate("rcmd started after Intent's input tap")
+                invalidate(evidence(.processStarted, observed: Self.runningIdentity()))
             }
             return
         }
-        guard let actual = Self.runningIdentity(), actual == identity,
-              Self.filterTapIDs(pid: identity.pid) == initialSnapshot.tapIDs else {
-            invalidate("rcmd input-tap topology changed")
+        let actual = Self.runningIdentity()
+        guard actual == identity else {
+            let absent = NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).isEmpty
+            invalidate(evidence(actual == nil ? (absent ? .processTerminated : .processIdentityUnavailable)
+                : .processIdentityChanged, observed: actual))
             return
+        }
+        let inventory = Self.tapInventory(pid: identity.pid)
+        if let failure = inventory.failure { invalidate(evidence(failure, observed: actual, inventory: inventory)); return }
+        if inventory.ids != initialSnapshot.tapIDs {
+            invalidate(evidence(.tapIDsChanged, observed: actual, inventory: inventory))
         }
     }
 
-    private func invalidate(_ reason: String) {
+    private func evidence(_ reason: RcmdCompatibilityFailure, observed: RcmdProcessIdentity? = nil,
+                          inventory: RcmdTapInventory? = nil) -> RcmdCompatibilityDiagnostic {
+        var result = RcmdCompatibilityDiagnostic(reason: reason, now: ProcessInfo.processInfo.systemUptime,
+            expectedTapIDs: initialSnapshot.tapIDs, inventory: inventory)
+        result.observedPID = observed?.pid; result.observedLaunch = observed?.launched
+        attachBaseline(to: &result)
+        return result
+    }
+
+    private func attachBaseline(to diagnostic: inout RcmdCompatibilityDiagnostic) {
+        diagnostic.expectedPID = initialSnapshot.processIdentity?.pid
+        diagnostic.expectedLaunch = initialSnapshot.processIdentity?.launched
+        diagnostic.expectedTapCount = initialSnapshot.tapIDs.count
+        diagnostic.expectedTapIDs = Array(initialSnapshot.tapIDs.sorted().prefix(16))
+        diagnostic.lastVerifiedAtUptime = lastVerified.observedAtUptime
+        diagnostic.keyboardLayoutRevision = lastVerified.keyboardLayoutRevision
+    }
+
+    private func readExpiredEvidence() -> RcmdCompatibilityDiagnostic {
+        var result = evidence(.readVerificationExpired, observed: lastVerified.processIdentity)
+        result.precedingReason = lastReadFailure?.reason
+        return result
+    }
+
+    private func invalidate(_ diagnostic: RcmdCompatibilityDiagnostic) {
         guard isActive, !invalidated else { return }
         invalidated = true
-        onSnapshot(initialSnapshot.invalidated(reason, now: ProcessInfo.processInfo.systemUptime))
-        onInvalidated(reason)
+        onSnapshot(initialSnapshot.invalidated(diagnostic.reason.rawValue, now: ProcessInfo.processInfo.systemUptime))
+        onInvalidated(diagnostic)
     }
 
     /// Bounded off-callback discovery. Uses the app's bundled supported CLI,
@@ -156,27 +207,45 @@ public final class RcmdCompatibilityMonitor {
         guard apps.count == 1, let app = apps.first, let identity = runningIdentity(),
               let bundleURL = app.bundleURL else {
             return unavailable(identity: apps.first.map { .init(pid: $0.processIdentifier, launched: -1, version: "unknown") },
-                reason: "rcmd process identity is unavailable", now: now)
+                reason: .processIdentityUnavailable, now: now)
         }
         let cli = bundleURL.appendingPathComponent("Contents/SharedSupport/rcmdCLI")
+        var inventory: RcmdTapInventory?
+        var observedIdentity: RcmdProcessIdentity? = identity
+        var expectedTaps: Set<UInt32> = []
+        var decoding = false
         do {
-            guard identity.version == "3.4.0", let taps = filterTapIDs(pid: identity.pid), !taps.isEmpty,
-                  FileManager.default.isExecutableFile(atPath: cli.path) else { throw MonitorFailure.unsupported }
+            guard identity.version == "3.4.0" else { throw MonitorFailure.typed(.unsupportedVersion) }
+            let firstInventory = tapInventory(pid: identity.pid); inventory = firstInventory
+            if let failure = firstInventory.failure { throw MonitorFailure.typed(failure) }
+            let taps = firstInventory.ids; expectedTaps = taps
+            guard FileManager.default.isExecutableFile(atPath: cli.path) else { throw MonitorFailure.typed(.cliUnavailable) }
             guard let layout = RcmdKeyboardLayoutCache.shared.snapshot else { throw MonitorFailure.keyboardLayoutChanged }
             let status = try boundedCLI(cli, arguments: ["status", "--json"])
             let keys = try boundedCLI(cli, arguments: ["app", "debug", "keys", "--json"])
             let config = try boundedCLI(cli, arguments: ["config", "export", "--json"])
-            guard runningIdentity() == identity, filterTapIDs(pid: identity.pid) == taps else { throw MonitorFailure.changed }
+            observedIdentity = runningIdentity()
+            guard observedIdentity == identity else {
+                let absent = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty
+                throw MonitorFailure.typed(observedIdentity == nil
+                    ? (absent ? .processTerminated : .processIdentityUnavailable) : .processIdentityChanged)
+            }
+            let finalInventory = tapInventory(pid: identity.pid); inventory = finalInventory
+            if let failure = finalInventory.failure { throw MonitorFailure.typed(failure) }
+            guard finalInventory.ids == taps else { throw MonitorFailure.typed(.tapIDsChanged) }
             guard RcmdKeyboardLayoutCache.shared.isCurrent(layout.revision) else { throw MonitorFailure.keyboardLayoutChanged }
+            decoding = true
             return try RcmdSnapshotDecoder.decode(statusData: status, keysData: keys, configData: config,
                 identity: identity, tapIDs: taps, now: ProcessInfo.processInfo.systemUptime,
                 keyCodesByCharacter: layout.keyCodesByCharacter).usingKeyboardLayout(revision: layout.revision)
         } catch {
-            let retryable = (error as? MonitorFailure).map {
-                $0 == .timedOut || $0 == .commandFailed || $0 == .keyboardLayoutChanged
-            } ?? false
-            return unavailable(identity: identity, reason: "rcmd compatibility could not be verified (\(error))", now: now,
-                retryable: retryable)
+            let reason = Self.failureReason(error, decoding: decoding)
+            let retryable = [.cliTimedOut, .cliCommandFailed, .keyboardLayoutChanged].contains(reason)
+            var diagnostic = RcmdCompatibilityDiagnostic(reason: reason, now: ProcessInfo.processInfo.systemUptime,
+                expectedTapIDs: expectedTaps, inventory: inventory)
+            diagnostic.expectedPID = identity.pid; diagnostic.expectedLaunch = identity.launched
+            diagnostic.observedPID = observedIdentity?.pid; diagnostic.observedLaunch = observedIdentity?.launched
+            return unavailable(identity: identity, reason: reason, now: now, retryable: retryable, diagnostic: diagnostic)
         }
     }
 
@@ -191,12 +260,13 @@ public final class RcmdCompatibilityMonitor {
         return runningIdentity() == identity && filterTapIDs(pid: identity.pid) == snapshot.tapIDs
     }
 
-    private static func unavailable(identity: RcmdProcessIdentity?, reason: String, now: TimeInterval,
-        retryable: Bool = false) -> RcmdCompatibilitySnapshot {
-        .init(processIdentity: identity, observedAtUptime: now, isCompatible: false, statusReason: reason,
+    private static func unavailable(identity: RcmdProcessIdentity?, reason: RcmdCompatibilityFailure, now: TimeInterval,
+        retryable: Bool = false, diagnostic: RcmdCompatibilityDiagnostic? = nil) -> RcmdCompatibilitySnapshot {
+        .init(processIdentity: identity, observedAtUptime: now, isCompatible: false, statusReason: reason.rawValue,
             appTrigger: nil, blockedTriggers: ["rcmd", "ralt", "rctrl", "rshift"].compactMap(RcmdModifierChord.init(description:)),
             appBundlesByKeyCode: [:], tapIDs: [], capturesCommandGrave: true, configurationFingerprint: "unavailable",
-            retryableFailure: retryable)
+            retryableFailure: retryable,
+            diagnostic: diagnostic ?? .init(reason: reason, now: now))
     }
 
     private static func runningIdentity() -> RcmdProcessIdentity? {
@@ -209,12 +279,18 @@ public final class RcmdCompatibilityMonitor {
     }
 
     private static func filterTapIDs(pid: Int32) -> Set<UInt32>? {
+        let observation = tapInventory(pid: pid)
+        return observation.failure == nil ? observation.ids : nil
+    }
+
+    private static func tapInventory(pid: Int32) -> RcmdTapInventory {
         var count: UInt32 = 0
-        guard CGGetEventTapList(0, nil, &count) == .success, count > 0, count <= 512 else { return nil }
+        guard CGGetEventTapList(0, nil, &count) == .success, count <= 512 else { return .init(available: false) }
+        if count == 0 { return .init(available: true) }
         var list = Array(repeating: CGEventTapInformation(), count: Int(count) + 16)
         var actual: UInt32 = 0
         guard CGGetEventTapList(UInt32(list.count), &list, &actual) == .success,
-              Int(actual) <= list.count else { return nil }
+              Int(actual) <= list.count else { return .init(available: false) }
         let keyboardMask = [CGEventType.keyDown, .keyUp, .flagsChanged].reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
         let relevant = list.prefix(Int(actual)).filter {
             $0.tappingProcess == pid && $0.eventsOfInterest & keyboardMask != 0
@@ -222,11 +298,33 @@ public final class RcmdCompatibilityMonitor {
         }
         // A HID-level switcher runs before a session tap and cannot be promised
         // preventive interception by this architecture. Do not silently accept it.
-        guard !relevant.isEmpty, relevant.allSatisfy({ $0.tapPoint == .cgSessionEventTap && $0.enabled }) else { return nil }
-        return Set(relevant.map(\.eventTapID))
+        return .init(available: true, ids: Set(relevant.map(\.eventTapID)),
+            disabled: Set(relevant.filter { !$0.enabled }.map(\.eventTapID)),
+            unsupported: Set(relevant.filter { $0.tapPoint != .cgSessionEventTap }.map(\.eventTapID)))
     }
 
-    private enum MonitorFailure: Error, Equatable { case unsupported, changed, timedOut, outputTooLarge, commandFailed, keyboardLayoutChanged }
+    private enum MonitorFailure: Error { case typed(RcmdCompatibilityFailure), timedOut, outputTooLarge, commandFailed, keyboardLayoutChanged }
+
+    private static func failureReason(_ error: Error, decoding: Bool) -> RcmdCompatibilityFailure {
+        if let error = error as? MonitorFailure {
+            switch error {
+            case .typed(let reason): return reason
+            case .timedOut: return .cliTimedOut
+            case .outputTooLarge: return .cliOutputTooLarge
+            case .commandFailed: return .cliCommandFailed
+            case .keyboardLayoutChanged: return .keyboardLayoutChanged
+            }
+        }
+        if let error = error as? RcmdSnapshotDecoder.Failure {
+            switch error {
+            case .malformed: return .schemaMalformed
+            case .unsupported: return .schemaUnsupported
+            case .identityChanged: return .schemaIdentityMismatch
+            case .ambiguousKey: return .ambiguousKeys
+            }
+        }
+        return decoding ? .schemaMalformed : .cliLaunchFailed
+    }
 
     private static func boundedCLI(_ executable: URL, arguments: [String]) throws -> Data {
         let process = Process(), output = Pipe()

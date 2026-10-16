@@ -42,6 +42,7 @@ public struct FocusEnforcementHealth: Codable, Equatable {
     public var coalescedInputActions: Int? = 0
     public var finish: Finish?
     public var safetyStopCause: FocusLockSafetyStopCause?
+    public var rcmdDiagnostics: [RcmdCompatibilityDiagnostic]?
 
     public init(accessMode: String, requiresEnforcement: Bool, hideDistractions: Bool,
                 selectedWindowGroupCount: Int, now: Date = Date()) {
@@ -60,6 +61,7 @@ public struct FocusEnforcementHealth: Codable, Equatable {
         case inputBatch(samples: Int, maxDurationMicroseconds: Double, maxSnapshotAgeMilliseconds: Double, maxPendingActions: Int, coalescedActions: Int, schedulingDelayMilliseconds: Double)
         case finished(Finish)
         case safetyStopped(FocusLockSafetyStopCause)
+        case rcmdDiagnostic(RcmdCompatibilityDiagnostic)
         case completed
     }
 
@@ -105,6 +107,10 @@ public struct FocusEnforcementHealth: Codable, Equatable {
         case .inputWorkCoalesced:
             coalescedInputActions = min(1_000_000_000, (coalescedInputActions ?? 0) + 1)
         case .finished(let reason): finish = reason; phase = .stopped
+        case .rcmdDiagnostic(let diagnostic):
+            var entries = rcmdDiagnostics ?? []
+            entries.append(diagnostic)
+            rcmdDiagnostics = Array(entries.suffix(8))
         case .safetyStopped(let cause):
             let alreadyRecordedTimeout = phase == .recovering
             safetyStopCause = cause; finish = .safety; phase = .stopped
