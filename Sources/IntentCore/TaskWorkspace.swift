@@ -35,20 +35,28 @@ public struct TaskWorkspaceTask: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+public struct TaskWorkspaceSize: Codable, Equatable, Sendable {
+    public var width: Double
+    public var height: Double
+    public init(width: Double, height: Double) { self.width = width; self.height = height }
+}
+
 public struct TaskWorkspaceFolder: Identifiable, Codable, Equatable, Sendable {
     public static let inboxID = "general"
     public var id: String
     public var title: String
     public var position: TaskWorkspacePosition
+    public var size: TaskWorkspaceSize?
     public var tasks: [TaskWorkspaceTask]
     public var isInbox: Bool { id == Self.inboxID }
 
     public init(id: String = UUID().uuidString, title: String,
                 position: TaskWorkspacePosition = .init(x: 0.04, y: 0.05),
-                tasks: [TaskWorkspaceTask] = []) {
+                tasks: [TaskWorkspaceTask] = [], size: TaskWorkspaceSize? = nil) {
         self.id = id
         self.title = title
         self.position = position
+        self.size = size
         self.tasks = tasks
     }
 }
@@ -88,6 +96,14 @@ public struct TaskWorkspaceDocument: Codable, Equatable, Sendable {
     public mutating func moveFolder(id: String, position: TaskWorkspacePosition) throws {
         let index = try folderIndex(id)
         folders[index].position = .init(x: position.x, y: position.y)
+    }
+
+    public mutating func setFolderFrame(id: String, position: TaskWorkspacePosition, size: TaskWorkspaceSize) throws {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+              size.width <= 10000, size.height <= 10000 else { throw TaskWorkspaceError.invalidDocument }
+        let index = try folderIndex(id)
+        folders[index].position = position
+        folders[index].size = size
     }
 
     public mutating func removeFolder(id: String) throws {
@@ -155,6 +171,10 @@ public struct TaskWorkspaceDocument: Codable, Equatable, Sendable {
                   folder.position.x.isFinite, folder.position.y.isFinite,
                   (0...1).contains(folder.position.x), (0...1).contains(folder.position.y) else {
                 throw TaskWorkspaceError.invalidDocument
+            }
+            if let size = folder.size {
+                guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+                      size.width <= 10000, size.height <= 10000 else { throw TaskWorkspaceError.invalidDocument }
             }
             for task in folder.tasks {
                 guard !task.id.isEmpty, taskIDs.insert(task.id).inserted,

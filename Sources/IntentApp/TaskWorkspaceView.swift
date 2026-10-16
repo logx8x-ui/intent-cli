@@ -3,8 +3,16 @@ import SwiftUI
 import UniformTypeIdentifiers
 import IntentCore
 
+private struct TaskWorkspaceActiveKey: EnvironmentKey { static let defaultValue = true }
+extension EnvironmentValues {
+    var taskWorkspaceActive: Bool {
+        get { self[TaskWorkspaceActiveKey.self] }
+        set { self[TaskWorkspaceActiveKey.self] = newValue }
+    }
+}
+
 /// A content page hosted over the overview's existing desktop wallpaper. The
-/// caller owns channel gating, the two/three-finger gesture and the selection draft.
+/// caller owns channel gating, the two-finger gesture and the selection draft.
 @MainActor
 struct TaskWorkspaceView: View {
     @StateObject private var model: TaskWorkspaceViewModel
@@ -58,6 +66,7 @@ struct TaskWorkspaceView: View {
                         }.frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
                     }
                 }
+                .coordinateSpace(name: "TaskWorkspaceDesktop")
                 .onAppear { canvasSize = geometry.size }
                 .onChange(of: geometry.size) { canvasSize = $0 }
             }
@@ -95,7 +104,7 @@ struct TaskWorkspaceView: View {
                     Label("Choose apps", systemImage: "arrow.left").font(.system(size: 13, weight: .medium))
                         .padding(.horizontal, 14).padding(.vertical, 10)
                 }.buttonStyle(.plain).background(.ultraThinMaterial, in: Capsule())
-                    .help("Return to your intention, or swipe right with two or three fingers")
+                    .help("Return to your intention, or swipe right with two fingers")
                 Spacer(minLength: 0)
                 VStack(spacing: 3) {
                     Text("Make room for what matters.").font(.system(size: 26, weight: .regular, design: .serif))
@@ -195,14 +204,17 @@ private struct TaskWorkspaceNotepad: View {
     let onBringForward: () -> Void
     @State private var dragOrigin: CGPoint?
     @State private var dragOffset = CGSize.zero
+    @State private var resizeOrigin: CGRect?
+    @State private var resizeFrame: CGRect?
     @State private var titleDraft = ""
     @State private var showCompleted = true
     @State private var dropTargeted = false
     @State private var folderDropTargeted = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    private var card: CGSize { TaskWorkspaceGeometry.cardSize(in: canvas) }
+    private var card: CGSize { resizeFrame?.size ?? TaskWorkspaceGeometry.cardSize(in: canvas, saved: folder.size) }
     private var origin: CGPoint {
+        if let resizeFrame { return resizeFrame.origin }
         let saved = TaskWorkspaceGeometry.origin(for: folder.position, canvas: canvas, card: card)
         let moved = CGPoint(x: (dragOrigin ?? saved).x + dragOffset.width,
                             y: (dragOrigin ?? saved).y + dragOffset.height)
@@ -277,8 +289,9 @@ private struct TaskWorkspaceNotepad: View {
         .onDrop(of: [TaskWorkspaceTransfer.type], isTargeted: $folderDropTargeted) { providers in
             TaskWorkspaceTransfer.accept(providers) { model.moveTask($0, to: folder.id) }
         }
+        .overlay { resizeHandles }
         .offset(x: origin.x, y: origin.y)
-        .onHover { if $0 { onBringForward() } }
+        .simultaneousGesture(TapGesture().onEnded { onBringForward() })
         .onChange(of: isRenaming) { if $0 { titleDraft = folder.title } }
         .onAppear { titleDraft = folder.title }
         .accessibilityElement(children: .contain)
@@ -323,7 +336,7 @@ private struct TaskWorkspaceNotepad: View {
                 .help("Close this list; tasks stay saved")
                 .accessibilityLabel("Close \(folder.title) list")
         }.padding(.horizontal, 18).frame(height: 61).contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 5)
+            .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named("TaskWorkspaceDesktop"))
                 .onChanged { gesture in
                     guard !isRenaming else { return }
                     if dragOrigin == nil {
@@ -335,10 +348,41 @@ private struct TaskWorkspaceNotepad: View {
                 .onEnded { _ in
                     guard dragOrigin != nil else { return }
                     let final = TaskWorkspaceGeometry.position(for: origin, canvas: canvas, card: card)
+                    model.moveFolder(folder.id, to: final)
                     dragOrigin = nil
                     dragOffset = .zero
-                    model.moveFolder(folder.id, to: final)
                 })
+    }
+
+    private var resizeHandles: some View {
+        ZStack {
+            ForEach(Array(TaskWorkspaceGeometry.Corner.allCases.enumerated()), id: \.offset) { _, corner in
+                Color.clear.contentShape(Rectangle()).frame(width: 24, height: 24)
+                    .overlay(alignment: .center) {
+                        if corner == .bottomRight {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 9)).foregroundStyle(.white.opacity(0.4)).allowsHitTesting(false)
+                        }
+                    }
+                    .position(x: corner.left ? 12 : card.width - 12, y: corner.top ? 12 : card.height - 12)
+                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("TaskWorkspaceDesktop"))
+                        .onChanged { value in
+                            if resizeOrigin == nil {
+                                onBringForward()
+                                resizeOrigin = CGRect(origin: origin, size: card)
+                            }
+                            if let start = resizeOrigin {
+                                resizeFrame = TaskWorkspaceGeometry.resized(start, corner: corner,
+                                    translation: value.translation, canvas: canvas)
+                            }
+                        }
+                        .onEnded { _ in
+                            if let frame = resizeFrame { model.resizeFolder(folder.id, frame: frame, canvas: canvas) }
+                            resizeOrigin = nil; resizeFrame = nil
+                        })
+                    .accessibilityLabel("Resize \(folder.title) from \(String(describing: corner))")
+            }
+        }
     }
 
     private func finishRename() {
@@ -447,6 +491,7 @@ private struct TaskWorkspaceComposer: View {
     @State private var loaded = false
     @State private var cancelled = false
     @State private var saved = false
+    @Environment(\.taskWorkspaceActive) private var workspaceActive
 
     private var mention: TaskWorkspaceMention? {
         mentionDismissed ? nil : TaskWorkspaceMention.parse(text)
@@ -514,18 +559,21 @@ private struct TaskWorkspaceComposer: View {
                 linkedID = initialLinkedID
             }
             loaded = true
-        }.onDisappear {
-                onEditingChanged(fieldID, false)
-                if loaded, !cancelled, !saved, let draft = model.draft(for: fieldID) {
-                    // Save on departure when possible. A failure leaves the
-                    // exact draft in the shared model for the next appearance.
-                    // A folder-removal transaction may already have consumed
-                    // this draft; never recreate it from the disappearing view.
-                    if !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        _ = model.saveDraft(for: fieldID, using: onSave)
-                    }
-                }
-            }
+        }.onChange(of: workspaceActive) { active in
+            if !active { persistOnDeparture() }
+        }.onDisappear { persistOnDeparture() }
+    }
+
+    private func persistOnDeparture() {
+        onEditingChanged(fieldID, false)
+        guard loaded, !cancelled, !saved, let draft = model.draft(for: fieldID),
+              !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // Pages stay mounted during a swipe. A departure still has the same
+        // atomic-save semantics as the former view disappearance, and failures
+        // retain the shared draft rather than displaying an empty editor.
+        if model.saveDraft(for: fieldID, using: onSave) {
+            text = ""; linkedID = nil; saved = initiallyFocused
+        }
     }
 
     private var mentionMenu: some View {

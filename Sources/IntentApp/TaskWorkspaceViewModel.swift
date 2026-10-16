@@ -69,6 +69,12 @@ final class TaskWorkspaceViewModel: ObservableObject {
         change { try $0.moveFolder(id: id, position: position) }
     }
 
+    func resizeFolder(_ id: String, frame: CGRect, canvas: CGSize) {
+        change { try $0.setFolderFrame(id: id,
+            position: TaskWorkspaceGeometry.position(for: frame.origin, canvas: canvas, card: frame.size),
+            size: .init(width: frame.width, height: frame.height)) }
+    }
+
     func removeFolder(_ id: String) {
         guard let folder = document.folders.first(where: { $0.id == id }) else { return }
         let addField = "add:" + id
@@ -164,8 +170,22 @@ final class TaskWorkspaceViewModel: ObservableObject {
 /// Positions describe the available travel of a whole card, not the screen.
 /// Changing display size therefore keeps its title, input and controls reachable.
 enum TaskWorkspaceGeometry {
-    static func cardSize(in canvas: CGSize) -> CGSize {
-        CGSize(width: min(330, max(1, canvas.width)), height: min(420, max(1, canvas.height)))
+    static func cardSize(in canvas: CGSize, saved: TaskWorkspaceSize? = nil) -> CGSize {
+        CGSize(width: min(max(280, saved?.width ?? 330), max(1, canvas.width)),
+               height: min(max(260, saved?.height ?? 420), max(1, canvas.height)))
+    }
+
+    enum Corner: CaseIterable { case topLeft, topRight, bottomLeft, bottomRight
+        var left: Bool { self == .topLeft || self == .bottomLeft }
+        var top: Bool { self == .topLeft || self == .topRight }
+    }
+    static func resized(_ start: CGRect, corner: Corner, translation: CGSize, canvas: CGSize) -> CGRect {
+        let minimum = CGSize(width: min(280, canvas.width), height: min(260, canvas.height))
+        let left = corner.left ? max(0, min(start.maxX - minimum.width, start.minX + translation.width)) : start.minX
+        let top = corner.top ? max(0, min(start.maxY - minimum.height, start.minY + translation.height)) : start.minY
+        let right = corner.left ? start.maxX : min(canvas.width, max(start.minX + minimum.width, start.maxX + translation.width))
+        let bottom = corner.top ? start.maxY : min(canvas.height, max(start.minY + minimum.height, start.maxY + translation.height))
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
     }
 
     static func origin(for position: TaskWorkspacePosition, canvas: CGSize, card: CGSize) -> CGPoint {

@@ -32,6 +32,22 @@ enum TaskWorkspaceChecks {
                 }
             }
         }
+        let resizeCanvas = CGSize(width: 1224, height: 800)
+        let start = CGRect(x: 150, y: 120, width: 330, height: 420)
+        for corner in TaskWorkspaceGeometry.Corner.allCases {
+            for delta in [CGSize(width: 60, height: 50), CGSize(width: -2000, height: -2000), CGSize(width: 2000, height: 2000)] {
+                let resized = TaskWorkspaceGeometry.resized(start, corner: corner, translation: delta, canvas: resizeCanvas)
+                try check(CGRect(origin: .zero, size: resizeCanvas).contains(resized)
+                    && resized.width >= 280 && resized.height >= 260, "Every resize corner keeps controls reachable and enforces minimum size")
+                try check((corner.left ? resized.maxX == start.maxX : resized.minX == start.minX)
+                    && (corner.top ? resized.maxY == start.maxY : resized.minY == start.minY),
+                    "Resizing anchors the opposite corner without drift")
+                let position = TaskWorkspaceGeometry.position(for: resized.origin, canvas: resizeCanvas, card: resized.size)
+                let restored = TaskWorkspaceGeometry.origin(for: position, canvas: resizeCanvas, card: resized.size)
+                try check(abs(restored.x - resized.minX) < 0.001 && abs(restored.y - resized.minY) < 0.001,
+                    "Committing a drag/resize does not jump from its last live position")
+            }
+        }
         let canvas = CGSize(width: 1224, height: 590)
         let card = TaskWorkspaceGeometry.cardSize(in: canvas)
         let first = TaskWorkspaceFolder(title: "General", position: .init(x: 0.04, y: 0.05))

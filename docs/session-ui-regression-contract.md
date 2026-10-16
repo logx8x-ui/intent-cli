@@ -127,7 +127,7 @@ with another delayed activation or an independent copy of session state.
   verified ownership through a bounded transition, then enforce normally. Do not
   solve an allowed-window false failure by permitting excluded windows or by
   suppressing a genuine persistent coverage failure. Test both selection paths.
-- The task workspace is exposed only in Test Intent. Its three-finger page swipe
+- The task workspace is exposed only in Test Intent. Its two-finger page swipe
   is scoped to Intent's overview and must not replace system Space navigation or
   text input. Selecting a task opens overview with its task name; linked saved
   intentions resolve by exact ID and do not auto-run. A missing/deleted link must
@@ -222,7 +222,7 @@ display geometry, and actual browser profile + extension version if involved.
 | Completion colour, duration, Reduce Motion, lock/sleep | Two bounded edge traces meet/fade; mouse/typing still reaches foreground app; no replay on unlock |
 | Apple Mission Control after SBT start | Enter Apple's Mission Control; click the allowed window to return. The same occurrence remains active, no failure notice or crash occurs, and an excluded ordinary app still cannot become usable. Repeat on the same Space, another Space, an empty Space and a sibling browser window. |
 | Apple Mission Control after DBT start | Repeat the preceding sequence from a double-backtick selection. Record exact allowed window/tab IDs before entry and after click return; Control-Tab, physical Caps Run, Escape and finish retain their original behavior. |
-| Test Intent task workspace | Physically swipe left with three fingers in Intent overview, use the page button as fallback, then swipe back. Rename/add/complete tasks, move tasks within/across cards, drag cards, remove/undo tasks and reopen the app. Names, positions, completion and links persist. |
+| Test Intent task workspace | Physically swipe left with two fingers in Intent overview, use the page button as fallback, then swipe back. Rename/add/complete tasks, move tasks within/across cards, drag cards, remove/undo tasks and reopen the app. Names, positions, completion and links persist. |
 | Saved-intention mentions and channel isolation | Choose an `@` suggestion, rename/delete the underlying saved intention, then open its task. The exact remaining preset is loaded with the task name without auto-running; a deleted link cannot guess a replacement. Confirm neither task page, gesture interception nor task-data writes appear in launch Intent. |
 
 Check foreground identity again after delayed callbacks have had time to finish,

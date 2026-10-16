@@ -30,6 +30,20 @@ final class QuickSelectionController: ObservableObject {
     var includesWebsiteAdder: Bool { IntentBuildPolicy.current.includesWebsiteAdder }
     var includesTaskWorkspace: Bool { IntentBuildPolicy.current.includesTaskWorkspace }
     @Published private(set) var taskWorkspaceVisible = false
+    @Published private(set) var pageSwipeProgress: CGFloat = 0
+    func updatePageSwipe(_ progress: CGFloat, settling: Bool) {
+        guard canShowTaskWorkspace, panel?.isVisible == true, !settingsOpen, optionsSection == nil,
+              !nativeFinderOwnsInput else { pageSwipeProgress = 0; return }
+        let bounded = taskWorkspaceVisible ? min(0, progress) : max(0, progress)
+        if settling {
+            withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .interactiveSpring(response: 0.32, dampingFraction: 0.9)) {
+                pageSwipeProgress = bounded
+            }
+        } else {
+            var transaction = Transaction(); transaction.disablesAnimations = true
+            withTransaction(transaction) { pageSwipeProgress = bounded }
+        }
+    }
     private var taskWorkspaceEditing = false
     lazy var taskWorkspaceModel = TaskWorkspaceViewModel()
 
@@ -54,8 +68,11 @@ final class QuickSelectionController: ObservableObject {
     func handlePageSwipe(_ direction: OverviewPageSwipe.Direction) {
         guard includesTaskWorkspace, panel?.isVisible == true, !settingsOpen, optionsSection == nil,
               !nativeFinderOwnsInput else { return }
-        if direction == .left { showTaskWorkspace() }
-        else if taskWorkspaceVisible { returnFromTaskWorkspace() }
+        withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .interactiveSpring(response: 0.32, dampingFraction: 0.9)) {
+            if direction == .left { showTaskWorkspace() }
+            else if taskWorkspaceVisible { returnFromTaskWorkspace() }
+            pageSwipeProgress = 0
+        }
     }
     func chooseWorkspaceTask(_ task: TaskWorkspaceTask) {
         guard includesTaskWorkspace, !model.hasActiveSession else { return }
@@ -1150,7 +1167,10 @@ final class QuickSelectionController: ObservableObject {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = .clear; panel.isOpaque = false
         let content = OverviewPageHostingView(rootView: QuickSelectionView(controller: self))
-        if includesTaskWorkspace { content.onPageSwipe = { [weak self] in self?.handlePageSwipe($0) } }
+        if includesTaskWorkspace {
+            content.onPageSwipe = { [weak self] in self?.handlePageSwipe($0) }
+            content.onPageProgress = { [weak self] in self?.updatePageSwipe($0, settling: $1) }
+        }
         // The desktop is the viewport. Intrinsic SwiftUI content must never
         // grow a borderless panel beyond it or push its controls off-screen.
         content.sizingOptions = []
@@ -1736,7 +1756,7 @@ final class QuickSelectionController: ObservableObject {
     }
     private func close() {
         panel?.makeFirstResponder(nil)
-        taskWorkspaceVisible = false; taskWorkspaceEditing = false
+        taskWorkspaceVisible = false; taskWorkspaceEditing = false; pageSwipeProgress = 0
         browserSetupSuspended = false
         closing = true
         savedRestorationGeneration = UUID()
@@ -2055,14 +2075,18 @@ private struct QuickSelectionView: View {
                     else { Color.black }
                 }.frame(width: geometry.size.width, height: geometry.size.height).clipped().allowsHitTesting(false)
                 Color.black.opacity(0.12).allowsHitTesting(false)
-                if controller.taskWorkspaceVisible && controller.includesTaskWorkspace {
+                if controller.includesTaskWorkspace {
                     TaskWorkspaceView(viewModel: controller.taskWorkspaceModel, savedIntentions: model.savedSlots,
                         onChooseTask: controller.chooseWorkspaceTask, onBack: controller.returnFromTaskWorkspace,
                         onEditingChanged: controller.setTaskWorkspaceEditing)
+                        .environment(\.taskWorkspaceActive, controller.taskWorkspaceVisible)
                         .padding(.top, controller.topSafeInset)
                         .frame(width: geometry.size.width, height: geometry.size.height)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                } else {
+                        .offset(x: (1 - (controller.taskWorkspaceVisible ? 1 : 0) - controller.pageSwipeProgress) * geometry.size.width)
+                        .allowsHitTesting(controller.taskWorkspaceVisible && controller.pageSwipeProgress == 0)
+                        .accessibilityHidden(!controller.taskWorkspaceVisible)
+                }
+                ZStack(alignment: .topLeading) {
                 OverviewChromeLayout {
                     OverviewHeader(controller: controller, model: model, showClock: showClock,
                                    topSafeInset: controller.topSafeInset, width: geometry.size.width)
@@ -2113,11 +2137,13 @@ private struct QuickSelectionView: View {
                         source: CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2 - 200),
                         target: CGPoint(x: menu.midX, y: menu.minY + 110)).id(transfer.id)
                 }
-                }
+                }.offset(x: -((controller.taskWorkspaceVisible ? 1 : 0) + controller.pageSwipeProgress) * geometry.size.width)
+                    .allowsHitTesting(!controller.taskWorkspaceVisible && controller.pageSwipeProgress == 0)
+                    .accessibilityHidden(controller.taskWorkspaceVisible)
                 RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.8), lineWidth: 3).padding(3)
                     .shadow(color: accent.opacity(0.65), radius: 10).allowsHitTesting(false)
             }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: controller.taskWorkspaceVisible)
+                .animation(reduceMotion ? nil : .interactiveSpring(response: 0.32, dampingFraction: 0.9), value: controller.taskWorkspaceVisible)
                 .clipped().foregroundStyle(.white).preferredColorScheme(.dark)
                 .coordinateSpace(name: "IntentOverview")
                 .onPreferenceChange(IntentionFramePreference.self) { intentionFrames = $0 }

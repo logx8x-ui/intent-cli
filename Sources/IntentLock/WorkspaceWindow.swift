@@ -98,7 +98,18 @@ public struct WorkspaceWindow {
         var standardElements: [AXUIElement] = []
         var minimizedIndices = Set<Int>()
         func failed(_ stage: String) -> CoverageObservation? {
-            let diagnostic: [String: Any] = ["stage": stage, "browser": bundleIdentifier,
+            let comparisons: [[String: Any]] = standard.enumerated().map { index, row in
+                let priorIDs = (prior?.anchors ?? [:]).filter { CFEqual($0.value, standardElements[index]) }.map { $0.key }
+                return ["index": index, "minimized": minimizedIndices.contains(index),
+                    "priorWindowIDs": priorIDs.map { $0.windowID },
+                    "axFrame": [row.frame.minX, row.frame.minY, row.frame.width, row.frame.height],
+                    "native": native.filter { priorIDs.contains($0.identity) }.map { item in
+                        ["id": item.identity.windowID,
+                         "titleMatches": BrowserWindowMatching.sameWindowTitle(item.title, row.title),
+                         "frame": [item.frame.minX, item.frame.minY, item.frame.width, item.frame.height]] as [String: Any]
+                    }]
+            }
+            let diagnostic: [String: Any] = ["comparisons": comparisons, "stage": stage, "browser": bundleIdentifier,
                 "recordedAt": Date().timeIntervalSince1970, "nativeCount": native.count,
                 "standardCount": standard.count, "minimizedCount": minimizedIndices.count,
                 "candidateCounts": standard.map { BrowserWindowCoveragePolicy.candidates($0, native: native).count }]

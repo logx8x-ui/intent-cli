@@ -50,6 +50,17 @@ func runTaskWorkspaceSpecs() throws {
     try expect(workspace.task(id: words)?.title == "Review Korean words"
         && workspace.task(id: words)?.isCompleted == false,
                "Editing or reopening a completed task does not create a duplicate")
+    try workspace.setFolderFrame(id: korean, position: .init(x: 0.2, y: 0.3), size: .init(width: 510, height: 370))
+    let roundTrip = try JSONDecoder().decode(TaskWorkspaceDocument.self, from: JSONEncoder().encode(workspace))
+    try expect(roundTrip == workspace && roundTrip.folders.first(where: { $0.id == korean })?.size == .init(width: 510, height: 370),
+        "Resized notes preserve dimensions, position, tasks and links after reopening")
+    let legacy = Data(#"{"schemaVersion":1,"folders":[{"id":"general","title":"General","position":{"x":0.1,"y":0.2},"tasks":[]}]}"#.utf8)
+    let legacyDocument = try JSONDecoder().decode(TaskWorkspaceDocument.self, from: legacy)
+    try legacyDocument.validate()
+    try expect(legacyDocument.folders[0].size == nil, "Existing task files without dimensions retain their default size")
+    try rejects(.invalidDocument, "Invalid resize cannot corrupt the saved workspace") {
+        try workspace.setFolderFrame(id: korean, position: .init(x: 0, y: 0), size: .init(width: .nan, height: 100))
+    }
     try workspace.removeFolder(id: korean)
     try expect(workspace.folders.first(where: { $0.id == inbox })?.tasks.map(\.id) == [words]
         && workspace.task(id: words)?.linkedIntentionID == "renamed-preset",

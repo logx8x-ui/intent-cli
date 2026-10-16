@@ -402,6 +402,21 @@ private func runCoverageAnchorSpecs() throws {
     try expect(closedNative?.isEmpty == true, "Missing native lifetime cannot retain prior anchor proof")
     try expect(Policy.continuingAnchors(native: [selected, old], standard: [standard("Study"), standard()], previous: [old.identity: "study-AX"],
         current: ["study-AX", "old-AX"], equal: ==) == nil, "An equal token with incompatible current title/frame is not a valid anchor")
+    for changed in [Policy.StandardWindow(bundleIdentifier: browser, processIdentity: process,
+                        title: "New title after navigation", frame: frame),
+                    Policy.StandardWindow(bundleIdentifier: browser, processIdentity: process,
+                        title: "New Tab", frame: frame.offsetBy(dx: 30, dy: 20))] {
+        let continued = Policy.continuingAnchors(native: [old], standard: [changed],
+            previous: [old.identity: "old-AX"], current: ["old-AX"], equal: ==)
+        try expect(continued == [0: old.identity]
+            && Policy.standardIdentityBindings(native: [old], standard: [changed], anchors: continued ?? [:]) == [old.identity],
+            "SBT and DBT coverage retain a proven same AX window across one asynchronous metadata change")
+        try expect(Policy.standardIdentities(native: [old], standard: [changed]) == nil,
+            "Partial metadata cannot identify a cold or replacement window")
+        try expect(Policy.continuingAnchors(native: twins, standard: [changed],
+            previous: [old.identity: "old-AX"], current: ["old-AX"], equal: ==) == nil,
+            "Ambiguous partial matches cannot retain an old window anchor")
+    }
     let restoreBounds = Policy.StandardWindow(bundleIdentifier: browser, processIdentity: process,
         title: "Put aside by Intent - Google Chrome", frame: CGRect(x: 0, y: 39, width: 1710, height: 1073))
     let hiddenAnchor = Policy.continuingAnchors(native: [old], standard: [restoreBounds],

@@ -178,10 +178,30 @@ public enum BrowserWindowCoveragePolicy {
         standard: [StandardWindow], minimizedIndices: Set<Int>, offscreenIdentities: Set<NativeIdentity>) -> Bool {
         guard standard.indices.contains(index) else { return false }
         if candidates(standard[index], native: native).contains(identity) { return true }
+        // An already proven, still-equal AX object can outlive asynchronous
+        // title or geometry updates on return from Mission Control. Require a
+        // unique current partial match and reject any complete contradictory
+        // match. This is continuity only: cold/replacement windows still need
+        // the complete bidirectional title-and-frame match above.
+        let row = standard[index]
+        let complete = candidates(row, native: native)
+        if complete.isEmpty, identity.isValid, row.processIdentity.isValid, validFrame(row.frame) {
+            let partial = native.filter { item in
+                item.identity.isValid && validFrame(item.frame)
+                    && item.identity.bundleIdentifier == row.bundleIdentifier
+                    && item.identity.pid == row.processIdentity.pid
+                    && item.identity.launched == row.processIdentity.launched
+                    && (BrowserWindowMatching.sameWindowTitle(item.title, row.title)
+                        || (abs(item.frame.minX - row.frame.minX) <= 3
+                            && abs(item.frame.minY - row.frame.minY) <= 3
+                            && abs(item.frame.width - row.frame.width) <= 3
+                            && abs(item.frame.height - row.frame.height) <= 3))
+            }
+            if partial.count == 1, partial[0].identity == identity { return true }
+        }
         // Chrome can retain AX restore bounds/title while WindowServer reports
         // the minimized backing surface. Only a previously bound, still-equal
         // live AX object may use this path; it cannot discover a new identity.
-        let row = standard[index]
         return minimizedIndices.contains(index) && offscreenIdentities.contains(identity)
             && identity.isValid && row.processIdentity.isValid
             && row.bundleIdentifier == identity.bundleIdentifier
