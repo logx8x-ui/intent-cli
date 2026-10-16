@@ -494,10 +494,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
         if allowsOffscreenVerification {
             let allRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
             let visibleRows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
-            if NativeWindowBindingInventory.isOffscreen(windowID: window.id, pid: window.pid,
-                allRows: allRows, onScreenRows: visibleRows) == true,
+            let offscreen = NativeWindowBindingInventory.isOffscreen(windowID: window.id, pid: window.pid,
+                allRows: allRows, onScreenRows: visibleRows)
+            if offscreen == true,
                mayEnforce, !app.isTerminated, app.bundleIdentifier == window.bundle, app.intentVisibilityLaunchDate == launched {
-                nativeDiagnosticTargets[target] = ["stage": "verifiedOffscreen", "onScreen": false]
+                nativeDiagnosticTargets[target] = ["stage": "verifiedOffscreen", "onScreen": false,
+                    "serverLayer": allRows?.first(where: { $0[kCGWindowNumber as String] as? UInt32 == window.id
+                        && $0[kCGWindowOwnerPID as String] as? pid_t == window.pid })?[kCGWindowLayer as String] ?? NSNull()]
                 return .offscreen
             }
         }

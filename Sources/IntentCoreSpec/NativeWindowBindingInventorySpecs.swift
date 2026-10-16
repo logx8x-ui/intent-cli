@@ -36,12 +36,38 @@ func runNativeWindowBindingInventorySpecs() throws {
     try expect(Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [blocked, selected]) == false,
         "Returning from Mission Control to the sibling immediately invalidates offscreen proof")
     var changedLayer = blocked; changedLayer[kCGWindowLayer as String] = 3
+    try expect(Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [changedLayer], onScreenRows: []) == true,
+        "A tracked surface changing to layer three remains positively offscreen without losing its exact identity")
+    try expect(Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [changedLayer], onScreenRows: [changedLayer]) == false,
+        "A nonzero-layer surface becoming visible immediately loses its offscreen proof")
+    // Actual Messages failure: an admitted sibling changes layer and disappears
+    // from the overview/AX enumeration, but its native lifetime remains present.
+    // Feed the real parser through the tracking policy; later visibility must
+    // still require hiding rather than silently dropping the obligation.
+    let tracked = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: "com.apple.MobileSMS",
+        pid: pid, launched: 123, windowID: 110)
+    var tracker = NativeOffscreenWindowCoveragePolicy()
+    for (time, inventory, visible) in [(0.0, [blocked], [[String: Any]]()),
+                                      (4.0, [changedLayer], [[String: Any]]()),
+                                      (8.0, [changedLayer], [[String: Any]]())] {
+        let outcome: NativeVisibilityCoveragePolicy.Outcome = Inventory.isOffscreen(
+            windowID: 110, pid: pid, allRows: inventory, onScreenRows: visible) == true ? .offscreen : .unresolved
+        try expect(tracker.update([tracked: outcome], now: time) == nil && tracker.targets.contains(tracked),
+            "Layer migration cannot time out an offscreen sibling or retire its monitoring")
+    }
+    let returned: NativeVisibilityCoveragePolicy.Outcome = Inventory.isOffscreen(
+        windowID: 110, pid: pid, allRows: [changedLayer], onScreenRows: [changedLayer]) == true ? .offscreen : .unresolved
+    try expect(tracker.update([tracked: returned], now: 9) == nil,
+        "A now-visible surface must regain hiding within the bounded deadline")
+    try expect(tracker.update([tracked: returned], now: 9 + NativeVisibilityCoveragePolicy.deadline)?.reason == .hidingUnconfirmed,
+        "A visible excluded surface still fails closed if hiding cannot be confirmed")
+    var noLayer = blocked; noLayer.removeValue(forKey: kCGWindowLayer as String)
     var missingOnScreenIdentity = selected; missingOnScreenIdentity.removeValue(forKey: kCGWindowOwnerPID as String)
     for proof in [
         Inventory.isOffscreen(windowID: 110, pid: pid, allRows: nil, onScreenRows: []),
         Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: nil),
         Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [selected], onScreenRows: []),
-        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [changedLayer], onScreenRows: []),
+        Inventory.isOffscreen(windowID: 110, pid: pid, allRows: [noLayer], onScreenRows: []),
         Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [row(110, owner: 616)]),
         Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [missingOnScreenIdentity]),
         Inventory.isOffscreen(windowID: 110, pid: pid, allRows: rows, onScreenRows: [selected, selected]),
