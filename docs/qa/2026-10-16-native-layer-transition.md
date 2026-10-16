@@ -41,3 +41,27 @@ physical acceptance is failed, not pending or passed. No tester promotion.
 Automated gate Fc9JTi passed all six suites on exact source fingerprint
 `cd56d5a78f63e778d58368dc8a109585196715c91230aa188cd357474bd166db`.
 Regression evidence is retained locally in dist/qa-20261016-layer-transition.
+
+## Installed follow-up
+
+- Local Test Intent installed, signature verified, UUID
+  `6B45509C-E8A2-309E-9F3D-2C0805CC8641` (development).
+- Local launch Intent installed, signature verified, UUID
+  `5421833A-0E1F-373C-9596-173996B08FAA` (launch).
+- Test Intent overview prepared Messages 7256, ChatGPT 4129 and the existing
+  Chrome tab. Startup reached enforcing with zero unresolved native windows.
+  This differs from the failed run's ChatGPT selection 4105, but uses the same
+  Messages process and selected main window. Existing tabs were not created,
+  closed or navigated for this smoke test.
+- Read-only 40-second WindowServer observation sees Messages surface 7257 still
+  present on layer 3, offscreen. The session remained enforcing for several
+  minutes. This does not prove that the user performed the requested physical
+  Mission Control transitions; that acceptance remains pending.
+- Source repair published as `0fb0730` on `codex/selected-resource-lifetime`.
+- Temporary Test session ended by explicit automation Quit after approximately
+  four minutes, with finish cause requested. No automatic safety stop observed
+  during this installed smoke test. Physical gesture result was not received.
+- Signed/notarized/stapled launch 0.9.6 / 202610160002 built from this source;
+  all three direct packages and DMG passed verify-release.sh. System installer
+  is prepared at protected SecurityAgent authentication; user action requested.
+  Root app remains 0.9.5 until that approval completes and version is rechecked.
