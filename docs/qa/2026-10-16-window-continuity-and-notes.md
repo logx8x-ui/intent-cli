@@ -58,3 +58,36 @@ acceptance is implied by source tests.
 - Root `/Applications/Intent.app` was verified as 0.9.4 build 202610150002, so the
   earlier installer approval did eventually complete. That package predates this
   turn's continuity change and is not evidence for the new fix.
+
+## Final source and installed evidence
+
+- Code commit: `02bc479`; source-only publication `9da6496` on
+  `codex/selected-resource-lifetime`.
+- Exact source fingerprint:
+  `89ca4a43387206b078774f03dc752376c6cb08e4f319c2f4ae0c9ef0486646f4`.
+- Final gate `LMT1Sw`: source, session, Swift, extension, native host and release
+  suites all exit 0. Receipt retained in `dist/qa-20261016-mission-control-notes`.
+- Both local apps installed; deep/strict signatures verified. Test binary UUID
+  `1F13E787-A4B3-36D5-8843-A22672A71A0F`; launch binary UUID
+  `406B6AD9-0173-341C-B706-85C4ADCC14F7`. Stable home Applications paths and
+  respective development/launch channels verified.
+- Installed Test Intent: created a disposable empty list, dragged its header
+  upward by 615 screen pixels, then resized bottom-right, top-left, top-right
+  and bottom-left. Saved dimensions progressed 330x420 -> 400x470 -> 420x490 ->
+  440x510 -> 460x530 points. No page navigation occurred during pointer drags.
+- Entered a task draft and clicked Choose apps without submitting; returning
+  to Tasks showed exactly one saved task and retained the resized card. Removed
+  the disposable task and list through UI and confirmed no QA list remained.
+  Existing user lists/tasks were preserved. Test Intent was then quit normally.
+- Built signed ARM64 launch 0.9.5 / 202610160001. Firefox, Chrome, Both packages
+  and DMG notarized/stapled; `verify-release.sh` passed. Artifacts retained under
+  `dist/private-candidate-202610160001`. This is package integrity evidence,
+  not release acceptance.
+- System-wide update is at the macOS protected installer authorization prompt.
+  Computer Use explicitly denied SecurityAgent; user action requested. Do not
+  report `/Applications/Intent.app` updated until version/build verification.
+- Still pending: physical two-finger left/right feel and three-finger rejection;
+  physical SBT and DBT -> Apple Mission Control -> return to allowed Chrome
+  window in both installed channels. Automated coverage does not close these.
+- Downloads remain disabled. Chrome store approval, complete hosted installer
+  journey, and runtime physical acceptance remain separate release blockers.
