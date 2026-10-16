@@ -91,3 +91,21 @@ acceptance is implied by source tests.
   window in both installed channels. Automated coverage does not close these.
 - Downloads remain disabled. Chrome store approval, complete hosted installer
   journey, and runtime physical acceptance remain separate release blockers.
+
+## System installation follow-up
+
+- User approved installer authentication. Verified `/Applications/Intent.app`
+  version 0.9.5, build 202610160001, deep/strict codesign success, ARM64 UUID
+  `406B6AD9-0173-341C-B706-85C4ADCC14F7`, and running process from that exact path.
+  Installed launch overview is visible; Test-only Tasks control is absent.
+- Chrome profile reported Browser Guard 0.2.46 with a fresh native snapshot.
+  First overview startup failed at `activation-confirmation`: exact target active,
+  fresh matching session, but `windowFocused: false`. This is distinct from the
+  reported post-Mission-Control continuity failure. No extension reload was done.
+- Controlled retry omitted immediate Intent AX inspection during asynchronous
+  activation. Chrome-only startup reached `becameReady: true`, enforcing, with
+  zero tap timeouts/disabled counts and no new coverage-failure receipt. Chrome
+  page remained accessible. Automation or concurrent foreground interaction may
+  have influenced the first attempt; causality is not established.
+- Physical Mission Control return requested with that session running. SBT/DBT
+  physical acceptance remains pending; do not promote this candidate yet.
