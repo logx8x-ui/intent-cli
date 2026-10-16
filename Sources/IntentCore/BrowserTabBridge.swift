@@ -137,6 +137,17 @@ public struct BrowserTabSnapshot: Codable, Equatable {
         let required = [BrowserGuardCapability.tabSessionIdentity, .quickSelection, .nativeWindowVisibility]
         return required.allSatisfy { guardCapabilities?.contains($0.rawValue) == true }
     }
+
+    /// Request receipts have their own files and observation dates. Renewing a
+    /// receipt does not change the ordinary inventory or its owning connection.
+    public func hasSameInventory(as other: BrowserTabSnapshot) -> Bool {
+        browserBundleIdentifier == other.browserBundleIdentifier
+            && browserSessionID == other.browserSessionID && browserProfileID == other.browserProfileID
+            && browserProcessIdentity == other.browserProcessIdentity
+            && guardEnabled == other.guardEnabled && guardVersion == other.guardVersion
+            && guardCapabilities == other.guardCapabilities
+            && tabs == other.tabs && allTabs == other.allTabs
+    }
 }
 
 public struct BrowserTabCommand: Codable, Equatable, Identifiable {

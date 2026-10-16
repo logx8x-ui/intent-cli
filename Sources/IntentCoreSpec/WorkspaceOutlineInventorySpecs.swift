@@ -28,6 +28,29 @@ func runWorkspaceOutlineInventorySpecs() throws {
     var old = reply; old.updatedAt = now.addingTimeInterval(-0.1)
     try expect(request.resolve(replies: [old], current: [owner], processes: [process], now: now) == nil,
         "A retained pre-request sidecar never substitutes for a new discovery reply")
+    var changedAfterReply = reply
+    changedAfterReply.updatedAt = now.addingTimeInterval(0.2)
+    changedAfterReply.allTabs = [BrowserTabItem(id: 9, windowID: 44, index: 0, title: "Replacement", url: "https://example.org", active: true)]
+    try expect(request.resolve(replies: [reply], current: [changedAfterReply], processes: [process], now: now.addingTimeInterval(0.3)) == nil,
+        "A newer changed ordinary inventory invalidates an older correlated outline receipt")
+    var partialAfterReply = changedAfterReply
+    partialAfterReply.allTabs = nil
+    var moved = tab; moved.windowID = 45
+    partialAfterReply.tabs = [moved]
+    try expect(request.resolve(replies: [reply], current: [partialAfterReply], processes: [process], now: now.addingTimeInterval(0.3)) == nil,
+        "A newer positive partial row moving the selected tab invalidates its older full outline receipt")
+    var resized = tab; resized.windowFrame = .init(left: 10, top: 20, width: 800, height: 600)
+    partialAfterReply.tabs = [resized]
+    try expect(request.resolve(replies: [reply], current: [partialAfterReply], processes: [process], now: now.addingTimeInterval(0.3)) == nil,
+        "A positive changed native frame contradicts an older receipt even without allTabs")
+    partialAfterReply.tabs = [tab]
+    let unchangedPartial = request.resolve(replies: [reply], current: [partialAfterReply], processes: [process], now: now.addingTimeInterval(0.3))
+    try expect(unchangedPartial?.profiles.first?.updatedAt == reply.updatedAt,
+        "An unchanged partial row retains only the original receipt observation date")
+    partialAfterReply.tabs = []
+    let emptyPartial = request.resolve(replies: [reply], current: [partialAfterReply], processes: [process], now: now.addingTimeInterval(0.3))
+    try expect(emptyPartial?.snapshot.allTabs == [tab] && emptyPartial?.profiles.first?.updatedAt == reply.updatedAt,
+        "An empty partial placeholder neither proves absence nor renews outline freshness")
     try expect(request.resolve(replies: [reply], current: [owner], processes: [process], now: now.addingTimeInterval(3.2)) == nil,
         "Expired replies cannot renew a staged tab outline")
     var replacement = owner; replacement.browserProfileID = "replacement"
@@ -66,6 +89,45 @@ func runWorkspaceOutlineInventorySpecs() throws {
     try expect(continuity.update(nil, context: "selection:profile:process", authoritative: true,
         now: now.addingTimeInterval(0.2)) == nil,
         "Native process or profile ownership loss clears the inventory immediately")
+
+    var budget = WorkspaceOutlineInventory.RefreshBudget()
+    try expect(budget.needsQuery(observationsChanged: false, now: now), "The first outline inventory is queried immediately")
+    budget.requested(at: now)
+    for tick in 1...3 {
+        try expect(!budget.needsQuery(observationsChanged: false, now: now.addingTimeInterval(Double(tick) * 0.35)),
+            "AX geometry ticks do not force unchanged full inventories back onto disk")
+    }
+    try expect(budget.needsQuery(observationsChanged: false, now: now.addingTimeInterval(1.41)),
+        "An unchanged outline refreshes within its explicit query budget")
+    try expect(budget.needsQuery(observationsChanged: true, now: now.addingTimeInterval(0.1)),
+        "Changed observed inventory bypasses the ordinary query interval")
+    var receiptOnly = owner
+    receiptOnly.updatedAt = now.addingTimeInterval(1)
+    receiptOnly.profileDiscoveryRequestIDs = ["another-reader"]
+    try expect(WorkspaceOutlineInventory.observationsMatch([owner], [receiptOnly]),
+        "Receipt dates and request IDs do not themselves invalidate unchanged ordinary inventory")
+    try expect(!WorkspaceOutlineInventory.observationsMatch([reply], [changedAfterReply])
+        && !WorkspaceOutlineInventory.observationsMatch([owner], [replacement])
+        && !WorkspaceOutlineInventory.observationsMatch([owner], [disabled])
+        && !WorkspaceOutlineInventory.observationsMatch([owner], []),
+        "Tab, profile, guard and owner disappearance changes invalidate cached marks immediately")
+    let ceiling = WorkspaceOutlineInventory.RefreshBudget.maximumConfirmedAge
+    _ = continuity.update(response, context: "bounded-query", authoritative: true, now: now, maxAge: ceiling)
+    try expect(continuity.update(nil, context: "bounded-query", authoritative: false,
+        now: now.addingTimeInterval(1.75), maxAge: ceiling) != nil,
+        "A verified outline survives its bounded background query without frame-by-frame full snapshots")
+    try expect(continuity.update(nil, context: "bounded-query", authoritative: false,
+        now: now.addingTimeInterval(ceiling + 0.01), maxAge: ceiling) == nil,
+        "Silent or unknown inventory cannot renew a green outline past the fixed ceiling")
+    _ = continuity.update(response, context: "late-receipt", authoritative: true,
+        now: now.addingTimeInterval(1.8), maxAge: ceiling)
+    try expect(continuity.update(nil, context: "late-receipt", authoritative: false,
+        now: now.addingTimeInterval(ceiling + 0.11), maxAge: ceiling) == nil,
+        "A late receipt cannot restart the freshness ceiling at reader arrival time")
+    _ = continuity.update(empty, context: "bounded-query", authoritative: true, now: now, maxAge: ceiling)
+    try expect(continuity.update(nil, context: "bounded-query", authoritative: false,
+        now: now.addingTimeInterval(ceiling + 0.01), maxAge: ceiling) == nil,
+        "Confirmed empty inventory also expires instead of becoming permanent absence authority")
 
     var other = owner; other.browserSessionID = "outline-b"; other.browserProfileID = "profile-b"
     let nonce = BrowserProfileSnapshots.nonce([owner, other])!

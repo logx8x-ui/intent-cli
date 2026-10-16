@@ -263,6 +263,8 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         var context = ""
         var request: WorkspaceOutlineInventory.Request?
         var continuity = WorkspaceOutlineInventory.Continuity()
+        var refreshBudget = WorkspaceOutlineInventory.RefreshBudget()
+        var observedOwners: [BrowserTabSnapshot]?
     }
     private var snapshotStates: [String: SnapshotState] = [:] // worker queue only
     private var diagnosticsSignature = "" // worker queue only
@@ -305,6 +307,15 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
         let context = "\(expected):\(proof):\(selection.tabs.filter { $0.browser == browser }.map(\.id).sorted())"
         var state = snapshotStates[browser] ?? SnapshotState()
         if state.context != context { state = SnapshotState(); state.context = context }
+        let observationsChanged = state.observedOwners.map {
+            !WorkspaceOutlineInventory.observationsMatch($0, owners)
+        } ?? true
+        state.observedOwners = owners
+        if observationsChanged {
+            // A newer observation (including removal, focus, frame, guard or
+            // profile changes) cannot retain an older green while polling.
+            state.continuity = WorkspaceOutlineInventory.Continuity()
+        }
         var accepted: WorkspaceOutlineInventory.Response?
         var authoritative = false
         var phase = "query-pending"
@@ -325,7 +336,8 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                 }
             }
         }
-        if state.request == nil {
+        if observationsChanged && accepted == nil { state.request = nil }
+        if state.request == nil && state.refreshBudget.needsQuery(observationsChanged: observationsChanged, now: now) {
             if let request = WorkspaceOutlineInventory.Request(browser: browser, expectedSession: expected,
                 owners: owners, processes: processes, now: now) {
                 do {
@@ -337,10 +349,12 @@ public final class WorkspaceOutlineController: @unchecked Sendable {
                         try JSONEncoder().encode(command).write(to: path, options: .atomic)
                     }
                     state.request = request
+                    state.refreshBudget.requested(at: now)
                 } catch { phase = "query-write-failed" }
             } else { authoritative = true; accepted = nil; phase = "owner-unavailable" }
         }
-        let response = state.continuity.update(accepted, context: context, authoritative: authoritative, now: now)
+        let response = state.continuity.update(accepted, context: context, authoritative: authoritative, now: now,
+            maxAge: WorkspaceOutlineInventory.RefreshBudget.maximumConfirmedAge)
         snapshotStates[browser] = state
         return (response, phase)
     }

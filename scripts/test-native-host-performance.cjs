@@ -78,3 +78,9 @@ try {
 } finally {
   fs.rmSync(intentDir, { recursive: true, force: true });
 }
+
+const profileBudget = spawnSync(process.execPath, [path.join(__dirname, 'test-native-host-write-budget.cjs')], {
+  env: {...process.env, INTENT_NATIVE_HOST_PATH: hostPath}, encoding: 'utf8', timeout: 40000
+});
+assert.equal(profileBudget.status, 0, profileBudget.stderr || profileBudget.error?.message);
+process.stdout.write(profileBudget.stdout);

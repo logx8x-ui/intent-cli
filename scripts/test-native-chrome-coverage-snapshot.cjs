@@ -38,7 +38,9 @@ child.stdout.on('data', chunk=>{
 child.stderr.resume();
 const file=path.join(directory,'browser-tabs-com-google-Chrome.json');
 const coverageFile=path.join(directory,'browser-tabs-com-google-Chrome.coverage-profile-'+crypto.createHash('sha256').update(profile).digest('hex').slice(0,24)+'.json');
+const discoveryFile=path.join(directory,'browser-tabs-com-google-Chrome.discovery-profile-'+crypto.createHash('sha256').update(profile).digest('hex').slice(0,24)+'.json');
 const readCoverage=()=>{try{return JSON.parse(fs.readFileSync(coverageFile));}catch{return null;}};
+const readDiscovery=()=>{try{return JSON.parse(fs.readFileSync(discoveryFile));}catch{return null;}};
 const read=()=>{try{return JSON.parse(fs.readFileSync(file));}catch{return null;}};
 const tabs=[{id:1,windowID:7,index:0,title:'Example',url:'https://example.test',active:true,
   windowFrame:{left:20,top:40,width:900,height:700}}];
@@ -48,9 +50,10 @@ async function request(id) {
 }
 async function snapshot(extra={}) {
   const before=read()?.updatedAt;
+  const beforeDiscovery=readDiscovery()?.updatedAt;
   child.stdin.write(frame({type:'tabsSnapshot',tabs,allTabs:tabs,completeWindowInventory:true,...extra}));
-  await until(()=>read()?.updatedAt!==before,'Snapshot was not persisted');
-  return read();
+  await until(()=>read()?.updatedAt!==before || readDiscovery()?.updatedAt!==beforeDiscovery,'Snapshot or exact receipt was not persisted');
+  return readDiscovery()?.updatedAt!==beforeDiscovery ? readDiscovery() : read();
 }
 (async()=>{
   try {
@@ -59,6 +62,7 @@ async function snapshot(extra={}) {
     let value=await snapshot({snapshotRequestIDs:['never-issued']});
     assert.deepEqual(value.browserProcessIdentity,proof,'Process identity is host-attested, not supplied by the snapshot');
     assert.equal(value.snapshotRequestIDs,undefined,'Unissued request ID cannot establish discovery freshness');
+    const unchangedInventory=fs.readFileSync(file,'utf8');
     await request('coverage-one');
     value=await snapshot({snapshotRequestIDs:['coverage-one','never-issued']});
     assert.deepEqual(value.snapshotRequestIDs,['coverage-one']);
@@ -66,6 +70,7 @@ async function snapshot(extra={}) {
     assert.equal(value.guardEnabled,true);
     assert.ok(value.guardCapabilities.includes('native-window-visibility-v1'));
     assert.deepEqual(value.allTabs,tabs);
+    assert.equal(fs.readFileSync(file,'utf8'),unchangedInventory,'A receipt-only query cannot rewrite ordinary inventory or lend it new authority');
     await until(()=>readCoverage()?.snapshotRequestIDs?.includes('coverage-one'),'Correlated sidecar was not persisted');
     const retained = readCoverage();
     assert.deepEqual(retained.snapshotRequestIDs,['coverage-one']);

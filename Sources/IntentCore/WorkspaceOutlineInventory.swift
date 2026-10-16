@@ -3,6 +3,27 @@ import Foundation
 /// Staged tab marks use their own correlated discovery. An ordinary idle
 /// placeholder or a receipt for another reader cannot erase or renew a mark.
 public enum WorkspaceOutlineInventory {
+    /// AX geometry still updates each frame. Full browser inventory is a
+    /// bounded read-only query, not a frame clock. Changed observations bypass
+    /// the interval; a silent owner never extends the confirmed lifetime.
+    public struct RefreshBudget {
+        public static let queryInterval: TimeInterval = 1.4
+        public static let maximumConfirmedAge: TimeInterval = 2.1
+        private var lastRequestedAt = Date.distantPast
+        public init() {}
+        public func needsQuery(observationsChanged: Bool, now: Date) -> Bool {
+            let age = now.timeIntervalSince(lastRequestedAt)
+            return observationsChanged || age < 0 || age >= Self.queryInterval
+        }
+        public mutating func requested(at now: Date) { lastRequestedAt = now }
+    }
+
+    public static func observationsMatch(_ left: [BrowserTabSnapshot], _ right: [BrowserTabSnapshot]) -> Bool {
+        left.count == right.count && left.allSatisfy { owner in
+            right.contains { owner.hasSameInventory(as: $0) }
+        }
+    }
+
     public struct Response {
         public let snapshot: BrowserTabSnapshot
         public let profiles: [BrowserTabSnapshot]
@@ -94,6 +115,21 @@ public enum WorkspaceOutlineInventory {
                       reply.browserProcessIdentity == owner.browserProcessIdentity,
                       BrowserProfileSnapshots.isDiscoveryReply(reply, owner: owner, requestID: id,
                           requestedAt: requestedAt, now: now) else { return nil }
+                // Ordinary rows cannot certify absence, but a later changed
+                // observation contradicts an older receipt. Wait for a new
+                // correlated query instead of repainting stale marks.
+                if let newer = current.first(where: { $0.browserSessionID == owner.browserSessionID }),
+                   newer.updatedAt > reply.updatedAt {
+                    if let rows = newer.allTabs {
+                        if rows != reply.allTabs { return nil }
+                    } else {
+                        // Partial positive rows can contradict the older full
+                        // inventory. Missing rows and empty idle placeholders
+                        // cannot establish absence or renew its timestamp.
+                        let previous = reply.allTabs ?? []
+                        if !newer.tabs.allSatisfy({ previous.contains($0) }) { return nil }
+                    }
+                }
             }
             guard let snapshot = BrowserProfileSnapshots.merged(replies),
                   Set((snapshot.allTabs ?? []).map(\.id)).count == snapshot.allTabs?.count else { return nil }
@@ -111,14 +147,16 @@ public enum WorkspaceOutlineInventory {
         public init() {}
 
         public mutating func update(_ snapshot: Response?, context: String,
-                                    authoritative: Bool, now: Date) -> Response? {
+                                    authoritative: Bool, now: Date, maxAge: TimeInterval = 0.6) -> Response? {
             if self.context != context { confirmed = nil; confirmedAt = .distantPast }
             self.context = context
             if authoritative {
                 confirmed = snapshot
-                confirmedAt = now
+                // Age starts at the oldest real profile observation, not when
+                // a delayed reader happens to receive it.
+                confirmedAt = min(now, snapshot?.profiles.map(\.updatedAt).min() ?? now)
             }
-            guard now.timeIntervalSince(confirmedAt) >= 0, now.timeIntervalSince(confirmedAt) < 0.6 else {
+            guard now.timeIntervalSince(confirmedAt) >= 0, now.timeIntervalSince(confirmedAt) < maxAge else {
                 confirmed = nil
                 return nil
             }

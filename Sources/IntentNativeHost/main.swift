@@ -299,6 +299,12 @@ struct HostMetrics: Codable {
     var sentMessages = 0
     var heartbeatWrites = 0
     var snapshotWrites = 0
+    var snapshotInventoryFileWrites = 0
+    var snapshotInventoryBytes = 0
+    var snapshotReceiptFileWrites = 0
+    var snapshotReceiptBytes = 0
+    var snapshotPersistenceFailures = 0
+    var snapshotRetryAttempts = 0
     var rulesReads = 0
     var rulePushes = 0
     var commandPushes = 0
@@ -384,8 +390,8 @@ private final class HostRuntime {
     private var lastPushedEnforcement: BrowserWindowVisibilityEnforcement?
     private var lastHeartbeatWriteAt: Date?
     private var lastMessageReceivedAt: Date?
-    private var lastSnapshotTabs: [BrowserTabItem]?
     private var requestedSnapshotRefresh = false
+    private var snapshotRefreshGeneration = 0
     private var requestedActivationRefreshAt: Date?
     private var issuedSnapshotRequests: [String: Date] = [:]
     private var issuedTabCreations: [String: BrowserTabCommand] = [:]
@@ -889,6 +895,7 @@ private final class HostRuntime {
 
     private func maybeWriteHeartbeat(force: Bool = false) {
         requireConnectionOwnership()
+        guard !snapshotPersistenceFailed else { return }
         guard let browserBundleIdentifier else { return }
         let now = Date()
         if !force,
@@ -921,9 +928,20 @@ private final class HostRuntime {
         }
     }
 
-    private var lastSnapshotSessionID: String?
-    private var lastSnapshotProfileID: String?
-    private var lastSnapshotAllTabs: [BrowserTabItem]?
+    private var lastPersistedSnapshot: BrowserTabSnapshot?
+    private struct SnapshotWrite {
+        struct Destination { let url: URL; let receipt: Bool }
+        let generation: Int
+        let snapshot: BrowserTabSnapshot
+        let data: Data
+        let refreshGeneration: Int
+        let activationRequestedAt: Date?
+        var destinations: [Destination]
+        var attempts = 0
+    }
+    private var pendingSnapshotWrite: SnapshotWrite?
+    private var snapshotWriteGeneration = 0
+    private var snapshotPersistenceFailed = false
     private func persistSnapshot(_ tabs: [HostTab], allTabs: [HostTab]?, browserSessionID: String?, browserBundleIdentifier: String,
                                  snapshotRequestIDs: [String]?, completeWindowInventory: Bool?) {
         requireConnectionOwnership()
@@ -954,10 +972,6 @@ private final class HostRuntime {
             )
         }
         let allItems = allTabs?.map { BrowserTabItem(id: $0.id, windowID: $0.windowID, index: $0.index, title: $0.title, url: $0.url, active: $0.active, faviconURL: $0.faviconURL, highlighted: $0.highlighted, pinned: $0.pinned, discarded: $0.discarded, groupID: $0.groupID, windowFrame: $0.windowFrame, windowFocused: $0.windowFocused, windowState: $0.windowState, searchSessionID: $0.searchSessionID, cookieStoreID: $0.cookieStoreID) }
-        // Explicit discovery and a recent delivered activation need fresh
-        // observations even if the requested tab was already active. Activation
-        // renews only ordinary freshness, never full-inventory request authority.
-        guard !profileAnswered.isEmpty || !answered.isEmpty || requestedSnapshotRefresh || activationRefresh || items != lastSnapshotTabs || allItems != lastSnapshotAllTabs || browserSessionID != lastSnapshotSessionID || browserProfileID != lastSnapshotProfileID else { return }
         let snapshot = BrowserTabSnapshot(
             browserBundleIdentifier: browserBundleIdentifier,
             browserSessionID: browserSessionID,
@@ -972,28 +986,98 @@ private final class HostRuntime {
             guardVersion: extensionVersion,
             guardCapabilities: extensionCapabilities
         )
-        let store = BrowserTabSnapshotStore(fileURL: paths.snapshot(for: browserBundleIdentifier))
-        if (try? store.write(snapshot)) != nil {
-            if let session = browserSessionID {
-                try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.partition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
-                // Keep the exact correlated response separate from ordinary
-                // active-tab refreshes, which may arrive before the app polls.
-                if !answered.isEmpty {
-                    try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.coveragePartition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
-                }
-                if !profileAnswered.isEmpty {
-                    try? BrowserTabSnapshotStore(fileURL: BrowserProfileSnapshots.discoveryPartition(paths.snapshot(for: browserBundleIdentifier), session: session)).write(snapshot)
-                }
-                maybeWriteHeartbeat(force: true)
-            }
-            requestedSnapshotRefresh = false
-            if activationRefresh { requestedActivationRefreshAt = nil }
-            metrics.snapshotWrites += 1
-            lastSnapshotSessionID = browserSessionID
-            lastSnapshotProfileID = browserProfileID
-            lastSnapshotTabs = items
-            lastSnapshotAllTabs = allItems
+        let hasReceipt = !profileAnswered.isEmpty || !answered.isEmpty
+        // Exact query authority lives in the receipt files. Do not rewrite the
+        // same large ordinary inventory just to advance a receipt timestamp.
+        // Legacy uncorrelated refreshes and no-op activation still renew their
+        // ordinary observation date, as existing activation consumers require.
+        let writeInventory = (lastPersistedSnapshot.map { !$0.hasSameInventory(as: snapshot) } ?? true)
+            || activationRefresh || (requestedSnapshotRefresh && !hasReceipt)
+        guard writeInventory || hasReceipt || snapshotPersistenceFailed else { return }
+        let activationRequestedAt = activationRefresh ? requestedActivationRefreshAt : nil
+        if let pending = pendingSnapshotWrite,
+           pending.attempts < 5,
+           now.timeIntervalSince(pending.snapshot.updatedAt) < 3,
+           pending.refreshGeneration == snapshotRefreshGeneration,
+           pending.activationRequestedAt == activationRequestedAt,
+           pending.snapshot.hasSameInventory(as: snapshot),
+           (!hasReceipt || (pending.snapshot.snapshotRequestIDs == snapshot.snapshotRequestIDs
+                && pending.snapshot.profileDiscoveryRequestIDs == snapshot.profileDiscoveryRequestIDs)) {
+            // Preserve the real original observation date and its scheduled
+            // bounded retry; duplicate browser events cannot spin disk writes.
+            return
         }
+        var destinations: [SnapshotWrite.Destination] = []
+        let base = paths.snapshot(for: browserBundleIdentifier)
+        if writeInventory || snapshotPersistenceFailed {
+            destinations.append(.init(url: base, receipt: false))
+            if let session = browserSessionID {
+                destinations.append(.init(url: BrowserProfileSnapshots.partition(base, session: session), receipt: false))
+            }
+        }
+        if let session = browserSessionID {
+            if !answered.isEmpty {
+                destinations.append(.init(url: BrowserProfileSnapshots.coveragePartition(base, session: session), receipt: true))
+            }
+            if !profileAnswered.isEmpty {
+                destinations.append(.init(url: BrowserProfileSnapshots.discoveryPartition(base, session: session), receipt: true))
+            }
+        }
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        snapshotWriteGeneration &+= 1
+        pendingSnapshotWrite = .init(generation: snapshotWriteGeneration, snapshot: snapshot, data: data,
+            refreshGeneration: snapshotRefreshGeneration,
+            activationRequestedAt: activationRequestedAt,
+            destinations: destinations)
+        persistPendingSnapshot(generation: snapshotWriteGeneration)
+    }
+
+    private func persistPendingSnapshot(generation: Int) {
+        requireConnectionOwnership()
+        guard var pending = pendingSnapshotWrite, pending.generation == generation,
+              Date().timeIntervalSince(pending.snapshot.updatedAt) < 3 else { return }
+        pending.attempts += 1
+        if pending.attempts > 1 { metrics.snapshotRetryAttempts += 1 }
+        do {
+            while let destination = pending.destinations.first {
+                try pending.data.write(to: destination.url, options: .atomic)
+                if destination.receipt {
+                    metrics.snapshotReceiptFileWrites += 1; metrics.snapshotReceiptBytes += pending.data.count
+                } else {
+                    metrics.snapshotInventoryFileWrites += 1; metrics.snapshotInventoryBytes += pending.data.count
+                }
+                pending.destinations.removeFirst()
+            }
+        } catch {
+            metrics.snapshotPersistenceFailures += 1
+            snapshotPersistenceFailed = true
+            pendingSnapshotWrite = pending
+            // A heartbeat cannot make an earlier/partially persisted profile
+            // inventory look current. Another profile's heartbeat is untouched.
+            if let session = pending.snapshot.browserSessionID {
+                let file = BrowserProfileSnapshots.partition(paths.snapshot(for: pending.snapshot.browserBundleIdentifier), session: session)
+                    .appendingPathExtension("heartbeat")
+                try? FileManager.default.removeItem(at: file)
+            }
+            if pending.attempts < 5 {
+                let delay = 0.05 * pow(2, Double(pending.attempts - 1))
+                queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.persistPendingSnapshot(generation: generation)
+                }
+            }
+            return
+        }
+        let recovering = snapshotPersistenceFailed
+        snapshotPersistenceFailed = false; pendingSnapshotWrite = nil
+        if pending.refreshGeneration == snapshotRefreshGeneration { requestedSnapshotRefresh = false }
+        if let activation = pending.activationRequestedAt, activation == requestedActivationRefreshAt {
+            requestedActivationRefreshAt = nil
+        }
+        lastPersistedSnapshot = pending.snapshot
+        metrics.snapshotWrites += 1
+        // Ordinary high-frequency tab/title/frame changes do not bypass the
+        // connection heartbeat budget. Recovery must restore its removed file.
+        maybeWriteHeartbeat(force: recovering)
     }
 
     private func currentFileSignature(for fileURL: URL) -> FileSignature? {
@@ -1074,7 +1158,7 @@ private final class HostRuntime {
         if let selected = selectedIDs, let session = profileSessionID {
             if expected?.hasPrefix("profiles:") == true {
                 let participating = String(expected!.dropFirst("profiles:".count)).components(separatedBy: "|").contains(session)
-                selectedIDs = participating ? (lastSnapshotAllTabs ?? lastSnapshotTabs ?? []).compactMap { tab in
+                selectedIDs = participating ? (lastPersistedSnapshot?.allTabs ?? lastPersistedSnapshot?.tabs ?? []).compactMap { tab in
                     selected.contains(BrowserProfileSnapshots.compositeID(session: session, id: tab.id)) ? tab.id : nil
                 } : []
                 selectedSession = session
@@ -1199,6 +1283,7 @@ private final class HostRuntime {
             }
             if let command = tabCommand, command.action == .snapshot {
                 requestedSnapshotRefresh = true
+                snapshotRefreshGeneration &+= 1
                 issuedSnapshotRequests = issuedSnapshotRequests.filter { Date().timeIntervalSince($0.value) <= 3 }
                 issuedSnapshotRequests[command.id] = Date()
                 if issuedSnapshotRequests.count > 16,
