@@ -234,19 +234,33 @@ public struct WorkspaceWindow {
         // the actual foreground application, never an arbitrary background app.
         return candidates.first
     }
-    public static func raise(ids: Set<UInt32>, bundle: String, actionGate: DeferredSessionActionGate? = nil) -> Bool {
-        guard let target = list(onScreen: false).first(where: { ids.contains($0.id) && $0.bundle == bundle }),
+    public static func raise(ids: Set<UInt32>, bundle: String, actionGate: DeferredSessionActionGate? = nil,
+                             expectedDesktopGeneration: UInt64? = nil) -> Bool {
+        func desktopIsCurrent() -> Bool {
+            guard let expectedDesktopGeneration else { return true }
+            let desktop = DesktopSessionAvailability.snapshot
+            return desktop.state != .secured && desktop.generation == expectedDesktopGeneration
+        }
+        guard desktopIsCurrent(),
+              let target = list(onScreen: false).first(where: { ids.contains($0.id) && $0.bundle == bundle }),
               let app = NSRunningApplication(processIdentifier: target.pid),
               let identity = PermittedWindowBinding.identity(window: target, app: app),
-              let binding = PermittedWindowBinding.resolve(identity) else { return false }
+              let binding = PermittedWindowBinding.resolve(identity), desktopIsCurrent() else { return false }
         return PermittedWindowRecoveryPolicy.restore(perform: { effect in
-            if let actionGate { return actionGate.perform(ifCurrent: 0, effect) }
-            return effect()
-        }, validate: { ids.contains(identity.windowID) && identity.bundleIdentifier == bundle && binding.isLive() },
-            setMain: { AXUIElementSetAttributeValue(binding.element, kAXMainAttribute as CFString, kCFBooleanTrue) },
-            raise: { AXUIElementPerformAction(binding.element, kAXRaiseAction as CFString) == .success },
-            activationTargetCurrent: { binding.isMainWindow() },
-            activate: { app.activate(options: []) }) == .restored
+            if let actionGate {
+                return actionGate.perform(ifCurrent: 0) { desktopIsCurrent() && effect() }
+            }
+            return desktopIsCurrent() && effect()
+        }, validate: {
+            desktopIsCurrent() && ids.contains(identity.windowID) && identity.bundleIdentifier == bundle
+                && binding.isLive() && desktopIsCurrent()
+        }, setMain: {
+            guard desktopIsCurrent() else { return }
+            AXUIElementSetAttributeValue(binding.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        }, raise: {
+            desktopIsCurrent() && AXUIElementPerformAction(binding.element, kAXRaiseAction as CFString) == .success
+        }, activationTargetCurrent: { binding.isMainWindow() },
+            activate: { desktopIsCurrent() && app.activate(options: []) }) == .restored
     }
 }
 

@@ -294,12 +294,21 @@ public final class FocusLock {
         Self.healthDiagnostics.record(event, owner: healthOwner)
     }
 
+    /// A locked/off-console desktop cannot provide meaningful foreground AX
+    /// evidence. Keep input protection attached, but fence deferred UI effects.
+    private func desktopAllowsEffects(generation: UInt64? = nil) -> Bool {
+        let desktop = DesktopSessionAvailability.snapshot
+        return desktop.state != .secured && (generation == nil || desktop.generation == generation)
+    }
+
     private func scheduleInputRefocus() {
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured else { return }
         inputRecovery.request { [weak self] in
             guard let self else { return }
             // Rejection happened synchronously. Only activation/AX recovery is
             // deferred, and the existing stop gate fences every resulting effect.
-            guard !self.isStopped else { return }
+            guard !self.isStopped, self.desktopAllowsEffects(generation: desktop.generation) else { return }
             self.refocus()
         }
     }
@@ -554,7 +563,7 @@ public final class FocusLock {
 
     @discardableResult
     private func activateApp(bundleIdentifier: String) -> Bool {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+        guard desktopAllowsEffects(), let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleIdentifier
         }) else {
             return false
@@ -565,7 +574,8 @@ public final class FocusLock {
 
     @discardableResult
     private func activateApp(processIdentifier: pid_t) -> Bool {
-        guard !isStopped, let app = NSRunningApplication(processIdentifier: processIdentifier), !app.isTerminated,
+        let desktop = DesktopSessionAvailability.snapshot
+        guard !isStopped, desktop.state != .secured, let app = NSRunningApplication(processIdentifier: processIdentifier), !app.isTerminated,
               let bundle = app.bundleIdentifier, spec.permitsApplication(bundle) else {
             return false
         }
@@ -575,11 +585,14 @@ public final class FocusLock {
                 $0.pid == processIdentifier && $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle)
             }.map(\.id))
             // A remembered app or startup fallback cannot bypass window scope.
-            return WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions)
+            guard desktopAllowsEffects(generation: desktop.generation) else { return false }
+            return WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions,
+                expectedDesktopGeneration: desktop.generation)
         }
 
         return focusActions.perform(ifCurrent: 0) {
-            app.activate(options: [.activateIgnoringOtherApps])
+            guard self.desktopAllowsEffects(generation: desktop.generation) else { return false }
+            return app.activate(options: [.activateIgnoringOtherApps])
         } ?? false
     }
 
@@ -633,14 +646,16 @@ public final class FocusLock {
     private func refreshInputPolicy() {
         guard !isStopped else { return }
         let snapshot = makeInputSnapshot()
-        guard !isStopped else { return }
+        guard !isStopped, snapshot.desktopGeneration == DesktopSessionAvailability.snapshot.generation else { return }
         inputComponents().driver?.publish(snapshot)
     }
 
     /// Only this producer performs platform discovery. An AX timeout cannot
     /// stall input delivery or queue another scan while this scan is in flight.
     private func makeInputSnapshot() -> FocusInputPolicySnapshot {
+        let desktop = DesktopSessionAvailability.snapshot
         var snapshot = FocusInputPolicySnapshot()
+        snapshot.desktopGeneration = desktop.generation
         snapshot.observedAt = ProcessInfo.processInfo.systemUptime
         let foreground = NSWorkspace.shared.frontmostApplication
         let applications = NSWorkspace.shared.runningApplications
@@ -703,7 +718,7 @@ public final class FocusLock {
             snapshot.nativeWindowBlocked = tab.foregroundBlocked; snapshot.addressSubmissionBlocked = tab.addressBlocked
             snapshot.tabRegionsValidUntil = ProcessInfo.processInfo.systemUptime + tab.remainingValidity
         }
-        if let point = CGEvent(source: nil)?.location {
+        if desktopAllowsEffects(generation: desktop.generation), let point = CGEvent(source: nil)?.location {
             let target = clickTarget(at: point, inMissionControl: snapshot.missionControl)
             snapshot.pointerProbe = point
             if snapshot.missionControl {
@@ -738,8 +753,10 @@ public final class FocusLock {
     }
 
     private func applyInputEffects(_ actions: [FocusInputAction], isCurrent: () -> Bool) {
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured else { return }
         for action in actions {
-            guard !isStopped, isCurrent() else { return }
+            guard !isStopped, isCurrent(), desktopAllowsEffects(generation: desktop.generation) else { return }
             switch action {
             case .refocus: scheduleInputRefocus()
             case .switcherAdvance(let steps): allowedAppSwitcher.advance(steps: steps)
@@ -831,10 +848,12 @@ public final class FocusLock {
                 return
             }
 
+            let desktop = DesktopSessionAvailability.snapshot
+            guard desktop.state != .secured else { return }
             // Notification bursts from switchers collapse into one current
             // foreground check; never replay a stale activation after a finish.
             self.inputRecovery.request { [weak self] in
-                guard let self, !self.isStopped,
+                guard let self, !self.isStopped, self.desktopAllowsEffects(generation: desktop.generation),
                       let current = NSWorkspace.shared.frontmostApplication else { return }
                 self.handleActivated(current)
             }
@@ -852,25 +871,27 @@ public final class FocusLock {
     }
 
     private func scheduleSpaceRecovery() {
-        guard !isStopped else { return }
+        let desktop = DesktopSessionAvailability.snapshot
+        guard !isStopped, desktop.state != .secured else { return }
         visibilityController.refreshAfterWorkspaceTransition()
         permittedWindowRecovery.noteSpaceChange()
         systemSwitcherGraceUntil = Date(timeIntervalSinceNow: 0.15)
         pendingSpaceRecovery?.cancel()
-        recoverSpace(attempt: 0)
+        recoverSpace(attempt: 0, desktopGeneration: desktop.generation)
     }
 
-    private func recoverSpace(attempt: Int) {
-        guard !isStopped,
+    private func recoverSpace(attempt: Int, desktopGeneration: UInt64) {
+        guard !isStopped, desktopAllowsEffects(generation: desktopGeneration),
               !FocusSystemToolPolicy.isScreenshotApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return }
         let visible = PermittedWindowRecovery.visibleApplication()
         guard FocusForegroundPolicy.shouldRestoreVisibleWindow(visibleBundleIdentifier: visible?.bundleIdentifier,
             accessMode: spec.accessMode, controlledBundleIdentifiers: spec.applicationWideControlledBundleIdentifiers,
             missionControlActive: isMissionControlActive()) else { return }
+        guard desktopAllowsEffects(generation: desktopGeneration) else { return }
         refocus(ignoreSystemTransitionGrace: true, restoreWindow: true)
         guard attempt < 8 else { return }
         let recovery = DispatchWorkItem { [weak self] in
-            self?.recoverSpace(attempt: attempt + 1)
+            self?.recoverSpace(attempt: attempt + 1, desktopGeneration: desktopGeneration)
         }
         pendingSpaceRecovery = recovery
         // The first attempt is immediate; bounded retries cover the OS transition
@@ -879,20 +900,25 @@ public final class FocusLock {
     }
 
     private func handleLaunched(_ app: NSRunningApplication) {
-        guard !isStopped, spec.blockNewApps else { return }
+        let desktop = DesktopSessionAvailability.snapshot
+        guard !isStopped, desktop.state != .secured, spec.blockNewApps else { return }
         guard let bundleIdentifier = app.bundleIdentifier else { return }
         guard !spec.permitsApplication(bundleIdentifier) else { return }
         guard app.activationPolicy == .regular else { return }
         guard !baselinePids.contains(app.processIdentifier) else { return }
 
         if !spec.hideDistractions, spec.accessMode != .blacklist, !spec.presetBlockedBundleIdentifiers.contains(bundleIdentifier) {
-            focusActions.perform(ifCurrent: 0) { app.terminate() }
+            focusActions.perform(ifCurrent: 0) {
+                guard self.desktopAllowsEffects(generation: desktop.generation) else { return false }
+                return app.terminate()
+            }
         }
         refocus()
     }
 
     private func handleActivated(_ app: NSRunningApplication) {
-        guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
+        let desktop = DesktopSessionAvailability.snapshot
+        guard !isStopped, desktop.state != .secured, spec.blockAppSwitching || spec.keepFocused else { return }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
         if FocusSystemToolPolicy.isScreenshotApplication(app.bundleIdentifier) { return }
         // An empty Space activates its desktop shell. It is not an attempt to
@@ -904,6 +930,7 @@ public final class FocusLock {
             return
         }
         let verifiedWindow = WorkspaceWindow.focused()
+        guard desktopAllowsEffects(generation: desktop.generation) else { return }
         if let window = verifiedWindow, window.pid == app.processIdentifier, window.bundle == app.bundleIdentifier,
            visibilityController.permitsAuxiliaryWindow(id: window.id, pid: window.pid,
                 bundleIdentifier: window.bundle, launched: app.launchDate) == true {
@@ -994,7 +1021,8 @@ public final class FocusLock {
     }
 
     private func enforceFocus() {
-        guard !isStopped, spec.blockAppSwitching || spec.keepFocused else { return }
+        let desktop = DesktopSessionAvailability.snapshot
+        guard !isStopped, desktop.state != .secured, spec.blockAppSwitching || spec.keepFocused else { return }
 
         let foreground = NSWorkspace.shared.frontmostApplication
         if FocusSystemToolPolicy.isScreenshotApplication(foreground?.bundleIdentifier) { return }
@@ -1049,6 +1077,7 @@ public final class FocusLock {
             spec.selectedWindowIDsByApp[$0] != nil ? $0 : nil
         }
         let focusedScopeWindow = selectedScopeBundle != nil ? WorkspaceWindow.focused() : nil
+        guard desktopAllowsEffects(generation: desktop.generation) else { return }
         if let bundle = selectedScopeBundle {
             // A different foreground sample is a transition, not evidence that
             // this app is showing an excluded window or has recovered already.
@@ -1062,11 +1091,13 @@ public final class FocusLock {
             if !spec.permitsWindow(window.id, bundleIdentifier: bundle) {
                 // AX/WindowServer reads can disagree briefly during a transition.
                 // Coalesce retries without changing which windows are permitted.
-                guard selectedWindowRecovery.beginAttempt(now: ProcessInfo.processInfo.systemUptime) else { return }
+                guard selectedWindowRecovery.beginAttempt(now: desktop.activeUptime) else { return }
                 let candidates: Set<UInt32>
                 if spec.accessMode == .whitelist { candidates = spec.selectedWindowIDsByApp[bundle] ?? [] }
                 else { candidates = Set(WorkspaceWindow.list().filter { $0.bundle == bundle && spec.permitsWindow($0.id, bundleIdentifier: bundle) }.map(\.id)) }
-                if WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions) {
+                guard desktopAllowsEffects(generation: desktop.generation) else { return }
+                if WorkspaceWindow.raise(ids: candidates, bundle: bundle, actionGate: focusActions,
+                    expectedDesktopGeneration: desktop.generation) {
                     selectedWindowRecovery.recovered(); return
                 }
                 // A blacklist may exclude the only window in this application.
@@ -1074,13 +1105,17 @@ public final class FocusLock {
                 if let fallback = WorkspaceWindow.list(onScreen: false).first(where: {
                     $0.bundle != Bundle.main.bundleIdentifier && $0.id != window.id
                         && spec.permitsWindow($0.id, bundleIdentifier: $0.bundle)
-                }), WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle, actionGate: focusActions) {
+                }), desktopAllowsEffects(generation: desktop.generation),
+                   WorkspaceWindow.raise(ids: [fallback.id], bundle: fallback.bundle, actionGate: focusActions,
+                        expectedDesktopGeneration: desktop.generation) {
                     selectedWindowRecovery.recovered(); return
                 }
                 // A single timeout or title/position mismatch must not release a
                 // valid intention. Unknown inventory does not establish closure.
-                let decision = selectedWindowRecovery.failed(now: ProcessInfo.processInfo.systemUptime,
-                    resources: selectedNativeResourcePresence())
+                let resources = selectedNativeResourcePresence()
+                let currentDesktop = DesktopSessionAvailability.snapshot
+                guard currentDesktop.state != .secured, currentDesktop.generation == desktop.generation else { return }
+                let decision = selectedWindowRecovery.failed(now: currentDesktop.activeUptime, resources: resources)
                 if decision == .safetyStop { stopForSafety(cause: .selectedWindowRecoveryUnavailable) }
                 return
             }
@@ -1145,7 +1180,7 @@ public final class FocusLock {
     }
 
     private func refocus(ignoreSystemTransitionGrace: Bool = false, restoreWindow: Bool = false) {
-        guard !isStopped,
+        guard !isStopped, desktopAllowsEffects(),
               !FocusSystemToolPolicy.isScreenshotApplication(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return }
         if !ignoreSystemTransitionGrace,
            shouldWaitForSystemSwitcher(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
@@ -1169,7 +1204,7 @@ public final class FocusLock {
     }
 
     private func activateBestPermittedApplication() {
-        guard !isStopped else { return }
+        guard !isStopped, desktopAllowsEffects() else { return }
         if permittedWindowRecovery.restore() { return }
         if let lastPermittedApplication,
            let bundleIdentifier = lastPermittedApplication.bundleIdentifier,

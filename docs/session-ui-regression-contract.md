@@ -127,6 +127,13 @@ with another delayed activation or an independent copy of session state.
   verified ownership through a bounded transition, then enforce normally. Do not
   solve an allowed-window false failure by permitting excluded windows or by
   suppressing a genuine persistent coverage failure. Test both selection paths.
+- A positively confirmed locked or switched-out desktop is not a failed window
+  enumeration. Retain the occurrence, browser rules, input interception and
+  visibility ownership while that desktop is inaccessible. Suspend only its
+  observation deadlines; unknown session state earns no exemption. On return,
+  discard pre-lock asynchronous results and require fresh observations within
+  the remaining bounded budget. Repeated locking must not reset unresolved work
+  or revive old recovery/auxiliary proofs. Real unlocked failures still stop.
 - The task workspace is exposed only in Test Intent. Its two-finger page swipe
   is scoped to Intent's overview and must not replace system Space navigation or
   text input. Selecting a task opens overview with its task name; linked saved
@@ -222,6 +229,7 @@ display geometry, and actual browser profile + extension version if involved.
 | Completion colour, duration, Reduce Motion, lock/sleep | Two bounded edge traces meet/fade; mouse/typing still reaches foreground app; no replay on unlock |
 | Apple Mission Control after SBT start | Enter Apple's Mission Control; click the allowed window to return. The same occurrence remains active, no failure notice or crash occurs, and an excluded ordinary app still cannot become usable. Repeat on the same Space, another Space, an empty Space and a sibling browser window. |
 | Apple Mission Control after DBT start | Repeat the preceding sequence from a double-backtick selection. Record exact allowed window/tab IDs before entry and after click return; Control-Tab, physical Caps Run, Escape and finish retain their original behavior. |
+| Screen lock and return, both selection paths and browsers | Keep two allowed tabs and one parked excluded tab. Lock longer than the coverage deadline, unlock, and verify the same occurrence and selection survive; the excluded tab and ordinary apps remain blocked. Repeat with a previously unresolved window and with sleep/user switching. A delayed pre-lock query cannot certify closure or coverage after return. Finish normally and verify owned restoration. |
 | Test Intent task workspace | Physically swipe left with two fingers in Intent overview, use the page button as fallback, then swipe back. Rename/add/complete tasks, move tasks within/across cards, drag cards, remove/undo tasks and reopen the app. Names, positions, completion and links persist. |
 | Saved-intention mentions and channel isolation | Choose an `@` suggestion, rename/delete the underlying saved intention, then open its task. The exact remaining preset is loaded with the task name without auto-running; a deleted link cannot guess a replacement. Confirm neither task page, gesture interception nor task-data writes appear in launch Intent. |
 

@@ -129,7 +129,7 @@ final class FocusInputTapDriver: @unchecked Sendable {
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         let began = ProcessInfo.processInfo.systemUptime
-        if let snapshot = mailbox.readIfAvailable() { cachedSnapshot = snapshot }
+        refreshCachedSnapshot()
         defer {
             metrics.samples = min(1_000_000, metrics.samples + 1)
             metrics.maxDurationMicroseconds = max(metrics.maxDurationMicroseconds,
@@ -183,7 +183,7 @@ final class FocusInputTapDriver: @unchecked Sendable {
         if manualFinish.pending && manualAcknowledgement.current != pendingAcknowledgementEpoch {
             manualFinish.acknowledge()
         }
-        if let snapshot = mailbox.readIfAvailable() { cachedSnapshot = snapshot }
+        refreshCachedSnapshot()
         if cachedSnapshot.stopped { finishing = true; recovery.stop(); CFRunLoopStop(CFRunLoopGetCurrent()); return }
         if now - cachedSnapshot.observedAt <= 0.6, !cachedSnapshot.accessibilityTrusted {
             fail(.accessibilityPermissionRequired)
@@ -203,11 +203,19 @@ final class FocusInputTapDriver: @unchecked Sendable {
             completedBatch = false; completionMutex.unlock()
             let batch = pending.take(); batchOutstanding = true
             let epoch = effectEpoch.current
+            let desktopGeneration = cachedSnapshot.desktopGeneration
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 // Even if stop races an outstanding main block, the owner checks
                 // its session gate again immediately before every actual effect.
-                self.onEffects(batch) { [weak self] in self?.effectEpoch.current == epoch }
+                self.onEffects(batch) { [weak self] in
+                    // This closure runs on the effect owner, not the event tap.
+                    // A batch queued before lock must not activate work after
+                    // unlock even if the input producer has not published yet.
+                    let desktop = DesktopSessionAvailability.snapshot
+                    return self?.effectEpoch.current == epoch && desktop.state != .secured
+                        && desktop.generation == desktopGeneration
+                }
                 self.completionMutex.lock(); self.completedBatch = true; self.completionMutex.unlock()
             }
         }
@@ -216,6 +224,14 @@ final class FocusInputTapDriver: @unchecked Sendable {
             let sample = metrics; metrics = .init(); lastMetrics = now
             controls.async { [onMetrics] in onMetrics(sample) }
         }
+    }
+    private func refreshCachedSnapshot() {
+        guard let snapshot = mailbox.readIfAvailable() else { return }
+        if snapshot.desktopGeneration != cachedSnapshot.desktopGeneration {
+            effectEpoch.invalidate()
+            _ = pending.take()
+        }
+        cachedSnapshot = snapshot
     }
     private func dispatchControl(_ control: Control) { controls.async { [onControl] in onControl(control) } }
     private func fail(_ cause: FocusLockSafetyStopCause) {

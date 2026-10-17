@@ -57,6 +57,7 @@ final class RestorationFocusGuard {
     private let visibleWindowID: UInt32
     private let targetResolution: String
     private let observationOnly: Bool
+    private let desktopFence: DesktopSessionEffectFence
     // NSEvent monitors are delivered on the main queue. AX IPC can briefly
     // block that queue, so also consult public WindowServer input counters
     // before effects rather than waiting for a queued cancellation callback.
@@ -77,7 +78,8 @@ final class RestorationFocusGuard {
     private var lastTargetMinimized: Bool?
 
     private init(application: NSRunningApplication, restoringPIDs: Set<pid_t>, visibleWindow: WorkspaceWindow,
-                 observationOnly: Bool) {
+                 observationOnly: Bool, desktopFence: DesktopSessionEffectFence) {
+        self.desktopFence = desktopFence
         self.application = application
         self.observationOnly = observationOnly
         initialInputCounts = Self.inputCounts()
@@ -97,6 +99,8 @@ final class RestorationFocusGuard {
     static func begin(restoringPIDs: Set<pid_t>, observationOnly: Bool = false) {
         precondition(Thread.isMainThread)
         cancel()
+        let desktopFence = DesktopSessionEffectFence(DesktopSessionAvailability.snapshot)
+        guard desktopFence.permits(DesktopSessionAvailability.snapshot) else { return }
         let controllerPID = ProcessInfo.processInfo.processIdentifier
         let foreground = NSWorkspace.shared.frontmostApplication
         let fromControls = foreground?.processIdentifier == controllerPID
@@ -110,13 +114,14 @@ final class RestorationFocusGuard {
         // It is part of this restoration, not a new destination chosen by the user.
         let permittedPIDs = fromControls ? restoringPIDs.union([controllerPID]) : restoringPIDs
         let guarder = RestorationFocusGuard(application: app, restoringPIDs: permittedPIDs,
-                                            visibleWindow: visible, observationOnly: observationOnly)
+                                            visibleWindow: visible, observationOnly: observationOnly, desktopFence: desktopFence)
         // Match WindowServer's actual visible window for both keyboard and
         // menu completion, rather than relying on remembered AX focus alone.
         guarder.observe("begin", details: ["controllerPID": controllerPID, "targetPID": targetPID,
             "fromControls": fromControls, "matchedWindow": guarder.window != nil,
             "visibleWindowID": visible.id, "resolution": guarder.targetResolution, "observationOnly": observationOnly])
         if !observationOnly && guarder.window == nil { guarder.observe("unresolvedVisibleWindow"); return }
+        guard desktopFence.permits(DesktopSessionAvailability.snapshot) else { return }
         current = guarder
         let input: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
             .gesture, .beginGesture, .swipe, .magnify, .rotate, .smartMagnify]
@@ -164,6 +169,9 @@ final class RestorationFocusGuard {
     }
     private func inputCancelled() -> Bool {
         guard Self.current === self else { return true }
+        guard desktopFence.permits(DesktopSessionAvailability.snapshot) else {
+            Self.cancel(reason: "desktopChanged"); return true
+        }
         if RestorationFocusPolicy.inputChanged(initial: initialInputCounts, current: Self.inputCounts()) {
             Self.cancel(reason: "inputCountChanged")
             return true

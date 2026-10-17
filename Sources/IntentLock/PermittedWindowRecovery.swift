@@ -94,15 +94,21 @@ final class PermittedWindowRecovery: @unchecked Sendable {
         }
     }
 
+    private static func desktopMatches(_ generation: UInt64) -> Bool {
+        let desktop = DesktopSessionAvailability.snapshot
+        return desktop.state != .secured && desktop.generation == generation
+    }
+
     func remember(_ application: NSRunningApplication, verifiedWindow: WorkspaceWindow?) {
-        guard let verifiedWindow, let expected = PermittedWindowBinding.identity(window: verifiedWindow, app: application),
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured, let verifiedWindow, let expected = PermittedWindowBinding.identity(window: verifiedWindow, app: application),
               spec.permitsWindow(expected.windowID, bundleIdentifier: expected.bundleIdentifier) else { return }
         let processID = application.processIdentifier
         mutex.lock()
         guard !stopped, Date().timeIntervalSince(lastSample) >= 0.15 else { mutex.unlock(); return }
         lastSample = Date(); mutex.unlock()
         queue.async { [weak self] in
-            guard let self, NSWorkspace.shared.frontmostApplication?.processIdentifier == processID,
+            guard let self, Self.desktopMatches(desktop.generation), NSWorkspace.shared.frontmostApplication?.processIdentifier == processID,
                   Self.visibleApplication()?.processIdentifier == processID else { return }
             let app = AXUIElementCreateApplication(processID)
             AXUIElementSetMessagingTimeout(app, 0.02)
@@ -114,7 +120,7 @@ final class PermittedWindowRecovery: @unchecked Sendable {
                   PermittedWindowRecoveryPolicy.accepts(expected: expected, sampled: sampled.identity,
                     permitted: self.spec.permitsWindow(sampled.identity.windowID, bundleIdentifier: sampled.identity.bundleIdentifier)) else { return }
             self.mutex.lock()
-            guard !self.stopped else { self.mutex.unlock(); return }
+            guard !self.stopped, Self.desktopMatches(desktop.generation) else { self.mutex.unlock(); return }
             let verified = self.awaitingVerification && self.binding?.identity == expected
                 && self.binding.map { CFEqual($0.element, window) } == true
             self.binding = sampled
@@ -126,6 +132,8 @@ final class PermittedWindowRecovery: @unchecked Sendable {
     }
 
     @discardableResult func restore() -> Bool {
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured else { return false }
         mutex.lock()
         guard !stopped, let binding else { mutex.unlock(); return false }
         let identity = binding.identity
@@ -141,16 +149,29 @@ final class PermittedWindowRecovery: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             self.mutex.lock(); let stopped = self.stopped; self.mutex.unlock()
-            guard !stopped else { return }
+            guard !stopped, Self.desktopMatches(desktop.generation) else { return }
             self.restoreRequests += 1
-            let outcome = PermittedWindowRecoveryPolicy.restore(perform: { self.actions.perform(ifCurrent: token, $0) },
+            let outcome = PermittedWindowRecoveryPolicy.restore(perform: { action in
+                self.actions.perform(ifCurrent: token) {
+                    guard Self.desktopMatches(desktop.generation) else { return false }
+                    return action()
+                }
+            },
                 validate: {
-                    !self.stopped && self.binding?.identity == identity
+                    !self.stopped && Self.desktopMatches(desktop.generation) && self.binding?.identity == identity
                         && self.spec.permitsWindow(identity.windowID, bundleIdentifier: identity.bundleIdentifier) && binding.isLive()
-                }, setMain: { AXUIElementSetAttributeValue(binding.element, kAXMainAttribute as CFString, kCFBooleanTrue) },
-                raise: { AXUIElementPerformAction(binding.element, kAXRaiseAction as CFString) == .success },
-                activationTargetCurrent: { binding.isMainWindow() },
-                activate: { app.activate(options: [.activateIgnoringOtherApps]) })
+                        && Self.desktopMatches(desktop.generation)
+                }, setMain: {
+                    guard Self.desktopMatches(desktop.generation) else { return }
+                    AXUIElementSetAttributeValue(binding.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+                }, raise: {
+                    Self.desktopMatches(desktop.generation)
+                        && AXUIElementPerformAction(binding.element, kAXRaiseAction as CFString) == .success
+                }, activationTargetCurrent: { binding.isMainWindow() },
+                activate: {
+                    Self.desktopMatches(desktop.generation) && app.activate(options: [.activateIgnoringOtherApps])
+                })
+            guard Self.desktopMatches(desktop.generation) else { return }
             self.awaitingVerification = outcome == .restored
             if outcome == .unavailable || outcome == .raiseFailed {
                 self.mutex.lock()

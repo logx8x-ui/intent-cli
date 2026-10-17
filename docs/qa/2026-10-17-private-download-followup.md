@@ -203,3 +203,98 @@ verification has been requested for this newly repaired build.
 Exact local evidence: `process-identity-local-installs-20261017.json`. A fresh
 signed candidate is needed; neither these local installs nor the older hosted
 packages qualify the complete tester journey.
+
+## Installed follow-up and signed candidate
+
+Logan confirmed the repaired local Test session stayed running through Mission
+Control returns and right Command+S, with Spotify blocked. Diagnostics recorded
+481 callbacks, maximum 96.833 microseconds and no input timeouts, disables or
+recovery. Duration/cycle counts do not meet the full release stress matrix, and
+this is not a pass for the signed app or both selection paths. Both local channels
+also started named ChatGPT-only overview sessions and released restrictions on
+normal app quit. The diagnostic `requested` quit release is not a spontaneous
+failure and does not substitute for checking the normal Finish control.
+
+Candidate **0.9.8 / 202610170001** was built from clean commit
+`8b1e3b1a2a36d7ead8ffd3649e65c0e629309ec9`, using fingerprint `b92388…499c` above.
+All three direct packages and the DMG were signed, Apple-notarized and stapled;
+the complete release verifier passed. Chrome approval remains false. The package
+was not uploaded or installed system-wide: the owner upload picker did not open
+through computer control, and noninteractive system installation required a Mac
+password. `/Applications/Intent.app` remains build 202610160004. The user deferred
+the Chrome review dashboard while away; do not repeatedly request it.
+
+`qualification-202610170001.json` records one automated source gate mapped by
+exact fingerprint and 24 pending acceptance checks. Older hosted-package and
+local physical evidence were explicitly not transferred to the new binary.
+
+## Separate locked-desktop failure found in Chrome runtime QA
+
+The existing Chrome **Intent QA** profile has an enabled unpacked 0.2.46 Guard
+using the normal `intent_native_host`; it is suitable for runtime QA, not Chrome
+Web Store onboarding acceptance. A new exact-profile snapshot and heartbeat were
+observed. Two selected Example Domain tabs started correctly; the excluded third
+tab moved into a minimized parking window. Clicking the second tab and native
+Control-Tab back to the first both worked in the installed launch app.
+
+At **13:07:48.038 KST October 17**, loginwindow started an automatic idle lock;
+the shield was raised at 13:07:48.064. Chrome's AX window enumeration then became
+unavailable. At **13:07:51.195**, the unchanged three-second coverage deadline
+stopped the intention with `inventoryUnavailable`. Chrome retained its original
+process lifetime and Guard heartbeat; there were no input callbacks/timeouts in
+this short session. The rules were released. This is a confirmed locked-desktop
+observation failure, not proof of an excluded-window escape or an Intent crash.
+
+Evidence: `chrome-lock-coverage-20261017/DIAGNOSIS.json`. Candidate 202610170001
+remains unqualified. The correction must preserve rules and hiding ownership,
+suspend only confirmed inaccessible-desktop observation time, reject late
+pre-lock results, and revalidate after return without resetting unresolved
+budgets. The physical lock/unlock journey remains pending while the Mac is locked.
+
+Apple documents the current-session dictionary and its on-console property:
+[current session](https://developer.apple.com/documentation/coregraphics/cgsessioncopycurrentdictionary%28%29),
+[session properties](https://developer.apple.com/documentation/coregraphics/window-server-session-properties).
+Missing session information is unknown, not proof of a protected desktop. The
+existing screen-lock key is not among those documented standard keys, so its
+absence must not earn an indefinite exemption.
+
+The shared repair introduces an observed desktop generation and an active-time
+clock. Native startup, off-screen obligations, browser cohorts and reported-window
+enforcement retain their existing deadlines; only positively secured intervals
+are excluded. Unknown state continues charging time and permits fresh successful
+AX observations. Unlock withdraws old coverage and requires current native and
+exact-profile evidence, without replenishing an unfinished deadline. Browser
+queries share the remaining wake budget rather than starting another full poll.
+Queued input effects and permitted-window recovery are fenced at the effect
+boundary so pre-lock work cannot activate a window after return.
+
+Restoration also keeps its durable ownership journal when an AX read or reveal
+crosses a desktop transition. A fresh unlock/wake notification retries that
+journal independently of browser-file changes; completed reveals are recognized
+without issuing them again. The short focus-preservation transaction cancels
+across the transition. Finishing while locked still requires installed acceptance.
+
+The focused suite covers the observed lock failure, all four existing policies,
+long/repeated locks, unknown metadata, stale callbacks, retained deadlines,
+ordinary unarmed uncertainty and stop while locked. A real asynchronous mailbox
+fixture also rejects a successful exact-profile reply arriving too late. Review
+caught and corrected an early leisure-startup regression before installation.
+The full source gate and installed lock/unlock acceptance must be recorded
+separately; these focused checks alone do not qualify either app for testers.
+
+The final eight-suite change-impact gate passed at **2026-10-17 04:43:30 UTC**
+with fingerprint `ed6c9c9ae07ff16e954b9792ef2376cd25b389a1e8d08c26daacc8b0d97d4a41`.
+It includes session/app model, core Swift, both extensions, native protocol,
+release/onboarding checks, service tests and extension lint. The first full run
+correctly failed the existing no-enforcement startup assertion on the actually
+locked Mac; the final fix evaluates zero-visibility readiness before the secure
+state rejection, while all effect owners retain their fences. Both run records
+are preserved. Final evidence is `secure-desktop-full-gate-20261017/` in the
+artifact directory, and independent source review is recorded alongside it.
+
+The local-install preflight currently refuses because Intent remains running on
+the locked Mac. Neither local bundle has been replaced with this repair, and
+system Intent still has build 202610160004. No active app was killed to bypass
+the guard. Prepare a fresh candidate from this source; do not reuse candidate
+202610170001's signatures or physical receipts. Physical lock/unlock, finish while
+locked, lock during input recovery and the complete tester journey remain pending.

@@ -14,6 +14,8 @@ public struct FocusInputPolicySnapshot {
         }
     }
     public var observedAt: TimeInterval = 0
+    /// Scalar desktop epoch supplied by the producer, never discovered by the tap.
+    public var desktopGeneration: UInt64 = 0
     public var stopped = false
     public var screenshotActive = false
     public var missionControl = false

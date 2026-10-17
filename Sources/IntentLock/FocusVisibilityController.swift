@@ -39,6 +39,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private static var recoveryGeneration = 0
     private static var recoverySource: DispatchSourceFileSystemObject?
     private static var recoveryTerminationObserver: NSObjectProtocol?
+    private static var recoveryWakeObservers: [NSObjectProtocol] = []
+    private static var recoveryUnlockObserver: NSObjectProtocol?
+    private static var recoveryWatching = false
+    private static var recoveryFocusContext: (pids: Set<pid_t>, observationOnly: Bool)?
+    private static var recoveryFocusDesktopGeneration: UInt64?
     private static var recoveryWork: DispatchWorkItem?
     private static var recoveryFingerprint: [String] = []
     private static var accessibilityWindows: [WindowIdentity: AXUIElement] = [:]
@@ -54,7 +59,67 @@ public final class FocusVisibilityController: @unchecked Sendable {
     /// The lock's thread-safe stop gate also fences a main-thread AX pass while
     /// another thread is waiting for synchronous visibility cleanup.
     public var enforcementIsCurrent: (() -> Bool)?
-    private var mayEnforce: Bool { !stopped && (enforcementIsCurrent?() ?? true) }
+    private var mayEnforce: Bool {
+        guard !stopped, enforcementIsCurrent?() ?? true else { return false }
+        let current = sampleDesktopSession()
+        return desktopCoverage.canObserve && (activeObservationGeneration == nil || activeObservationGeneration == current.generation)
+    }
+    private var desktopCoverage: DesktopSessionCoveragePolicy
+    private var activeObservationGeneration: UInt64?
+    private var desktopObservers: [NSObjectProtocol] = []
+    private var distributedDesktopObservers: [NSObjectProtocol] = []
+    private var browserObservationGenerations: [String: UInt64] = [:]
+
+    /// Called on the visibility queue, including immediately around AX effects.
+    /// The shared sampler also sees transitions observed by the input scanner.
+    @discardableResult private func sampleDesktopSession() -> DesktopSessionObservation {
+        let current = DesktopSessionAvailability.snapshot
+        if desktopCoverage.update(current) {
+            coverageSweepGeneration &+= 1
+            coverageSweepInFlight = false
+            invalidateRecoveryCoverage()
+            publishAuxiliaryProofs([:])
+            observedAuxiliaryProofs.removeAll()
+            nativeRecoveryObservation = (0, false)
+            reportedRecoveryObservation = (0, false)
+            browserRecoveryObservations.removeAll()
+            browserObservationGenerations.removeAll()
+            coverageReadyLock.lock(); initialCoverageReady = false; coverageReadyLock.unlock()
+            // Receipts from before the protected desktop cannot prove post-lock
+            // visibility. Reissue after a new native observation, retaining age.
+            for state in coverageStates.values {
+                state.request?.snapshots = nil; state.request?.receiptAt = nil
+                state.request?.needsFreshQuery = true
+            }
+        }
+        return current
+    }
+    private var coverageBudgetTime: TimeInterval { sampleDesktopSession().activeUptime }
+    private func observationIsCurrent(_ generation: UInt64) -> Bool {
+        mayEnforce && desktopCoverage.accepts(generation: generation)
+    }
+    private func checkDesktopCoverageDeadline() {
+        guard mayEnforce, let domain = desktopCoverage.expiredDomain() else { return }
+        switch domain {
+        case .browser(let browser): reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable))
+        case .native, .reported: onNativeCoverageFailure?(.init(reason: .inventoryUnavailable))
+        }
+    }
+    private func installDesktopObservers() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.sessionDidResignActiveNotification,
+                     NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.screensDidSleepNotification] {
+            desktopObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.refreshAfterWorkspaceTransition()
+            })
+        }
+        for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
+            distributedDesktopObservers.append(DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in
+                    self?.refreshAfterWorkspaceTransition()
+                })
+        }
+    }
     // AppKit visibility requests must run on the application main thread.
     // A background unhide can fail even after hide succeeded.
     private let queue = DispatchQueue.main
@@ -75,19 +140,23 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var nativeKnownDocumentWindows: Set<NativeVisibilityCoveragePolicy.Target> = []
     private let auxiliaryProofLock = NSLock()
     private var auxiliaryProofs: [NativeVisibilityCoveragePolicy.Target: TimeInterval] = [:]
+    private var auxiliaryProofGeneration: UInt64?
     private var observedAuxiliaryProofs: [NativeVisibilityCoveragePolicy.Target: TimeInterval] = [:]
     /// Derived utility permission stays separate from the frozen work selection.
     /// This lookup performs no AX read or visibility effect and expires quickly.
     public func permitsAuxiliaryWindow(id: UInt32, pid: pid_t, bundleIdentifier: String, launched: Date?) -> Bool {
-        guard let launched else { return false }
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured, let launched else { return false }
         let target = NativeVisibilityCoveragePolicy.Target(bundleIdentifier: bundleIdentifier, pid: pid,
             launched: launched.timeIntervalSinceReferenceDate, windowID: id)
         auxiliaryProofLock.lock(); defer { auxiliaryProofLock.unlock() }
-        guard let observedAt = auxiliaryProofs[target] else { return false }
+        guard auxiliaryProofGeneration == desktop.generation, let observedAt = auxiliaryProofs[target] else { return false }
         return NativeVisibilityCoveragePolicy.auxiliaryProofIsFresh(observedAt: observedAt, now: ProcessInfo.processInfo.systemUptime)
     }
     private func publishAuxiliaryProofs(_ proofs: [NativeVisibilityCoveragePolicy.Target: TimeInterval]) {
-        auxiliaryProofLock.lock(); auxiliaryProofs = proofs; auxiliaryProofLock.unlock()
+        auxiliaryProofLock.lock(); auxiliaryProofs = proofs
+        auxiliaryProofGeneration = desktopCoverage.observation?.generation
+        auxiliaryProofLock.unlock()
     }
     private struct CoverageRequest {
         var id: String
@@ -98,6 +167,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var receiptAt: TimeInterval?
         var reported: Set<BrowserWindowCoveragePolicy.ReportedIdentity>
         var expectedProfiles: Set<String>
+        var needsFreshQuery = false
     }
     private final class CoverageState {
         var known: Set<BrowserWindowCoveragePolicy.NativeIdentity>
@@ -107,6 +177,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         var cohort: BrowserWindowCoverageCohort
         var request: CoverageRequest?
         var inventoryFailureSince: TimeInterval?
+        var observationBegan: TimeInterval?
         var pendingReported: Set<BrowserWindowCoveragePolicy.ReportedIdentity> = []
         init(_ coverage: BrowserWindowCoveragePolicy.Coverage, observation: WorkspaceWindow.CoverageObservation?, allowsLater: Bool) {
             self.coverage = coverage; self.observation = observation
@@ -124,6 +195,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
     private let coverageReadyLock = NSLock()
     private var initialCoverageReady = true
+    private var publishedCoverageGeneration: UInt64?
+    private var nonEnforcingCoverageReady = false
     private var recoveryCoverage = (verifiedAtUptime: TimeInterval(0), resolved: false)
     // These observations are main-queue-owned. The input scanner reads only the
     // short-lock copy, never AX state or sticky startup readiness.
@@ -131,14 +204,19 @@ public final class FocusVisibilityController: @unchecked Sendable {
     private var reportedRecoveryObservation = (at: TimeInterval(0), resolved: false)
     private var browserRecoveryObservations: [String: (at: TimeInterval, resolved: Bool)] = [:]
     public var inputRecoveryCoverage: (verifiedAtUptime: TimeInterval, resolved: Bool) {
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured else { return (0, false) }
         coverageReadyLock.lock(); defer { coverageReadyLock.unlock() }
-        if recoveryCoverage.resolved && !(spec.hideDistractions && spec.requiresEnforcement) {
-            return (ProcessInfo.processInfo.systemUptime, true)
+        if !(spec.hideDistractions && spec.requiresEnforcement) {
+            return (desktop.uptime, nonEnforcingCoverageReady)
         }
+        guard publishedCoverageGeneration == desktop.generation else { return (0, false) }
         return recoveryCoverage
     }
     private func publishRecoveryCoverage() {
-        var observations = [nativeRecoveryObservation, reportedRecoveryObservation]
+        guard mayEnforce else { invalidateRecoveryCoverage(); return }
+        var observations = [nativeRecoveryObservation]
+        if visibilityCache != nil { observations.append(reportedRecoveryObservation) }
         for (browser, state) in coverageStates {
             // Add-as-you-go retires initial browser exclusions; native and
             // reported claims still require current observations.
@@ -149,24 +227,39 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 && state.request == nil && state.pendingReported.isEmpty && state.cohort.initialResolved))
         }
         let at = observations.map(\.at).min() ?? 0
-        let resolved = mayEnforce && observations.allSatisfy { $0.resolved && $0.at > 0 }
+        let resolved = desktopCoverage.isReady && observations.allSatisfy { $0.resolved && $0.at > 0 }
         coverageReadyLock.lock()
         recoveryCoverage = (at, resolved)
+        publishedCoverageGeneration = desktopCoverage.observation?.generation
         coverageReadyLock.unlock()
     }
     private func invalidateRecoveryCoverage() {
         coverageReadyLock.lock(); recoveryCoverage = (0, false); coverageReadyLock.unlock()
     }
     public var isInitialCoverageReady: Bool {
-        coverageReadyLock.lock(); defer { coverageReadyLock.unlock() }; return initialCoverageReady
+        let desktop = DesktopSessionAvailability.snapshot
+        coverageReadyLock.lock(); defer { coverageReadyLock.unlock() }
+        // Leisure and non-hiding sessions have no visibility prerequisite,
+        // including when the current desktop is secured. Their effect owners
+        // still independently fence actual focus/AX work.
+        if !(spec.hideDistractions && spec.requiresEnforcement) { return nonEnforcingCoverageReady }
+        guard desktop.state != .secured else { return false }
+        return publishedCoverageGeneration == desktop.generation && initialCoverageReady
     }
     private func updateCoverageReady() {
         coverageReadyLock.lock()
-        initialCoverageReady = nativeCoverage.initialResolved && coverageStates.values.allSatisfy { $0.cohort.initialResolved }
+        publishedCoverageGeneration = desktopCoverage.observation?.generation
+        initialCoverageReady = desktopCoverage.isRevalidationReady && nativeCoverage.initialResolved && coverageStates.values.allSatisfy { $0.cohort.initialResolved }
         coverageReadyLock.unlock()
     }
     public init(spec: FocusSessionSpec) {
         self.spec = spec
+        nonEnforcingCoverageReady = !(spec.hideDistractions && spec.requiresEnforcement)
+        let required = DesktopSessionCoveragePolicy.requiredDomains(
+            enforcesVisibility: spec.hideDistractions && spec.requiresEnforcement,
+            hasReportedWindowSession: spec.nativeWindowVisibilitySessionID != nil,
+            browsers: Set(spec.browserWindowCoverage.map(\.browserBundleIdentifier)))
+        desktopCoverage = .init(required: required)
         nativeCoverage = .init(required: spec.hideDistractions && spec.requiresEnforcement)
         for coverage in spec.browserWindowCoverage where spec.hideDistractions && spec.requiresEnforcement {
             coverageStates[coverage.browserBundleIdentifier] = CoverageState(coverage, observation: spec.browserCoverageObservations[coverage.browserBundleIdentifier], allowsLater: spec.coverageAllowsLaterWindows)
@@ -182,8 +275,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
 
     public func start() {
         onMain {
-            guard mayEnforce else { return }
+            guard !started, !stopped, enforcementIsCurrent?() ?? true else { return }
+            let initialDesktop = sampleDesktopSession()
             started = true
+            coverageReadyLock.lock(); nonEnforcingCoverageReady = !(spec.hideDistractions && spec.requiresEnforcement); coverageReadyLock.unlock()
+            installDesktopObservers()
             Self.diagnosticEvents = []
             Self.recoveryGeneration &+= 1
             Self.stopRecoveryWatcher()
@@ -195,13 +291,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
             guard spec.hideDistractions && spec.requiresEnforcement, !stopped, timer == nil else {
                 let now = ProcessInfo.processInfo.systemUptime
                 nativeRecoveryObservation = (now, true); reportedRecoveryObservation = (now, true)
+                updateCoverageReady()
                 publishRecoveryCoverage()
                 if spec.startupWindowAnchor == nil, Self.needsRecoveryObservation(entries, parkingOnly: true) {
                     Self.startRecoveryWatcher(generation: Self.recoveryGeneration, parkingOnly: true)
                 }
                 return
             }
-            nativeCoverage.begin(now: ProcessInfo.processInfo.systemUptime)
+            nativeCoverage.begin(now: initialDesktop.activeUptime)
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now(), repeating: 0.5)
             timer.setEventHandler { [weak self] in self?.refresh() }
@@ -211,6 +308,12 @@ public final class FocusVisibilityController: @unchecked Sendable {
     public func stop(restorationPolicyOverride: HiddenWorkspaceRestorationPolicy? = nil) {
         onMain {
             guard !stopped else { return }
+            desktopCoverage.stop()
+            coverageReadyLock.lock(); initialCoverageReady = false; nonEnforcingCoverageReady = false; coverageReadyLock.unlock()
+            coverageSweepGeneration &+= 1; coverageSweepInFlight = false
+            for observer in desktopObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+            for observer in distributedDesktopObservers { DistributedNotificationCenter.default().removeObserver(observer) }
+            desktopObservers.removeAll(); distributedDesktopObservers.removeAll()
             invalidateRecoveryCoverage()
             publishAuxiliaryProofs([:])
             nativeCoverage.stop()
@@ -244,7 +347,9 @@ public final class FocusVisibilityController: @unchecked Sendable {
     /// Coalesce notifications and fence the queued pass with session ownership.
     public func refreshAfterWorkspaceTransition() {
         onMain {
-            guard started, mayEnforce, timer != nil, !workspaceRefreshQueued else { return }
+            guard started, !stopped, timer != nil else { return }
+            _ = sampleDesktopSession()
+            guard !workspaceRefreshQueued else { return }
             workspaceRefreshQueued = true
             queue.async { [weak self] in
                 guard let self else { return }
@@ -280,8 +385,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let onlyDeferredOwnership = !saved.isEmpty && saved.allSatisfy {
             ($0.restorationPolicy ?? .automatic) == .onUserReveal
         }
-        RestorationFocusGuard.begin(restoringPIDs: restoringPIDs,
-            observationOnly: policy == .onUserReveal || onlyDeferredOwnership)
+        recoveryFocusContext = (restoringPIDs, policy == .onUserReveal || onlyDeferredOwnership)
+        beginRecoveryFocusGuardIfNeeded()
         // Only bound native ownership can survive finish. Uncaptured holding
         // windows have not been ACKed, so JS has not moved any user tabs there.
         if needsRecoveryObservation(saved) { startRecoveryWatcher(generation: generation) }
@@ -293,21 +398,38 @@ public final class FocusVisibilityController: @unchecked Sendable {
         if !needsRecoveryObservation(pending) { stopRecoveryWatcher() }
         return pending
     }
-    private static func retryRecovery(generation: Int, attempts: Int) {
+    private static func beginRecoveryFocusGuardIfNeeded() {
+        guard let context = recoveryFocusContext else { return }
+        let desktop = DesktopSessionAvailability.snapshot
+        guard desktop.state != .secured, recoveryFocusDesktopGeneration != desktop.generation else { return }
+        let fence = DesktopSessionEffectFence(desktop)
+        // Capture the user's current foreground on the first available retry,
+        // never the stale pre-lock destination. Do not restart after new input
+        // or for subsequent file writes in this same desktop epoch.
+        RestorationFocusGuard.begin(restoringPIDs: context.pids, observationOnly: context.observationOnly)
+        if fence.permits(DesktopSessionAvailability.snapshot) { recoveryFocusDesktopGeneration = desktop.generation }
+    }
+    private static func retryRecovery(generation: Int, attempts: Int, parkingOnly: Bool = false) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard generation == recoveryGeneration else { return }
             // unhide() may report false while the visibility request is still in flight.
             // Re-read macOS state before discarding ownership, or retry if it really failed.
-            let pending = restore()
+            let pending = restore(parkingOnly: parkingOnly)
             if pending.contains(where: { ($0.restorationPolicy ?? .automatic) == .automatic }) && attempts > 1 {
-                retryRecovery(generation: generation, attempts: attempts - 1)
-            } else if !needsRecoveryObservation(pending) { stopRecoveryWatcher() }
+                retryRecovery(generation: generation, attempts: attempts - 1, parkingOnly: parkingOnly)
+            } else if !needsRecoveryObservation(pending, parkingOnly: parkingOnly) { stopRecoveryWatcher() }
         }
     }
 
     private func refresh() {
         guard mayEnforce else { return }
-        let recoveryObservationBegan = ProcessInfo.processInfo.systemUptime
+        let desktop = sampleDesktopSession()
+        let previousGeneration = activeObservationGeneration
+        activeObservationGeneration = desktop.generation
+        defer { activeObservationGeneration = previousGeneration }
+        checkDesktopCoverageDeadline()
+        guard mayEnforce else { return }
+        let recoveryObservationBegan = desktop.uptime
         invalidateRecoveryCoverage()
         let serverRows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         let windows = WorkspaceWindow.list(records: serverRows ?? [])
@@ -406,13 +528,15 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let packet = nativeInventoryAvailable ? observations.map {
             NativeVisibilityCoveragePolicy.Observation(target: $0.key, outcome: $0.value)
         } : nil
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = coverageBudgetTime
+        guard observationIsCurrent(desktop.generation) else { return }
         let wasReady = nativeCoverage.initialResolved
         let startupFailure = nativeCoverage.update(packet, now: now)
         let offscreenFailure = offscreenCoverage.update(nativeInventoryAvailable ? observations : nil, now: now)
         let failure = startupFailure ?? offscreenFailure
         nativeRecoveryObservation = (recoveryObservationBegan,
             nativeInventoryAvailable && failure == nil && observations.values.allSatisfy { $0 != .unresolved })
+        desktopCoverage.record(.native, resolved: nativeRecoveryObservation.resolved, generation: desktop.generation)
         if !wasReady || failure != nil || lastNativeObservations != observations {
             writeNativeCoverageDiagnostics(observations: observations, inventoryAvailable: nativeInventoryAvailable,
                 unidentifiedPIDs: unidentifiedPIDs, missingIdentityPIDs: missingIdentityPIDs, failure: failure)
@@ -433,6 +557,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         publishAuxiliaryProofs(mayEnforce ? observedAuxiliaryProofs : [:])
         updateCoverageReady()
         publishRecoveryCoverage()
+        checkDesktopCoverageDeadline()
     }
 
     private func hideNativeApplication(_ app: NSRunningApplication,
@@ -816,6 +941,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
     }
     private func reportCoverageFailure(_ failure: BrowserWindowCoveragePolicy.Failure) {
+        guard mayEnforce else { return }
         var value: [String: Any] = ["schemaVersion": 1, "browser": failure.browserBundleIdentifier,
             "reason": failure.reason.rawValue, "recordedAt": Date().timeIntervalSince1970]
         if let occurrence = spec.nativeWindowVisibilitySessionID { value["occurrence"] = occurrence }
@@ -827,7 +953,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             value["pendingReportedCount"] = state.pendingReported.count
             value["expectedProfileCount"] = state.request?.expectedProfiles.count ?? state.profiles.count
             if let began = state.request?.began {
-                value["discoveryElapsed"] = ProcessInfo.processInfo.systemUptime - began
+                value["discoveryElapsed"] = coverageBudgetTime - began
             }
         }
         if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
@@ -835,23 +961,28 @@ public final class FocusVisibilityController: @unchecked Sendable {
             try? data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         }
+        guard mayEnforce else { return }
         onCoverageFailure?(failure)
     }
 
     private func refreshBrowserCoverage() {
         guard !coverageStates.isEmpty, coverageIsCurrent() else { return }
-        let now = ProcessInfo.processInfo.systemUptime
+        let desktop = sampleDesktopSession()
+        let now = desktop.activeUptime
         let active = coverageStates.filter { !spec.coverageAllowsLaterWindows || !$0.value.cohort.initialResolved
             || !$0.value.pendingReported.isEmpty || $0.value.request != nil }
+        for browser in Set(coverageStates.keys).subtracting(active.keys) {
+            desktopCoverage.record(.browser(browser), resolved: true, generation: desktop.generation)
+        }
         for (browser, state) in active {
             if let failure = state.cohort.expiredFailure(now: now) { reportCoverageFailure(failure); return }
             if let request = state.request, now - request.began >= 3 {
                 reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
             }
-            if let began = state.inventoryFailureSince, now - began >= 3 {
+            if let began = state.inventoryFailureSince ?? state.observationBegan, now - began >= 3 {
                 reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)); return
             }
-            if let request = state.request, request.snapshots == nil {
+            if let request = state.request, !request.needsFreshQuery, request.snapshots == nil {
                 let snapshots = BrowserProfileSnapshots.coverageSnapshots(base: BrowserTabSnapshotStore.fileURL(for: browser), requestID: request.id)
                 let profiles = Set(snapshots.compactMap(\.browserSessionID))
                 if request.expectedProfiles.isSubset(of: profiles), !snapshots.isEmpty,
@@ -862,9 +993,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
         }
         guard !active.isEmpty, !coverageSweepInFlight else { return }
-        for state in active.values { state.cohort.beginPendingObservation(now: now) }
+        for state in active.values {
+            state.cohort.beginPendingObservation(now: now)
+            // An AX scan crossing lock keeps its original bounded obligation,
+            // even though its eventual result is discarded by generation.
+            if state.observationBegan == nil { state.observationBegan = now }
+        }
         coverageSweepInFlight = true; coverageSweepGeneration &+= 1
-        let generation = coverageSweepGeneration, browsers = Array(active.keys), deadline = now + 2.5
+        let generation = coverageSweepGeneration, browsers = Array(active.keys), deadline = desktop.uptime + 2.5
         let previous = active.compactMapValues(\.observation)
         Self.coverageQueue.async { [weak self] in
             var samples: [CoverageSample] = []
@@ -875,8 +1011,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
             let completedSamples = samples
             DispatchQueue.main.async { [weak self] in
-                guard let self, generation == self.coverageSweepGeneration else { return }
+                guard let self, self.observationIsCurrent(desktop.generation), generation == self.coverageSweepGeneration else { return }
                 self.coverageSweepInFlight = false
+                let previousGeneration = self.activeObservationGeneration
+                self.activeObservationGeneration = desktop.generation
+                defer { self.activeObservationGeneration = previousGeneration }
                 guard self.coverageIsCurrent() else { return }
                 for sample in completedSamples {
                     guard self.coverageIsCurrent() else { return }
@@ -887,15 +1026,20 @@ public final class FocusVisibilityController: @unchecked Sendable {
                                 launched: Date(timeIntervalSinceReferenceDate: identity.launched), window: identity.windowID)] = element
                         }
                     }
+                    if observation != nil { self.browserObservationGenerations[sample.browser] = desktop.generation }
                     self.applyBrowserCoverage(browser: sample.browser, observation: observation, began: now)
                     if let state = self.coverageStates[sample.browser] {
-                        self.browserRecoveryObservations[sample.browser] = (now,
+                        self.browserRecoveryObservations[sample.browser] = (desktop.uptime,
                             observation != nil && state.inventoryFailureSince == nil && state.request == nil
                                 && state.pendingReported.isEmpty && state.cohort.initialResolved)
+                        self.desktopCoverage.record(.browser(sample.browser),
+                            resolved: self.browserRecoveryObservations[sample.browser]?.resolved == true,
+                            generation: desktop.generation)
                     }
                 }
                 self.updateCoverageReady()
                 self.publishRecoveryCoverage()
+                self.checkDesktopCoverageDeadline()
             }
         }
     }
@@ -906,7 +1050,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
     private func applyBrowserCoverage(browser: String, observation: WorkspaceWindow.CoverageObservation?, began: TimeInterval) {
         guard coverageIsCurrent(), let occurrence = spec.nativeWindowVisibilitySessionID, let state = coverageStates[browser] else { return }
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = coverageBudgetTime
+        guard mayEnforce else { return }
         guard let observation else {
             for target in state.cohort.targets {
                 _ = state.cohort.observe(target.identity, outcome: .unresolved, now: began)
@@ -914,7 +1059,8 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     reportCoverageFailure(failure); return
                 }
             }
-            let firstFailure = state.inventoryFailureSince ?? began; state.inventoryFailureSince = firstFailure
+            let firstFailure = state.inventoryFailureSince ?? state.observationBegan ?? began
+            state.inventoryFailureSince = firstFailure
             if now - firstFailure >= 3 { reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .inventoryUnavailable)) }
             return
         }
@@ -923,7 +1069,14 @@ public final class FocusVisibilityController: @unchecked Sendable {
         state.observation = observation
         state.coverage = state.coverage.retainingContinuous(observation.continuousIdentities)
         state.request?.witnessed.formIntersection(observation.continuousIdentities)
-        state.inventoryFailureSince = nil
+        state.inventoryFailureSince = nil; state.observationBegan = nil
+        if state.request?.needsFreshQuery == true {
+            let command = BrowserTabCommand(tabID: -1, windowID: -1, action: .snapshot)
+            state.request?.id = command.id
+            state.request?.needsFreshQuery = false
+            state.request?.witnessed = inventory.observedStandard
+            try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(command)
+        }
         if !spec.coverageAllowsLaterWindows || !state.pendingReported.isEmpty || state.request != nil {
             let current = Set(inventory.windows.map(\.identity))
             state.known.formIntersection(current)
@@ -936,9 +1089,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 // a failed send is pending until its bounded deadline.
                 try? BrowserTabCommandStore(browserBundleIdentifier: browser).write(command)
             }
+            let receiptCheckUptime = ProcessInfo.processInfo.systemUptime
             if let request = state.request, let snapshots = request.snapshots,
                let receiptAt = request.receiptAt, BrowserWindowCoveragePolicy.isPostReceiptObservation(receiptAt: receiptAt,
-                    sampledAt: observation.sampledAt, now: now, deadline: request.began + 3) {
+                    sampledAt: observation.sampledAt, now: receiptCheckUptime,
+                    deadline: receiptCheckUptime + max(0, 3 - (now - request.began))) {
                 if now - request.began >= 3 {
                     reportCoverageFailure(.init(browserBundleIdentifier: browser, reason: .discoveryUnavailable)); return
                 }
@@ -1059,6 +1214,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     /// only while the coverage packet still owns the exact live AX binding.
     private func coverageBinding(record: BrowserWindowVisibilityRecord, claim: BrowserWindowVisibilityWindow) -> UInt32? {
         guard record.plan.intentionSessionID == spec.nativeWindowVisibilitySessionID,
+              browserObservationGenerations[record.browserBundleIdentifier] == desktopCoverage.observation?.generation,
               let state = coverageStates[record.browserBundleIdentifier], let observation = state.observation,
               let identity = state.coverage.matches[.init(bundleIdentifier: record.browserBundleIdentifier,
                   browserSessionID: record.browserSessionID, windowID: claim.windowID)],
@@ -1072,6 +1228,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
 
     private func reconcileBrowserWindows(records: [BrowserWindowVisibilityRecord], windows: [WorkspaceWindow], observedAt: TimeInterval, inventoryComplete: Bool) {
+        guard mayEnforce, let generation = desktopCoverage.observation?.generation else { return }
         reportedRecoveryObservation = (observedAt, false)
         // A newly connected profile can report an already-observed native-only
         // window. Its native ID is not new, but its report identity still needs
@@ -1162,9 +1319,11 @@ public final class FocusVisibilityController: @unchecked Sendable {
         // before a failure callback; a stop/new session cannot be resurrected.
         let rules = Self.currentRules()
         let currentSession = rules.flatMap { $0.active && $0.hideDistractions && $0.nativeWindowVisibility && $0.isFresh() ? $0.startupSessionID : nil }
+        let updateBudgetTime = coverageBudgetTime
+        guard observationIsCurrent(generation) else { return }
         var nextPolicy = enforcementPolicy
         let failure = nextPolicy?.update(observations,
-            activeIntentionSessionID: currentSession, now: ProcessInfo.processInfo.systemUptime)
+            activeIntentionSessionID: currentSession, now: updateBudgetTime)
         if let failure {
             // A later plan may have omitted this window while AX was answering.
             // Keep the old clock, but retry a changed plan instead of delivering
@@ -1202,6 +1361,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             && currentSession == spec.nativeWindowVisibilitySessionID && observations.allSatisfy {
                 $0.outcome == .verifiedMinimized || $0.outcome == .verifiedApplicationHidden || $0.outcome == .noLongerExists
             })
+        desktopCoverage.record(.reported, resolved: reportedRecoveryObservation.resolved, generation: generation)
         // Plan omission is not a reveal: Add As You Go leaves initial
         // distractions hidden until completion.
     }
@@ -1454,6 +1614,13 @@ public final class FocusVisibilityController: @unchecked Sendable {
     }
     private static func restore(parkingOnly: Bool = false) -> [Entry] {
         let entries = loadEntries()
+        let desktopFence = DesktopSessionEffectFence(DesktopSessionAvailability.snapshot)
+        func currentDesktop() -> Bool { desktopFence.permits(DesktopSessionAvailability.snapshot) }
+        // Keep the complete durable journal if any read/effect crosses a secure
+        // transition. A later fresh pass can retire already-restored entries.
+        guard currentDesktop() else { return entries }
+        beginRecoveryFocusGuardIfNeeded()
+        guard currentDesktop() else { return entries }
         let records = recoveryRecords(entries: entries)
         // Retire browser-confirmed closures before any CG/AX lookup. Chrome can
         // retain a native CG window after its extension window ID is gone.
@@ -1463,7 +1630,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             }
         }
         if !entries.isEmpty && remaining.isEmpty {
-            guard save([]) else { return entries }
+            guard currentDesktop(), save([]) else { return entries }
             accessibilityWindows.removeAll()
             return []
         }
@@ -1475,6 +1642,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
         let rules = currentRules()
         let activeSession = rules.flatMap { $0.active && $0.isFresh() ? $0.startupSessionID : nil }
         for entry in remaining {
+            guard currentDesktop() else { return entries }
             let historicalBootstrap = entry.bootstrapEffectID != nil && entry.intentionSessionID != activeSession
             if parkingOnly && entry.parking != true && !historicalBootstrap { pending.append(entry); continue }
             // AppKit can temporarily lack an application or its launch metadata.
@@ -1528,6 +1696,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                       let window = windows.first(where: { $0.id == id && $0.pid == entry.pid }),
                       let element = element(window, launched: entry.launched) else { pending.append(entry); continue }
                 let before = boolean(element, kAXMinimizedAttribute)
+                guard currentDesktop() else { return entries }
                 if before.value == false { continue }
                 // A late settled effect cannot reveal under a newer policy.
                 // The colliding new claim remains unresolved and safety-stops.
@@ -1545,12 +1714,16 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 if entry.nativeCoverage != nil && entry.parking != true {
                     let restored = BrowserWindowCoverageEffects.restore(ownershipSessionID: entry.intentionSessionID,
                         activeSessionID: activeSession, readMinimized: {
-                        boolean(element, kAXMinimizedAttribute).value
+                        guard currentDesktop() else { return nil }
+                        let value = boolean(element, kAXMinimizedAttribute).value
+                        return currentDesktop() ? value : nil
                     }, dispatch: {
+                        guard currentDesktop() else { return }
                         let status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                         observe("restore", pid: entry.pid, window: id, status: status)
                         RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                     })
+                    guard currentDesktop() else { return entries }
                     if !restored { pending.append(entry) }
                     RestorationFocusGuard.preserveCurrent()
                     continue
@@ -1571,17 +1744,20 @@ public final class FocusVisibilityController: @unchecked Sendable {
                             browserBundleIdentifier: entry.bundle, browserSessionID: profile, intentionSessionID: intention
                         ) { record in
                             disposition = parkingDisposition(entry, record: record)
-                            if disposition == .restore {
+                            if disposition == .restore && currentDesktop() {
                                 dispatched = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                             }
                         }
                     } catch { pending.append(entry); continue }
+                    guard currentDesktop() else { return entries }
                     if disposition == .discard { continue }
                     guard let dispatched else { pending.append(entry); continue }
                     status = dispatched
                 } else {
+                    guard currentDesktop() else { return entries }
                     status = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                 }
+                guard currentDesktop() else { return entries }
                 observe("restore", pid: entry.pid, window: id, status: status)
                 RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 // Successful dispatch is not completion. A request that timed
@@ -1589,13 +1765,15 @@ public final class FocusVisibilityController: @unchecked Sendable {
                 if boolean(element, kAXMinimizedAttribute).value != false { pending.append(entry) }
             } else {
                 func sameLifetime() -> Bool {
-                    !app.isTerminated && app.processIdentifier == entry.pid && app.bundleIdentifier == entry.bundle && app.intentVisibilityLaunchDate == entry.launched
+                    !app.isTerminated && app.processIdentifier == entry.pid && app.bundleIdentifier == entry.bundle
+                        && app.intentVisibilityLaunchDate == entry.launched && currentDesktop()
                 }
                 let restored = NativeVisibilityCoverageEffects.restoreWithFallback(isCurrent: sameLifetime, readHidden: {
                     applicationHidden(app, accessibilityHideOwned: entry.accessibilityApplicationHide == true).hidden
                 }, shouldReveal: {
                     (entry.restorationPolicy ?? .automatic).action(isHidden: true) == .reveal
                 }, dispatchPrimary: {
+                    guard sameLifetime() else { return }
                     _ = app.unhide()
                     RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 }, dispatchFallback: {
@@ -1603,6 +1781,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
                     let element = AXUIElementCreateApplication(entry.pid)
                     guard isSettable(element, kAXHiddenAttribute), sameLifetime() else { return }
                     AXUIElementSetMessagingTimeout(element, 0.025)
+                    guard sameLifetime() else { return }
                     _ = AXUIElementSetAttributeValue(element, kAXHiddenAttribute as CFString, kCFBooleanFalse)
                     RestorationFocusGuard.preserveAfterOwnedVisibilityChange()
                 })
@@ -1611,7 +1790,7 @@ public final class FocusVisibilityController: @unchecked Sendable {
             RestorationFocusGuard.preserveCurrent()
         }
         // Failed persistence cannot make the watcher forget durable ownership.
-        guard save(pending) else { return entries }
+        guard currentDesktop(), save(pending) else { return entries }
         let identities = Set(pending.compactMap { entry in entry.window.map { WindowIdentity(pid: entry.pid, launched: entry.launched, window: $0) } })
         accessibilityWindows = accessibilityWindows.filter { identities.contains($0.key) }
         RestorationFocusGuard.preserveCurrent()
@@ -1624,17 +1803,47 @@ public final class FocusVisibilityController: @unchecked Sendable {
         }
     }
     private static func startRecoveryWatcher(generation: Int, parkingOnly: Bool = false) {
+        recoveryWatching = true
+        // Desktop availability is an independent retry source. The browser plan
+        // and journal can remain byte-for-byte unchanged throughout a lock.
+        func retryAfterDesktopTransition() {
+            guard generation == recoveryGeneration, recoveryWatching else { return }
+            recoveryFingerprint = planFingerprint()
+            let pending = restore(parkingOnly: parkingOnly)
+            if needsRecoveryObservation(pending, parkingOnly: parkingOnly) {
+                retryRecovery(generation: generation, attempts: 4, parkingOnly: parkingOnly)
+            } else { stopRecoveryWatcher() }
+        }
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            recoveryWakeObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                retryAfterDesktopTransition()
+            })
+        }
+        recoveryUnlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { _ in
+                // Re-read at delivery; the notification itself grants no effect.
+                retryAfterDesktopTransition()
+            }
+        recoveryTerminationObserver = center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { _ in
+            guard generation == recoveryGeneration, recoveryWatching else { return }
+            let pending = restore(parkingOnly: parkingOnly)
+            if !needsRecoveryObservation(pending, parkingOnly: parkingOnly) { stopRecoveryWatcher() }
+        }
         let directory = file.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let descriptor = open(directory.path, O_EVTONLY)
+        // Keep wake/activation retries even if the optional file watch cannot
+        // open. Failure to observe a directory must not abandon owned windows.
         guard descriptor >= 0 else { return }
         recoveryFingerprint = planFingerprint()
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
         source.setEventHandler {
-            guard generation == recoveryGeneration, recoverySource != nil else { return }
+            guard generation == recoveryGeneration, recoveryWatching else { return }
             recoveryWork?.cancel()
             let work = DispatchWorkItem {
-                guard generation == recoveryGeneration, recoverySource != nil else { return }
+                guard generation == recoveryGeneration, recoveryWatching else { return }
                 let fingerprint = planFingerprint()
                 guard fingerprint != recoveryFingerprint else { return }
                 recoveryFingerprint = fingerprint
@@ -1647,17 +1856,18 @@ public final class FocusVisibilityController: @unchecked Sendable {
         source.setCancelHandler { close(descriptor) }
         recoverySource = source
         source.resume()
-        recoveryTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { _ in
-            guard generation == recoveryGeneration, recoverySource != nil else { return }
-            let pending = restore(parkingOnly: parkingOnly)
-            if !needsRecoveryObservation(pending, parkingOnly: parkingOnly) { stopRecoveryWatcher() }
-        }
     }
     private static func stopRecoveryWatcher() {
+        recoveryWatching = false
+        recoveryFocusContext = nil; recoveryFocusDesktopGeneration = nil
         recoveryWork?.cancel(); recoveryWork = nil
         recoverySource?.cancel(); recoverySource = nil
         if let observer = recoveryTerminationObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         recoveryTerminationObserver = nil
+        for observer in recoveryWakeObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        recoveryWakeObservers.removeAll()
+        if let observer = recoveryUnlockObserver { DistributedNotificationCenter.default().removeObserver(observer) }
+        recoveryUnlockObserver = nil
         recoveryFingerprint = []
     }
     private static func planFingerprint() -> [String] {

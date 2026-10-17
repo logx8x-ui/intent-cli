@@ -2019,7 +2019,11 @@ final class IntentAppModel: ObservableObject {
                 windowSelectionAppIDs: Set(selectedWindows.keys), tabSelectionAppIDs: Set(tabIDs.keys))
             quickSelectionMonitor = Task { [weak self] in
                 var browserPresence = Dictionary(uniqueKeysWithValues: tabIDs.keys.map { ($0, SelectedResourceLifetime.BrowserPresence.unknown) })
-                while !Task.isCancelled {
+                let initialDesktop = DesktopSessionAvailability.snapshot
+                var desktopGeneration = initialDesktop.generation
+                var securedGeneration: UInt64? = initialDesktop.state == .secured ? nil : initialDesktop.securedGeneration
+                var desktopRevalidation: [String: DesktopSessionCoveragePolicy] = [:]
+                monitorLoop: while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard !Task.isCancelled, let self, self.activeSessionID == intention.id,
                           self.activeSessionOccurrenceID == occurrence,
@@ -2027,6 +2031,37 @@ final class IntentAppModel: ObservableObject {
                     // Do not mistake an app still launching during startup for
                     // an exhausted intention. onReady owns session readiness.
                     guard self.currentRecord?.id == occurrence else { continue }
+                    let desktop = DesktopSessionAvailability.snapshot
+                    let desktopChanged = desktop.generation != desktopGeneration
+                    if desktopChanged {
+                        desktopGeneration = desktop.generation
+                        // Lock-screen absence is never evidence that work closed.
+                        // Each browser retains an unfinished revalidation budget
+                        // across repeated lock/unlock transitions.
+                        browserPresence = Dictionary(uniqueKeysWithValues: tabIDs.keys.map { ($0, .unknown) })
+                    }
+                    if securedGeneration != desktop.securedGeneration {
+                        securedGeneration = desktop.securedGeneration
+                        for browser in tabIDs.keys where desktopRevalidation[browser] == nil {
+                            desktopRevalidation[browser] = DesktopSessionCoveragePolicy(required: [.browser(browser)],
+                                requiresInitialVerification: true)
+                        }
+                    }
+                    for browser in Array(desktopRevalidation.keys) {
+                        desktopRevalidation[browser]?.update(desktop)
+                    }
+                    guard desktop.state != .secured else { continue }
+                    func desktopIsCurrent() -> Bool {
+                        let current = DesktopSessionAvailability.snapshot
+                        return current.state != .secured && current.generation == desktop.generation
+                    }
+                    func awaitingBrowserRevalidation(_ browser: String) -> Bool {
+                        let current = DesktopSessionAvailability.snapshot
+                        guard current.state != .secured, current.generation == desktop.generation else { return false }
+                        desktopRevalidation[browser]?.update(current)
+                        guard let policy = desktopRevalidation[browser] else { return false }
+                        return policy.hasPendingVerification && policy.expiredDomain(grace: 3) == nil
+                    }
                     for (browser, selected) in tabIDs {
                         // New permitted searches may appear while other apps
                         // keep this occurrence alive, after older work closes.
@@ -2035,31 +2070,46 @@ final class IntentAppModel: ObservableObject {
                         // disconnect. Other explicitly selected resources survive.
                         if requireSelectedResources,
                            NSRunningApplication.runningApplications(withBundleIdentifier: browser).isEmpty {
+                            guard desktopIsCurrent() else { continue monitorLoop }
+                            if awaitingBrowserRevalidation(browser) { continue monitorLoop }
                             browserPresence[browser] = .closed
                             continue
                         }
                         guard !Task.isCancelled, self.activeLock === lock, !lock.isStopRequested else { return }
                         let heartbeat = BrowserGuardHeartbeatStore(fileURL: BrowserGuardHeartbeatStore.fileURL(for: browser))
-                        guard heartbeat.supports(intention.accessMode == .blacklist ? .blacklistSelection : .quickSelection, maxAge: 5),
-                              heartbeat.supports(.tabSessionIdentity, maxAge: 5),
-                              BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled() else {
+                        let guardEnabled = BrowserGuardStateStore(fileURL: BrowserGuardStateStore.fileURL(for: browser)).isEnabled()
+                        let heartbeatValue = heartbeat.heartbeat()
+                        let heartbeatFresh = heartbeatValue.map { Date().timeIntervalSince($0.lastSeenAt) <= 5 } ?? false
+                        let capabilitiesMatch = heartbeatValue?.supports(intention.accessMode == .blacklist ? .blacklistSelection : .quickSelection) == true
+                            && heartbeatValue?.supports(.tabSessionIdentity) == true
+                        guard guardEnabled, heartbeatFresh, capabilitiesMatch else {
+                            guard desktopIsCurrent() else { continue monitorLoop }
+                            // Only missing/stale liveness gets wake-up grace. An
+                            // explicitly disabled or incompatible guard still fails.
+                            if guardEnabled, !heartbeatFresh,
+                               heartbeatValue == nil || capabilitiesMatch,
+                               awaitingBrowserRevalidation(browser) { continue monitorLoop }
                             // Safety failures must release even a user-locked timer.
                             self.activeLock?.stopForSafety()
                             self.errorMessage = "The selected-tab intention stopped because Browser Guard disconnected or was turned off."
                             return
                         }
-                        guard let snapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load(),
+                        let currentSnapshot = BrowserTabSnapshotStore(browserBundleIdentifier: browser).load()
+                        guard desktopIsCurrent() else { continue monitorLoop }
+                        guard let snapshot = currentSnapshot,
                               let expected = browserSessionIDs[browser], !expected.isEmpty,
                               snapshot.browserSessionID == expected else {
+                            if currentSnapshot == nil, awaitingBrowserRevalidation(browser) { continue monitorLoop }
                             self.activeLock?.stopForSafety()
                             self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
                             return
                         }
-                        if SelectedResourceLifetime.hasRemainingTabs(snapshot: snapshot,
+                        let needsDesktopRevalidation = desktopRevalidation[browser].map { !$0.isReady } ?? false
+                        if !needsDesktopRevalidation, SelectedResourceLifetime.hasRemainingTabs(snapshot: snapshot,
                             selectedIDs: Set(selected), searchSessionID: searchSessionID) {
                             browserPresence[browser] = .present
                         }
-                        if SelectedResourceLifetime.needsTabConfirmation(restrictive: requireSelectedResources,
+                        if needsDesktopRevalidation || SelectedResourceLifetime.needsTabConfirmation(restrictive: requireSelectedResources,
                             snapshot: snapshot, selectedIDs: Set(selected), searchSessionID: searchSessionID) {
                             // Idle/query-suppressed snapshots can be empty while
                             // every selected tab is still open. Confirm absence
@@ -2067,25 +2117,57 @@ final class IntentAppModel: ObservableObject {
                             let check = BrowserSelectedTabPresenceCheck(browser: browser,
                                 expectedSession: expected, selectedIDs: selected, searchSessionID: searchSessionID)
                             var confirmedPresent = false
+                            var awaitingDesktopRevalidation = false
+                            var desktopRevalidationExpired = false
                             // Finish requests stop before teardown clears the
                             // occurrence or cancels this task. Respect that gap.
                             await BrowserSelectedTabPresenceMonitor.confirm(check, isCurrent: {
-                                self.activeSessionID == intention.id && self.activeSessionOccurrenceID == occurrence
-                                    && self.activeLock === lock && !lock.isStopRequested
+                                guard self.activeSessionID == intention.id, self.activeSessionOccurrenceID == occurrence,
+                                      self.activeLock === lock, !lock.isStopRequested, desktopIsCurrent() else { return false }
+                                // The query shares the remaining wake budget;
+                                // it cannot gain another full polling interval.
+                                desktopRevalidation[browser]?.update(DesktopSessionAvailability.snapshot)
+                                if let policy = desktopRevalidation[browser], policy.hasPendingVerification,
+                                   policy.expiredDomain(grace: 3) != nil {
+                                    desktopRevalidationExpired = true
+                                    return false
+                                }
+                                return desktopIsCurrent()
                             }, didConfirm: { result in
+                                guard desktopIsCurrent(), self.activeSessionID == intention.id,
+                                      self.activeSessionOccurrenceID == occurrence,
+                                      self.activeLock === lock, !lock.isStopRequested else { return }
                                 switch result {
                                 case .present:
                                     confirmedPresent = true; browserPresence[browser] = .present
+                                    desktopRevalidation[browser]?.record(.browser(browser), resolved: true,
+                                        generation: desktop.generation)
                                 case .closed:
                                     confirmedPresent = true; browserPresence[browser] = .closed
+                                    desktopRevalidation[browser]?.record(.browser(browser), resolved: true,
+                                        generation: desktop.generation)
                                 case .changed:
                                     self.errorMessage = "The browser restarted or Browser Guard reloaded, so this intention stopped safely. Choose your current tabs again."
                                     self.activeLock?.stopForSafety()
                                 case .pending:
+                                    if awaitingBrowserRevalidation(browser) {
+                                        awaitingDesktopRevalidation = true
+                                        return
+                                    }
                                     self.errorMessage = "Browser Guard could not confirm the selected tabs, so this intention stopped safely. Keep Browser Guard connected and try again."
                                     self.activeLock?.stopForSafety()
                                 }
                             })
+                            guard desktopIsCurrent() else { continue monitorLoop }
+                            guard !Task.isCancelled, self.activeSessionID == intention.id,
+                                  self.activeSessionOccurrenceID == occurrence,
+                                  self.activeLock === lock, !lock.isStopRequested else { return }
+                            if desktopRevalidationExpired {
+                                self.errorMessage = "Browser Guard could not confirm the selected tabs, so this intention stopped safely. Keep Browser Guard connected and try again."
+                                lock.stopForSafety()
+                                return
+                            }
+                            if awaitingDesktopRevalidation { continue monitorLoop }
                             guard confirmedPresent, !Task.isCancelled, self.activeSessionID == intention.id,
                                   self.activeSessionOccurrenceID == occurrence,
                                   self.activeLock === lock, !lock.isStopRequested else { return }
@@ -2093,10 +2175,12 @@ final class IntentAppModel: ObservableObject {
                     }
                     guard !Task.isCancelled, self.activeSessionOccurrenceID == occurrence,
                           self.activeLock === lock, !lock.isStopRequested else { return }
+                    guard desktopIsCurrent() else { continue }
                     // Re-read native windows after asynchronous browser queries,
                     // including replacement windows opened while awaiting them.
                     let nativeWindows = WorkspaceWindow.lifetimeInventory(
                         selectedWindows: selectedWindows, wholeApps: wholeApps)
+                    guard desktopIsCurrent() else { continue }
                     if SelectedResourceLifetime.shouldFinish(restrictive: requireSelectedResources,
                         selectedWindows: selectedWindows, wholeApps: wholeApps,
                         liveWindows: nativeWindows, browsers: browserPresence) {

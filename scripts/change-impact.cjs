@@ -27,6 +27,7 @@ const LIVE_CASES = Object.freeze([
   'finish-exact-current-native-window-and-browser-tab-delayed-tail',
   'apple-mission-control-sbt-click-allowed-window-keeps-session',
   'apple-mission-control-dbt-click-allowed-window-keeps-session',
+  'screen-lock-unlock-retains-occurrence-and-revalidates-browser-coverage',
   'task-workspace-development-channel-and-launch-exclusion',
   'task-workspace-physical-swipe-drag-mention-and-named-overview',
 ]);

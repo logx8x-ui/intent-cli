@@ -128,6 +128,34 @@ private func exercisePresenceMonitor() async throws {
     try expect(!stoppingPhase.isCancelled && currentOccurrence == stoppingOccurrence && stoppingDecisions.isEmpty,
         "A stop request rejects a late closure before teardown cancels the monitor or replaces its occurrence")
 
+    // A query started late in wake-up verification must use the remaining
+    // active-time budget, including time spent before another lock interval.
+    let waking = try makeCheck()
+    var desktopClock = DesktopSessionClock()
+    var wakePolicy = DesktopSessionCoveragePolicy(required: [.browser(browser)], requiresInitialVerification: true)
+    wakePolicy.update(desktopClock.observe(.available, uptime: 0))
+    wakePolicy.update(desktopClock.observe(.secured, uptime: 1))
+    wakePolicy.update(desktopClock.observe(.available, uptime: 61))
+    var queryUptime: TimeInterval = 62.9
+    var wakeExpired = false
+    var wakingDecisions: [BrowserSelectedTabPresenceCheck.Result] = []
+    let wakingPhase = Task { @MainActor in
+        await BrowserSelectedTabPresenceMonitor.confirm(waking, isCurrent: {
+            wakePolicy.update(desktopClock.observe(.available, uptime: queryUptime))
+            if wakePolicy.hasPendingVerification, wakePolicy.expiredDomain(grace: 3) != nil {
+                wakeExpired = true
+                return false
+            }
+            return true
+        }, didConfirm: { wakingDecisions.append($0) })
+    }
+    let wakingCommand = try await awaitRequest()
+    queryUptime = 63.01
+    try reply(wakingCommand, tabs: [selected])
+    await wakingPhase.value
+    try expect(wakeExpired && wakingDecisions.isEmpty,
+        "A late successful exact-profile reply cannot extend a wake deadline beyond its retained active-time budget")
+
     let obsolete = try makeCheck()
     var obsoleteDecisions: [BrowserSelectedTabPresenceCheck.Result] = []
     await BrowserSelectedTabPresenceMonitor.confirm(obsolete, isCurrent: { false },

@@ -46,6 +46,7 @@ do {
     try runBrowserWindowBootstrapSpecs()
     try runBrowserWindowCoverageSpecs()
     try runNativeVisibilityCoverageSpecs()
+    try runDesktopSessionCoverageSpecs()
     try runPublicAccessibilityWindowInventorySpecs()
     try runBrowserWindowVisibilityCacheSpecs()
     try runBrowserWindowEnforcementSpecs()
