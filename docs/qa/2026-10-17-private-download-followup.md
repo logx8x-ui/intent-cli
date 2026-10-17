@@ -278,7 +278,8 @@ The focused suite covers the observed lock failure, all four existing policies,
 long/repeated locks, unknown metadata, stale callbacks, retained deadlines,
 ordinary unarmed uncertainty and stop while locked. A real asynchronous mailbox
 fixture also rejects a successful exact-profile reply arriving too late. Review
-caught and corrected an early leisure-startup regression before installation.
+caught an early leisure-startup issue; the first full gate then caught the
+remaining no-enforcement readiness ordering regression before installation.
 The full source gate and installed lock/unlock acceptance must be recorded
 separately; these focused checks alone do not qualify either app for testers.
 
@@ -298,3 +299,37 @@ system Intent still has build 202610160004. No active app was killed to bypass
 the guard. Prepare a fresh candidate from this source; do not reuse candidate
 202610170001's signatures or physical receipts. Physical lock/unlock, finish while
 locked, lock during input recovery and the complete tester journey remain pending.
+
+## Build preparation after the secured-desktop source gate
+
+Shared runtime commit `3d5e748` contains the final secured-desktop repair. Its
+source-equivalent commit `1efb489` was pushed to `codex/input-protection-repair`.
+All three development products compiled successfully, and the app reports the
+development channel. The compiled Test Intent app UUID is
+`98208D3F-57E7-3BCC-9722-B43A322BB79B`. These products have not been installed:
+the closed-app preflight still reports the local Intent app running, so the
+installer guard was preserved. The earlier physical result applies to the
+previous installed repair only.
+
+A fresh launch build, **0.9.8 / 202610170002**, compiled all three ARM64 products
+from this exact source. The app and Firefox installer were signed, and their
+deep strict app signature and installer certificate checks passed. Packaging
+then stopped with `notarytool` exit 69: `No Keychain password item found for
+profile: intent-notary`. An explicit login-Keychain lookup returned the same
+error; read-only Keychain status showed unlocked. The cause of the missing
+credential lookup is unresolved. No credentials were read, changed or recreated.
+
+The incomplete staging and build log are preserved under
+`signed-incomplete-202610170002/` and `signed-build-blocked-202610170002.log` in
+the external evidence directory. `incomplete-build-202610170002.json` records
+the exact app/package hashes and signing results. There is no completed release
+manifest or notarized installer set for this build. It was not installed,
+uploaded or enabled for testers. Candidate 202610170001 is preserved as an older
+signed artifact but does not include the secured-desktop repair.
+
+`qualification-preparation-blocked-202610170002.json` records all 25 acceptance
+checks as pending, with the successful source gate retained separately. Next
+acceptance includes installed lock/unlock, finishing while locked, lock during
+input-tap recovery, the full DBT/SBT and Mission Control paths, clean-account
+onboarding and the three actual hosted package journeys. Chrome review remains
+deferred at Logan's request. Tester downloads remain disabled.
