@@ -67,7 +67,14 @@ alone cannot attest unchanged rcmd configuration, so the safety bound is retaine
 - Chrome installation is now confirmed by `/var/log/install.log`: the actual
   Downloads package installed at 2026-10-16 21:19:05 KST and showed Install
   Succeeded at 21:19:06. Its automatic-launch preference was not observed live.
-- Both has reached a new protected installation approval; not yet a pass.
+- Both installation is confirmed at 2026-10-17 09:45:01 KST, with Install
+  Succeeded at 09:45:02. The actual downloaded package still matches its SHA and
+  size; package signature, Gatekeeper and stapled ticket passed. The system app
+  matches candidate UUID `10556785-3319-3C2E-BE9D-69AE7061C6F0` and executable
+  SHA `7cd7096e65e359e434019b018754232a3691290db596c9d9bba6fcd76dd13e3c`.
+  Its root-owned onboarding receipt records `both` and build `202610160004`.
+  Existing completed onboarding is preserved. The launch command's argument and
+  a fresh-account onboarding journey were not observed.
 - Website source `2cd5e81604f61fe657dbab8622892e0c477d1027` was pushed and version
   19 deployed successfully. The Git push failure was resolved with a child-only
   16 MiB `http.postBuffer` override instead of the global 4096 MiB value. No global
@@ -76,7 +83,9 @@ alone cannot attest unchanged rcmd configuration, so the safety bound is retaine
 - Anonymous checks after deployment: public root 200; missing/invalid invite
   pages and invalid download request 404; unauthenticated owner API 404. Private
   responses carry private/no-store, no-referrer and noindex headers.
-- The refreshed owner verifier still needs its browser acceptance check.
+- The refreshed owner verifier passed in Firefox on October 17: all three
+  candidate packages passed HEAD, byte range and full downloaded SHA-256 checks.
+  The page explicitly retained private staging and disabled tester downloads.
 - The Chrome Web Store still shows 0.2.14; required 0.2.46 is not publicly approved.
 
 `PINNED_LAUNCH_RELEASE` remains null. Private staging is not a tester release.
@@ -117,6 +126,80 @@ was taken after Test installation, so it is not a separate before/after Test dat
 claim. The apps were not launched while the Mac was locked. `/Applications/Intent.app`
 remains the signed 202610160004 candidate. No new signed tester package was promoted.
 
-Installed live acceptance, the pending Both installer approval, and refreshed
-owner-page verification resume after unlock. Automated passes do not resolve the
-later rcmd safety-stop cause or replace physical/clean-account qualification.
+Installed live acceptance continues after unlock. Automated passes do not resolve
+the later rcmd safety-stop cause or replace physical/clean-account qualification.
+
+## New installed diagnostic after unlock
+
+The installed Test build above recorded another ready-session safety stop on
+October 17, 02:43:13 UTC, after starting at 02:04:34. Its 3,900 callbacks had a
+167.834-microsecond maximum, with zero tap timeouts, disables or recovery attempts.
+The typed reason is `processTerminated`, expected rcmd PID 72696 and kernel birth
+1792143307.96941. No tap inventory was sampled in that failure record.
+
+At the following inspection, the same PID and original process start still
+existed. This contradicts interpreting the transient application-directory result
+as confirmed process death. The native Test UI showed the matching input-protection
+stop alert; it was dismissed without restarting the interrupted intention.
+
+Evidence is retained in `rcmd-false-termination-observation-20261017.json` and
+`website-owner-verification-20261017.json` in the external evidence directory.
+Launch Services logged connection interruptions at 11:43:13.441821 and
+11:43:13.455476 KST, coincident with the stop. This corroborates an application
+discovery interruption; it cannot establish the exact triggering source call.
+
+The shared monitor now independently verifies the kernel PID/birth, executable
+path and freshly read bounded bundle metadata. Lifecycle notifications request
+revalidation instead of unconditionally invalidating the session. Complete
+keyboard-tap owner discovery prevents empty application enumeration from hiding
+another rcmd process. Saturated inventories cannot certify completeness.
+Unrelated unbundled keyboard helpers are positively distinguished from rcmd.
+
+Unknown identity suspends mapped activations inside the existing two-second
+verification deadline. Only a fresh complete process/tap/configuration/layout
+read restores them. An older queued read cannot clear newer uncertainty. Positive
+PID reuse, executable/version changes, disabled or replaced taps and configuration
+changes still invalidate the session; no third-party settings are changed.
+
+Both focused suites passed. Fixtures call the production monitor/read path with
+controlled missing application-list, stale notification, duplicate process,
+unknown identity and positive-change observations. A read-only production probe
+then completed 90.05 seconds and 82 snapshot updates without invalidation.
+Independent review found no remaining blocking issue. There is no claim that the
+new injection fixtures ran against the old binary. The full gate and installed
+acceptance are recorded separately below when complete.
+
+## Process identity repair gate
+
+Runtime commit `86bba01` fixes the process-discovery failure above. Its complete
+eight-suite gate passed October 17 at 03:35:10 UTC, including session, Swift,
+Firefox/Chrome extensions, native host, release tooling, AI and lint checks.
+Fingerprint: `b92388a21e3bcaba681f1243bac9d48f5c46a766ec7069a3337d864cb5cf499c`.
+The source-equivalent repair was pushed to `codex/input-protection-repair` as
+`03b3877`. No remote CI result or physical acceptance is implied.
+
+Gate evidence: `process-identity-full-gate-20261017/` under the external evidence
+directory. The original evidence commit identifies the parent with the tested
+working-tree diff; the fingerprint identifies the exact tested source.
+
+Both repaired local apps installed before first launch; the nine pre-install
+data-file hashes were unchanged. Deep strict signatures, expected build channels,
+Mach-O UUIDs and all file-backed section contents match their compiled products
+(bundle re-signing changes signature bytes, so whole-file equality is not claimed).
+
+| Repaired local app | UUID |
+| --- | --- |
+| Test Intent | `FC94761B-FD60-362B-A896-9FD7B0D6202C` |
+| Intent | `ED080A9F-E437-3860-9951-4C1F6D559815` |
+
+Test Intent was opened through its exact installed path and started a named
+ChatGPT-only overview session. Clicking the app preview moved focus out of naming
+and enabled Run. Diagnostics reached `enforcing`, with installed input protection
+and zero unresolved visibility targets. App-targeted Spotify accessibility actions
+did not exercise a global activation or input callback; they are not a blocking
+acceptance pass. Native Dock control timed out. Physical Mission Control/rcmd
+verification has been requested for this newly repaired build.
+
+Exact local evidence: `process-identity-local-installs-20261017.json`. A fresh
+signed candidate is needed; neither these local installs nor the older hosted
+packages qualify the complete tester journey.
