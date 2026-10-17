@@ -6,8 +6,9 @@ public struct RcmdProcessIdentity: Equatable, Sendable {
     public let pid: Int32
     public let launched: TimeInterval
     public let version: String
-    public init(pid: Int32, launched: TimeInterval, version: String) {
-        self.pid = pid; self.launched = launched; self.version = version
+    public let executablePath: String?
+    public init(pid: Int32, launched: TimeInterval, version: String, executablePath: String? = nil) {
+        self.pid = pid; self.launched = launched; self.version = version; self.executablePath = executablePath
     }
 }
 
